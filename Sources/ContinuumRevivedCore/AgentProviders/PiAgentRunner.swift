@@ -35,6 +35,12 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// Extra args before the prompt. The runner always adds
         /// `-p --mode json <model> --thinking <level>` and the session flag.
         public var extraArgs: [String]
+        /// C8: `-e <path>` args for pi's extension loader — loads
+        /// continuum-spawn-agent.ts so pi's `spawn_agent` tool registers.
+        /// Defaults from `PiAgentRunner.installedExtensionPaths()`, which
+        /// checks the real file's presence and resolves to `[]` if it isn't
+        /// there (a `-e` pointed at a missing file is worse than no `-e`).
+        public var extensionPaths: [String]
 
         /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
         /// so changing the picker changes what the next prompt spawns.
@@ -43,36 +49,58 @@ public final class PiAgentRunner: @unchecked Sendable {
             thinking: String = AgentModelConfig.resolvedFromDefaults(harness: .pi).thinking,
             cwd: URL,
             sessionId: String? = nil,
-            extraArgs: [String] = []
+            extraArgs: [String] = [],
+            extensionPaths: [String] = PiAgentRunner.installedExtensionPaths()
         ) {
             self.model = model
             self.thinking = thinking
             self.cwd = cwd
             self.sessionId = sessionId
             self.extraArgs = extraArgs
+            self.extensionPaths = extensionPaths
         }
     }
 
+    /// C8: the real, on-disk `-e` argument for a live Pi spawn — checks
+    /// whether `PiExtensionInstaller`'s destination actually holds the file
+    /// (its own `install()` may never have run, or a user could have removed
+    /// it) and resolves to `[]` rather than pointing `-e` at a path that does
+    /// not exist. This is the ONE place in the adapter that touches the
+    /// filesystem for this; `processArguments` itself stays pure below.
+    /// `fileExists` is injectable (same convention as `resolvedCommand`) so a
+    /// check can pin both outcomes without touching the real ~/.pi.
+    public static func installedExtensionPaths(fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
+        let path = PiExtensionInstaller.defaultExtensionsDirectory()
+            .appendingPathComponent(PiExtensionInstaller.extensionFileName).path
+        return fileExists(path) ? [path] : []
+    }
+
     /// The Pi args after the executable (and any `/usr/bin/env` prefix): the
-    /// json/model flags, the session flag, extras, then the provider prompt
-    /// segments. Pure so it can be pinned in the matrix.
-    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: AgentPrompt) -> [String] {
+    /// json/model flags, the session flag, extension loads, extras, then the
+    /// provider prompt segments. Pure — no default reads the filesystem or
+    /// the environment — so it can be pinned in the matrix. `Config`'s own
+    /// `extensionPaths` (impure, resolved once per `Config`) is what actually
+    /// reaches a live Pi spawn; see `run()`.
+    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: AgentPrompt, extensionPaths: [String] = []) -> [String] {
         let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
+        let extensionArgs = extensionPaths.flatMap { ["-e", $0] }
         return ["-p", "--mode", "json", "--model", model, "--thinking", thinking]
             + sessionArgs
+            + extensionArgs
             + extraArgs
             + promptArgumentSegments(prompt)
     }
 
     /// Text-only compatibility wrapper. Keeps the historical argv byte shape
     /// for callers that have not adopted local attachments.
-    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
+    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: String, extensionPaths: [String] = []) -> [String] {
         processArguments(
             model: model,
             thinking: thinking,
             sessionId: sessionId,
             extraArgs: extraArgs,
-            prompt: AgentPrompt(prompt)
+            prompt: AgentPrompt(prompt),
+            extensionPaths: extensionPaths
         )
     }
 
@@ -165,6 +193,16 @@ public final class PiAgentRunner: @unchecked Sendable {
         return dirs
     }
 
+    /// C8: the default `-e` argument for `processArguments` — the path Pi
+    /// loads continuum-spawn-agent.ts from once `PiExtensionInstaller` has put
+    /// it there (`~/.pi/agent/extensions/`, confirmed against pi's own
+    /// resource-loader.js: `getAgentDir()` + "extensions"). A home-directory
+    /// string, not a filesystem read, so `processArguments` stays pure.
+    public static func installedExtensionPaths() -> [String] {
+        [PiExtensionInstaller.defaultExtensionsDirectory()
+            .appendingPathComponent(PiExtensionInstaller.extensionFileName).path]
+    }
+
     /// Live wrapper around `resolvedCommand`: assembles the search dirs from
     /// the real environment + home, expanding nvm node versions on disk.
     static func liveResolvedCommand() -> ResolvedCommand {
@@ -228,7 +266,8 @@ public final class PiAgentRunner: @unchecked Sendable {
             thinking: config.thinking,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
-            prompt: prompt
+            prompt: prompt,
+            extensionPaths: config.extensionPaths
         )
 
         queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
@@ -269,8 +308,14 @@ public final class PiAgentRunner: @unchecked Sendable {
         spawned.standardError.readabilityHandler = nil
 
         // Flush any trailing partial line + drain whatever the handlers missed.
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // Bounded, never `readDataToEndOfFile()`: a descendant that inherited
+        // fd 1/2 keeps the write end open after the leader exits, and the
+        // unbounded read then blocks until that process dies — potentially
+        // forever. Kill the group's leftovers first so the pipes close (a clean
+        // exit leaves nothing, making this a no-op).
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
@@ -344,6 +389,15 @@ public final class PiAgentRunner: @unchecked Sendable {
         for event in translator.translate(line: line) {
             onEvent(event)
         }
+    }
+}
+
+extension PiAgentRunner: ObservedRunReporting {
+    /// Where a `delegate_agent` child's transcript will be. Same confinement as
+    /// `observeSpawnRequests`: set before `run`, delivered on the runner's serial
+    /// queue, so a caller needing the main actor hops itself.
+    public func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void) {
+        queue.sync { translator.onObservedRun = handler }
     }
 }
 

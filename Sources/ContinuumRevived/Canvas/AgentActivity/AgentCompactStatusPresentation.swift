@@ -610,6 +610,7 @@ enum AgentRadialContextMeterPresenter {
         case .claudeResultUsage: return "per-turn usage"
         case .codexTurnUsage: return "per-turn usage"
         case .codexRolloutTokenCount: return "Codex rollout token count"
+        case .claudeCompactBoundary: return "after compaction"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }

@@ -97,7 +97,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// See `withAutoLayoutSuppressed` (M1.2, `.plans/46`).
     private var _suppressesAutoLayoutForHydration = false
     private var agentLineageOverlay: AgentLineageOverlayView?
-    private var contextualAgentLineage: (parentTileID: UUID, childTileID: UUID)?
+    /// C11: N edges, not one — a fan-out reveal shows the parent's whole
+    /// visible fan, bounded the same way the inbox bounds visible children
+    /// (`InboxSort.maxVisibleChildren`, enforced in
+    /// `showContextualAgentLineage(edges:)`).
+    private var contextualAgentLineage: [(parentTileID: UUID, childTileID: UUID)] = []
     private var showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
@@ -838,10 +842,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private var hoveredRelationshipEndpointId: UUID?
 
     struct DocumentRelationshipQAStats: Equatable {
+        /// Every call to `updateDocumentRelationshipOverlay`, including ones that
+        /// early-out. A camera step must not grow this — see
+        /// `canvas.document-relationship-zoom-cost`.
+        var updateCalls = 0
         var tileIndexVisits = 0
         var linkEvaluations = 0
         var segmentAssignments = 0
         var stackingReconciliations = 0
+        /// Times the overlay's own frame was actually rewritten. The overlay is a
+        /// world-space sibling now, so this must track content (tiles moving,
+        /// links changing), never the camera.
+        var frameWrites = 0
     }
     private(set) var qaDocumentRelationshipStats = DocumentRelationshipQAStats()
     func qaResetDocumentRelationshipStats() { qaDocumentRelationshipStats = .init() }
@@ -957,7 +969,11 @@ final class CanvasNSView: NSView, TokenThemed {
             zoom: viewport.zoom
         )
         qaCameraLayoutStats.cameraMutations += writes
-        updateDocumentRelationshipOverlay()
+        // The document-relationship overlay does NOT need a per-camera-step
+        // recompute: it is a world-space sibling now (see
+        // `updateDocumentRelationshipOverlay`'s doc comment), so its content is
+        // camera-invariant and every real invalidation (links set, tiles
+        // added/removed/moved, hover/focus) already calls it directly.
         updateContextualAgentLineageGeometry()
     }
 
@@ -1697,46 +1713,64 @@ final class CanvasNSView: NSView, TokenThemed {
         return nil
     }
 
-    /// Shows one contextual direct edge. No lineage is persisted here; callers
-    /// derive it from `AgentRecord.parentAgentID` and current tile bindings.
+    /// Shows one contextual direct edge. Convenience for the common single-edge
+    /// caller; routes through `showContextualAgentLineage(edges:)`.
     func showContextualAgentLineage(parentTileID: UUID, childTileID: UUID) {
-        guard parentTileID != childTileID,
-              let parent = tileView(for: parentTileID),
-              tileView(for: childTileID) != nil else {
+        showContextualAgentLineage(edges: [(parentTileID, childTileID)])
+    }
+
+    /// C11 — a fan-out reveal has more than one live edge to show: the
+    /// parent's whole VISIBLE fan, not just the one agent that was clicked.
+    /// No lineage is persisted here; callers derive edges from
+    /// `AgentRecord.parentAgentID` and current tile bindings.
+    ///
+    /// Bounded to `InboxSort.maxVisibleChildren` — the same cap the inbox
+    /// itself enforces on a parent's visible children (`boundedForInbox`) —
+    /// so the canvas never draws more fan-out than the inbox would ever show
+    /// at once. A degenerate edge (parent == child) or one naming a tile this
+    /// canvas does not hold is dropped rather than failing the whole set.
+    func showContextualAgentLineage(edges: [(parentTileID: UUID, childTileID: UUID)]) {
+        let resolved = edges
+            .filter { $0.parentTileID != $0.childTileID }
+            .filter { tileView(for: $0.parentTileID) != nil && tileView(for: $0.childTileID) != nil }
+            .prefix(InboxSort.maxVisibleChildren)
+        guard !resolved.isEmpty else {
             clearContextualAgentLineage()
             return
         }
-        contextualAgentLineage = (parentTileID, childTileID)
+        contextualAgentLineage = Array(resolved)
         let overlay = agentLineageOverlay ?? AgentLineageOverlayView()
         agentLineageOverlay = overlay
         if overlay.superview == nil {
-            worldPlane.addSubview(overlay, positioned: .below, relativeTo: parent)
-            reorderTileSubviewsByZIndex()
+            overlay.frame = bounds
+            overlay.autoresizingMask = [.width, .height]
+            overlay.setMarchingSuspended(overlayAnimationsSuspended)
+            // Priority-visible over opaque tiles. Focus, attention, and HUD
+            // siblings already above the world plane retain precedence.
+            addSubview(overlay, positioned: .above, relativeTo: worldPlane)
         }
-        overlay.reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         updateContextualAgentLineageGeometry()
     }
 
     func clearContextualAgentLineage() {
-        contextualAgentLineage = nil
+        contextualAgentLineage = []
+        agentLineageOverlay?.hide()
         agentLineageOverlay?.removeFromSuperview()
     }
 
     private func updateContextualAgentLineageGeometry() {
-        guard let relation = contextualAgentLineage,
-              let parent = tileView(for: relation.parentTileID),
-              let child = tileView(for: relation.childTileID),
-              let overlay = agentLineageOverlay else { return }
-        overlay.frame = worldPlane.bounds
-        let parentRect = overlay.convert(parent.bounds, from: parent)
-        let childRect = overlay.convert(child.bounds, from: child)
-        let travelsRight = childRect.midX >= parentRect.midX
-        overlay.startPoint = CGPoint(
-            x: travelsRight ? parentRect.maxX : parentRect.minX,
-            y: parentRect.midY)
-        overlay.endPoint = CGPoint(
-            x: travelsRight ? childRect.minX : childRect.maxX,
-            y: childRect.midY)
+        guard !contextualAgentLineage.isEmpty, let overlay = agentLineageOverlay else { return }
+        overlay.frame = bounds
+        let segments = contextualAgentLineage.compactMap { relation -> DocumentRelationshipOverlayView.Segment? in
+            guard let parent = tileView(for: relation.parentTileID),
+                  let child = tileView(for: relation.childTileID) else { return nil }
+            return .init(
+                source: overlay.convert(parent.bounds, from: parent),
+                target: overlay.convert(child.bounds, from: child),
+                emphasized: true
+            )
+        }
+        overlay.show(segments: segments)
     }
 
     func setDocumentRelationships(_ links: [DocumentAgentLink], agentTileIds: [AgentID: UUID]) {
@@ -1778,10 +1812,18 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     /// T8: the lineage overlay's painted endpoints, in the canvas's own space.
-    var qaLineageEndpointsInCanvasSpace: (start: CGPoint, end: CGPoint)? {
-        guard let overlay = agentLineageOverlay else { return nil }
-        return (overlay.convert(overlay.startPoint, to: self),
-                overlay.convert(overlay.endPoint, to: self))
+    /// C11: one entry per painted edge, in the same order `showContextualAgentLineage`
+    /// resolved them — never more than `InboxSort.maxVisibleChildren`.
+    var qaLineageEndpointsInCanvasSpace: [(start: CGPoint, end: CGPoint)] {
+        guard let overlay = agentLineageOverlay else { return [] }
+        return overlay.endpoints.map { (overlay.convert($0.start, to: self), overlay.convert($0.end, to: self)) }
+    }
+
+    var qaLineageAnimationCount: Int { agentLineageOverlay?.qaAnimationCount ?? 0 }
+    var qaLineageIsAnimating: Bool { agentLineageOverlay?.qaIsAnimating == true }
+    var qaLineageHitTestPassesThrough: Bool {
+        guard let overlay = agentLineageOverlay else { return true }
+        return overlay.hitTest(CGPoint(x: overlay.bounds.midX, y: overlay.bounds.midY)) == nil
     }
 
     var qaDocumentRelationshipRoutes: [DocumentRelationshipOverlayView.Route] {
@@ -1835,11 +1877,33 @@ final class CanvasNSView: NSView, TokenThemed {
             relationshipHitTestPassesThrough: documentRelationshipOverlay.hitTest(.zero) == nil)
     }
 
+    /// Perf (.plans/44 M item 1): this used to run every camera step from
+    /// `syncWorldPlaneToCamera`, sizing itself to `worldPlane.bounds` — a
+    /// viewport-sized frame write on every step, plus a full re-walk of every
+    /// installed tile, even on a canvas with zero document links.
+    ///
+    /// Both tile views and this overlay are direct children of `worldPlane` at
+    /// WORLD frames, so a rect resolved in `worldPlane`'s own coordinate space
+    /// is camera-invariant: pan and zoom only change `worldPlane`'s bounds, not
+    /// the relative position of its children. That means the overlay's frame
+    /// can be sized to its CONTENT (the union of every linked tile pair, in
+    /// world space) instead of the viewport, and this function no longer needs
+    /// to run on a camera step at all — `syncWorldPlaneToCamera` does not call
+    /// it. `qaSegmentRectInCanvasSpace` still resolves the live, on-screen
+    /// position at call time via the normal view hierarchy, which is what lets
+    /// the camera move the connectors "for free" the same way it moves tiles.
+    ///
+    /// Real callers remain: `setDocumentRelationships`, tile add/remove,
+    /// `markActive`/hover (emphasis), and every geometry commit that already
+    /// routes through `layoutAllTiles` or a zone-placement update.
     private func updateDocumentRelationshipOverlay() {
-        if documentRelationshipOverlay.frame != worldPlane.bounds {
-            documentRelationshipOverlay.frame = worldPlane.bounds
+        qaDocumentRelationshipStats.updateCalls += 1
+        guard !documentLinks.isEmpty else {
+            if !documentRelationshipOverlay.segments.isEmpty {
+                documentRelationshipOverlay.segments = []
+            }
+            return
         }
-        let visible = worldPlane.bounds
         let focused = canvasState.lastActiveTileId
         var viewsByTileId = tileViews
         qaDocumentRelationshipStats.tileIndexVisits += tileViews.count
@@ -1849,32 +1913,55 @@ final class CanvasNSView: NSView, TokenThemed {
                 viewsByTileId[tileId] = view
             }
         }
-        let segments = documentLinks.compactMap { link -> DocumentRelationshipOverlayView.Segment? in
+        struct Pair {
+            let agentTileId: UUID
+            let documentTileId: UUID
+            let sourceWorldFrame: CGRect
+            let targetWorldFrame: CGRect
+        }
+        var pairs: [Pair] = []
+        pairs.reserveCapacity(documentLinks.count)
+        for link in documentLinks {
             qaDocumentRelationshipStats.linkEvaluations += 1
             guard let agentTileId = documentAgentTileIds[link.agentId],
                   let source = viewsByTileId[agentTileId], !source.isHidden,
-                  let target = viewsByTileId[link.documentTileId], !target.isHidden,
-                  source.frame.union(target.frame).intersects(visible) else { return nil }
-            // T8 (`.plans/48`): converted into the OVERLAY's coordinate space, not
-            // handed raw `worldPlane` frames.
-            //
-            // `worldPlane` implements pan as `setBoundsOrigin(worldOrigin)`, so its
-            // `bounds.origin` IS the camera's world position. Assigning that rect
-            // as this overlay's FRAME positions it correctly, but the overlay's own
-            // `bounds.origin` stays (0,0) — so a path drawn at world W painted at
-            // `worldOrigin + W`, displaced by exactly the camera pan and growing
-            // the further you pan from the world origin. At viewport (0,0) the
-            // offset is zero, which is the only viewport the old coverage used.
-            //
-            // `convert` rather than subtracting `worldPlane.bounds.origin`: it is
-            // the idiom the lineage overlay and the focus border already use in
-            // this file, and it cannot drift if the camera model changes again.
-            return .init(
-                source: documentRelationshipOverlay.convert(source.bounds, from: source),
-                target: documentRelationshipOverlay.convert(target.bounds, from: target),
-                emphasized: focused == agentTileId || focused == link.documentTileId
-                    || hoveredRelationshipEndpointId == agentTileId
-                    || hoveredRelationshipEndpointId == link.documentTileId
+                  let target = viewsByTileId[link.documentTileId], !target.isHidden else { continue }
+            pairs.append(Pair(
+                agentTileId: agentTileId,
+                documentTileId: link.documentTileId,
+                sourceWorldFrame: worldPlane.convert(source.bounds, from: source),
+                targetWorldFrame: worldPlane.convert(target.bounds, from: target)
+            ))
+        }
+        guard !pairs.isEmpty else {
+            if !documentRelationshipOverlay.segments.isEmpty {
+                documentRelationshipOverlay.segments = []
+            }
+            return
+        }
+        // Padded past the route's max escape clearance (12pt, `route(for:)`'s
+        // overlap-fallback polyline) plus stroke width, so every drawn path —
+        // including curve handles, which stay within the source/target union —
+        // stays inside the view it is drawn into.
+        var worldBounds = pairs[0].sourceWorldFrame.union(pairs[0].targetWorldFrame)
+        for pair in pairs.dropFirst() {
+            worldBounds = worldBounds.union(pair.sourceWorldFrame).union(pair.targetWorldFrame)
+        }
+        let paddedBounds = worldBounds.insetBy(dx: -32, dy: -32)
+        if documentRelationshipOverlay.frame != paddedBounds {
+            qaDocumentRelationshipStats.frameWrites += 1
+            documentRelationshipOverlay.frame = paddedBounds
+        }
+        // T8 (`.plans/48`): converted into the OVERLAY's coordinate space via
+        // `convert`, the same idiom the lineage overlay and the focus border
+        // already use — it cannot drift if the camera model changes again.
+        let segments = pairs.map { pair -> DocumentRelationshipOverlayView.Segment in
+            .init(
+                source: documentRelationshipOverlay.convert(pair.sourceWorldFrame, from: worldPlane),
+                target: documentRelationshipOverlay.convert(pair.targetWorldFrame, from: worldPlane),
+                emphasized: focused == pair.agentTileId || focused == pair.documentTileId
+                    || hoveredRelationshipEndpointId == pair.agentTileId
+                    || hoveredRelationshipEndpointId == pair.documentTileId
             )
         }
         if documentRelationshipOverlay.segments != segments {
@@ -2255,8 +2342,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// WKWebView, flush note save, purge descriptor) is the caller's
     /// responsibility — `removeTile` is the canvas-side teardown only.
     func removeTile(id: UUID) {
-        if contextualAgentLineage?.parentTileID == id || contextualAgentLineage?.childTileID == id {
+        // C11: the shared parent going away leaves every edge unanchored, so the
+        // whole set clears; a single child going away only drops its own edge —
+        // the rest of the parent's fan is still real and still on screen.
+        if contextualAgentLineage.contains(where: { $0.parentTileID == id }) {
             clearContextualAgentLineage()
+        } else if contextualAgentLineage.contains(where: { $0.childTileID == id }) {
+            let remaining = contextualAgentLineage.filter { $0.childTileID != id }
+            if remaining.isEmpty {
+                clearContextualAgentLineage()
+            } else {
+                showContextualAgentLineage(edges: remaining)
+            }
         }
         if let view = tileViews[id] {
             focusBroker?.unregister(view.focusSurfaceID)
@@ -2352,6 +2449,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func applyOverlayAnimationSuspension() {
         let suspended = overlayAnimationsSuspended
         focusBorderOverlay?.setMarchingSuspended(suspended)
+        agentLineageOverlay?.setMarchingSuspended(suspended)
         for overlay in attentionBorderOverlays.values {
             overlay.setMarchingSuspended(suspended)
         }

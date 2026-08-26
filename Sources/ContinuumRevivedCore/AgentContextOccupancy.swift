@@ -49,8 +49,10 @@ public enum AgentContextOccupancy {
             // never context occupancy, even when a legacy record already has
             // used/max populated from an older derivation.
             return nil
-        case .providerSessionStats:
+        case .providerSessionStats, .claudeCompactBoundary:
             // Authoritative occupancy is reported directly when it exists.
+            // `compact_boundary.post_tokens` is exactly that: the size of the
+            // conversation the NEXT turn will start from, stated by the harness.
             return snapshot.usedTokens
         case .unknown:
             return nil

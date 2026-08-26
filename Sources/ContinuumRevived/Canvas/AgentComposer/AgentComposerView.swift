@@ -76,6 +76,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
     private var replyOptions: [String] = []
+    /// B4 — Array's own follow-up queue, rendered as chips above the composer.
+    private let queuedMessageRail: ComposerQueuedMessageRailView
+    private let queuedMessageRailHeightConstraint: NSLayoutConstraint
+    /// Callbacks the tile wires to `AgentSupervisor`. Direct manipulation of
+    /// Array's queue, never the turn in flight.
+    var onCancelQueuedMessage: ((UUID) -> Void)?
+    var onClearQueuedMessages: (() -> Void)?
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
@@ -156,6 +163,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         fileReferenceRailHeightConstraint = fileReferenceRail.heightAnchor.constraint(equalToConstant: 0)
         replyOptionRail = ComposerReplyOptionRailView(frame: .zero)
         replyOptionRailHeightConstraint = replyOptionRail.heightAnchor.constraint(equalToConstant: 0)
+        queuedMessageRail = ComposerQueuedMessageRailView(frame: .zero)
+        queuedMessageRailHeightConstraint = queuedMessageRail.heightAnchor.constraint(equalToConstant: 0)
         super.init(frame: frameRect)
 
         wantsLayer = true
@@ -182,9 +191,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         replyOptionRail.onSelect = { [weak self] option in
             self?.acceptReplyOption(option)
         }
+        queuedMessageRail.translatesAutoresizingMaskIntoConstraints = false
+        queuedMessageRail.onRemove = { [weak self] messageID in
+            self?.onCancelQueuedMessage?(messageID)
+        }
+        queuedMessageRail.onClearAll = { [weak self] in
+            self?.onClearQueuedMessages?()
+        }
         addSubview(replyOptionRail)
         addSubview(fileReferenceRail)
         addSubview(attachmentRail)
+        addSubview(queuedMessageRail)
         addSubview(scrollView)
 
         placeholderLabel.stringValue = variant.placeholder
@@ -207,9 +224,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
             attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
             attachmentRail.topAnchor.constraint(equalTo: fileReferenceRail.bottomAnchor),
+            queuedMessageRailHeightConstraint,
+            queuedMessageRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
+            queuedMessageRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
+            queuedMessageRail.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
-            scrollView.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor, constant: Self.internalPadding),
+            scrollView.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor, constant: Self.internalPadding),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.internalPadding),
             placeholderLabel.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor),
@@ -256,9 +277,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight + Self.internalPadding
         let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight
         let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight
+        let queuedRailHeight = queuedMessageRail.isHidden ? 0 : ComposerQueuedMessageRailView.railHeight
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: editorHeight + (Self.internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight
+            height: editorHeight + (Self.internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
         )
     }
 
@@ -424,11 +446,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         turnSnapshot = snapshot
     }
 
+    /// B4 — pending chips for Array's own follow-up queue. `paused` mirrors
+    /// `AgentSupervisor.isQueuePaused(for:)`: held after an interrupted turn so
+    /// the chips do not imply they are about to run.
+    func updateQueuedMessages(_ messages: [AgentComposerQueuedMessage], paused: Bool) {
+        queuedMessageRail.setMessages(messages, paused: paused)
+        queuedMessageRailHeightConstraint.constant = messages.isEmpty ? 0 : ComposerQueuedMessageRailView.railHeight
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     func unbindActionSink() {
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
         actionSink = nil
         turnSnapshot = nil
+        updateQueuedMessages([], paused: false)
     }
 
     private func cancelActionTaskForRebind() {
@@ -623,11 +656,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             )
             let intent: AgentComposerIntent?
             if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
-                intent = .sendPrompt(AgentPrompt(
+                let attachedPrompt = AgentPrompt(
                     text: prompt,
                     imageAttachments: importedAttachments,
                     fileReferences: importedFileReferences
-                ))
+                )
+                switch snapshot.executionState {
+                case .ready:
+                    intent = .sendPrompt(attachedPrompt)
+                case .working:
+                    // Honest resolution, not a forced send: a mid-turn attachment
+                    // must go through the same steer/queue gate as text alone, or
+                    // be refused, rather than blindly retrying `.sendPrompt` while
+                    // a turn is running (which the supervisor refuses as
+                    // `.turnNotReady`, rolling back the optimistic bubble).
+                    intent = resolver.workingDraftIntent(prompt: attachedPrompt)
+                }
             } else {
                 intent = snapshot.executionState == .working
                     ? resolver.workingDraftIntent(draft: prompt)
@@ -809,6 +853,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
         case .skill, .promptTemplate, .runtimeCommand, .command:
             guard onCompletionAction?(completion.payload) == true else { return }
+            // Fix 2a: a command picked from this popover used to skip the
+            // optimistic echo that `submitBoundIntent` paints for a typed send,
+            // so invoking the exact same command two ways produced two
+            // different appearances — silent here, an immediate bubble there.
+            // Echo the same text a typed acceptance would have shown.
+            if case let .command(invocation) = completion.payload {
+                let echoText = invocation.arguments.isEmpty
+                    ? completion.insertionText
+                    : "\(completion.insertionText) \(invocation.arguments.joined(separator: " "))"
+                onSubmissionStarted?(AgentPrompt(echoText))
+            }
             textView.insertCompletion("", replacementRange: replacementRange)
         }
     }
@@ -1275,8 +1330,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaImageImportFailureCount: Int { imageImportFailureCount }
     var qaImageImportFailureCategories: [String] { imageImportFailureCategories }
 
+    /// Drives the exact method a completion accept — whether from a click, an
+    /// arrow-navigated Enter, or typeahead — funnels through, so a check can
+    /// exercise the real acceptance path without a live popover window.
+    func qaAcceptCompletionForChecks(_ completion: AgentCompletion, replacementRange: NSRange) {
+        acceptCompletion(completion, replacementRange: replacementRange)
+    }
+
     func qaImportFileReferences(from pasteboard: NSPasteboard) {
         importFileReferences(ComposerFileReferencePasteboardDecoder.decodedReferences(from: pasteboard))
+    }
+
+    /// Test-only attachment injection that skips the pasteboard decode path —
+    /// used to drive the mid-turn attachment intent witness without a real drag
+    /// or paste.
+    func qaAddFileReferenceForChecks(_ reference: AgentPromptFileReference) {
+        addFileReferences([reference])
     }
 
     func qaRemoveFileReference(at index: Int) {

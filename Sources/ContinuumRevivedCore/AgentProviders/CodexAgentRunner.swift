@@ -19,6 +19,9 @@ import Foundation
 // <thread_id>`; a stale id fails and the runner self-heals to a fresh `exec`.
 
 public enum CodexCLIBackend {
+    /// The sandbox posture Array pins for every managed codex turn. The config
+    /// override works for both exec and app-server transports.
+    public static let sandboxMode = "workspace-write"
 
     /// `provider/model` catalogue id → the codex `-m` argument. Codex takes the
     /// bare slug (`gpt-5.6-sol`); the `openai-codex/` prefix is Array's
@@ -113,6 +116,8 @@ public enum CodexCLIBackend {
         }
         args += [
             "--json", "--skip-git-repo-check",
+            "-c", "approval_policy=never",
+            "-c", "sandbox_mode=\(sandboxMode)",
             "-m", model,
         ]
         if let effort {
@@ -136,6 +141,43 @@ public enum CodexCLIBackend {
         segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: "\n")
+    }
+
+    /// codex args for the `app-server` subprocess. Same `-c` overrides as
+    /// `processArguments` (`approval_policy=never`, `sandbox_mode`) since those
+    /// are process-level flags either way; there is no per-thread equivalent.
+    /// `extraArgs` is always `[]` in production today (`codexRunnerConfig`
+    /// never sets it — that field only carries pi's role `--tools` args) but
+    /// is threaded through for the same reason `processArguments` threads it:
+    /// a slot for a future per-agent override, not a currently-used one.
+    public static func appServerArguments(extraArgs: [String]) -> [String] {
+        var args = [
+            "-c", "approval_policy=never",
+            "-c", "sandbox_mode=\(sandboxMode)",
+            "app-server",
+        ]
+        args += extraArgs
+        return args
+    }
+
+    /// App-server is the default because it is the only Codex transport with
+    /// structured provider-owned subagent identity. `exec` remains an explicit
+    /// emergency escape hatch.
+    public enum Transport: String, Sendable { case exec, appServer }
+    public static func transportOverride(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Transport {
+        environment["CONTINUUM_CODEX_TRANSPORT"] == "exec" ? .exec : .appServer
+    }
+
+    /// The distinguishing app-server JSON-RPC error for a `thread/resume` on a
+    /// thread id whose rollout no longer exists — the app-server analogue of
+    /// `isUnknownSessionFailure`'s stderr text match, except this one is a
+    /// clean error CODE + message rather than parsed stderr. Measured live
+    /// (codex-cli 0.148.0): `{"code": -32600, "message": "no rollout found for
+    /// thread id <uuid>"}`.
+    public static func isUnknownSessionFailure(appServerErrorMessage message: String) -> Bool {
+        message.contains("no rollout found for thread id")
     }
 }
 
@@ -172,6 +214,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
     public enum RunError: Error, CustomStringConvertible {
         case launchFailed(String)
         case codexFailed(exitCode: Int32, stderr: String)
+        /// app-server path only: a JSON-RPC request failed for a reason other
+        /// than the resume self-heal (`isUnknownSessionFailure`), or a turn
+        /// ended without ever observing its own `turn/completed`.
+        case appServerFailed(String)
 
         public var description: String {
             switch self {
@@ -179,6 +225,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 return "launchFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             case .codexFailed(let exitCode, let stderr):
                 return "codexFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
+            case .appServerFailed(let message):
+                return "appServerFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             }
         }
     }
@@ -228,6 +276,24 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var stopRequested = false   // queue-confined; suppresses the self-heal
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
 
+    // MARK: - app-server transport (queue-confined; nil on the exec path)
+    private var appServerTranslator = CodexAppServerEventTranslator()
+    /// The live JSON-RPC connection for the turn in flight, so `stop()` (called
+    /// from an arbitrary thread) can send `turn/interrupt` before the group-wide
+    /// SIGTERM. Set right after `thread/start`/`thread/resume` succeeds, cleared
+    /// when the turn ends.
+    private var appServerTransport: CodexAppServerTransport?
+    private var appServerActiveTurn: (threadId: String, turnId: String)?
+    /// Set right after `turn/start`'s response; signaled by the notification
+    /// handler once THIS thread/turn's `turn/completed` is observed. One per
+    /// turn — `runOnceAppServer` owns the whole lifecycle of a single value.
+    private var appServerTurnCompletion: (threadId: String, turnId: String, semaphore: DispatchSemaphore)?
+    private var appServerTurnOutcome: AgentRuntimeEvent?
+    private var appServerPrimaryThreadID: String?
+    private var appServerLiveChildThreads: Set<String> = []
+    private var appServerTurnAccepted = false
+    private var providerSubagentActivityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
+
     public init(config: Config) {
         self.config = config
         self.translator = CodexEventTranslator(workingDirectory: config.cwd)
@@ -241,6 +307,18 @@ public final class CodexAgentRunner: @unchecked Sendable {
     /// self-heals to a fresh `exec` (which mints — and the observation persists —
     /// a NEW id).
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        if CodexCLIBackend.transportOverride() == .appServer {
+            do {
+                try runAppServer(prompt: prompt, onEvent: onEvent)
+                return
+            } catch {
+                // Startup compatibility fallback only. Once Codex accepted
+                // `turn/start`, replaying the prompt through exec could repeat
+                // filesystem or network side effects.
+                let canFallback = queue.sync { !appServerTurnAccepted && !stopRequested }
+                guard canFallback else { throw error }
+            }
+        }
         if config.threadId == nil {
             let result = try runOnce(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
             publish(result.finalEvents, onEvent: onEvent)
@@ -284,23 +362,285 @@ public final class CodexAgentRunner: @unchecked Sendable {
         if queue.sync { stopRequested } { throw AgentRunStopped(detail: stderr) }
     }
 
+    // MARK: - app-server transport
+
+    /// The app-server analogue of `run(prompt:onEvent:)`: same fresh-vs-resume
+    /// decision and the same self-heal-on-unknown-thread shape as the exec
+    /// path, but resume failure is read off a JSON-RPC error CODE
+    /// (`isUnknownSessionFailure(appServerErrorMessage:)`), never stderr text.
+    ///
+    /// Still process-per-turn at the OS level — one `codex app-server`
+    /// subprocess is spawned, driven through exactly one turn, and torn down
+    /// before this method returns. A single persistent process for the
+    /// agent's WHOLE life (what `.plans/46` calls for) needs a live connection
+    /// held BETWEEN `run()` calls, but `AgentSupervisor.codexRunner(for:)`
+    /// constructs a fresh `CodexAgentRunner` for every send
+    /// (`AgentSupervisor.swift`, off-limits to this ticket — see the report).
+    /// What this DOES fix relative to exec: the transport is real JSON-RPC
+    /// (clean request/response correlation, no stderr text matching), and the
+    /// notification path has no terminal-event gate — every method is
+    /// forwarded to `onEvent` as it streams, exactly as
+    /// `CodexAppServerEventTranslator` already assumes.
+    private func runAppServer(
+        prompt: AgentPrompt,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        if config.threadId == nil {
+            try runOnceAppServer(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
+            return
+        }
+        do {
+            try runOnceAppServer(mode: .resume, threadId: config.threadId, prompt: prompt, onEvent: onEvent)
+            return
+        } catch let error as CodexAppServerTransport.RPCError
+            where CodexCLIBackend.isUnknownSessionFailure(appServerErrorMessage: error.message) {
+            // Self-heal: a stored id whose rollout was deleted/archived/cleaned.
+            // Same shape as exec's self-heal — the rejected resume's state is
+            // deliberately dropped, and a fresh translator/thread starts clean.
+            try throwStoppedIfRequested(stderr: "")
+            try runOnceAppServer(mode: .fresh, threadId: nil, prompt: prompt, onEvent: onEvent)
+        }
+    }
+
+    /// One app-server subprocess, driven through initialize → thread/start (or
+    /// thread/resume) → turn/start → wait for the primary turn AND every
+    /// announced child thread to complete → teardown. The app-server can emit a
+    /// child's final frames after the parent's `turn/completed`; keeping one live
+    /// child set here prevents teardown from truncating those frames. The pure
+    /// translator independently remains ungated and is verified by
+    /// `CodexAppServerParityChecks`; the process-lifetime half is verified by the
+    /// late-child scenario in `CodexAppServerRunnerChecks`.
+    private func runOnceAppServer(
+        mode: CodexCLIBackend.SessionMode,
+        threadId: String?,
+        prompt: AgentPrompt,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        let command = Self.liveResolvedCommand()
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs)
+
+        queue.sync {
+            appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
+            appServerTranslator.onRuntimeObservation = runtimeObservationHandler
+            appServerPrimaryThreadID = nil
+            appServerLiveChildThreads.removeAll()
+            appServerTurnAccepted = false
+            appServerTurnOutcome = nil
+            appServerTranslator.onSubagentAnnouncement = { [weak self] parent, child, item, label in
+                guard let self else { return }
+                self.appServerLiveChildThreads.insert(child)
+                self.providerSubagentActivityHandler?(.childAnnounced(
+                    parentProviderThreadID: parent,
+                    childProviderThreadID: child,
+                    sourceItemID: item,
+                    displayLabel: label
+                ))
+            }
+        }
+
+        let spawned: ProcessGroupChild
+        do {
+            spawned = try ProcessGroupChild.spawn(
+                executable: command.executable,
+                arguments: arguments,
+                environment: PiAgentRunner.childEnvironment(),
+                currentDirectory: config.cwd,
+                standardInput: .pipe)
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        queue.sync { self.child = spawned }
+
+        let transport = CodexAppServerTransport(child: spawned) { [weak self] line in
+            guard let self else { return }
+            self.queue.sync {
+                let providerThreadID = Self.appServerThreadID(in: line)
+                let events = self.appServerTranslator.translate(line: line)
+                for event in events {
+                    if case .turnCompleted(let eventThreadId, let eventTurnId, _, _) = event {
+                        if eventThreadId == self.appServerPrimaryThreadID,
+                           self.appServerTurnCompletion?.turnId == nil
+                            || eventTurnId == self.appServerTurnCompletion?.turnId {
+                            self.appServerTurnOutcome = event
+                        } else {
+                            self.appServerLiveChildThreads.remove(eventThreadId)
+                        }
+                    }
+                    if let providerThreadID,
+                       let primary = self.appServerPrimaryThreadID,
+                       providerThreadID != primary {
+                        self.providerSubagentActivityHandler?(.threadEvent(
+                            providerThreadID: providerThreadID,
+                            event: event
+                        ))
+                    } else {
+                        onEvent(event)
+                    }
+                }
+                if let expected = self.appServerTurnCompletion,
+                   self.appServerTurnOutcome != nil,
+                   self.appServerLiveChildThreads.isEmpty {
+                    expected.semaphore.signal()
+                }
+            }
+        }
+
+        defer {
+            transport.shutdown()
+            spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+            queue.sync {
+                self.child = nil
+                self.appServerTransport = nil
+                self.appServerActiveTurn = nil
+                self.appServerTurnCompletion = nil
+                self.appServerPrimaryThreadID = nil
+                self.appServerLiveChildThreads.removeAll()
+            }
+        }
+
+        _ = try transport.sendRequest(
+            method: "initialize",
+            params: [
+                "clientInfo": ["name": "array", "title": "Array", "version": "0.0.1"],
+                "capabilities": ["experimentalApi": true],
+            ],
+            timeout: 15)
+        try transport.sendNotification(method: "initialized", params: [:])
+
+        let resolvedThreadId: String
+        switch mode {
+        case .fresh:
+            let result = try transport.sendRequest(
+                method: "thread/start",
+                params: [
+                    "cwd": config.cwd.path,
+                    "model": config.model,
+                    "skipGitRepoCheck": true,
+                    "multiAgentMode": "explicitRequestOnly",
+                ],
+                timeout: 30)
+            guard let thread = result["thread"] as? [String: Any], let id = thread["id"] as? String, !id.isEmpty
+            else { throw RunError.appServerFailed("thread/start returned no thread id") }
+            resolvedThreadId = id
+        case .resume:
+            let id = threadId ?? ""
+            _ = try transport.sendRequest(
+                method: "thread/resume",
+                params: ["threadId": id, "model": config.model],
+                timeout: 30)
+            resolvedThreadId = id
+            // Measured 2026-08-24: unlike a fresh `thread/start`, a successful
+            // `thread/resume` emits NO `thread/started` notification — so
+            // without this, the translator's session-ready/running events (and
+            // its `onRuntimeObservation(.threadId(...))` projection) would
+            // never fire for a resumed turn. `codex exec resume` does not have
+            // this gap: it re-emits `thread.started` with the same id every
+            // time (`CodexEventTranslator.swift:77-88`). Synthesizing the
+            // notification here reuses the translator's own parsing rather
+            // than duplicating its session-start logic.
+            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"}}}"
+            queue.sync {
+                for event in appServerTranslator.translate(line: synthetic) { onEvent(event) }
+            }
+        }
+
+        queue.sync {
+            appServerPrimaryThreadID = resolvedThreadId
+            providerSubagentActivityHandler?(.primaryThread(providerThreadID: resolvedThreadId))
+        }
+
+        var turnParams: [String: Any] = [
+            "threadId": resolvedThreadId,
+            "input": [["type": "text", "text": CodexCLIBackend.promptArgument(prompt)]],
+        ]
+        if let effort = config.effort { turnParams["effort"] = effort }
+        let turnResult = try transport.sendRequest(method: "turn/start", params: turnParams, timeout: 15)
+        guard let turn = turnResult["turn"] as? [String: Any], let turnId = turn["id"] as? String, !turnId.isEmpty
+        else { throw RunError.appServerFailed("turn/start returned no turn id") }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        queue.sync {
+            self.appServerTransport = transport
+            self.appServerActiveTurn = (resolvedThreadId, turnId)
+            self.appServerTurnCompletion = (resolvedThreadId, turnId, semaphore)
+            self.appServerTurnAccepted = true
+            if self.appServerTurnOutcome != nil, self.appServerLiveChildThreads.isEmpty {
+                semaphore.signal()
+            }
+        }
+
+        // No timeout on the wait itself: matches `spawned.wait()`'s unbounded
+        // block on the exec path, and does NOT gate notification forwarding —
+        // every method still translates and forwards independently of this
+        // wait, exactly as `CodexAppServerEventTranslator` has no gate. An
+        // announced child keeps this wait unresolved after the primary's
+        // completion until that child's own terminal event arrives. `stop()`
+        // unblocks it two ways: `turn/interrupt` over the live connection
+        // produces a `turn/completed(status: interrupted)` notification
+        // (measured live) which resolves it normally, OR — if that races
+        // (`stop()` reads `appServerActiveTurn` before it's set) or the
+        // connection is wedged — the group-wide SIGTERM/SIGKILL below still
+        // kills the process, and THIS thread is what turns that into a
+        // return instead of a permanent hang: without it, a killed process
+        // that never got to send `turn/completed` blocks here forever.
+        // Detached deliberately: in the ordinary success path the process is
+        // still alive here (it is only killed by the OUTER `defer` above,
+        // AFTER this method returns), so this thread outlives `wait()` below
+        // and exits on its own once that later kill actually happens — an
+        // extra harmless `semaphore.signal()` after `wait()` has already
+        // returned is a no-op.
+        let exitWatcher = Thread {
+            _ = spawned.wait()
+            semaphore.signal()
+        }
+        exitWatcher.start()
+        semaphore.wait()
+        try throwStoppedIfRequested(stderr: "")
+        let outcome = queue.sync { self.appServerTurnOutcome }
+        guard case .turnCompleted(_, _, let turnOutcome, let errorMessage) = outcome else {
+            throw RunError.appServerFailed("turn/completed not observed")
+        }
+        if turnOutcome == .failed {
+            throw RunError.appServerFailed(errorMessage ?? "turn failed")
+        }
+    }
+
     /// Text-only compatibility wrapper, matching the other runners'.
     public func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
         try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
     }
 
     public func stop() {
-        // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
-        let running = queue.sync { () -> ProcessGroupChild? in
+        let (running, transport, activeTurn) = queue.sync {
+            () -> (ProcessGroupChild?, CodexAppServerTransport?, (threadId: String, turnId: String)?) in
             stopRequested = true
-            return child
+            return (child, appServerTransport, appServerActiveTurn)
         }
+        // app-server only: ask for a graceful interrupt over the live
+        // connection first (M7 item 4 — the analogue of `turn/interrupt`).
+        // Best-effort with a short timeout so a wedged connection can't block
+        // Stop; the group-wide SIGTERM/SIGKILL escalation right below is the
+        // backstop regardless of whether this succeeds.
+        if let transport, let activeTurn {
+            try? transport.sendRequest(
+                method: "turn/interrupt",
+                params: ["threadId": activeTurn.threadId, "turnId": activeTurn.turnId],
+                timeout: 2.0)
+        }
+        // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
         running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
-    /// Codex has no `spawn_agent` side channel (same as claude). The handler is
-    /// accepted for seam parity and never fires.
+    /// Exec has no structured subagent side channel. App-server reports through
+    /// `ProviderSubagentActivityObserving` below instead of pretending an
+    /// Array-owned `spawn_agent` request occurred.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+
+    public func observeProviderSubagentActivity(
+        _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
+    ) {
+        queue.sync { providerSubagentActivityHandler = handler }
+    }
 
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
@@ -380,8 +720,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
         spawned.standardOutput.readabilityHandler = nil
         spawned.standardError.readabilityHandler = nil
 
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // Bounded, never `readDataToEndOfFile()`: a descendant that inherited
+        // fd 1/2 keeps the write end open after the leader exits, and the
+        // unbounded read then blocks until that process dies — potentially
+        // forever. Kill the group's leftovers first so the pipes close (a clean
+        // exit leaves nothing, making this a no-op).
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let finalState: (stderr: String, threadId: String?, terminal: [AgentRuntimeEvent]) = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
@@ -457,6 +803,16 @@ public final class CodexAgentRunner: @unchecked Sendable {
     ) {
         queue.sync { events.forEach(onEvent) }
     }
+
+    private static func appServerThreadID(in line: String) -> String? {
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let params = object["params"] as? [String: Any]
+        else { return nil }
+        return params["threadId"] as? String
+    }
 }
+
+extension CodexAgentRunner: ProviderSubagentActivityObserving {}
 
 #endif  // os(macOS)

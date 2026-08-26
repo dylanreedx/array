@@ -30,6 +30,9 @@ Build-only evidence is not enough for UX behavior. If a check failed, was skippe
 - If a check's semantics must change, keep that change in scope, explain why, and add replacement coverage.
 - Prefer `./scripts/run-matrix.sh` for the fast local matrix; run ticket-specific checks and any required QA flows too.
 - For external QA, use `qa/README.md` and review generated artifacts under `qa-runs/`.
+  `qa/run-autonomous.sh --scope changed` covers just what the branch touched; it
+  supplies the disposable tmux namespace the real-tmux legs require, so never run
+  those against the default socket while Array is open.
 
 ## Handoffs
 

@@ -1,0 +1,12 @@
+{"type":"session","sessionId":"array-agent-fixture-parent","cwd":"/private/tmp/fixture-repo"}
+{"type":"agent_start","agentId":"fixture-parent"}
+{"type":"turn_start","turnId":"t1"}
+{"type":"message_start","message":{"role":"assistant"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Delegating the survey."}}
+{"type":"tool_execution_start","toolCallId":"call_fixture_delegate_1","toolName":"delegate_agent","args":{"agent":"code-scout","task":"Survey the recipe column helpers and report what they share.","background":true,"worktree":false}}
+{"type":"tool_execution_end","toolCallId":"call_fixture_delegate_1","toolName":"delegate_agent","result":{"content":[{"type":"text","text":"Agent code-scout dispatched in background.\n\nRun: code-scout-20260825T141759Z-a23808\nStatus: running\n"}],"details":{"runId":"code-scout-20260825T141759Z-a23808","agent":"code-scout","task":"Survey the recipe column helpers and report what they share.","status":"running","phase":"dispatched","artifacts":{"events":".pi/agent-runs/code-scout-20260825T141759Z-a23808/events.jsonl","final":".pi/agent-runs/code-scout-20260825T141759Z-a23808/final.md"}}},"isError":false}
+{"type":"message_start","message":{"role":"custom"}}
+{"type":"message_end","message":{"role":"custom","content":[{"type":"text","text":"## Agent running\ncode-scout-20260825T141759Z-a23808\nrole: code-scout"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Delegating the survey."}],"usage":{"input":1409,"output":14}}}
+{"type":"turn_end","turnId":"t1"}
+{"type":"agent_settled"}

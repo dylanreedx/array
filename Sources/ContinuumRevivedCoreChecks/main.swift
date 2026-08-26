@@ -16,6 +16,18 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--codex-appserver-parity-check") {
+    runCodexAppServerParityChecks()
+    print("CodexAppServerParityChecks passed")
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--codex-appserver-runner-check") {
+    runCodexAppServerRunnerChecks()
+    print("CodexAppServerRunnerChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--command-center-check") {
     runCommandCenterChecks()
     print("CommandCenterChecks passed")
@@ -6488,6 +6500,74 @@ do {
     expect(missingSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
 }
 
+// MARK: - RunArtifactsReader.tailEventsJSONL — incremental reads cost only what is new
+//
+// E: `readEventsJSONL` re-reads and re-parses the WHOLE file on every call, no
+// matter how little of it is new — measured at ~19ms/MB, almost entirely in
+// `split`/`JSONSerialization`, and re-incurred on every one of the watcher's
+// 0.25s polls. `tailEventsJSONL` exists to make that O(new bytes) instead of
+// O(file size). Gated on COUNTS, never wall-clock: a busy machine flakes a
+// millisecond budget but cannot make a re-parsed prefix produce the right
+// number of events by accident.
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-tail-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    func line(_ i: Int) -> String { #"{"ts":"\#(i)","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"line-\#(i)"}]}}"# }
+
+    let prefixCount = 5000
+    let prefixText = (0..<prefixCount).map(line).joined(separator: "\n") + "\n"
+    try prefixText.write(to: eventsURL, atomically: true, encoding: .utf8)
+
+    let first = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: nil)
+    expect(first.events.count == prefixCount, "tailEventsJSONL: the first read (no prior cursor) reads everything, got \(first.events.count) of \(prefixCount)")
+    expect(first.rewrote == false, "tailEventsJSONL: a first-ever read is not a rewrite")
+    expect(first.state != nil, "tailEventsJSONL: no cursor state returned from the first read")
+    let state1 = first.state ?? RunEventsFileState(inode: 0, byteOffset: 0)
+    expect(state1.byteOffset == UInt64(prefixText.utf8.count), "tailEventsJSONL: the cursor after a full read should sit at end-of-file, got \(state1.byteOffset) vs \(prefixText.utf8.count)")
+
+    // Append a SMALL delta to a LARGE prefix — the shape that actually occurs
+    // in production (a live run keeps growing while Array tails it).
+    let deltaCount = 5
+    let deltaText = (prefixCount..<(prefixCount + deltaCount)).map(line).joined(separator: "\n") + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(deltaText.utf8))
+    try handle.close()
+
+    let second = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state1)
+    // THE assertion: exactly the 5 new events, not 5005. A re-read-from-scratch
+    // implementation (the pre-fix behavior) would return `prefixCount + deltaCount`
+    // here — this is the counting proof, not a timing one.
+    expect(second.events.count == deltaCount, "tailEventsJSONL: an append re-read the \(prefixCount)-line prefix instead of reading only the \(deltaCount) new lines — got \(second.events.count) events")
+    expect(second.events.first?.rawJSON.contains("line-\(prefixCount)") == true, "tailEventsJSONL: the first delivered event after the append is not the first new line")
+    expect(second.rewrote == false, "tailEventsJSONL: an append (same inode) must not read as a rewrite")
+    expect(second.state != nil, "tailEventsJSONL: no cursor state returned from the second read")
+    let state2 = second.state ?? RunEventsFileState(inode: 0, byteOffset: 0)
+    // Bytes, not milliseconds: the cursor advanced by exactly the appended
+    // byte count — proof the read started at the OLD end-of-file, not at 0.
+    expect(state2.byteOffset - state1.byteOffset == UInt64(deltaText.utf8.count),
+           "tailEventsJSONL: cursor advanced by \(state2.byteOffset - state1.byteOffset) bytes, expected exactly the \(deltaText.utf8.count)-byte delta")
+
+    // A third read with nothing new returns nothing and does not move the cursor.
+    let third = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state2)
+    expect(third.events.isEmpty, "tailEventsJSONL: a read with no new bytes returned \(third.events.count) events")
+    expect(third.state?.byteOffset == state2.byteOffset, "tailEventsJSONL: a read with no new bytes moved the cursor")
+
+    // A completion rewrite (temp-file + rename) is detected by inode, not size,
+    // and is read fresh from byte 0 — this is what makes the A fix possible.
+    let rewriteText = (0..<3).map(line).joined(separator: "\n") + "\n"
+    try rewriteText.write(to: eventsURL, atomically: true, encoding: .utf8)
+    let fourth = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: state2)
+    expect(fourth.rewrote == true, "tailEventsJSONL: a temp-file+rename replace was not detected as a rewrite")
+    expect(fourth.events.count == 3, "tailEventsJSONL: a detected rewrite should read the fresh file from byte 0, got \(fourth.events.count) events instead of 3")
+
+    print("RunArtifactsReader.tailEventsJSONL checks passed: a first read consumes the whole file, an append of 5 lines onto a 5,000-line prefix reads and parses only those 5 (cursor advancing by exactly the appended byte count), a no-op read moves nothing, and a rename-based rewrite is caught by inode and re-read from byte 0")
+}
+
 // MARK: - RunArtifactsWatcher debounced updates
 
 do {
@@ -8229,11 +8309,21 @@ do {
         Foundation.exit(1)
     }
     let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
-    let compactDeclaration = declaration.filter { !$0.isWhitespace }
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")]),"#
+    // C8 added a `resources:` clause (continuum-spawn-agent.ts, Pi's spawn_agent
+    // extension) plus explanatory comments. Strip full-line comments before
+    // compacting so the guard tolerates those without losing its teeth: the
+    // expected string below still pins the dependency list AND the resources
+    // clause exactly, so an added dependency (or a silently dropped/changed
+    // resources clause) still goes red.
+    let declarationWithoutComments = declaration
+        .components(separatedBy: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: "\n")
+    let compactDeclaration = declarationWithoutComments.filter { !$0.isWhitespace }
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, and GRDB, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the PiExtensions resource, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned PiExtensions resource")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
@@ -10778,6 +10868,10 @@ runCanvasMirrorShowOnCanvasChecks()
 runPiEventTranslatorChecks()
 runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
+
+// Ticket: C8 — pi subagent spawning's installer half (continuum-spawn-agent.ts
+// into ~/.pi/agent/extensions, injected with a throwaway /tmp root here).
+runPiExtensionInstallerChecks()
 runAgentPromptImageContractChecks()
 runAgentPromptFileReferenceContractChecks()
 runAgentContextOccupancyChecks()
@@ -11536,7 +11630,11 @@ runSpawnRequestChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2D.3-role-registry.md — roles get a home,
 // and a spawn's role decides what it runs with.
-runRoleRegistryChecks()
+try runItemKindLenientDecodingChecks()
+try runAgentCommandExecutionPlannerChecks()
+runClaudeSubagentSupplyChecks()
+runPiDelegateSupplyChecks()
+try runRoleRegistryChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
 // window that lets the inbox drain itself, and the rule it feeds.
@@ -11605,5 +11703,29 @@ runProcessGroupChildChecks()
 // Plan: .plans/45 T1 — the transcript's hover-revealed "sent at" time needs a
 // timestamp in the document, and every transcript already on disk predates it.
 runAgentEntryTimestampChecks()
+
+// Ticket: codex app-server parity harness (.plans/46, "Codex — the decision,
+// settled by measurement", 2026-08-24). De-risking step before any
+// CodexAgentRunner rewrite: pins CodexAppServerEventTranslator's own mapping,
+// single-agent parity against the existing CodexEventTranslator/exec path, and
+// the measured ordering hazard (a delegating child's completion can arrive
+// after the parent's turn/completed).
+runCodexAppServerParityChecks()
+
+// Ticket: codex app-server migration (.plans/46). The impure half the parity
+// ticket left for later: CodexAppServerTransport's JSON-RPC request/response
+// correlation and error surfacing, and CodexAgentRunner's app-server run path
+// (fresh/resume, the JSON-RPC-error self-heal, stop()'s turn/interrupt) driven
+// end to end against a scripted fake `codex app-server` standing in on PATH.
+runCodexAppServerRunnerChecks()
+
+// M2 pi rpc transport (`.plans/46`, "pi rpc" probe). `PiRpcTransport` (request/
+// response correlation surviving interleaving, malformed-frame tolerance) and
+// `PiRpcAgentRunner` (one process serving many turns, abort keeping the
+// connection alive, steer not itself ending the turn) driven end to end
+// against a scripted fake `pi --mode rpc` standing in on PATH, plus the
+// two-frame-type `PiEventTranslator` addition (`response`,
+// `extension_ui_request`).
+runPiRpcTransportChecks()
 
 print("ContinuumRevivedCoreChecks passed")

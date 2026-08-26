@@ -751,14 +751,67 @@ enum FileOpenChecks {
                     && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 65
                     && largeCanvas.qaDocumentRelationshipSegmentCount == 64,
                    "relationship refresh was not O(tiles + links), or failed missing-endpoint filtering: \(largeCanvas.qaDocumentRelationshipStats)")
+        // A CAMERA step must now cost nothing at all.
+        //
+        // This assertion used to demand 65 tile visits and 65 link evaluations per
+        // camera step — it pinned the recomputation as the mechanism by which
+        // connectors kept up with the camera. They no longer need to: the overlay
+        // is a content-sized sibling inside `worldPlane` drawing in world
+        // coordinates, so the camera moves it exactly as it moves tiles. Asserting
+        // the old counts would now be asserting waste (a 40-step pinch on a canvas
+        // with no links at all was paying 960 tile visits and 40 full-viewport
+        // frame writes).
+        //
+        // What the old assertion was FOR is preserved below, as an outcome rather
+        // than a mechanism: the connector must still be in the right place after
+        // the camera moves.
         largeCanvas.qaResetDocumentRelationshipStats()
         let largeInvalidations = largeCanvas.qaDocumentRelationshipDisplayInvalidationCount
-        largeCanvas.setViewport(largeCanvas.viewport)
-        try expect(largeCanvas.qaDocumentRelationshipStats.stackingReconciliations == 0
-                    && largeCanvas.qaDocumentRelationshipStats.tileIndexVisits == 65
-                    && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 65
+        guard let beforeCameraMove = largeCanvas.qaDocumentRelationshipSegmentRects.first.map({
+            largeCanvas.qaSegmentRectInCanvasSpace($0.source)
+        }) else {
+            try expect(false, "the relationship fixture painted no connector to track")
+            return
+        }
+        let movedViewport = CanvasViewport(
+            x: largeCanvas.viewport.x + 137, y: largeCanvas.viewport.y + 91,
+            zoom: largeCanvas.viewport.zoom)
+        largeCanvas.setViewport(movedViewport)
+        try expect(largeCanvas.qaDocumentRelationshipStats.updateCalls == 0
+                    && largeCanvas.qaDocumentRelationshipStats.stackingReconciliations == 0
+                    && largeCanvas.qaDocumentRelationshipStats.tileIndexVisits == 0
+                    && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 0
+                    && largeCanvas.qaDocumentRelationshipStats.frameWrites == 0
                     && largeCanvas.qaDocumentRelationshipDisplayInvalidationCount == largeInvalidations,
-                   "geometry-only refresh reordered views or repainted unchanged connectors: \(largeCanvas.qaDocumentRelationshipStats)")
+                   "a camera step rebuilt or repainted connectors that did not move: \(largeCanvas.qaDocumentRelationshipStats)")
+
+        // The outcome the counts above must not have bought: the connector
+        // followed the camera anyway. Its canvas-space position tracks the tiles
+        // it joins, and it tracks them for free.
+        guard let afterCameraMove = largeCanvas.qaDocumentRelationshipSegmentRects.first.map({
+            largeCanvas.qaSegmentRectInCanvasSpace($0.source)
+        }) else {
+            try expect(false, "the connector vanished when the camera moved")
+            return
+        }
+        let expectedShift = CGPoint(
+            x: beforeCameraMove.origin.x - 137 * largeCanvas.viewport.zoom,
+            y: beforeCameraMove.origin.y - 91 * largeCanvas.viewport.zoom)
+        try expect(abs(afterCameraMove.origin.x - expectedShift.x) < 1.5
+                    && abs(afterCameraMove.origin.y - expectedShift.y) < 1.5,
+                   "the connector did not follow the camera: expected roughly \(expectedShift), "
+                   + "got \(afterCameraMove.origin) — a camera step costs nothing only if the "
+                   + "overlay lives in world space, and this is the half that proves it does")
+
+        // And a TILE move — the thing that genuinely changes a connector — must
+        // still repaint it. With the camera no longer driving the overlay, this is
+        // the invalidation path that has to carry it.
+        largeCanvas.qaResetDocumentRelationshipStats()
+        largeCanvas.setDocumentRelationships(links, agentTileIds: ids)
+        try expect(largeCanvas.qaDocumentRelationshipStats.updateCalls > 0
+                    && largeCanvas.qaDocumentRelationshipStats.linkEvaluations == 65,
+                   "a real relationship invalidation stopped recomputing after the camera stopped "
+                   + "driving the overlay: \(largeCanvas.qaDocumentRelationshipStats)")
     }
 
     // MARK: - Section 3: an agent's local-file link opens beside the agent
@@ -840,6 +893,20 @@ enum FileOpenChecks {
             )
             opens.append(result)
             if case let .refused(reason) = result { refusals.append(reason) }
+        }
+        var webTargets: [AgentLinkOpenTarget] = []
+        var spawnedBrowserTileIDs: [UUID] = []
+        agentView.onOpenWebLink = { url, target in
+            webTargets.append(target)
+            guard target == .array,
+                  let spawner = harness.runtime.activeController?.tileSpawner else { return }
+            if case let .spawned(runtime) = spawner.spawnBrowser(
+                url: url.absoluteString,
+                beside: agentTile.id,
+                targetZoneId: harness.zone
+            ) {
+                spawnedBrowserTileIDs.append(runtime.tileId)
+            }
         }
 
         // Render REAL assistant Markdown through the production ingest path.
@@ -926,6 +993,30 @@ enum FileOpenChecks {
         try expect(harness.runtime.document.documentLinks.count == 1,
                    "repeat opens from one agent must deduplicate the relationship")
 
+        // Web links deliberately have the opposite duplicate policy: every
+        // ordinary activation creates a fresh browser beside the authoring
+        // agent, in that agent's zone, while explicit system intent creates no
+        // canvas state.
+        try activate("https://example.com/guide")
+        try activate("https://example.com/guide")
+        guard let webMatch = renderedLinks().first(where: {
+            $0.link.destination == "https://example.com/guide"
+        }) else { throw Failure(message: "the transcript lost its https link") }
+        _ = webMatch.view.activateLink(
+            at: webMatch.link.range.location,
+            target: .systemBrowser
+        )
+        try expect(webTargets == [.array, .array, .systemBrowser],
+                   "web link activation must preserve Array vs system intent; got \(webTargets)")
+        try expect(Set(spawnedBrowserTileIDs).count == 2,
+                   "two ordinary clicks must create two distinct browser tiles")
+        for browserTileID in spawnedBrowserTileIDs {
+            try expect(harness.canvas.tileIds(inZone: harness.zone).contains(browserTileID),
+                       "a transcript browser must belong to the source agent's zone")
+            try expect(harness.canvas.tileView(for: browserTileID) is BrowserTileNSView,
+                       "a transcript web link must install a real BrowserTileNSView")
+        }
+
         // A second agent reveals the same canonical document and contributes a
         // second persistent relationship (and therefore a second connector).
         let secondAgentId = AgentID(rawValue: UUID())
@@ -972,7 +1063,16 @@ enum FileOpenChecks {
         guard let firstRoute = harness.canvas.qaDocumentRelationshipRoutes.first else {
             throw Failure(message: "the transcript-created relationship has no drawable route")
         }
-        let routePoints = firstRoute.points
+        // The corridor is compared against pixels of the CANVAS, so it has to be
+        // in the canvas's coordinates. A route's points are in the overlay's own
+        // space, and those two used to be the same space only because the overlay
+        // was viewport-sized and camera-driven. It is now a content-sized sibling
+        // inside `worldPlane`, so the conversion is no longer the identity — and
+        // reading the raw route x's looks for the connector in the wrong column
+        // and finds background.
+        let routePoints = firstRoute.points.map { point in
+            harness.canvas.qaSegmentRectInCanvasSpace(CGRect(origin: point, size: .zero)).origin
+        }
         let corridorX: ClosedRange<CGFloat>
         if let minimum = routePoints.map(\.x).min(), let maximum = routePoints.map(\.x).max() {
             corridorX = minimum...maximum

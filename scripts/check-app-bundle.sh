@@ -143,6 +143,22 @@ done
   || { echo "FAIL: missing bundled agent sound manifest" >&2; exit 1; }
 "$ROOT_DIR/scripts/generate-agent-sounds.py" --check "$RESOURCES/AgentSounds"
 
+# C8: continuum-spawn-agent.ts (Pi's spawn_agent extension) ships as a SwiftPM
+# resource on ContinuumRevivedCore, copied into Contents/Resources (not the
+# .app's top level — see make-app-bundle.sh's comment on why). Asserts it
+# landed exactly where PiExtensionInstaller looks for it in production,
+# byte-identical to the committed source (a truncated or stale copy is as dead
+# as a missing one).
+CORE_RESOURCE_BUNDLE_PATH="$RESOURCES/continuum-revived_ContinuumRevivedCore.bundle"
+SPAWN_AGENT_EXTENSION_SOURCE="$ROOT_DIR/Sources/ContinuumRevivedCore/Resources/PiExtensions/continuum-spawn-agent.ts"
+SPAWN_AGENT_EXTENSION_BUNDLED="$CORE_RESOURCE_BUNDLE_PATH/PiExtensions/continuum-spawn-agent.ts"
+[[ -d "$CORE_RESOURCE_BUNDLE_PATH" ]] || { echo "FAIL: missing Core resource bundle at $CORE_RESOURCE_BUNDLE_PATH" >&2; exit 1; }
+[[ -f "$SPAWN_AGENT_EXTENSION_BUNDLED" ]] || { echo "FAIL: missing bundled spawn_agent extension at $SPAWN_AGENT_EXTENSION_BUNDLED" >&2; exit 1; }
+if ! cmp -s "$SPAWN_AGENT_EXTENSION_SOURCE" "$SPAWN_AGENT_EXTENSION_BUNDLED"; then
+  echo "FAIL: bundled spawn_agent extension differs from the committed source" >&2
+  exit 1
+fi
+
 # Sparkle (go-live Phase 2): feed keys in the plist, framework embedded with
 # its updater pieces, and the rpath that lets the bundled binary find it. The
 # launch probe below is the behavioral proof the rpath resolves.

@@ -38,6 +38,29 @@ public final class RunArtifactsWatcher: @unchecked Sendable {
     private var firstDirtyAt: Date?
     private var readWindowStartedAt: Date?
     private var readsInWindow = 0
+    /// Per-run incremental read state: the byte cursor `tailEventsJSONL` needs to
+    /// avoid re-reading the whole file, plus the events accumulated so far so a
+    /// caller keeps seeing the full history the way `RunArtifactsReader.read`
+    /// always has. Reset to empty (not merely re-cursored) when the underlying
+    /// file's inode changes — see `readSnapshot`.
+    private struct EventsCacheEntry {
+        var state: RunEventsFileState?
+        var events: [RunEventArtifact] = []
+        var badLineCount = 0
+    }
+    private var eventsCache: [String: EventsCacheEntry] = [:]
+
+    /// When non-nil, ONLY these run ids are stat'ed.
+    ///
+    /// T6: not an optimisation. `.pi/agent-runs` accumulates one directory per
+    /// delegated run forever — 143 of them in Array's own checkout — and an
+    /// unfiltered watcher stats four paths in every one of them on every poll,
+    /// then marks all of them dirty on its first scan and reads them at the rate
+    /// cap for half a minute. Array only ever cares about the runs a tool call in
+    /// THIS session bound, so an allowlist keeps the work O(bound runs) instead of
+    /// O(history). nil means unfiltered, which is what the pre-existing
+    /// run-artifacts tile wants.
+    private var watchedRunIds: Set<String>?
 
     public init(
         rootURL: URL,
@@ -113,12 +136,43 @@ public final class RunArtifactsWatcher: @unchecked Sendable {
         for id in idsToRead {
             dirtyRunIds.remove(id)
             readsInWindow += 1
-            snapshots[id] = RunArtifactsReader.read(runDirectory: rootURL.appendingPathComponent(id, isDirectory: true), fileManager: fileManager)
+            snapshots[id] = readSnapshot(runId: id, directory: rootURL.appendingPathComponent(id, isDirectory: true))
         }
         if dirtyRunIds.isEmpty { self.firstDirtyAt = nil } else { self.firstDirtyAt = now }
         let update = RunArtifactsWatcherUpdate(snapshots: snapshots, readCount: readsInWindow)
         handler?(update)
         return update
+    }
+
+    /// `run.json` and `final.md` are small and read in full every time, same as
+    /// `RunArtifactsReader.read` always did — the cost this class exists to
+    /// avoid is entirely in re-parsing `events.jsonl`. That file alone is read
+    /// incrementally, via a per-run cached byte cursor.
+    private func readSnapshot(runId: String, directory: URL) -> RunArtifactsSnapshot {
+        let runURL = directory.appendingPathComponent("run.json", isDirectory: false)
+        let eventsURL = directory.appendingPathComponent("events.jsonl", isDirectory: false)
+        let finalURL = directory.appendingPathComponent("final.md", isDirectory: false)
+        let run = RunArtifactsReader.readRunJSON(at: runURL)
+        let finalMarkdown = RunArtifactsReader.readUTF8IfPresent(at: finalURL, fileManager: fileManager)
+
+        var cache = eventsCache[runId] ?? EventsCacheEntry()
+        let tail = RunArtifactsReader.tailEventsJSONL(at: eventsURL, from: cache.state, fileManager: fileManager)
+        if tail.rewrote {
+            // A different file under the same name (completion compaction). The
+            // events accumulated against the OLD file no longer correspond to
+            // anything a byte offset could continue from — start over.
+            cache = EventsCacheEntry()
+        }
+        cache.state = tail.state
+        cache.events.append(contentsOf: tail.events)
+        cache.badLineCount += tail.badLineCount
+        eventsCache[runId] = cache
+
+        return RunArtifactsSnapshot(
+            run: run,
+            events: RunEventsArtifact(events: cache.events, badLineCount: cache.badLineCount, rewrote: tail.rewrote),
+            finalMarkdown: finalMarkdown
+        )
     }
 
     private func resetReadWindowIfNeeded(now: Date) {
@@ -133,7 +187,39 @@ public final class RunArtifactsWatcher: @unchecked Sendable {
         }
     }
 
+    /// Restrict this watcher to the named runs, or pass nil to watch every
+    /// directory under the root. Applied on the watcher's own queue so a change
+    /// cannot interleave with a scan.
+    public func setWatchedRunIds(_ ids: Set<String>?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.watchedRunIds = ids
+            // Drop signatures and dirt for runs no longer watched, so unwatching
+            // and re-watching a run does not replay it from a stale signature.
+            if let ids {
+                self.lastSignatures = self.lastSignatures.filter { ids.contains($0.key) }
+                self.dirtyRunIds = self.dirtyRunIds.filter { ids.contains($0) }
+                if self.dirtyRunIds.isEmpty { self.firstDirtyAt = nil }
+                // Same reason as the signature drop above: a run that leaves and
+                // later rejoins the allowlist must start from a fresh read, not
+                // resume a byte cursor that predates the gap.
+                self.eventsCache = self.eventsCache.filter { ids.contains($0.key) }
+            }
+        }
+    }
+
     private func currentRunSignatures() -> [String: String] {
+        // With an allowlist, address the directories directly rather than
+        // enumerating the root: enumeration is the cost being avoided.
+        if let watchedRunIds {
+            var signatures: [String: String] = [:]
+            for runId in watchedRunIds {
+                let child = rootURL.appendingPathComponent(runId, isDirectory: true)
+                guard (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                signatures[runId] = directorySignature(child)
+            }
+            return signatures
+        }
         guard fileManager.fileExists(atPath: rootURL.path),
               let children = try? fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         else { return [:] }

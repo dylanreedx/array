@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -42,6 +43,14 @@ enum RelationshipGeometryChecks {
     private static func nearly(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 0.5) -> Bool {
         abs(lhs.minX - rhs.minX) < tolerance && abs(lhs.minY - rhs.minY) < tolerance
             && abs(lhs.width - rhs.width) < tolerance && abs(lhs.height - rhs.height) < tolerance
+    }
+
+    private static func point(_ point: CGPoint, liesOnEdgeOf rect: CGRect, tolerance: CGFloat = 0.75) -> Bool {
+        let withinX = point.x >= rect.minX - tolerance && point.x <= rect.maxX + tolerance
+        let withinY = point.y >= rect.minY - tolerance && point.y <= rect.maxY + tolerance
+        let onVertical = abs(point.x - rect.minX) < tolerance || abs(point.x - rect.maxX) < tolerance
+        let onHorizontal = abs(point.y - rect.minY) < tolerance || abs(point.y - rect.maxY) < tolerance
+        return (withinY && onVertical) || (withinX && onHorizontal)
     }
 
     static func run() throws {
@@ -138,23 +147,106 @@ enum RelationshipGeometryChecks {
         //    assume it, at the same non-zero viewport.
         canvas.showContextualAgentLineage(parentTileID: agentTileId, childTileID: fileTileId)
         canvas.layoutSubtreeIfNeeded()
-        guard let endpoints = canvas.qaLineageEndpointsInCanvasSpace,
+        let singleEndpoints = canvas.qaLineageEndpointsInCanvasSpace
+        guard singleEndpoints.count == 1,
               let agentRect = canvas.qaTileRectInCanvasSpace(agentTileId),
               let fileRect = canvas.qaTileRectInCanvasSpace(fileTileId) else {
-            throw Failure(message: "lineage: no overlay endpoints")
+            throw Failure(message: "lineage: expected exactly one overlay endpoint pair; got \(singleEndpoints.count)")
         }
-        try expect(abs(endpoints.start.y - agentRect.midY) < 0.5
-                   && endpoints.start.x >= agentRect.minX - 0.5
-                   && endpoints.start.x <= agentRect.maxX + 0.5,
+        let endpoints = singleEndpoints[0]
+        try expect(point(endpoints.start, liesOnEdgeOf: agentRect),
                    "lineage: the start point must sit on the parent tile's edge. Got "
                    + "\(endpoints.start), tile \(agentRect)")
-        try expect(abs(endpoints.end.y - fileRect.midY) < 0.5
-                   && endpoints.end.x >= fileRect.minX - 0.5
-                   && endpoints.end.x <= fileRect.maxX + 0.5,
+        try expect(point(endpoints.end, liesOnEdgeOf: fileRect),
                    "lineage: the end point must sit on the child tile's edge. Got "
                    + "\(endpoints.end), tile \(fileRect)")
 
+        // 6. C11 — N > 1 edges. `CanvasNSView` used to draw exactly one edge
+        // (`startPoint`/`endPoint`); `showContextualAgentLineage(edges:)` must
+        // paint one per resolved (parent, child) pair, bounded to
+        // `InboxSort.maxVisibleChildren` the way the inbox itself bounds a
+        // parent's visible children.
+        //
+        // The fixture size is PINNED to the real spawn caps, not to a literal
+        // "16" or "8": two levels of `AgentSupervisor.maxChildrenPerParent` is
+        // exactly the "16 live streams" a maxed-out fan-out produces, and
+        // two PARENTS' worth of that same cap is exactly
+        // `InboxSort.maxVisibleChildren` — the relationship
+        // `ContinuumApp.swift:26972-26973` already pins for `maxDepth`. If
+        // either cap changes, THIS assertion fails loudly instead of an
+        // edge count silently meaning something else.
+        try expect(
+            AgentSupervisor.maxChildrenPerParent * AgentSupervisor.maxChildrenPerParent == 16,
+            "the 16-live-stream fixture below assumes maxChildrenPerParent² == 16; "
+            + "maxChildrenPerParent is \(AgentSupervisor.maxChildrenPerParent)")
+        try expect(
+            AgentSupervisor.maxChildrenPerParent + AgentSupervisor.maxChildrenPerParent
+                == InboxSort.maxVisibleChildren,
+            "InboxSort.maxVisibleChildren (\(InboxSort.maxVisibleChildren)) must equal two parents' worth of "
+            + "AgentSupervisor.maxChildrenPerParent (\(AgentSupervisor.maxChildrenPerParent)) — the canvas lineage "
+            + "bound below reuses maxVisibleChildren on exactly that assumption")
+
+        let fanParentTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D0")!
+        let fanChildTileIds = (0 ..< 16).map { index in
+            UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000000%02X", 0xE0 + index))!
+        }
+        func fanTile(_ id: UUID, x: Double, y: Double) -> Tile {
+            Tile(id: id, kind: .note, title: "t",
+                 frame: TileFrame(x: x, y: y, width: 120, height: 90),
+                 zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                 metadata: TileMetadata(noteId: id))
+        }
+        let fanParentTile = fanTile(fanParentTileId, x: 100, y: 100)
+        let fanChildTiles = fanChildTileIds.enumerated().map { index, id in
+            fanTile(id, x: 400 + Double(index % 4) * 160, y: 100 + Double(index / 4) * 130)
+        }
+        let fanCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [fanParentTile] + fanChildTiles, groups: [], lastActiveTileId: nil))
+        fanCanvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        fanCanvas.install(tileView: NoteTileNSView(tile: fanParentTile, noteId: fanParentTileId, initialBody: ""),
+                           for: fanParentTile)
+        for tile in fanChildTiles {
+            fanCanvas.install(tileView: NoteTileNSView(tile: tile, noteId: tile.id, initialBody: ""), for: tile)
+        }
+        fanCanvas.layoutSubtreeIfNeeded()
+
+        let fanEdges = fanChildTileIds.map { (parentTileID: fanParentTileId, childTileID: $0) }
+        fanCanvas.showContextualAgentLineage(edges: fanEdges)
+        fanCanvas.layoutSubtreeIfNeeded()
+        let fanEndpoints = fanCanvas.qaLineageEndpointsInCanvasSpace
+        try expect(fanEndpoints.count == InboxSort.maxVisibleChildren,
+                   "a \(fanEdges.count)-edge fan-out must bound to InboxSort.maxVisibleChildren "
+                   + "(\(InboxSort.maxVisibleChildren)) painted edges; got \(fanEndpoints.count)")
+
+        guard let fanParentRect = fanCanvas.qaTileRectInCanvasSpace(fanParentTileId) else {
+            throw Failure(message: "fan-out lineage: could not read the shared parent's rect")
+        }
+        for (offset, endpoint) in fanEndpoints.enumerated() {
+            try expect(point(endpoint.start, liesOnEdgeOf: fanParentRect),
+                       "fan-out lineage edge \(offset): the start point must sit on the shared parent's edge. "
+                       + "Got \(endpoint.start), tile \(fanParentRect)")
+            guard let childRect = fanCanvas.qaTileRectInCanvasSpace(fanChildTileIds[offset]) else {
+                throw Failure(message: "fan-out lineage edge \(offset): could not read child \(offset)'s rect")
+            }
+            try expect(point(endpoint.end, liesOnEdgeOf: childRect),
+                       "fan-out lineage edge \(offset): the end point must sit on child \(offset)'s edge. "
+                       + "Got \(endpoint.end), tile \(childRect)")
+        }
+        try expect(fanCanvas.qaLineageAnimationCount <= 1,
+                   "a bounded lineage fan must use at most one Core Animation loop; got "
+                   + "\(fanCanvas.qaLineageAnimationCount)")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            try expect(fanCanvas.qaLineageIsAnimating,
+                       "lineage should march when Reduce Motion is off and the canvas is active")
+        }
+        try expect(fanCanvas.qaLineageHitTestPassesThrough,
+                   "the priority-visible lineage overlay must remain click-through")
+
         print("RelationshipGeometryChecks: the document connector and the lineage overlay both "
-              + "paint on their endpoints at a panned, zoomed camera, and track it when it moves")
+              + "paint on their endpoints at a panned, zoomed camera, and track it when it moves; "
+              + "a 16-edge fan-out (maxChildrenPerParent² live streams) bounds to exactly "
+              + "InboxSort.maxVisibleChildren painted edges, each still on its own parent/child pair, "
+              + "through one click-transparent animation")
     }
 }

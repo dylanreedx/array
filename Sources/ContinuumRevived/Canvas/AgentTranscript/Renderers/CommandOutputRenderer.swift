@@ -47,7 +47,7 @@ final class CommandOutputView: NSView {
     private(set) var iconView = NSImageView(frame: .zero)
     private(set) var titleLabel = NSTextField(labelWithString: "Command output")
     private(set) var statusLabel = NSTextField(labelWithString: "")
-    private(set) var scrollView = NSScrollView(frame: .zero)
+    private(set) var scrollView = CodeBlockScrollView(frame: .zero)
     private(set) var outputTextView = CommandOutputTextView(frame: .zero)
     private(set) var copyButton = CommandOutputCopyButton(frame: .zero)
     private(set) var isExpanded = false
@@ -75,8 +75,11 @@ final class CommandOutputView: NSView {
 
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
+        // See the note in `ToolCallRenderer`: this pane has the same zero-slack
+        // geometry and inherited the same clipping.
+        scrollView.scrollerStyle = .overlay
+        scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.documentView = outputTextView
 
@@ -169,6 +172,13 @@ final class CommandOutputView: NSView {
             height: max(0, bounds.height - outputY - Self.outputBottomInset)
         )
         scrollView.layoutSubtreeIfNeeded()
+        scrollView.layoutSubtreeIfNeeded()
+        let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string)
+        let needsVerticalScroll = measuredOutput.height > scrollView.contentSize.height + 0.5
+        if scrollView.hasVerticalScroller != needsVerticalScroll {
+            scrollView.hasVerticalScroller = needsVerticalScroll
+            scrollView.layoutSubtreeIfNeeded()
+        }
         outputTextView.sizeDocument(toFit: scrollView.contentSize)
     }
 

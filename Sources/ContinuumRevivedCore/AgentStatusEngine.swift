@@ -220,7 +220,15 @@ public enum TurnOutcome: String, Codable, Equatable, Sendable {
     case cancelled
 }
 
-public enum ItemKind: String, Codable, Equatable, Sendable {
+/// What one timeline item IS.
+///
+/// **Decoding must never throw**, which is why this is hand-written rather than
+/// a synthesized `String`-raw enum. These values are persisted in activity events
+/// and cross to the companion, so a build that meets a kind a newer build wrote
+/// used to fail the whole decode and lose the event — a data-loss bug wearing a
+/// one-line diff. `AgentContextWindowFreshness` in this same file already solved
+/// it this way; adding a case to the old shape would have reopened it.
+public enum ItemKind: RawRepresentable, Codable, Equatable, Hashable, Sendable {
     case commandExecution
     case fileChange
     case mcpToolCall
@@ -229,6 +237,60 @@ public enum ItemKind: String, Codable, Equatable, Sendable {
     case reasoning
     case plan
     case error
+    /// A child agent this item delegated to. claude spawns one through the
+    /// `Agent` tool (formerly `Task`); pi and codex through `spawn_agent`. It is
+    /// not a command execution, which is where `default:` used to send it.
+    case subagent
+    /// A context-compaction boundary: the point where the provider dropped
+    /// earlier turns. It is a real kind, not a tool, and B6.2 shipped it as
+    /// `.unknown("compaction")` only because an exhaustive switch sat behind a
+    /// file that ticket could not edit — which is the opposite of why this enum
+    /// was made lenient.
+    case compaction
+    /// A kind some other build knows and this one does not. Preserved verbatim
+    /// so a round trip through an older build does not silently rewrite it.
+    case unknown(String)
+
+    public var rawValue: String {
+        switch self {
+        case .commandExecution: return "commandExecution"
+        case .fileChange: return "fileChange"
+        case .mcpToolCall: return "mcpToolCall"
+        case .webSearch: return "webSearch"
+        case .assistantMessage: return "assistantMessage"
+        case .reasoning: return "reasoning"
+        case .plan: return "plan"
+        case .error: return "error"
+        case .subagent: return "subagent"
+        case .compaction: return "compaction"
+        case let .unknown(raw): return raw
+        }
+    }
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "commandExecution": self = .commandExecution
+        case "fileChange": self = .fileChange
+        case "mcpToolCall": self = .mcpToolCall
+        case "webSearch": self = .webSearch
+        case "assistantMessage": self = .assistantMessage
+        case "reasoning": self = .reasoning
+        case "plan": self = .plan
+        case "error": self = .error
+        case "subagent": self = .subagent
+        case "compaction": self = .compaction
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public enum ItemStatus: String, Codable, Equatable, Sendable {
@@ -293,11 +355,17 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     /// provider-reported limit.
     case codexRolloutTokenCount
     case providerSessionStats
+    /// claude's `system/compact_boundary` frame. `compact_metadata.post_tokens`
+    /// is the conversation's size AFTER compaction — occupancy stated directly by
+    /// the harness, not a per-turn aggregate to be summed. Without it the ring
+    /// keeps showing the PRE-compaction percentage for the whole following
+    /// interval: a number that is confidently wrong.
+    case claudeCompactBoundary
     case unknown(String)
 
     public var isAuthoritativeForContextOccupancy: Bool {
         switch self {
-        case .providerSessionStats, .codexRolloutTokenCount:
+        case .providerSessionStats, .codexRolloutTokenCount, .claudeCompactBoundary:
             return true
         case .piMessageUsage, .claudeResultUsage, .codexTurnUsage, .unknown:
             return false
@@ -311,6 +379,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case .codexTurnUsage: return "codexTurnUsage"
         case .codexRolloutTokenCount: return "codexRolloutTokenCount"
         case .providerSessionStats: return "providerSessionStats"
+        case .claudeCompactBoundary: return "claudeCompactBoundary"
         case .unknown(let raw): return raw
         }
     }
@@ -323,6 +392,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         case "codexTurnUsage": self = .codexTurnUsage
         case "codexRolloutTokenCount": self = .codexRolloutTokenCount
         case "providerSessionStats": self = .providerSessionStats
+        case "claudeCompactBoundary": self = .claudeCompactBoundary
         default: self = .unknown(raw)
         }
     }

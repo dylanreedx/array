@@ -3759,7 +3759,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
         attachmentStore: agentComposerAttachmentStore,
-        submissionRecoveryStore: agentComposerDraftStore
+        submissionRecoveryStore: agentComposerDraftStore,
+        transcriptStore: agentTranscriptStore
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
@@ -3853,7 +3854,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         root: RegistryStore.defaultApplicationSupportDirectory()
             .appendingPathComponent("agent-transcripts", isDirectory: true)
     )
-    private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
     /// Set when the service runs in relay mode (D4-R1); used to register
@@ -3936,6 +3936,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // pixel baseline and tour render therefore photographs a motionless
         // transcript — a frame captured mid-fade would be a flapping baseline.
         AgentTranscriptMotion.isEnabled = { true }
+        // C3: adopt any pre-2026-08-24 per-tile transcript directory under the
+        // agent-stable key. Detached and non-blocking because it only ever moves
+        // history the app is not yet reading, and idempotent, so a crash halfway
+        // through costs the next launch one more pass and nothing else. Runs on
+        // the interactive path only, for the same reason motion does.
+        Task.detached { [store = agentTranscriptStore] in
+            _ = try? await store.migrateLegacySessionDirectories()
+        }
+        // C8's fourth blocker was that nothing ever installed the extension, so
+        // the whole pi spawn path shipped unreachable. This is that call site,
+        // and it is HERE rather than beside `ToolEnvironment.bootstrap()`
+        // deliberately: `applicationDidFinishLaunching` runs only on the
+        // interactive path, after the entire `--*-check` cascade, so no self-check
+        // leg can write into the developer's real `~/.pi/agent/extensions`.
+        // The installer never overwrites a copy whose bytes are not ours.
+        Task.detached {
+            let result = PiExtensionInstaller.install()
+            if case .leftUserModifiedCopy = result {
+                FileHandle.standardError.write(Data(
+                    "PiExtensionInstaller: left a modified continuum-spawn-agent.ts in place\n".utf8))
+            }
+        }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()
@@ -4826,7 +4848,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 report("FAIL: could not move the spawned agent onto anthropic/haiku"); Foundation.exit(2)
             }
             guard let record = self.agentSupervisor.records[agentId],
-                  AgentSupervisor.productionRunner(for: record) is ClaudeAgentRunner
+                  AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is ClaudeAgentRunner
             else {
                 report("FAIL: anthropic/haiku did not route to ClaudeAgentRunner"); Foundation.exit(2)
             }
@@ -4904,7 +4926,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 report("FAIL: could not move the spawned agent onto openai-codex/gpt-5.4-mini"); Foundation.exit(2)
             }
             guard let record = self.agentSupervisor.records[agentId],
-                  AgentSupervisor.productionRunner(for: record) is CodexAgentRunner
+                  AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is CodexAgentRunner
             else {
                 report("FAIL: openai-codex/gpt-5.4-mini did not route to CodexAgentRunner"); Foundation.exit(2)
             }
@@ -5039,9 +5061,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { return }
             self.synchronizeAgentFocus(to: tileId)
             self.agentSignalCenter.markViewed(tileID: tileId)
+            self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
         }
+    }
+
+    /// Focus owns the ephemeral lineage presentation. A child resolves upward
+    /// to its parent; a parent stays itself; both show the same bounded visible
+    /// direct-child fan. Non-agent focus clears the contextual overlay.
+    private func updateContextualAgentLineage(forFocusedTile tileId: UUID) {
+        guard let canvasView,
+              let focusedAgent = agentSupervisor.agent(forTile: tileId),
+              let focusedRecord = agentSupervisor.records[focusedAgent]
+        else {
+            self.canvasView?.clearContextualAgentLineage()
+            return
+        }
+        let parentID = focusedRecord.parentAgentID ?? focusedAgent
+        guard let parentTileID = agentSupervisor.records[parentID]?.tileId else {
+            canvasView.clearContextualAgentLineage()
+            return
+        }
+        let edges = agentSupervisor.children(of: parentID)
+            .sorted { $0.rawValue.uuidString < $1.rawValue.uuidString }
+            .compactMap { childID -> (parentTileID: UUID, childTileID: UUID)? in
+                guard let childTileID = agentSupervisor.records[childID]?.tileId,
+                      canvasView.tileView(for: childTileID) != nil else { return nil }
+                return (parentTileID, childTileID)
+            }
+        canvasView.showContextualAgentLineage(edges: edges)
     }
 
     /// T2 (`.plans/47`): working in a tile arms its zone, so the next thing you
@@ -8502,11 +8551,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             transcriptDocument: { rawAgentID in
                 let agentID = AgentID(rawValue: rawAgentID)
+                // C3: this asked for the literal "thread-main" while the writer
+                // used the TILE's thread id, so the companion never once found a
+                // transcript. Both ends now name the agent.
+                let sessionID = AgentTranscriptStore.canonicalSessionID(for: agentID)
                 guard let document = try? await transcriptStore.load(
                     agentID: agentID,
-                    sessionID: "thread-main"
+                    sessionID: sessionID
                 ) else { return nil }
-                return (sessionID: "thread-main", document: document)
+                return (sessionID: sessionID, document: document)
             },
             stopAgent: { rawAgentID in
                 await MainActor.run {
@@ -9207,12 +9260,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // reveal landed — arming focus on an agent you failed to reach would suppress
         // the next mark for a row you never saw.
         agentSupervisor.focus(agentID: agentId)
+        // C11: the parent's WHOLE visible fan, not just the child that was
+        // revealed — every sibling that already has a reachable tile gets its
+        // own edge, bounded to `InboxSort.maxVisibleChildren` inside
+        // `showContextualAgentLineage(edges:)` (the same cap the inbox itself
+        // enforces on a parent's visible children).
         if let parentAgentID = agentSupervisor.records[agentId]?.parentAgentID,
            let parentTileID = agentSupervisor.records[parentAgentID]?.tileId,
            canvasView?.tileView(for: parentTileID) != nil {
-            canvasView?.showContextualAgentLineage(
-                parentTileID: parentTileID,
-                childTileID: tileId)
+            let siblingEdges = agentSupervisor.records.values
+                .filter { $0.parentAgentID == parentAgentID }
+                .compactMap { record -> (parentTileID: UUID, childTileID: UUID)? in
+                    guard let siblingTileID = record.tileId,
+                          canvasView?.tileView(for: siblingTileID) != nil else { return nil }
+                    return (parentTileID, siblingTileID)
+                }
+            canvasView?.showContextualAgentLineage(edges: siblingEdges)
         }
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has
@@ -11755,6 +11818,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // is not deleting a tile, the inverse of P2A.5's rule that closing a tile
             // is not deleting an agent), so submitting a prompt in it is how you ask
             // for an agent here again — deliberately, by a gesture, not by a relaunch.
+            // The suppressed tile renders no transcript until a prompt revives
+            // it, but binding the reveal is safe (it needs no agent of its own)
+            // and keeps any chip that ever renders here from clicking into
+            // nothing.
+            view.onRevealAgent = { [weak self, weak view] childID, _ in
+                if self?.revealAgentFromInbox(childID.rawValue) != true {
+                    view?.showActionFailedNotice(
+                        "Couldn't open that subagent — it may have been deleted.")
+                }
+            }
             view.onSubmitPrompt = { [weak self, weak view] prompt in
                 guard let self, let view else { return }
                 supervisor.allowAgentRespawn(forTile: tileId)
@@ -11837,23 +11910,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onOpenLocalFile = { [weak self] destination in
             self?.openAgentLocalFile(destination, agentID: agentId, sourceTileId: tileId)
         }
-        view.onRevealAgent = { [weak self] childID, _ in
-            _ = self?.revealAgentFromInbox(childID.rawValue)
+        view.onOpenWebLink = { [weak self] url, target in
+            self?.openAgentWebLink(url, target: target, sourceTileId: tileId)
         }
-        view.onSemanticTranscriptUpdated = { [weak self] persistedAgentID, sessionID, document, final in
-            guard let self else { return }
-            self.transcriptPersistenceTasks[persistedAgentID]?.cancel()
-            self.transcriptPersistenceTasks[persistedAgentID] = Task { [weak self] in
-                if !final { try? await Task.sleep(for: .milliseconds(200)) }
-                guard !Task.isCancelled, let self else { return }
-                try? await self.agentTranscriptStore.saveSnapshot(
-                    agentID: persistedAgentID,
-                    sessionID: sessionID,
-                    document: document
-                )
-                self.transcriptPersistenceTasks.removeValue(forKey: persistedAgentID)
+        view.onRevealAgent = { [weak self, weak view] childID, _ in
+            // A silent false here is a chip that clicks and does nothing — the
+            // user cannot tell a dead chip from a slow reveal. Say it on the
+            // tile, through the same notice seam a refused send uses.
+            if self?.revealAgentFromInbox(childID.rawValue) != true {
+                view?.showActionFailedNotice(
+                    "Couldn't open that subagent — it may have been deleted.")
             }
         }
+        // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
+        // the same restamped event stream every consumer sees, so a tile-less
+        // agent (fan-out's common case) is no longer silently unsaved. The tile
+        // is a reader of the agent's stream, same as before; it no longer owns
+        // the write.
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest. Project NAME is supplied by the app's
@@ -13595,6 +13668,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
         return true
+    }
+
+    /// Opens an authorized transcript URL using the destination the click made
+    /// explicit. Array-owned web opens are anchored to the authoring tile and
+    /// its zone; Command-click/context-menu opens never create canvas state.
+    @discardableResult
+    func openAgentWebLink(
+        _ url: URL,
+        target: AgentLinkOpenTarget,
+        sourceTileId: UUID
+    ) -> Bool {
+        switch target {
+        case .systemBrowser:
+            return NSWorkspace.shared.open(url)
+        case .array:
+            guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  let spawner = tileSpawner,
+                  let source = canvasView?.navigationTileSnapshot(for: sourceTileId)
+            else { return false }
+            switch spawner.spawnBrowser(
+                url: url.absoluteString,
+                beside: sourceTileId,
+                targetZoneId: source.zoneId
+            ) {
+            case let .spawned(runtime):
+                browserRuntimes.append(runtime)
+                workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+                workspaceRuntime?.enforceBrowserRuntimeBudget()
+                focusSpawnedTile(runtime.tileId)
+                return true
+            case .invalidURL, .failure:
+                return false
+            }
+        }
     }
 
     func agentLocalFileOpener() -> AgentLocalFileOpener {
@@ -27770,10 +27877,10 @@ extension AppDelegate {
     let holdRunners = HoldingTiles()
     revealApp.agentSupervisor = AgentSupervisor(
         store: revealAgentStore,
-        makeRunner: { record in
+        makeRunner: { launch in
             ScriptedAgentRunner(
                 script: turnScript,
-                holdUntilStopped: record.tileId.map { holdRunners.tiles.contains($0) } ?? false)
+                holdUntilStopped: launch.record.tileId.map { holdRunners.tiles.contains($0) } ?? false)
         })
     revealApp.agentSupervisor.restore()
     let revealSupervisor = revealApp.agentSupervisor

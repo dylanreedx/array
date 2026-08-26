@@ -27,6 +27,13 @@ public struct PiEventTranslator {
     private var currentTurnId: String = "pi-unknown#t0"
     private var seenUsageSignatures = Set<String>()
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
+    /// Did the message currently being assembled already emit its text as deltas?
+    ///
+    /// This is what keeps `replayingCompletedMessages` honest. See the doc on that
+    /// flag: a run's `events.jsonl` holds BOTH forms of the same words for the
+    /// whole time the run is live, so recovery has to be decided per message, not
+    /// per reader.
+    private var streamedTextInCurrentMessage = false
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -43,6 +50,21 @@ public struct PiEventTranslator {
     /// in production.
     public var onSpawnRequest: (@Sendable (SpawnRequest) -> Void)?
 
+    /// Where an observed pi child's transcript will be found.
+    ///
+    /// The third-party `delegate_agent` tool runs its child as a separate process
+    /// and appends that child's stdout to `.pi/agent-runs/<runId>/events.jsonl`.
+    /// The `runId` is only in the tool's RESULT, so it arrives strictly after the
+    /// `SpawnRequest` that mints the child — the chip appears on the call, the
+    /// transcript binds on the return. In practice that gap is milliseconds
+    /// (`background` defaults true and the tool returns as soon as the run is
+    /// created), which is why no discovery-by-scan exists to close it: matching a
+    /// role and a timestamp against sibling run directories is a duplicate-minting
+    /// machine.
+    ///
+    /// Local-only and non-Codable for the same I5 reason as `onSpawnRequest`.
+    public var onObservedRun: (@Sendable (ObservedRunHandle) -> Void)?
+
     /// Queue 91 P2 — the general host-local observation side channel.
     ///
     /// Like `onSpawnRequest`, this never widens `AgentRuntimeEvent`. It exposes
@@ -52,12 +74,59 @@ public struct PiEventTranslator {
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
 
+    /// Recover assistant prose from COMPLETED messages instead of from deltas.
+    ///
+    /// Off for the live path, which must stay byte-identical: pi streams assistant
+    /// text as `message_update` → `text_delta`, and `message_end` contributes only
+    /// usage, so reading both would duplicate every word.
+    ///
+    /// On for reading an observed child's `events.jsonl`, where it is the only
+    /// way to get the prose once the run has ended. It does NOT mean "this file is
+    /// finished": the same reader tails the run live, and a live file holds both
+    /// the deltas and the `message_end` that closes them. So this flag only grants
+    /// PERMISSION to recover; `streamedTextInCurrentMessage` decides whether there
+    /// is anything left to recover. Measured, not assumed: the `harness-agents`
+    /// extension rewrites that file when the run completes and the rewrite strips
+    /// **every** `message_update` line (24 → 0 in a probe), leaving `message_end`
+    /// holding the full text. Replaying a finished run without this yields tools,
+    /// turns and usage — and not one word of what the child said.
+    private let replayingCompletedMessages: Bool
+
     public init(
         workingDirectory: URL? = nil,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        replayingCompletedMessages: Bool = false
     ) {
         self.workingDirectory = workingDirectory?.standardizedFileURL
         self.now = now
+        self.replayingCompletedMessages = replayingCompletedMessages
+    }
+
+    /// Assistant text from a COMPLETED message, for the replay path only.
+    ///
+    /// `role == "user"` is skipped unconditionally, and that is not an
+    /// optimisation: in a child's own `events.jsonl` the user message is the
+    /// `Task: <task>` prompt body the parent handed it. That text is
+    /// model-authored, I5-sensitive, and Array's own boundary says command bodies
+    /// never cross — so the one line in the file that contains it is the one line
+    /// this refuses to read.
+    private func completedMessageText(from object: [String: Any]) -> [AgentRuntimeEvent] {
+        guard let message = object["message"] as? [String: Any],
+              (message["role"] as? String) == "assistant",
+              let content = message["content"] as? [[String: Any]]
+        else {
+            return []
+        }
+        var events: [AgentRuntimeEvent] = []
+        for block in content where (block["type"] as? String) == "text" {
+            guard let text = block["text"] as? String, !text.isEmpty else { continue }
+            events.append(.contentDelta(
+                threadId: threadId,
+                turnId: currentTurnId,
+                streamKind: .assistant,
+                delta: text))
+        }
+        return events
     }
 
     /// Translate one line of Pi json output into zero or more normalized
@@ -93,11 +162,26 @@ public struct PiEventTranslator {
             currentTurnId = "\(threadId)#t\(turnCounter)"
             return [.turnStarted(threadId: threadId, turnId: currentTurnId)]
 
+        case "message_start":
+            // Purely structural, and deliberately not folded into `default`: this
+            // is where the per-message recovery state resets.
+            streamedTextInCurrentMessage = false
+            return []
+
         case "message_update":
             return translateMessageUpdate(object)
 
         case "message_end":
-            return translateUsageEvents(from: object)
+            var events = translateUsageEvents(from: object)
+            // Recover the completed text only for a message that never streamed.
+            // A run being tailed live has not been compacted yet, so its deltas
+            // are still in the file and this same `message_end` closes them —
+            // recovering unconditionally repeats the entire answer.
+            if replayingCompletedMessages && !streamedTextInCurrentMessage {
+                events.insert(contentsOf: completedMessageText(from: object), at: 0)
+            }
+            streamedTextInCurrentMessage = false
+            return events
 
         case "tool_execution_start":
             guard let toolCallId = object["toolCallId"] as? String,
@@ -114,6 +198,18 @@ public struct PiEventTranslator {
                 }
                 if let onSpawnRequest,
                    let request = SpawnRequest.parse(toolName: toolName, args: args, sourceItemID: toolCallId) {
+                    onSpawnRequest(request)
+                }
+                // pi's other delegation verb. Kept a separate call rather than
+                // folded into `parse` because the child is already running and
+                // Array must never claim to own it — `observedOnly` is what stops
+                // a composer and a Stop appearing on a process Array cannot
+                // prompt. `task` reaches the supervisor here and NOWHERE else:
+                // `toolDetailFields` whitelists query/pattern/url/path/description,
+                // so it does not cross the I5 boundary below.
+                if let onSpawnRequest,
+                   let request = SpawnRequest.parsePiDelegateTool(
+                       toolName: toolName, args: args, toolUseID: toolCallId) {
                     onSpawnRequest(request)
                 }
                 if let onRuntimeObservation,
@@ -150,6 +246,17 @@ public struct PiEventTranslator {
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
             let isError = (object["isError"] as? Bool) ?? false
+            // The `runId` that names the child's transcript on disk. Measured on
+            // the wire: `result.details.runId`, alongside `details.task` — which
+            // is the child's prompt body and is deliberately NOT read here.
+            if let onObservedRun,
+               toolName == SpawnRequest.piDelegateToolName,
+               let result = object["result"] as? [String: Any],
+               let details = result["details"] as? [String: Any],
+               let runId = details["runId"] as? String,
+               let handle = ObservedRunHandle.validated(toolUseID: toolCallId, runId: runId) {
+                onObservedRun(handle)
+            }
             // `.plans/45` S2 — this branch used to emit no observation at all:
             // the result text and the provider-authored end instant were both
             // parsed upstream and discarded here (C1's pi row of the table).
@@ -184,6 +291,18 @@ public struct PiEventTranslator {
 
         case "agent_settled":
             return [.sessionStateChanged(.ready)]
+
+        // M2 (`.plans/46`): the two rpc-only protocol frame types. The event
+        // stream is the SAME function print-mode and rpc-mode both use
+        // (`toJsonEvent` in `modes/json-event.js`); these two are the only
+        // types rpc adds on top of it, and neither is part of the turn
+        // transcript -- `response` is request/response correlation (handled
+        // by `PiRpcTransport`, never reaching this translator in practice),
+        // `extension_ui_request` is a UI prompt pi's own extension host
+        // answers. Explicit here (rather than relying on `default:`) so the
+        // ignore is a decision, not an accident of the fallthrough.
+        case "response", "extension_ui_request":
+            return []
 
         default:
             // session/user message echoes, agent_end transcript dump, etc.
@@ -286,12 +405,13 @@ public struct PiEventTranslator {
 
     // MARK: - message_update sub-protocol
 
-    private func translateMessageUpdate(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateMessageUpdate(_ object: [String: Any]) -> [AgentRuntimeEvent] {
         guard let event = object["assistantMessageEvent"] as? [String: Any],
               let subtype = event["type"] as? String else { return [] }
         switch subtype {
         case "text_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return [] }
+            streamedTextInCurrentMessage = true
             return [.contentDelta(threadId: threadId, turnId: currentTurnId, streamKind: .assistant, delta: delta)]
         case "thinking_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return [] }
@@ -451,6 +571,10 @@ public struct PiEventTranslator {
             return .fileChange
         case "web_search", "websearch", "web":
             return .webSearch
+        // Delegation is not a command. Both pi delegation verbs bucket here:
+        // Array's own inert extension tool and the third-party `delegate_agent`.
+        case "spawn_agent", "delegate_agent":
+            return .subagent
         default:
             return .commandExecution
         }

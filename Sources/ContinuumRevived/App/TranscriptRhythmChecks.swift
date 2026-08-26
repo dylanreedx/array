@@ -30,7 +30,18 @@ enum TranscriptRhythmChecks {
         var description: String { message }
     }
 
+    /// A1's vacuity floor for `checkFilledSurfacesPadTheirText`, measured
+    /// across `.mixed` + `.realClaudeTurn` + `.turnBoundary` after
+    /// `UserPromptView` stopped being a filled surface: `mixed=3,
+    /// real-claude-turn=0, turn-boundary=0` (neither replayed state authors a
+    /// code/diff/plan/approval/command block). Floored AT the measured total,
+    /// the program's convention. Re-measure if a fixture's filled-artifact mix
+    /// changes; a floor left stale in either direction defeats the point (too
+    /// high goes red for no reason, too low stops measuring anything).
+    private static let minimumFilledSurfacesExamined = 3
+
     static func run() throws {
+        try checkUserTurnIsRuledNotFilled()
         try checkHeadingLadder()
         try checkHangingIndents()
         try checkThematicBreak()
@@ -42,14 +53,24 @@ enum TranscriptRhythmChecks {
         try checkClustering()
         try checkFilledSurfacesPadTheirText()
         try checkDiffStatDensity()
+        try checkDiffSummaryReusesFileRows()
+        try checkDiffBodyRendersInline()
         try checkReasoningExpands()
         try checkRowsShareOneTextColumn()
         try checkLiveDocumentsCarryTimestamps()
         try checkMotionIsPresentationOnly()
+        try checkTurnRangesMatchLegacyLastTurnStart()
+        try checkASupersededToolRowIsFoldedOut()
+        try checkTurnFolding()
+        try checkARowSaysEachThingOnce()
+        try checkAFoldedTurnReportsASpanNotASum()
+        try checkADisplayCycleCostsNothingPerRow()
+        try checkAThoughtIsNotShoutedAtTheReader()
+        try checkGlyphsDistinguishRowKinds()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
-            + "the replayed real claude turn and tool-run clustering"
+            + "the replayed real claude turn, tool-run clustering, one line per fact, and a glyph vocabulary that distinguishes row kinds"
         )
     }
 
@@ -421,8 +442,20 @@ enum TranscriptRhythmChecks {
         // collection item), so comparing raw frames compares different origins
         // and would report a difference that is not on screen.
         let space = mixedSurface.transcript.collectionView
-        let proseX = mixed.compactMap { $0 as? AssistantProseView }
+        // A1: `UserPromptView.proseView` IS an `AssistantProseView` instance (the
+        // renderer is shared), so the old unqualified `AssistantProseView` sweep
+        // silently included the user turn's prose too. That is why this used to
+        // pass without asserting anything about the user surface: the MINIMUM
+        // over both happened to still be the assistant's, and the user turn's
+        // own leading edge only moved from 24 to 22 with nothing here to notice.
+        // Split by owner and assert each edge on purpose.
+        let assistantProseX = mixed.compactMap { $0 as? AssistantProseView }
+            .filter { !($0.superview is UserPromptView) }
             .flatMap(\.textFields)
+            .map { $0.convert($0.bounds, to: space).minX }
+            .min()
+        let userProseX = mixed.compactMap { $0 as? UserPromptView }
+            .flatMap { $0.proseView.textFields }
             .map { $0.convert($0.bounds, to: space).minX }
             .min()
         // Only the renderer views that legitimately keep a fill. A width-based
@@ -436,11 +469,24 @@ enum TranscriptRhythmChecks {
             else { return nil }
             return view.convert(view.bounds, to: space).minX
         }.min()
-        if let proseX, let fillX, abs(proseX - fillX) > 0.5 {
+        if let assistantProseX, let fillX, abs(assistantProseX - fillX) > 0.5 {
             throw fail(
-                "left edges: prose text starts at \(proseX) but the nearest artifact fill starts "
-                + "at \(fillX). AssistantProseView.horizontalReadingInset is added ON TOP of the "
-                + "layout's own contentInsets.left, so card edges and prose never share an edge."
+                "left edges: assistant prose text starts at \(assistantProseX) but the nearest "
+                + "artifact fill starts at \(fillX). AssistantProseView.horizontalReadingInset is "
+                + "added ON TOP of the layout's own contentInsets.left, so card edges and prose "
+                + "never share an edge."
+            )
+        }
+        // A1: the user turn no longer shares the assistant's leading edge — it
+        // sits past its own authorship rule instead, at the row's content
+        // edge (the same edge an artifact fill starts at) plus
+        // `UserPromptView.leadingInset`.
+        if let userProseX, let fillX,
+           abs(userProseX - (fillX + UserPromptView.leadingInset)) > 0.5 {
+            throw fail(
+                "left edges: user prose text starts at \(userProseX), expected the row's leading "
+                + "edge (\(fillX)) plus UserPromptView.leadingInset (\(UserPromptView.leadingInset)) "
+                + "= \(fillX + UserPromptView.leadingInset)"
             )
         }
 
@@ -458,6 +504,91 @@ enum TranscriptRhythmChecks {
                     "fills: a ToolCallView still paints an artifact fill. Only code, diff, plan and "
                     + "approval keep a fill; a routine tool row must sit on the tile body."
                 )
+            }
+        }
+    }
+
+    // MARK: - A1
+
+    /// `.plans/45` A1 — Dylan's decision, replayed: the user turn loses its
+    /// card entirely (no fill, no rounded corner) and keeps only a
+    /// `LineWidth.rule`-wide `AgentLineRole.authorship` rule down the left
+    /// edge. This is the check that MUST gate the redesign: `--component-lab-check`
+    /// and `--ui-baseline-check` are both `MATRIX_KNOWN_RED`, so an assertion
+    /// added to either of those reads as coverage and never actually runs.
+    ///
+    /// Exercised over three states on purpose: `.mixed` (the ordinary single
+    /// turn), `.realClaudeTurn` (a real capture through the real translator,
+    /// not authored prose), and `.turnBoundary` (which — S4.0 — renders two
+    /// CONSECUTIVE user prompts with real `AgentTranscriptLayout.interTurnSpacing`
+    /// between them, so the same assertion also proves two rules never merge
+    /// into one continuous line).
+    private static func checkUserTurnIsRuledNotFilled() throws {
+        for state: AgentTranscriptReviewState in [.mixed, .realClaudeTurn, .turnBoundary] {
+            for theme: TokenTheme in [.light, .dark] {
+                let (_, views) = try render(state, theme: theme)
+                let userViews = views.compactMap { $0 as? UserPromptView }
+                guard !userViews.isEmpty else {
+                    throw fail(
+                        "\(state.rawValue)/\(theme.rawValue): no UserPromptView rendered — the "
+                        + "fixture or the role-aware registry stopped producing one"
+                    )
+                }
+                let expectedHex = AgentLineRole.authorship.color.cgColor(for: theme).hexForChecks
+                for user in userViews {
+                    // 1. No fill left. Comparing to `nil`, not `.clear` — a
+                    //    painted transparent is an unregistered literal to the
+                    //    appearance census (CLAUDE.md hazard 8).
+                    guard user.layer?.backgroundColor == nil else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): a user turn still paints a "
+                            + "background fill — the card was supposed to be removed entirely"
+                        )
+                    }
+                    // 2. Exactly one rule subview, at bounds.minX, LineWidth.rule
+                    //    wide, full row height.
+                    let ruleLayers = user.qaTokenPaintedLayers
+                    guard ruleLayers.count == 1 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): expected exactly one authorship "
+                            + "rule subview, found \(ruleLayers.count)"
+                        )
+                    }
+                    let ruleFrame = ruleLayers[0].layer.frame
+                    guard abs(ruleFrame.minX - user.bounds.minX) <= 0.01,
+                          abs(ruleFrame.width - CGFloat(LineWidth.rule)) <= 0.01,
+                          abs(ruleFrame.height - user.bounds.height) <= 0.5 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): the authorship rule is not a full "
+                            + "row-height, LineWidth.rule-wide stripe at bounds.minX — got \(ruleFrame) "
+                            + "against row bounds \(user.bounds)"
+                        )
+                    }
+                    // 3. The rule's resolved colour is AgentLineRole.authorship,
+                    //    in THIS appearance.
+                    guard ruleLayers[0].layer.backgroundColor?.hexForChecks == expectedHex else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): the rule painted "
+                            + "\(ruleLayers[0].layer.backgroundColor?.hexForChecks ?? "nil"), expected "
+                            + "AgentLineRole.authorship (\(expectedHex))"
+                        )
+                    }
+                    // 4. The leftmost prose glyph sits at rule.maxX + Space.m —
+                    //    `AssistantProseRenderer.horizontalReadingInset == 0`, so
+                    //    the shared text column IS the row's leading edge; there
+                    //    is no interior margin to hang the rule in.
+                    let expectedGlyphX = ruleFrame.maxX + CGFloat(Space.m)
+                    let leftmostGlyphX = user.proseView.textFields.map {
+                        $0.convert($0.bounds, to: user).minX
+                    }.min()
+                    guard let leftmostGlyphX, abs(leftmostGlyphX - expectedGlyphX) <= 0.5 else {
+                        throw fail(
+                            "\(state.rawValue)/\(theme.rawValue): leftmost prose glyph is at "
+                            + "\(String(describing: leftmostGlyphX)), expected rule.maxX + Space.m "
+                            + "(\(expectedGlyphX))"
+                        )
+                    }
+                }
             }
         }
     }
@@ -631,17 +762,30 @@ enum TranscriptRhythmChecks {
     /// padded" is a property of the class of filled surfaces and a new one
     /// would otherwise repeat the bug.
     private static func checkFilledSurfacesPadTheirText() throws {
+        // A1: the user turn lost its fill, so it is no longer a filled content
+        // surface at all — leaving it in the list below was a lie the `alpha >
+        // 0.01` guard already hid (a `nil` background never reaches the type
+        // check). Removed rather than left as dead coverage.
+        //
+        // Its removal also shrinks how many filled surfaces this loop actually
+        // examines per state, which is exactly the failure mode a coverage
+        // check like this one can have without anyone noticing: every clause
+        // inside the loop can stay green by never running. A floor on the
+        // count examined is the general cure.
+        var examinedPerState: [AgentTranscriptReviewState: Int] = [:]
         for state in [AgentTranscriptReviewState.mixed, .realClaudeTurn, .turnBoundary] {
             let (surface, views) = try render(state)
             let space = surface.transcript.collectionView
+            var examined = 0
             for view in views {
                 guard let colour = view.layer?.backgroundColor, colour.alpha > 0.01 else { continue }
-                let isFilledContentSurface = view is UserPromptView || view is CodeBlockView
+                let isFilledContentSurface = view is CodeBlockView
                     || view is AgentPlanView || view is AgentDiffSummaryView
                     || view is AgentRequestView || view is CommandOutputView
                 guard isFilledContentSurface else { continue }
                 let fill = view.convert(view.bounds, to: space)
                 guard fill.width > 1 else { continue }
+                examined += 1
                 // An NSTextView carries its own padding as textContainerInset,
                 // which its BOUNDS include — measuring the frame alone reports a
                 // padded code block as flush. Offset to the first glyph's origin.
@@ -676,6 +820,21 @@ enum TranscriptRhythmChecks {
                     )
                 }
             }
+            examinedPerState[state] = examined
+        }
+        // The vacuity floor: every clause above can stay green forever by
+        // simply never running, which is what removing `UserPromptView`
+        // (correctly) just did to `.turnBoundary` — it authors no code/diff/
+        // plan/approval/command block, so it now examines ZERO filled
+        // surfaces. Gate the TOTAL rather than pretend every state must
+        // examine something it does not carry.
+        let totalExamined = examinedPerState.values.reduce(0, +)
+        guard totalExamined >= minimumFilledSurfacesExamined else {
+            throw fail(
+                "filled-surface padding: examined \(totalExamined) filled surface(s) across "
+                + "\(examinedPerState.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(separator: ", ")), "
+                + "floor is \(minimumFilledSurfacesExamined) — this check can pass by never running"
+            )
         }
     }
 
@@ -860,6 +1019,255 @@ enum TranscriptRhythmChecks {
         }
     }
 
+    // MARK: - A2
+
+    /// `AgentDiffSummaryView.apply` tore down and rebuilt every file-name/stat/
+    /// bar row on EVERY apply (`rebuildFileLabels`) and `layout()` measured
+    /// each stat label's `attributedStringValue.size()` on every display cycle
+    /// -- `performance.md` traps 1, 2 and 3 together, multiplied by up to
+    /// `maximumVisibleFiles` rows. This drives the real `apply`/`layout` entry
+    /// points directly -- the same ones `DiffSummaryRenderer` calls -- across
+    /// repeated applies and repeated no-op layout passes, and counts the WORK,
+    /// never the wall clock: subviews created, stat measurements taken, frames
+    /// actually written.
+    private static func checkDiffSummaryReusesFileRows() throws {
+        let view = AgentDiffSummaryView()
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        func files(_ count: Int) -> [AgentDiffFileSummary] {
+            (0..<count).map {
+                AgentDiffFileSummary(displayName: "file\($0).swift", addedLineCount: UInt($0 + 1), removedLineCount: UInt($0))
+            }
+        }
+        func apply(_ count: Int) {
+            view.apply(
+                blockID: AgentNodeID(rawValue: "diff-1")!,
+                payload: AgentDiffPayload(text: "", files: files(count), canOpenReview: false),
+                context: context
+            )
+        }
+
+        // First apply: five files. Building the pool for the first time is
+        // allowed to create five rows.
+        apply(5)
+        view.frame = NSRect(x: 0, y: 0, width: 480, height: 400)
+        view.layout()
+        guard view.qaFileViewsCreatedForChecks == 5 else {
+            throw fail(
+                "diff-summary reuse: the first apply of 5 files created "
+                + "\(view.qaFileViewsCreatedForChecks) row view(s), expected 5"
+            )
+        }
+
+        // Re-applying the SAME five files must create zero new views and must
+        // not re-measure a stat label whose file summary did not change.
+        view.qaResetCountersForChecks()
+        apply(5)
+        guard view.qaFileViewsCreatedForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: an unchanged apply created "
+                + "\(view.qaFileViewsCreatedForChecks) new row view(s) -- rebuildFileLabels is "
+                + "still tearing down and rebuilding every apply"
+            )
+        }
+        guard view.qaStatMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: an unchanged apply re-measured "
+                + "\(view.qaStatMeasurementsForChecks) stat label(s) that did not change"
+            )
+        }
+
+        // Growing to eight files must create exactly three MORE views, not
+        // eight new ones.
+        view.qaResetCountersForChecks()
+        apply(8)
+        guard view.qaFileViewsCreatedForChecks == 3 else {
+            throw fail(
+                "diff-summary reuse: growing from 5 to 8 files created "
+                + "\(view.qaFileViewsCreatedForChecks) row view(s), expected 3 (the pool should "
+                + "grow by the difference, not rebuild)"
+            )
+        }
+
+        // Shrinking back to five must create zero new views -- the pool holds
+        // the surplus, hidden, rather than tearing anything down.
+        view.qaResetCountersForChecks()
+        apply(5)
+        guard view.qaFileViewsCreatedForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: shrinking to 5 files created "
+                + "\(view.qaFileViewsCreatedForChecks) new row view(s) instead of hiding the surplus"
+            )
+        }
+        guard view.fileLabels.count == 8 else {
+            throw fail(
+                "diff-summary reuse: the pool shrank to \(view.fileLabels.count) view(s) instead "
+                + "of hiding the surplus 3 (a shrink-then-regrow would recreate them)"
+            )
+        }
+
+        // Ten no-op layout passes on unchanged content must write zero frames
+        // and take zero further measurements -- performance.md traps 2 and 3.
+        view.qaResetCountersForChecks()
+        for _ in 0..<10 {
+            view.needsLayout = true
+            view.layout()
+        }
+        guard view.qaFrameWritesForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: \(view.qaFrameWritesForChecks) frame write(s) across 10 "
+                + "unchanged layout passes -- frames are assigned unconditionally"
+            )
+        }
+        guard view.qaStatMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff-summary reuse: \(view.qaStatMeasurementsForChecks) stat measurement(s) "
+                + "across 10 unchanged layout passes -- layout() is measuring text"
+            )
+        }
+    }
+
+    // MARK: - A3
+
+    /// `AgentDiffPayload.text` carries the raw unified diff and, before this
+    /// ticket, was parsed and shown nowhere -- only the safe file summary
+    /// rendered. This drives `AgentDiffSummaryView.apply`/`layout` directly
+    /// with a REAL unified diff (every other diff fixture in this file and in
+    /// `ComponentLab` uses opaque/malformed compatibility text on purpose, to
+    /// prove raw text is never dumped verbatim -- this one proves the parsed
+    /// structure DOES render). Asserts: added/removed lines carry the right
+    /// tokens in both appearances, the body truncates at
+    /// `AgentDiffSummaryView.bodyMaxLines` with the correct "+N more lines"
+    /// affordance, and re-applying the identical (blockID, revision) creates
+    /// zero new body views and re-parses zero times -- extending the same
+    /// work-counting shape `checkDiffSummaryReusesFileRows` (A2) established,
+    /// per `performance.md` traps 1-3 one layer up: the diff body itself.
+    private static func checkDiffBodyRendersInline() throws {
+        // 40 added lines: bodyMaxLines (30) leaves room for the leading context
+        // + deletion line and 28 of the 40 additions, so the overflow must read
+        // "+12 more lines" (42 hunk lines total, 30 shown).
+        let addedLines = (1...40).map { "+added line \($0)" }.joined(separator: "\n")
+        let diffText = """
+        diff --git a/Sample.swift b/Sample.swift
+        index aaaaaaa..bbbbbbb 100644
+        --- a/Sample.swift
+        +++ b/Sample.swift
+        @@ -1,2 +1,41 @@
+         context line
+        -removed line
+        \(addedLines)
+        """
+        let blockID = AgentNodeID(rawValue: "diff-body-1")!
+        AgentDiffSummaryView.qaResetDiffParseCacheForChecks()
+
+        func makeContext(appearance: TokenTheme) -> AgentRenderContext {
+            AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: appearance)
+        }
+        let payload = AgentDiffPayload(
+            text: diffText, summary: "Sample change",
+            files: [.init(displayName: "Sample.swift", addedLineCount: 40, removedLineCount: 1)],
+            canOpenReview: false
+        )
+
+        let view = AgentDiffSummaryView()
+        // Off-window: `effectiveTokenTheme` (which the view's colouring uses,
+        // matching `applyTokens`/`syncFileRows`) reads the real AppKit
+        // appearance, not `context.appearance` — force it, the same way
+        // `UIProbeGeometry`/`ComponentLab` do for an offline theme sweep.
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: .dark))
+        view.frame = NSRect(x: 0, y: 0, width: 480, height: 1400)
+        view.layout()
+
+        guard let body = view.bodyTextView, !body.isHidden else {
+            throw fail("diff body: no inline body view appeared for a real unified diff")
+        }
+        guard body.string.contains("added line 28\n") || body.string.hasSuffix("added line 28"),
+              !body.string.contains("added line 29") else {
+            throw fail(
+                "diff body: did not truncate at \(AgentDiffSummaryView.bodyMaxLines) shown lines "
+                + "(expected line 28 present, 29 absent)"
+            )
+        }
+        guard !view.bodyOverflowLabel.isHidden, view.bodyOverflowLabel.stringValue == "+12 more lines" else {
+            throw fail(
+                "diff body: overflow affordance wrong, got '\(view.bodyOverflowLabel.stringValue)' "
+                + "hidden=\(view.bodyOverflowLabel.isHidden)"
+            )
+        }
+        guard view.qaDiffBodyViewsCreatedForChecks == 1 else {
+            throw fail("diff body: first apply should allocate exactly one body view, got \(view.qaDiffBodyViewsCreatedForChecks)")
+        }
+
+        func foregroundColor(containing needle: String) throws -> NSColor {
+            guard let range = body.string.range(of: needle) else {
+                throw fail("diff body: expected substring '\(needle)' not found while checking colour")
+            }
+            let nsRange = NSRange(range, in: body.string)
+            guard let color = body.textStorage?.attribute(.foregroundColor, at: nsRange.location, effectiveRange: nil) as? NSColor else {
+                throw fail("diff body: no foreground colour attribute at '\(needle)'")
+            }
+            return color
+        }
+
+        for theme: TokenTheme in [.dark, .light] {
+            // `AgentDiffSummaryView` colours the body via `effectiveTokenTheme`
+            // (the view's real AppKit appearance), matching every other colour
+            // in this view (`applyTokens`, `syncFileRows`) — not
+            // `context.appearance`. Off-window, that has to be forced the same
+            // way `UIProbeGeometry`/`ComponentLab` force it for a theme sweep.
+            view.appearance = NSAppearance(named: theme == .dark ? .darkAqua : .aqua)
+            view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: theme))
+            view.layoutSubtreeIfNeeded()
+            let addedColor = try foregroundColor(containing: "added line 1\n")
+            let removedColor = try foregroundColor(containing: "removed line\n")
+            let expectedAdded = AccentToken.accentDone.color.nsColor(for: theme)
+            let expectedRemoved = AccentToken.accentFailed.color.nsColor(for: theme)
+            guard addedColor.usingColorSpace(.sRGB) == expectedAdded.usingColorSpace(.sRGB) else {
+                throw fail("diff body (\(theme)): added line did not carry the accentDone token colour")
+            }
+            guard removedColor.usingColorSpace(.sRGB) == expectedRemoved.usingColorSpace(.sRGB) else {
+                throw fail("diff body (\(theme)): removed line did not carry the accentFailed token colour")
+            }
+        }
+
+        // Re-applying the IDENTICAL (blockID, revision, theme) must create zero
+        // new body views, re-render the attributed string zero times, and
+        // re-parse the diff zero times -- the count witness the ticket asked
+        // for, in the same shape as A2's file-row counters.
+        view.qaResetCountersForChecks()
+        let parsesBeforeRepeat = AgentDiffSummaryView.qaDiffParsesForChecks
+        view.apply(blockID: blockID, revision: 1, payload: payload, context: makeContext(appearance: .light))
+        guard view.qaDiffBodyViewsCreatedForChecks == 0 else {
+            throw fail("diff body: an unchanged re-apply created \(view.qaDiffBodyViewsCreatedForChecks) new body view(s)")
+        }
+        guard view.qaDiffBodyRendersForChecks == 0 else {
+            throw fail("diff body: an unchanged re-apply re-rendered the body \(view.qaDiffBodyRendersForChecks) time(s)")
+        }
+        guard AgentDiffSummaryView.qaDiffParsesForChecks == parsesBeforeRepeat else {
+            throw fail(
+                "diff body: an unchanged re-apply re-parsed the diff "
+                + "(\(AgentDiffSummaryView.qaDiffParsesForChecks - parsesBeforeRepeat) more parse(s)) "
+                + "-- the (blockID, revision) parse cache is not being hit"
+            )
+        }
+
+        // Ten no-op layout passes at the same width must not re-measure the
+        // body's bounding rect -- `performance.md` trap 2, one layer up from A2.
+        view.layout()
+        view.qaResetCountersForChecks()
+        for _ in 0..<10 {
+            view.needsLayout = true
+            view.layout()
+        }
+        guard view.qaDiffBodyHeightMeasurementsForChecks == 0 else {
+            throw fail(
+                "diff body: \(view.qaDiffBodyHeightMeasurementsForChecks) bounding-rect "
+                + "measurement(s) across 10 unchanged layout passes -- layout() is measuring "
+                + "the body text instead of reusing bodyHeightCache"
+            )
+        }
+    }
+
     // MARK: - S4.3
 
     /// Dylan's design 2: consecutive settled tool rows fold to one line;
@@ -1037,6 +1445,314 @@ enum TranscriptRhythmChecks {
             )
         }
     }
+
+    // MARK: - A4.2 turn folding
+
+    /// A4.2 — a completed turn with a genuinely long tail of tool work folds
+    /// under one "Worked for … · N tools" header, while the turn's own
+    /// opening prompt and closing answer stay put as ordinary rows. Drives
+    /// the REAL production entry point (`AgentTranscriptListView.apply`)
+    /// with a hand-built two-turn document — deliberately not routed through
+    /// `ComponentLab`'s `AgentTranscriptReviewState` enum, since every case
+    /// there is also a `--ui-pixel-check` / `--ui-baseline-check` fixture and
+    /// this feature must not grow either gate a new baseline this leg cannot
+    /// bless.
+    private static func checkTurnFolding() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "turnfold-\(suffix)")! }
+        func paragraph(_ suffix: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(suffix), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+        func tool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: "done", status: .completed))
+            )
+        }
+        func entry(_ suffix: String, role: AgentEntryRole, blocks: [AgentBlock]) -> AgentEntry {
+            AgentEntry(
+                id: id("entry-\(suffix)"), revision: 1, role: role,
+                provenance: role == .user
+                    ? .localPrompt(promptID: "turnfold")
+                    : .providerItem(provider: "fixture", itemID: suffix),
+                lifecycle: .finished, blocks: blocks
+            )
+        }
+        let longTurn: [AgentEntry] = [
+            entry("u1", role: .user, blocks: [paragraph("u1-t", "Investigate the slow query.")]),
+            entry("a1", role: .assistant, blocks: [
+                tool("t1", name: "Read file"),
+                tool("t2", name: "Grep codebase"),
+                tool("t3", name: "Run tests"),
+                tool("t4", name: "Read file"),
+                paragraph("a1-t", "Found it — a missing index on the join column."),
+            ]),
+        ]
+        let currentTurn: [AgentEntry] = [
+            entry("u2", role: .user, blocks: [paragraph("u2-t", "Add the index.")]),
+            entry("a2", role: .assistant, blocks: [paragraph("a2-t", "Added.")]),
+        ]
+        let document = AgentDocument(version: 1, entries: longTurn + currentTurn)
+        let list = AgentTranscriptListView()
+        // Mirrors `AgentTranscriptReviewSurface.init` exactly (a real, if
+        // borderless, window; frame set and an initial layout pass BEFORE
+        // `apply`; a second layout pass after) — a bare, windowless NSView
+        // never resolves the scroll view's AutoLayout constraints, so the
+        // collection view materializes no item views at all.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        list.layout()
+        list.collectionView.layout()
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("turn folding: projection/snapshot mismatch: \(mismatch)")
+        }
+        let headerIDs = list.qaClusterHeaderIDsForChecks
+        guard headerIDs.count == 1, let headerID = headerIDs.first else {
+            throw fail(
+                "turn folding: expected the long completed turn to fold under ONE header, got "
+                + "\(headerIDs.count)"
+            )
+        }
+        // The turn's own prompt stays a plain, findable row — the turn
+        // separator and hover reveal both key off it.
+        guard list.qaTurnStartPointForChecks(entryID: id("entry-u1")) != nil else {
+            throw fail("turn folding: the folded turn's own opening prompt lost its turn-start row")
+        }
+        let allViews = descendants(in: list)
+        let headers = allViews.compactMap { $0 as? AgentToolClusterHeaderView }
+        guard let header = headers.first(where: { $0.clusterID == headerID }) else {
+            throw fail("turn folding: the header item never rendered")
+        }
+        guard header.summaryLabel.stringValue.hasPrefix("Worked"),
+              header.summaryLabel.stringValue.contains("4 tools") else {
+            throw fail(
+                "turn folding: the folded line must read 'Worked ... 4 tools', got "
+                + "'\(header.summaryLabel.stringValue)'"
+            )
+        }
+        // The terminal answer survives the fold, unfolded, right after the header.
+        let proseTexts = textViews(allViews).map(\.string)
+        guard proseTexts.contains(where: { $0.contains("missing index") }) else {
+            throw fail("turn folding: the folded turn's terminal answer is not visible")
+        }
+        let collapsedSnapshotCount = list.qaSnapshotItemCountForChecks
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        if let mismatch = list.qaClusterProjectionMismatch() {
+            throw fail("turn folding: projection/snapshot mismatch after expand: \(mismatch)")
+        }
+        // Expanding restores what `plan()`'s OWN tool-cluster fold already made
+        // of the 4 tool rows (S4.3 folds a settled run of >= 2 to one header
+        // BEFORE `foldTurns` ever sees the item list) — one more item, that
+        // nested header, not four raw rows. The turn fold layers on `plan()`'s
+        // output; it does not unfold it.
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount + 1 else {
+            throw fail(
+                "turn folding: expanding must restore the nested tool-cluster header, went "
+                + "\(collapsedSnapshotCount) -> \(list.qaSnapshotItemCountForChecks)"
+            )
+        }
+        list.qaToggleClusterForChecks(headerID)
+        list.layoutSubtreeIfNeeded()
+        guard list.qaSnapshotItemCountForChecks == collapsedSnapshotCount else {
+            throw fail("turn folding: collapsing did not restore the folded snapshot")
+        }
+        guard list.qaSemanticRowCount == 8 else {
+            throw fail("turn folding: the semantic row count changed — the projection leaked into rows")
+        }
+
+        // A turn with a failed tool call never folds, however long.
+        func failedTool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: "failed", status: .failed))
+            )
+        }
+        let failingTurn: [AgentEntry] = [
+            entry("fu1", role: .user, blocks: [paragraph("fu1-t", "Try the migration.")]),
+            entry("fa1", role: .assistant, blocks: [
+                tool("ft1", name: "Read file"), tool("ft2", name: "Read file"),
+                failedTool("ft3", name: "Run migration"),
+                paragraph("fa1-t", "That failed — here is why."),
+            ]),
+        ]
+        let failingDocument = AgentDocument(version: 1, entries: failingTurn + currentTurn)
+        let failingList = AgentTranscriptListView()
+        try failingList.apply(
+            document: failingDocument,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: failingDocument.version,
+                inserted: failingDocument.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        // The two settled tool rows before the failure still cluster under
+        // plan()'s OWN S4.3 rule (unrelated to turn folding) — what must be
+        // absent is specifically a TURN-scoped header.
+        guard !failingList.qaClusterHeaderIDsForChecks.contains(where: { $0.rawValue.hasPrefix("__turn__") })
+        else {
+            throw fail("turn folding: a turn containing a failed tool call must never fold")
+        }
+    }
+
+    // MARK: - A4.1 turn ranges (no-op extraction)
+
+    /// A4.1 extracted `turnRanges(facts:)` out of `plan()`'s inline
+    /// `lastTurnStart` computation. It must change no rendered output — the
+    /// witness for that is a replay: several representative fact corpora are
+    /// run both through the shipped `plan()` (which now derives its turn
+    /// start from `turnRanges`) and through `legacyPlan`, a byte-for-byte copy
+    /// of `plan()` as it read before the extraction, and the two `[Item]`
+    /// lists must match exactly.
+    private static func checkTurnRangesMatchLegacyLastTurnStart() throws {
+        func legacyLastTurnStart(_ facts: [AgentTranscriptClusterPlanner.RowFact]) -> Int {
+            facts.lastIndex(where: { $0.startsTurn }) ?? 0
+        }
+        func fact(
+            tool: Bool = false, failure: Bool = false, live: Bool = false, turn: Bool = false,
+            id: String
+        ) -> AgentTranscriptClusterPlanner.RowFact {
+            AgentTranscriptClusterPlanner.RowFact(
+                isToolRow: tool, isFailure: failure, isLive: live, startsTurn: turn,
+                id: AgentNodeID(rawValue: id)!
+            )
+        }
+        let corpora: [[AgentTranscriptClusterPlanner.RowFact]] = [
+            [],
+            [fact(id: "0")],
+            [fact(id: "0"), fact(tool: true, id: "1"), fact(tool: true, id: "2")],
+            [
+                fact(id: "0"), fact(tool: true, id: "1"), fact(tool: true, id: "2"),
+                fact(turn: true, id: "3"), fact(tool: true, id: "4"), fact(tool: true, id: "5"),
+                fact(tool: true, id: "6"), fact(tool: true, live: true, id: "7"),
+            ],
+            [
+                fact(id: "0"), fact(tool: true, failure: true, id: "1"),
+                fact(turn: true, id: "2"), fact(tool: true, id: "3"),
+            ],
+            [
+                fact(id: "0"), fact(tool: true, id: "1"), fact(turn: true, id: "2"),
+                fact(tool: true, id: "3"), fact(tool: true, id: "4"), fact(tool: true, id: "5"),
+            ],
+            // Boundary case: the settled run starts EXACTLY at the last turn's
+            // start (no leading non-tool row), so `run[0] >= lastTurnStart` is
+            // decided by the exact value, not merely which side of it — an
+            // off-by-one in `turnRanges` flips this comparison's outcome.
+            [fact(tool: true, id: "0"), fact(tool: true, id: "1")],
+        ]
+        for facts in corpora {
+            let expectedStart = legacyLastTurnStart(facts)
+            let actualStart = AgentTranscriptClusterPlanner.turnRanges(facts: facts).last?.lowerBound ?? 0
+            guard actualStart == expectedStart else {
+                throw fail(
+                    "turnRanges: last range lowerBound \(actualStart) != legacy lastTurnStart "
+                    + "\(expectedStart) for a \(facts.count)-fact corpus"
+                )
+            }
+            for tailStreaming in [false, true] {
+                let viaShipped = AgentTranscriptClusterPlanner.plan(
+                    facts: facts, tailStreaming: tailStreaming, isExpanded: { _ in false })
+                let viaLegacy = legacyPlan(
+                    facts: facts, tailStreaming: tailStreaming, lastTurnStart: expectedStart,
+                    isExpanded: { _ in false })
+                guard viaShipped == viaLegacy else {
+                    throw fail(
+                        "turnRanges: plan() diverged from the pre-extraction algorithm for a "
+                        + "\(facts.count)-fact corpus (tailStreaming=\(tailStreaming))"
+                    )
+                }
+            }
+        }
+    }
+
+    /// A byte-for-byte copy of `plan()` as it read before A4.1's extraction,
+    /// parameterised on `lastTurnStart` instead of deriving it inline. Exists
+    /// ONLY so `checkTurnRangesMatchLegacyLastTurnStart` can assert the
+    /// extraction changed no output — do not evolve this alongside the real
+    /// `plan()`; a copy that quietly tracks future changes stops witnessing
+    /// anything.
+    private static func legacyPlan(
+        facts: [AgentTranscriptClusterPlanner.RowFact],
+        tailStreaming: Bool,
+        lastTurnStart: Int,
+        isExpanded: (AgentNodeID) -> Bool
+    ) -> [AgentTranscriptClusterPlanner.Item] {
+        typealias Item = AgentTranscriptClusterPlanner.Item
+        typealias Header = AgentTranscriptClusterPlanner.Header
+        var items: [Item] = []
+        items.reserveCapacity(facts.count)
+        var index = 0
+        while index < facts.count {
+            let fact = facts[index]
+            guard fact.isToolRow, !fact.isFailure else {
+                items.append(.row(index))
+                index += 1
+                continue
+            }
+            var run: [Int] = [index]
+            var next = index + 1
+            while next < facts.count,
+                  facts[next].isToolRow,
+                  !facts[next].isFailure,
+                  !facts[next].startsTurn {
+                run.append(next)
+                next += 1
+            }
+            defer { index = next }
+
+            let liveIndex = run.firstIndex { facts[$0].isLive }
+            if let liveIndex {
+                let earlier = Array(run[..<liveIndex])
+                if earlier.count >= 3 {
+                    let id = AgentTranscriptClusterPlanner.headerID(forFirstMember: facts[earlier[0]].id)
+                    items.append(.header(Header(
+                        id: id, memberIndexes: earlier, isLive: true, isExpanded: isExpanded(id)
+                    )))
+                    if isExpanded(id) {
+                        items.append(contentsOf: earlier.map(Item.row))
+                    }
+                }
+                items.append(contentsOf: run[liveIndex...].map(Item.row))
+                continue
+            }
+
+            if tailStreaming, run[0] >= lastTurnStart {
+                items.append(contentsOf: run.map(Item.row))
+                continue
+            }
+
+            guard run.count >= 2 else {
+                items.append(.row(run[0]))
+                continue
+            }
+
+            let id = AgentTranscriptClusterPlanner.headerID(forFirstMember: facts[run[0]].id)
+            let expanded = isExpanded(id)
+            items.append(.header(Header(
+                id: id, memberIndexes: run, isLive: false, isExpanded: expanded
+            )))
+            if expanded {
+                items.append(contentsOf: run.map(Item.row))
+            }
+        }
+        return items
+    }
 }
 
 extension CGColor {
@@ -1055,4 +1771,469 @@ extension CGColor {
             Int((c[2] * 255).rounded()), Int((a * 255).rounded())
         )
     }
+}
+
+
+extension TranscriptRhythmChecks {
+    /// One delegation is ONE row.
+    ///
+    /// A claude `Agent` call produces two: the tool call, and the durable
+    /// `agentReference` chip naming the child it started. The chip carries the
+    /// child's name, its live status and a way to open it; the tool row carries
+    /// the word "Agent". Both shipped, so a single delegation occupied two rows
+    /// and said less in each — with two subagents that is four rows of almost
+    /// nothing, which is what Dylan saw.
+    ///
+    /// The fold is a DISPLAY projection, so the block stays in the document and
+    /// `rows == flatten(document)` still holds. That is the same contract tool
+    /// clustering keeps, and it is what makes this safe to do at all.
+    static func checkASupersededToolRowIsFoldedOut() throws {
+        func fact(
+            tool: Bool = false, superseded: Bool = false, id: String
+        ) -> AgentTranscriptClusterPlanner.RowFact {
+            AgentTranscriptClusterPlanner.RowFact(
+                isToolRow: tool, isFailure: false, isLive: false, startsTurn: false,
+                id: AgentNodeID(rawValue: id)!, isSuperseded: superseded)
+        }
+        func rowIDs(_ items: [AgentTranscriptClusterPlanner.Item],
+                    _ facts: [AgentTranscriptClusterPlanner.RowFact]) -> [String] {
+            items.compactMap { item in
+                guard case let .row(index) = item else { return nil }
+                return facts[index].id.rawValue
+            }
+        }
+
+        // prose, the Agent tool call, then the chip that supersedes it.
+        let facts = [
+            fact(id: "prose"),
+            fact(tool: true, superseded: true, id: "toolu_agent"),
+            fact(id: "chip")
+        ]
+        let planned = AgentTranscriptClusterPlanner.plan(
+            facts: facts, tailStreaming: false, isExpanded: { _ in false })
+        let displayed = rowIDs(planned, facts)
+        guard !displayed.contains("toolu_agent") else {
+            throw Failure(message: "superseded fold: the Agent tool row is still displayed alongside its chip — one delegation is rendering as two rows")
+        }
+        guard displayed == ["prose", "chip"] else {
+            throw Failure(message: "superseded fold: expected [prose, chip], got \(displayed) — the fold must remove ONLY the superseded row")
+        }
+
+        // And nothing folds when nothing is superseded: without this the check
+        // would pass over a planner that dropped every tool row.
+        let unmarked = [
+            fact(id: "prose"),
+            fact(tool: true, id: "toolu_agent"),
+            fact(id: "chip")
+        ]
+        let untouched = rowIDs(
+            AgentTranscriptClusterPlanner.plan(
+                facts: unmarked, tailStreaming: false, isExpanded: { _ in false }),
+            unmarked)
+        guard untouched == ["prose", "toolu_agent", "chip"] else {
+            throw Failure(message: "superseded fold: an unsuperseded tool row was folded anyway, got \(untouched)")
+        }
+    }
+
+    /// Dylan, driving the build: "there is a lot of doubling."
+    ///
+    /// Every tool row printed its title and then a second line restating it —
+    /// "Bash" over "bash", "Read foo.js" over "Read: …/dir/foo.js". Two tool
+    /// calls made four lines of almost nothing.
+    ///
+    /// The root cause is in the PRESENTER, and it is witnessed there
+    /// (`AgentToolDetailStoreChecks`, over a real store, with independent teeth
+    /// for both halves). This is the render-level wall, and it is here because
+    /// the presenter's two strings are composed in different files with
+    /// different fallbacks — so an exact, case-sensitive dedupe was always going
+    /// to miss. It drives a real `ToolCallView` with the exact payload the bug
+    /// produced rather than sweeping a fixture corpus: the review fixtures do
+    /// not populate the host-local detail store at all, so a sweep over them
+    /// sees `summary == nil` on every row and would read as coverage while
+    /// asserting nothing. (Checked: reverting either half of the presenter fix
+    /// left such a sweep green.)
+    private static func checkARowSaysEachThingOnce() throws {
+        let view = ToolCallView(frame: NSRect(x: 0, y: 0, width: 480, height: 44))
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        guard let blockID = AgentNodeID(rawValue: "doubling-row") else {
+            throw fail("doubling: could not mint a block id")
+        }
+
+        // The shape the presenter used to emit: a title that is only the tool
+        // name, over a body line that is the same word in another case.
+        var doubled = AgentToolCallPayload(name: "Bash", status: .completed)
+        doubled.summary = "bash"
+        doubled.presentedToolNameText = "bash"
+        view.apply(blockID: blockID, payload: doubled, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard view.summaryLabel.isHidden || view.summaryLabel.stringValue.isEmpty else {
+            throw fail(
+                "doubling: a row titled 'Bash' still showed "
+                + "'\(view.summaryLabel.stringValue)' underneath it — the same fact twice, "
+                + "differing only in case"
+            )
+        }
+
+        // And the wall is not a blanket mute: a body line that genuinely adds
+        // something must survive, or the fix would be hiding real detail.
+        var informative = AgentToolCallPayload(name: "Ran tests", status: .completed)
+        informative.summary = "Exit code: 1"
+        informative.presentedToolNameText = "bash"
+        view.apply(blockID: blockID, payload: informative, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard !view.summaryLabel.isHidden, view.summaryLabel.stringValue.contains("Exit code: 1") else {
+            throw fail(
+                "doubling: suppression swallowed a body line that added a fact the title did "
+                + "not carry — visible summary was '\(view.summaryLabel.stringValue)'"
+            )
+        }
+    }
+
+    /// The icon column has to carry information. `bubble.left` was BOTH the
+    /// reasoning glyph and the glyph for every delegation verb, so a
+    /// `delegate_agent` row rendered as a thought. Two dead needles ("run " and
+    /// "cat " carried trailing spaces) could never match a bare tool name, and an
+    /// unavailable SF Symbol resolved to nil straight into `iconView.image` —
+    /// which is a genuinely blank column, contradicting the mapping's own promise
+    /// to "degrade to today's behaviour rather than to a blank column".
+    private static func checkGlyphsDistinguishRowKinds() throws {
+        let delegation = ToolCallView.symbolName(forToolNamed: "delegate_agent")
+        guard delegation != CompletedReasoningDisclosureView.symbolName else {
+            throw fail(
+                "glyphs: delegation and reasoning both render '\(delegation)', so a delegated "
+                + "agent reads as a thought"
+            )
+        }
+        for name in ["Agent", "Task", "spawn_agent", "delegate_agent"] {
+            guard ToolCallView.symbolName(forToolNamed: name) == delegation else {
+                throw fail(
+                    "glyphs: '\(name)' is a delegation verb but renders "
+                    + "'\(ToolCallView.symbolName(forToolNamed: name))'"
+                )
+            }
+        }
+        for (name, expected) in [("run", "terminal"), ("cat", "eye"), ("bash", "terminal"),
+                                 ("Read", "eye"), ("grep", "magnifyingglass")] {
+            guard ToolCallView.symbolName(forToolNamed: name) == expected else {
+                throw fail(
+                    "glyphs: '\(name)' resolved to "
+                    + "'\(ToolCallView.symbolName(forToolNamed: name))', expected '\(expected)'"
+                )
+            }
+        }
+        // No route to a blank column, including for a name this OS has no symbol
+        // for and for the nil the row is first built with.
+        for name in [nil, "", "delegate_agent", "bash", "Read", "utterly_unknown_tool"] {
+            guard ToolCallView.symbolImage(forToolNamed: name) != nil else {
+                throw fail("glyphs: '\(name ?? "<nil>")' left the icon column blank")
+            }
+        }
+        // T2 follow-up (2026-08-25) — raw substring matching collides on two
+        // axes this fixture list above never exercised: "cat" as a NEEDLE
+        // matches inside "locate"/"relocate", and "agent"/"task" as needles
+        // match inside any tool NAME merely containing those letters (an MCP
+        // tool literally named `mcp__linear__create_task`). Both must resolve
+        // to their own kind, not the collided one.
+        let fallback = ToolCallView.fallbackSymbolName
+        for (name, expected) in [
+            ("locate", fallback), ("relocate", fallback),
+            ("mcp__linear__create_task", fallback),
+        ] {
+            let resolved = ToolCallView.symbolName(forToolNamed: name)
+            guard resolved == expected else {
+                throw fail(
+                    "glyphs: '\(name)' resolved to '\(resolved)', expected '\(expected)' — "
+                    + "a substring collision, not the tool's own kind"
+                )
+            }
+        }
+    }
+
+
+    /// Dylan: "the working time isn't cumulative, it restarts often?"
+    ///
+    /// The fold headers summed each member's own `endedAt - startedAt`, so every
+    /// interval where the model was thinking was excluded. Three 30 ms `Bash`
+    /// calls read "0.1s" however long the run took, and the turn-scope header's
+    /// "Worked for …" used the same sum — the one figure claiming to describe a
+    /// whole turn was the least accurate on screen.
+    ///
+    /// This fixture carries NO host-local detail records at all, which is the
+    /// sharpest form of the defect: the old code's `knowsAnyDuration` was false,
+    /// so it printed no duration whatsoever, while the document had honest
+    /// timestamps the whole time. It also proves the figure survives the detail
+    /// store's 1 h TTL, which is why a turn reads its span from `createdAt`
+    /// rather than from the records.
+    /// A display cycle must not cost the conversation.
+    ///
+    /// `layout()` ran once per display cycle and hashed EVERY row's entryID to
+    /// decide whether a turn rule could have moved — work proportional to content
+    /// repeated per frame, which is the exact sin the comment above that loop
+    /// invokes `performance.md` to condemn. At 10,000 rows it is a measurable
+    /// slice of every frame, and it is paid whether or not anything changed.
+    ///
+    /// The signature is now maintained at apply time, on the only apply that can
+    /// move a boundary. This asserts the consequence: with the document settled,
+    /// display cycles are free.
+    private static func checkADisplayCycleCostsNothingPerRow() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "cycle-\(suffix)")! }
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        var entries: [AgentEntry] = []
+        for index in 0..<400 {
+            entries.append(AgentEntry(
+                id: id("entry-\(index)"), revision: 1,
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                provenance: index.isMultiple(of: 2)
+                    ? .localPrompt(promptID: "p\(index)")
+                    : .providerItem(provider: "fixture", itemID: "a\(index)"),
+                lifecycle: .finished,
+                blocks: [AgentBlock(
+                    id: id("block-\(index)"), revision: 1, kind: .paragraph,
+                    payload: .paragraph([.text("row \(index)")]))],
+                createdAt: base.addingTimeInterval(Double(index)),
+                finishedAt: base.addingTimeInterval(Double(index) + 0.5)))
+        }
+        let document = AgentDocument(version: 1, entries: entries)
+        let list = AgentTranscriptListView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)))
+        list.layout()
+        list.collectionView.layout()
+
+        // The fixture's own teeth: there has to be enough history for a per-row
+        // cost to be distinguishable from a constant one.
+        guard list.qaSemanticRowCount >= 400 else {
+            throw fail(
+                "display cycle: the fixture holds \(list.qaSemanticRowCount) rows, too few for a "
+                + "per-row cost to show up"
+            )
+        }
+        // Now the document is settled. Every display cycle from here changes
+        // nothing, so every one of them should be free.
+        list.qaResetFlattenStats()
+        for _ in 0..<30 { list.layout() }
+        guard list.qaHistoryScanCount == 0 else {
+            throw fail(
+                "display cycle: 30 display cycles over a SETTLED transcript walked the whole "
+                + "history \(list.qaHistoryScanCount) times across \(list.qaSemanticRowCount) rows — "
+                + "work proportional to content, repeated per frame"
+            )
+        }
+        guard list.qaFullFlattenCount == 0 else {
+            throw fail(
+                "display cycle: 30 display cycles rebuilt the row index "
+                + "\(list.qaFullFlattenCount) times with nothing changed"
+            )
+        }
+    }
+
+    /// `.plans/49` 5.2 — Dylan: *"the 'thought' expanded details look like shit,
+    /// it's bolded and has weird padding/margins."*
+    ///
+    /// Both halves of that were real and neither was a taste call.
+    ///
+    /// The bold is the PROVIDER's: reasoning renders through the same prose path
+    /// as an assistant answer with no de-emphasis anywhere, and providers emit a
+    /// reasoning item's own section heading as `**Planning sports updates**`,
+    /// which the projection splits into its own block — a paragraph whose entire
+    /// inline content is strong, drawn as 13pt bold body. The row already draws
+    /// its own "Thought" title, so that is a duplicate heading, not emphasis.
+    ///
+    /// The geometry is OURS: the body began 36pt left of the title introducing
+    /// it, and the gap above the prose was four times tighter than the gap
+    /// between its paragraphs.
+    private static func checkAThoughtIsNotShoutedAtTheReader() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "thought-\(suffix)")! }
+        let wholeBold = AgentBlock(
+            id: id("heading"), revision: 1, kind: .paragraph,
+            payload: .paragraph([.strong([.text("Planning sports updates")])]))
+        let mixed = AgentBlock(
+            id: id("prose"), revision: 1, kind: .paragraph,
+            payload: .paragraph([
+                .text("The scores come from "),
+                .strong([.text("two")]),
+                .text(" different feeds."),
+            ]))
+        let entry = AgentEntry(
+            id: id("entry"), revision: 1, role: .reasoning,
+            provenance: .providerItem(provider: "fixture", itemID: "r1"),
+            lifecycle: .finished, blocks: [wholeBold, mixed])
+        var expanded: Set<AgentNodeID> = [id("entry")]
+        let actions = AgentRenderActions(
+            perform: { _ in },
+            disclosureState: { nodeID, _ in expanded.contains(nodeID) },
+            setDisclosureState: { nodeID, isOn in
+                if isOn { expanded.insert(nodeID) } else { expanded.remove(nodeID) }
+            },
+            presentationRevision: { _ in 0 },
+            invalidatePresentation: { _ in }
+        )
+        guard let presentation = CompletedReasoningDisclosurePresenter.presentation(
+            for: entry, authoritativeDuration: 3, actions: actions) else {
+            throw fail("thought: the reasoning entry produced no presentation")
+        }
+        guard presentation.isExpanded, presentation.bodyBlocks.count == 2 else {
+            throw fail(
+                "thought: expected an expanded presentation with two body blocks, got "
+                + "expanded=\(presentation.isExpanded) blocks=\(presentation.bodyBlocks.count)"
+            )
+        }
+
+        // 1. The provider's whole-paragraph heading loses its bold.
+        guard case let .paragraph(headingInlines) = presentation.bodyBlocks[0].payload else {
+            throw fail("thought: the first body block is no longer a paragraph")
+        }
+        if case .strong = headingInlines.first {
+            throw fail(
+                "thought: a reasoning paragraph whose ENTIRE content is the provider's own "
+                + "section heading still renders as bold body prose, directly under the "
+                + "row's own 'Thought' title — two headings for one thought"
+            )
+        }
+        guard case let .text(headingText) = headingInlines.first,
+              headingText == "Planning sports updates" else {
+            throw fail("thought: de-emphasis lost the heading's words: \(headingInlines)")
+        }
+
+        // 2. …and a bolded PHRASE inside a sentence is left exactly as written.
+        //    Without this the fix would be "reasoning can never be bold", which
+        //    throws away the model's actual emphasis.
+        guard case let .paragraph(proseInlines) = presentation.bodyBlocks[1].payload,
+              proseInlines.count == 3,
+              case .strong = proseInlines[1] else {
+            throw fail(
+                "thought: de-emphasis flattened a bolded phrase inside a sentence — only the "
+                + "whole-paragraph case is a duplicate heading"
+            )
+        }
+
+        // 3. The body's text column starts where the title's does.
+        let view = CompletedReasoningDisclosureView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+        let context = AgentRenderContext(actions: actions, tokens: .transcript, appearance: .dark)
+        view.apply(entry: entry, authoritativeDuration: 3, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard abs(view.bodyContainer.frame.minX - view.titleLabel.frame.minX) < 0.5 else {
+            throw fail(
+                "thought: the body starts at x=\(view.bodyContainer.frame.minX) while the title "
+                + "that introduces it starts at x=\(view.titleLabel.frame.minX) — a heading and "
+                + "its prose disagreeing about the margin"
+            )
+        }
+
+        // 4. The gap above the prose is not tighter than the gap within it. The
+        //    24pt controls overhang the 18pt header by 3pt, so a 2pt gap was
+        //    negative in practice.
+        guard CompletedReasoningDisclosureView.bodyTopSpacing
+            >= CompletedReasoningDisclosureView.bodyBlockSpacing else {
+            throw fail(
+                "thought: \(CompletedReasoningDisclosureView.bodyTopSpacing)pt above the first "
+                + "paragraph against \(CompletedReasoningDisclosureView.bodyBlockSpacing)pt "
+                + "between paragraphs — the body reads as glued to its own title"
+            )
+        }
+    }
+
+    private static func checkAFoldedTurnReportsASpanNotASum() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "span-\(suffix)")! }
+        func tool(_ suffix: String, name: String) -> AgentBlock {
+            AgentBlock(
+                id: id(suffix), revision: 1, kind: .toolCall,
+                payload: .toolCall(.init(name: name, summary: nil, status: .completed))
+            )
+        }
+        func paragraph(_ suffix: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(suffix), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // Four brief tools spread over 45s of real time: the sum of what a detail
+        // store could know about them is ~0, the span is 45s.
+        let entries: [AgentEntry] = [
+            AgentEntry(
+                id: id("entry-u"), revision: 1, role: .user,
+                provenance: .localPrompt(promptID: "span"), lifecycle: .finished,
+                blocks: [paragraph("u-t", "Find the slow query.")], createdAt: base),
+            AgentEntry(
+                id: id("entry-a"), revision: 1, role: .assistant,
+                provenance: .providerItem(provider: "fixture", itemID: "a"),
+                lifecycle: .finished,
+                blocks: [
+                    tool("t1", name: "Read file"), tool("t2", name: "Grep codebase"),
+                    tool("t3", name: "Run tests"), tool("t4", name: "Read file"),
+                    paragraph("a-t", "A missing index on the join column."),
+                ],
+                createdAt: base.addingTimeInterval(45),
+                // The reply's first token lands at +45; the answer finishes
+                // streaming at +120. A span measured createdAt-to-createdAt calls
+                // this turn 45s and throws away 75s of the model's actual work.
+                finishedAt: base.addingTimeInterval(120)),
+            AgentEntry(
+                id: id("entry-u2"), revision: 1, role: .user,
+                provenance: .localPrompt(promptID: "span2"), lifecycle: .finished,
+                blocks: [paragraph("u2-t", "Add it.")], createdAt: base.addingTimeInterval(60)),
+            AgentEntry(
+                id: id("entry-a2"), revision: 1, role: .assistant,
+                provenance: .providerItem(provider: "fixture", itemID: "a2"),
+                lifecycle: .finished, blocks: [paragraph("a2-t", "Added.")],
+                createdAt: base.addingTimeInterval(61),
+                finishedAt: base.addingTimeInterval(64)),
+        ]
+        let document = AgentDocument(version: 1, entries: entries)
+        let list = AgentTranscriptListView()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        let host = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        host.addSubview(list)
+        window.contentView = host
+        list.frame = host.bounds
+        list.layoutSubtreeIfNeeded()
+        try list.apply(
+            document: document,
+            patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: document.version,
+                inserted: document.entries.flatMap(\.blocks).map(\.id)
+            )
+        )
+        list.layout()
+        list.collectionView.layout()
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let headers = descendants(in: list).compactMap { $0 as? AgentToolClusterHeaderView }
+        let summaries = headers.map(\.summaryLabel.stringValue).filter { !$0.isEmpty }
+        guard !summaries.isEmpty else {
+            throw fail("span: the folded turn rendered no cluster header at all")
+        }
+        guard let worked = summaries.first(where: { $0.hasPrefix("Worked") }) else {
+            throw fail("span: no turn-scope header among \(summaries)")
+        }
+        // The turn opened at +0 and its reply finished streaming at +120, so it
+        // took 2m 0s. Two wrong answers this must never give:
+        //   "0s"    — a sum over members with no detail records (the pre-T3 bug).
+        //   "45s"   — createdAt-to-createdAt, i.e. TIME TO FIRST TOKEN, which
+        //             throws away the whole answer and contradicts the settled
+        //             tail a few rows below it.
+        guard worked.contains("2m 0s") else {
+            throw fail(
+                "span: the turn header read '\(worked)' — the document says the turn ran from +0s "
+                + "to a reply that finished streaming at +120s, so it took 2m 0s. '45s' is the "
+                + "reply's FIRST TOKEN and excludes the entire answer; '0s' is a sum over per-tool "
+                + "records that excludes every interval where the model was thinking"
+            )
+        }
+    }
+
 }

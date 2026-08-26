@@ -23,6 +23,18 @@ once at creation and rendered as "working" forever. The row is showing PROCESS L
 ACTIVITY. The fix is a derivation from the turn state the supervisor already owns, NOT a lazy
 `.stopped` write, which would make a live idle agent indistinguishable from a dead one.
 
+**PHASE 5 (`P5.1`-`P5.10`, rows 78-87) — STOP. VERIFY AGAINST CODE BEFORE TAKING ANY OF THEM.**
+Checked 2026-08-25: `Sources/ContinuumRevivedCore/AgentProviders/PiRpcTransport.swift` (320 lines)
+and `PiRpcAgentRunner.swift` (255 lines) **both exist and ship**, and the runner already implements
+`run`, `stop`, `steer`, `interrupt`, a generic `command(_:payload:)`, a persistent `sessionId`, and
+model/thinking arguments — i.e. the substance of `P5.1`, `P5.2`, and at least parts of `P5.3`-`P5.7`.
+These rows were never marked `done`, so **the loop's own selection rule would hand `P5.1` to an agent
+and have it rebuild a transport that is already in the product.** Individual rows are deliberately
+NOT flipped here, because the picture is mixed rather than uniformly done: `.plans/49` §3.3 and §3.4
+record that steering and `/compact` are *advertised and then refused* even when the rpc runner is
+bound, so some of this phase is real work on top of shipped code rather than fresh construction.
+Read the code, then the row.
+
 **Row `48c` (`P3.15-wire-destructive-row-actions`) — DONE at `bcb6bc4`.** Kept here for the record:
 The owner cannot delete an agent — at all, by any route. `P2A.7` landed restore-on-relaunch, so every
 record on disk returns every launch, and nothing was ever wired to remove one: the shipped app assigns

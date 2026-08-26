@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run the requested command, then create `note.txt` with the file-editing tool and verify its contents."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo hi-from-codex'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo hi-from-codex'","aggregated_output":"hi-from-codex\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"file_change","changes":[{"path":"/tmp/fixture/note.txt","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"/tmp/fixture/note.txt","kind":"add"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc \"wc -l note.txt && sed -n '1p' note.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc \"wc -l note.txt && sed -n '1p' note.txt\"","aggregated_output":"       1 note.txt\nedited\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"- Command output: `hi-from-codex`\n- Created [note.txt](/tmp/fixture/note.txt) containing one line: `edited`"}}
+{"type":"turn.completed","usage":{"input_tokens":64925,"cached_input_tokens":59392,"cache_write_input_tokens":0,"output_tokens":286,"reasoning_output_tokens":32}}

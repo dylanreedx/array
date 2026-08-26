@@ -11,6 +11,18 @@ Companion documents: `.plans/42` (evidence), `.plans/43` (design argument),
 `.plans/45` (the original handoff). `.plans/41` (zone lifecycle) and `.plans/44`
 (performance audit) belong to other agents; see S0.6.
 
+> **STALE ROWS — verify against code before taking any `TODO` here (2026-08-26).**
+> `.plans/49` §6.1 enumerates, with evidence, several tables in this file whose
+> rows still say `TODO` for work that shipped: Slice 0, Slice 1b, Slice 4, rows
+> 1d.1/1d.2, and row 1h.1 (whose residual is WORSE than it states, not better).
+> One is verified here: **row 4d.2 ("pi → `--mode rpc`") is not untouched** —
+> `PiRpcTransport.swift` and `PiRpcAgentRunner.swift` ship, with `run`, `stop`,
+> `steer`, `interrupt`, a generic `command`, a persistent session and
+> model/thinking arguments. The rows are deliberately NOT flipped wholesale,
+> because the picture is mixed rather than uniformly done and a row marked done
+> without a witness is exactly what the paragraph above forbids. Read the code,
+> then the row. `.plans/50` records the 2026-08-25 hardening pass.
+
 ## Status vocabulary
 
 | status | meaning |
@@ -336,16 +348,16 @@ reason. Nothing visible yet.
 
 | id | ticket | detail | status |
 |---|---|---|---|
-| 1c.0 | delta path precondition | `run-matrix.sh:618-627` records the cause: `apply(document:patch:)` calls `flatten(document)` regardless of the patch — 36 ms for one revised tail row on 10,000. Fix, then take the leg off KNOWN-RED | TODO |
-| 1c.1 | row geometry | one 32pt row; reserved trailing status column so text never reflows; reserved leading glyph column | TODO |
+| 1c.0 | delta path precondition | `run-matrix.sh:618-627` records the cause: `apply(document:patch:)` calls `flatten(document)` regardless of the patch — 36 ms for one revised tail row on 10,000. Fix, then take the leg off KNOWN-RED | **DONE** 2026-08-24 — see G0 below; leg off KNOWN-RED |
+| 1c.1 | row geometry | one 32pt row; reserved trailing status column so text never reflows; reserved leading glyph column | **DONE** S4.0–4.2 (`0105c3cf`) |
 | 1c.2 | per-tool iconography | **GREEN 2026-08-23** (pulled into the visual milestone by Dylan; no 1b dependency). `ToolCallView.symbolName(forToolNamed:)` matches on substrings because the three harnesses disagree on casing and wording for the same operation; an unknown name keeps the wrench, so a new provider tool degrades to today's behaviour rather than to a blank column. |
-| 1c.3 | status as a glyph | completed uses foreground colour, not green — only failures pull the eye | TODO |
-| 1c.4 | summary/title dedup | `ToolCallRenderer.swift:105` compares only against `presentation.label`, so `Edit` / `Edited Foo.swift` both render | TODO |
-| 1c.5 | cluster consecutive tool calls | one group with a hairline gutter instead of N stacked cards | TODO |
-| 1c.6 | detail while running | `presentedToolBlock` returns early at `AgentTranscriptListView.swift:1354-1356`, second gate `:1394-1396` | TODO |
+| 1c.3 | status as a glyph | completed uses foreground colour, not green — only failures pull the eye | **DONE** S4.0–4.2 (`0105c3cf`) |
+| 1c.4 | summary/title dedup | `ToolCallRenderer.swift:105` compares only against `presentation.label`, so `Edit` / `Edited Foo.swift` both render | **DONE** S4.0–4.2 (`0105c3cf`) |
+| 1c.5 | cluster consecutive tool calls | one group with a hairline gutter instead of N stacked cards | **DONE** S4.3 (`c2ceb9dd`) |
+| 1c.6 | detail while running | `presentedToolBlock` returns early at `AgentTranscriptListView.swift:1354-1356`, second gate `:1394-1396` | **DONE** S1–S3 (`bbc3d086`) |
 | 1c.7 | distrust provider status | sniff `exited with exit code N`, `ENOENT`, "no such file" — providers report `completed` on failing commands | TODO |
-| 1c.8 | expanded body as fields | render `AgentToolDetailExpandedPresentation` as an argument table, output pane, exit code, duration. `CommandOutputView` (`CommandOutputRenderer.swift:39`) is that pane and is dead code — give it its first production caller | TODO |
-| 1c.9 | surface truncation flags | `truncatedByBytes`, `truncatedByLines`, `redacted`. Never silently truncate | TODO |
+| 1c.8 | expanded body as fields | render `AgentToolDetailExpandedPresentation` as an argument table, output pane, exit code, duration. `CommandOutputView` (`CommandOutputRenderer.swift:39`) is that pane and is dead code — give it its first production caller | **DONE** S1–S3 (`bbc3d086`) |
+| 1c.9 | surface truncation flags | `truncatedByBytes`, `truncatedByLines`, `redacted`. Never silently truncate | **DONE** S1–S3 (`bbc3d086`) |
 | 1d.1 | inline diff | reuse `GitDiffParser.parse` (`GitDiffEngine.swift:236`, pure) and `DiffReviewTileNSView.render(_:theme:)` (`:317`, static+pure). Bounded with a visible "+N more lines" | TODO |
 | 1d.2 | do not copy the freeze pattern | `AgentDiffSummaryView.rebuildFileLabels()` (`DiffSummaryRenderer.swift:188-200`) removes and recreates up to 8 `NSTextField`s on **every** apply, called unconditionally from `:90` | TODO |
 | 1d.3 | measure-key correctness | any per-row indent must enter `AgentBlockMeasureKey` or a nested row reuses a top-level row's cached height at the wrong width | TODO |
@@ -1028,3 +1040,1353 @@ Noted, not fixed: laying a managed agent tile out offscreen logs one
 `NSLayoutConstraint … exceeds internal limits`. It reproduces with the reply
 rail empty, so it is a pre-existing tile-layout condition this new witness is
 merely the first in that leg to surface.
+
+## G0 — the delta budget re-measured, and a regression this milestone caused (2026-08-24)
+
+The first item of the new program (`~/.claude/plans/plans-45-…`, M0) was to
+re-measure `--perf-budget-transcript-delta-check`, because the published 36.3 ms
+and its 56%/35%/8% attribution predated the 2026-08-24 churn reduction that
+landed on exactly the two paths it blamed.
+
+**The number moved the wrong way.** Measured in an isolated worktree, debug (the
+configuration the matrix uses), four consecutive runs at HEAD: 50.202, 50.595,
+50.365, 51.232 ms — under 2% spread, so this is a deterministic number, not host
+noise. Every COUNT budget stays green (visitSlope 0, 1 visit/delta,
+fullFlattens 0, worstInvalidatedTopLevel 1).
+
+**Bisected, one build per commit, same machine, same session:**
+
+| commit | what landed | worst delta @10k |
+|---|---|---|
+| `09de0b0` | 0.5.10, before the redo | **36.394 ms** ← reproduces the published number exactly |
+| `bbc3d086` | S1–S3, real tool-detail supply | 42.967 ms (**+6.6**) |
+| `0105c3cf` | S4.0–4.2, action-first row | 43.535 ms (+0.5) |
+| `c2ceb9dd` | **S4.3, clustering** | 52.979 ms (**+9.5**) |
+| `8a42d708` | stability pass | 53.994 ms (+1.0) |
+| `e8a49cf2` | motion + reply options | 50.202 ms (**−3.8**) |
+
+So the redo added **+17.6 ms** and today's work gave back 3.8. Two causes, both
+per-apply passes over the whole history:
+
+1. **`rebuildDisplayProjection()` — the larger half.** It is O(rows) once per
+   visual apply, which the S4.3 design accepted explicitly on the grounds that
+   "the scheduler already coalesces 5,000 deltas into one apply, so no per-delta
+   O(history) pass." That reasoning is right for a burst and **wrong for this
+   scenario and for slow streaming**: 20 deltas here are 20 applies, and each one
+   pays the full walk. The mistake was reading the coalescer as an amortiser when
+   it only bounds the worst case.
+2. **The S1–S3 supply path — +6.6 ms** before any clustering existed, i.e. the
+   presentation/lifecycle work over every entry.
+
+**Consequences for the program.** 1c.0 is not the "threshold conversation" the
+plan hoped for; it is real work, and it should be pulled forward rather than left
+until M9. Both of the milestones that add to this path — M3 (inline diffs, which
+adds a parse and a body) and M6 (up to 16 concurrent child streams) — would be
+built on top of a budget already 6× over. The fix direction for both causes is
+the same: make the per-apply pass proportional to what changed, not to history.
+
+Method note for whoever repeats this: measure in a worktree with its own
+`.build`, debug configuration, and take at least three runs. The scenario is
+`PerfScenarios.transcriptDelta` and the shape is load-bearing — one entry per
+turn with one block each.
+
+
+---
+
+## G0 — the delta path stops walking the history (2026-08-24, M0)
+
+**A8 first.** The Slice 1c–1h table above marked 1c.0, 1c.1, 1c.3–1c.6, 1c.8 and
+1c.9 `TODO` while all seven had shipped in the S1–S7 sections of this same file. A
+stale table is how work gets done twice; corrected in this commit.
+
+### What was wrong
+
+`--perf-budget-transcript-delta-check` had been KNOWN-RED on wall clock for months
+while every count budget stayed green. Re-measuring found the number had moved the
+WRONG way. Debug configuration, isolated worktree, one build per commit, same
+machine, worst of 20 tail-revision deltas at 10,000 rows:
+
+| commit | what landed | worst delta |
+|---|---|---|
+| `09de0b0` | before the redo | 36.394 ms |
+| `bbc3d086` | S1–S3 supply | 42.967 (+6.6) |
+| `0105c3cf` | S4.0–4.2 row | 43.535 (+0.5) |
+| `c2ceb9dd` | **S4.3 clustering** | 52.979 (+9.5) |
+| `8a42d708` | stability pass | 53.994 (+1.0) |
+| `e8a49cf2` | motion | 50.202 (−3.8) |
+
+Four consecutive runs at `e8a49cf2`: 50.202 / 50.595 / 50.365 / 51.232 — under 2%
+spread, so deterministic, not host noise.
+
+**The reasoning error, recorded so it is not repeated.** S4.3 justified an O(rows)
+`rebuildDisplayProjection()` per visual apply on the grounds that "the scheduler
+already coalesces 5,000 deltas into one apply". That is true of a BURST and false
+of slow streaming: twenty deltas arriving a second apart are twenty applies and
+each paid the full walk. **A coalescer bounds the worst case; it does not
+amortise.**
+
+### The witness came first, and it is a COUNT
+
+`transcript-delta.worstHistoryScansPerDelta`, limit `.exactly(0)`, committed RED at
+**6** in `5cba885d` with the fix unwritten and the commit message saying so.
+`recordHistoryScan(_:)` is called at each offending pass so a failure names which.
+A millisecond threshold could not have done this job: it had been red for months
+and named nothing, and "a content-only delta walks the history zero times" cannot
+be satisfied by a fast machine.
+
+### The nine passes
+
+Six the counter watched, all in `applyUnscrolled` unless noted:
+
+1. the reasoning-entry diff — only needed to purge disclosure state for REMOVED
+   reasoning entries, and the incremental index refuses every structural patch, so
+   on that path the removed set is provably empty. Skipped.
+2. the `rowsByID` rebuild — patched at the changed slots.
+3. `rebuildDisplayProjection()` — the planner's `RowFact`s are now cached.
+   A content-only delta recomputes the changed slots and their successors
+   (`startsTurn` reads `rows[index - 1]`), COMPARES them, and replans only when a
+   fact or the tail-streaming flag actually moved. Facts are compared rather than
+   assumed stable because a tool row's STATUS is a projection input and a
+   content-only delta changes it.
+4. the role-change scan — restricted to the rebuilt rows; no other row can carry a
+   new role, by identity.
+5. the `newIDs` array — `changedTopLevelIDs.intersection(newIDs)` became a filter
+   on `rowsByID`, whose key set is exactly `rows.map(\.id)`.
+6. `prepareToolDetailLifecycle` (called from `apply`) — a restricted pass that
+   examines only the entries a content-only patch could have touched and patches
+   the cache instead of rebuilding it. It refuses anything it cannot verify and
+   falls back to the full pass.
+
+Three more the counter did **not** watch, caught by the duration alarm afterwards
+at 12.807 ms — worth recording, because it is the second time this axis has shown
+that a count witness is blind to work it was not taught about:
+
+7. `let oldRowsByID = rowsByID` was free while the dictionary was about to be
+   REPLACED, and became a 10,000-key copy-on-write the moment the patched path
+   mutated it in place. It now captures only the rows that can differ.
+8. the diffable snapshot was built on every apply and applied only when the
+   display identity moved. Now it is built inside that branch.
+9. the identity itself was a CONCATENATED array (`displayIDs + [tailID]`), so
+   comparing it allocated and walked the whole display sequence every delta. The
+   tail flag is now kept beside the list instead of inside it, which hits Array's
+   shared-buffer fast path whenever the projection was skipped.
+10. `captureTurnTimes` rebuilt both date maps over every entry on every apply. A
+    content-only patch cannot add, remove or reorder an entry, so the only way
+    they go stale is an updated entry whose `createdAt` moved — which costs the
+    changed set to check.
+
+### Result
+
+| | before | after |
+|---|---|---|
+| `worstHistoryScansPerDelta` | 6 | **0** |
+| worst delta @ 10,000 rows | 50.202 ms | **5.749 ms** |
+| scaling 10 / 100 / 1k / 10k | 0.37 / 0.73 / 4.8 / 50.2 | 0.34 / 0.42 / 0.75 / 5.75 |
+
+`--perf-budget-transcript-delta-check` is **removed from `MATRIX_KNOWN_RED` in this
+commit** — a listed leg that passes is reported as a stale allowlist.
+
+Green in the same run: `--transcript-delta-index-oracle-check` (the live index is
+still indistinguishable from a full walk), `--transcript-rhythm-check`,
+`--ui-geometry-check` (including the 10,000-row virtualization and the 5,000-delta
+coalescing cases), `check-agent-tile-ux-program.sh`,
+`check-sidebar-native-ux-program.sh`.
+
+**Why this had to come first.** M3 adds a diff parse and a body to this path and M6
+adds up to 16 concurrent child streams. Building either on a budget 6× over is how
+the app becomes unusable and subagents get blamed for it.
+
+---
+
+## Probes — 2026-08-24 (M0)
+
+Three probes ran in throwaway `/tmp` dirs. No user dotfile was touched, no tmux
+server was contacted, and every capture below is scrubbed.
+
+### C1 — a real claude subagent stream (committed as a fixture)
+
+`Sources/ContinuumRevivedCoreChecks/Fixtures/claude-subagent-turn.jsonl`, 55
+lines, captured with production argv **plus** `--forward-subagent-text`:
+
+```
+claude -p --output-format stream-json --verbose --include-partial-messages \
+       --forward-subagent-text "<prompt>"
+```
+
+Every open question C0 rested on is now answered by evidence rather than by
+Anthropic's docs:
+
+- **`parent_tool_use_id` is non-null on 4 frames**, all carrying ONE value, and
+  that value is exactly the `id` of the parent's `tool_use` block whose `name` is
+  `Agent`. Stable across every frame of that child. The four are the child's own
+  `user` text, `assistant` tool_use, `user` tool_result and `assistant` text — so
+  with the flag on, a child transcript is complete, not tool-calls-only.
+- **`input` carries `subagent_type`, `prompt`, `description` and
+  `run_in_background`**, and the content block carries a sibling
+  `caller: {"type":"direct"}`. C7 publishes `subagent_type` (a role id) and never
+  `prompt`.
+- **The terminal `tool_result` carries a `tool_use_result` sidecar** with
+  `agentId`, `agentType`, `resolvedModel`, `totalDurationMs`, `totalTokens`, a
+  full `usage` breakdown and `toolStats`. That is where a child's isolated cost
+  lives.
+- **The `result` frame leaks child cost into the parent.** Its `modelUsage` is a
+  COMBINED parent+child total per model, so a consumer that treats `result` as
+  "this turn's parent cost" double-counts the subagent. `case "result"` at
+  `ClaudeEventTranslator.swift:102` is the one unfiltered case; C7 owes it a
+  decision, and the honest source for a child's cost is the sidecar above.
+- **`capabilities`** = `["interrupt_receipt_v1", "interrupt_cancel_queued_v1",
+  "msg_lifecycle_v1"]`. Feature-detect from this, never from a version string.
+- **A `system/task_started` frame carries `spawn_depth`**, so Claude Code models
+  depth explicitly and Array can read it rather than infer it.
+- Weakness to respect: depth 1 only, one child, so the fixture cannot witness a
+  nested `parent_tool_use_id` chain or two siblings of one parent call.
+
+### B5.0 — does a headless CLI interpret a leading slash?
+
+The answer differs per harness, which settles B5's design: the classifier must be
+per-harness, and the prose fallback is a REGRESSION on two of three.
+
+| harness | verdict | evidence |
+|---|---|---|
+| claude 2.1.241 | **INTERPRETS** | `/help`, `/status`, `/compact` return `model: "<synthetic>"` with `input_tokens: 0`, `output_tokens: 0`, `total_cost_usd: 0` — no model call. `/definitelynotacommand` → `"Unknown command: …"`. Several commands answer `"… isn't available in this environment."` |
+| codex 0.148.0 | **PASSES AS PROSE** | a real turn: 113,485 input / 654 output tokens, the model ran web searches and answered conversationally about what it can help with |
+| pi 0.84.1 | **PASSES AS PROSE** | a real turn, real cost, tool calls investigating "what is pi", conversational reply |
+
+So Array's current serialize-and-send costs a codex or pi user a paid turn and a
+wrong answer for every slash command they type. It is not a neutral fallback.
+claude's own refusals (`/help`, `/status`, `/compact` in `-p`) must also not be
+presented as working.
+
+Flags confirmed verbatim in `claude --help` on 2.1.241: `--forward-subagent-text`
+(documented as "only works with --print and --output-format=stream-json"),
+`--agents <json>`, `--bare`, `--fork-session`, `--input-format <text|stream-json>`.
+`codex app-server --help` self-labels `[experimental]` in its first line and
+carries `daemon`, `proxy`, `generate-ts`, `generate-json-schema` subcommands.
+`pi --help` documents `--mode <text|json|rpc>` and nothing further about rpc.
+
+### pi rpc — and a correction to the data-loss story
+
+The important finding **overturns the framing in `.plans/48` §4.2**. pi's
+persistence is not a property of the mode or of the signal handler. It is
+`SessionManager._persist()` (`session-manager.js:717-751`), shared by json and rpc
+alike, and it is gated on a watermark:
+
+> until a session's file entries contain at least one prior **assistant** message,
+> every completed entry is held in memory only and nothing is written to disk —
+> not even the session file. Once the session has ever produced one assistant
+> message, every subsequent completed message is written with a **synchronous**
+> `appendFileSync`, inline, before the event even reaches stdout.
+
+Measured: a fresh rpc session signalled right after the `prompt` ack exits 143
+with **no session file at all** — identical to one-shot. A session that already
+had one assistant message kept every new message on disk under both SIGTERM and
+SIGINT, and resumed cleanly afterwards.
+
+Also measured: **rpc registers handlers for SIGTERM and SIGHUP only**. SIGINT
+kills it raw, with no `dispose()`.
+
+Consequences for M4 and for B1:
+
+1. **B1's interim notice must be NARROWED, not deleted at M4.** The exposure is
+   the first turn of a brand-new session, in both modes. A long-lived rpc session
+   crosses the watermark once, early, and then loses at most the single in-flight
+   message.
+2. Array must not expect SIGINT to clean anything up in rpc mode.
+3. `abort` is awaited and answers `{"type":"response","command":"abort","success":true}`;
+   the process stays healthy and accepts the next `prompt` on the same connection.
+4. `steer` is documented in `agent-session.js:986` as delivered *after* the
+   current assistant turn finishes executing its tool calls, before the next LLM
+   call — so it is turn-boundary steering, not mid-tool interruption. Do not
+   promise the latter in the UI.
+5. **The event stream really is the same function.** Both `modes/print-mode.js`
+   and `modes/rpc/rpc-mode.js` import `toJsonEvent` from `modes/json-event.js`.
+   Live diff of one prompt through both modes: identical types and identical key
+   sets. rpc adds two protocol-only frame types, `response` and
+   `extension_ui_request`, and omits print-mode's `session` header record (the
+   same data is reachable via `get_state`). **`PiEventTranslator` needs exactly
+   one change: ignore those two new top-level frame types.**
+6. The vocabulary is 31 commands, not 32: `prompt steer follow_up abort
+   new_session get_state set_model cycle_model get_available_models
+   set_thinking_level cycle_thinking_level get_available_thinking_levels
+   set_steering_mode set_follow_up_mode compact set_auto_compaction set_auto_retry
+   abort_retry bash abort_bash get_session_stats export_html switch_session fork
+   clone get_fork_messages get_entries get_tree get_last_assistant_text
+   set_session_name get_messages get_commands`. Note `get_commands` returns the
+   session's SLASH commands, not this vocabulary.
+7. `RpcSessionState` = `{model?, thinkingLevel, isStreaming, isCompacting,
+   steeringMode, followUpMode, sessionFile?, sessionId, sessionName?,
+   autoCompactionEnabled, messageCount, pendingMessageCount}`.
+
+Caveat on what was measurable: this account currently returns an immediate 400
+("Third-party apps now draw from extra usage, not plan limits") for pi model
+calls, so multi-second tool-use turns could not be driven. Q1 and Q2 were
+measured around that with a preflight-ack race and with resumed sessions; Q3 is
+source-read.
+
+---
+
+## Codex — the decision, settled by measurement (2026-08-24)
+
+`.plans/48` §4.3 was right about the shape and wrong about the risk, in both
+directions. A driven probe (codex-cli 0.148.0, ChatGPT auth, throwaway `/tmp`,
+no user dotfile touched) settles it.
+
+**The bug we were designing around does not reproduce.** #33267's "Encrypted
+function output content could not be decrypted or decoded" did not occur.
+`codex exec --json -c features.multi_agent_v2=true` ran clean on this auth, and
+so did V1. Delegation genuinely happens — the child wrote real files, confirmed
+on disk.
+
+**And `exec --json` still cannot see any of it.** Every distinct frame across
+three runs: `thread.started`, `turn.started`, `item.started`, `item.completed`,
+`turn.completed`, with item types `agent_message`, `collab_tool_call`,
+`command_execution`. The `collab_tool_call` frame is, verbatim and identically in
+V1 and V2:
+
+```json
+{"type":"item.started","item":{"id":"item_1","type":"collab_tool_call","tool":"wait",
+ "sender_thread_id":"<uuid>","receiver_thread_ids":[],"prompt":null,
+ "agents_states":{},"status":"in_progress"}}
+```
+
+`receiver_thread_ids` and `agents_states` stayed **empty while real subagent work
+was happening underneath**, and the child's file write never appeared as an item
+event at all. So our original probe's "empty wait" reading was not a
+misconfiguration after all — it is what this transport always shows. Setting the
+feature flag buys Array **nothing**, which is the same conclusion the closed
+`ThreadItemDetails` enum predicted, now measured rather than inferred.
+
+**`app-server` does see it, and it is more real than "[experimental]" suggests.**
+Driven end to end over stdio: `initialize` → `thread/start` → `turn/start` →
+`turn/completed` → `thread/read`, with a genuine child thread running.
+
+- `subAgentActivity` is a real `ThreadItem` variant: `{type, kind, agentThreadId,
+  agentPath, id}`. **Its `kind` enum is `started | interacted | interrupted` —
+  there is no `completed`.** `.plans/48` claimed four values; that was wrong.
+- `thread/list` accepts `sourceKinds`, whose enum is `cli, vscode, exec,
+  appServer, subAgent, subAgentThreadSpawn, subAgentReview, subAgentCompact,
+  subAgentOther, unknown`. Filtering by `parentThreadId` returned the child.
+- `thread/read` with `includeTurns` returns the child's turns including its
+  `subAgentActivity` items.
+- The handshake **requires** `capabilities: {"experimentalApi": true}`; without it
+  `thread/start.multiAgentMode` is refused `-32600 requires experimentalApi
+  capability`. And `multiAgentMode` is `explicitRequestOnly | proactive |
+  {custom: String}` — **not** `"v2"`. The CLI feature flag and the per-thread mode
+  are two separate knobs.
+- Ownership, confirmed live against a running child rather than read out of a
+  test suite: `turn/start` and `turn/steer` are both refused with exactly
+  `-32600 direct app-server input is not allowed for multi-agent v2 sub-agents`,
+  while `thread/read`, `thread/list` and `turn/interrupt` are allowed
+  (`turn/interrupt` failed only on a deliberately wrong `turnId`, naming the real
+  one).
+
+**The ordering hazard is real and Array would hit it immediately.** Timestamped:
+
+```
+857797  turn/completed   thread=PARENT      <- the parent's turn closes
+861409  item/started     commandExecution  thread=CHILD
+872237  item/started     fileChange        thread=CHILD   (the real write)
+878213  turn/completed   thread=CHILD
+```
+
+The child's work arrived **20 seconds after** the parent's `turn/completed`.
+`CodexAgentRunner.emit()` treats `turnCompleted` as terminal and fires it at
+process exit, so a naive port truncates or misfiles every late child event.
+
+### So the codex arm is a RUNNER rewrite, not a flag
+
+`CodexEventTranslator` is adaptable — 9 handled shapes, most needing renames.
+Three need genuinely new mapping: `agent_message`/`reasoning` **stream real token
+deltas** on app-server (`item/agentMessage/delta`) rather than arriving whole, so
+the translator's "the whole reply arrives at once" comment is architecturally
+false there; token usage arrives as a **separate** `thread/tokenUsage/updated`
+notification correlated by `threadId`/`turnId` instead of inline on
+`turn.completed`; and eight item kinds have no coverage at all today
+(`subAgentActivity`, `collabAgentToolCall`, `dynamicToolCall`, `imageView`,
+`sleep`, `imageGeneration`, `entered/exitedReviewMode`, `contextCompaction`) —
+safely dropped by the `default:` discipline, but that is also why codex shows
+nothing.
+
+`CodexAgentRunner` is the hard part, and its premise is what breaks:
+
+1. **Process-per-turn.** `runOnce()` spawns a fresh `codex exec` and blocks on
+   `spawned.wait()` (`:389`). app-server is one long-lived connection for the
+   agent's whole life. Everything downstream assumes "process exit == turn done".
+2. **The terminal-event gate** (`:451-457`) is precisely the ordering hazard.
+3. **Resume** relaunches `codex exec resume <thread_id>` and self-heals on
+   **stderr text matching** (`isUnknownSessionFailure`, `:85-88`). app-server has
+   no relaunch, and failure is a JSON-RPC code, not stderr text.
+4. **`stop()`** SIGTERMs a process group (`:302-309`); the analogue is
+   `turn/interrupt` over the live connection.
+5. **`observeSpawnRequests`** (`:311-313`) is a no-op whose comment — "Codex has
+   no `spawn_agent` side channel" — is now measurably false.
+
+That rewrite is the same one that brings `turn/steer` and `turn/interrupt` to
+Program B, so codex's subagent arm and codex's steering arm are one piece of
+work, not two.
+
+**De-risking step, taken first:** a single-agent app-server parity harness that
+runs a non-delegating session end to end and diffs its event shapes against the
+existing `CodexEventTranslator` fixture corpus — answering "is app-server really a
+superset for the path we already ship" without touching production.
+
+## Codex app-server parity harness — the de-risking step, taken (2026-08-24)
+
+Built the harness the previous section called for, without touching
+`CodexAgentRunner` or `CodexEventTranslator` (both stayed read-only). Verdict:
+**single-agent parity holds.** app-server carries a strict superset of the 9
+event shapes the exec-based translator already maps, for the non-delegating
+path Array ships today. The two restructures already named in the decision
+section (streamed deltas, separated token usage) are confirmed live and are
+restructures, not gaps; a third restructure (`turn.failed` folding into
+`turn/completed`) is confirmed too. The ordering hazard is confirmed live and
+independently reproducible — not a one-off.
+
+### The harness
+
+`scripts/codex-appserver-capture.py` drives one `codex app-server` process over
+stdio: `initialize` (`capabilities.experimentalApi: true`, otherwise
+`thread/start`'s `multiAgentMode` field is refused `-32600`) → `initialized` →
+`thread/start` → `turn/start` → poll for the **parent thread's own**
+`turn/completed` (keying on any `turn/completed` conflates a delegating child's
+completion with the parent's — the harness's own first version had this bug) →
+an extra `--drain` window for late child activity → `thread/read`. Raw
+send/recv frames land in an NDJSON capture file with wall-clock timestamps.
+
+Exact argv, mirroring what `CodexAgentRunner.processArguments` already passes
+to `codex exec` (`-c approval_policy=never`, `-c sandbox_mode=workspace-write`,
+never touching `~/.codex/config.toml`):
+
+```
+codex -c approval_policy=never -c sandbox_mode=workspace-write app-server [--enable multi_agent_v2]
+```
+
+(`app-server` takes no `--experimental` flag of its own — that flag belongs to
+`generate-json-schema`; `app-server` itself needs nothing beyond the `-c`
+overrides and `--enable` for the delegating capture.) Model: `gpt-5.6-sol`
+(fully-qualified slug read from `~/.codex/models_cache.json`, never a partial
+pattern). Run against codex-cli 0.148.0, ChatGPT subscription auth, throwaway
+`/tmp` cwds.
+
+One correction the harness needed mid-flight: `thread/start` **mints its own
+thread id** in the response (`result.thread.id`) — it does not accept a
+client-supplied one. The first probe run was 100% `-32600 thread not found`
+because it sent a locally generated UUID to `turn/start`.
+
+### Two committed fixtures
+
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-single-agent.jsonl`
+  (108 lines) — one turn: run a shell command, then edit a file with the
+  file-editing tool (not a shell redirect), report both. Exercises
+  `commandExecution`, `fileChange`, `reasoning` (empty — reasoning text never
+  streamed live here either, same as exec), `agentMessage` streaming, and
+  `thread/tokenUsage/updated`.
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-appserver-delegating-turn.jsonl`
+  (61 lines) — a real `--enable multi_agent_v2` delegation: parent spawns
+  exactly one subagent to run a slow shell command in the background and
+  finishes its own turn without waiting. Contains real `subAgentActivity`
+  (`kind: started`) and `collabAgentToolCall` items, and the late child
+  completion.
+- `Sources/ContinuumRevivedCoreChecks/Fixtures/codex-exec-single-agent-parity.jsonl`
+  (11 lines) — the SAME two-step task captured separately through
+  `codex exec --json`, for the equivalence check below. Not byte-identical to
+  the app-server fixture (the model is not deterministic across two live
+  runs) — that's why the equivalence check is structural.
+
+All three scrubbed: home paths → `/tmp/fixture`, every thread/turn/item id
+(UUID-shaped or `msg_`/`call_`/`exec-`/`item_`-prefixed) → a stable fake kept
+internally consistent (the delegating fixture's parent→child link still
+resolves after scrubbing — parent mints thread `...0001`, child is
+`...0004`), machine hostname/installation id scrubbed. Grepped clean of
+`/Users/`/`dylan` after scrubbing.
+
+### The ordering hazard, reproduced on demand
+
+Not just present in the original measurement — reliably reproducible by
+prompting the parent to spawn a background subagent and finish its own turn
+without waiting. Timestamped from the committed fixture's original capture:
+
+```
+turn/started    parent
+item/started    subAgentActivity   parent   (kind: started)
+turn/started    child
+turn/completed  parent                                    <- parent's turn closes
+item/started    commandExecution   child
+item/completed  commandExecution   child    (~12s later)  <- the real work
+turn/completed  child                        (~16s later)
+```
+
+### Parity table — the 9 shapes `CodexEventTranslator` handles today
+
+| exec frame | app-server frame(s) | mapping |
+|---|---|---|
+| `thread.started` | `thread/started` (notification) | rename — same role, id lives one level deeper (`params.thread.id` vs `thread_id`) |
+| `turn.started` | `turn/started` | rename; app-server's `turn.id` is a real server-minted id — nothing to synthesize/salt, unlike exec's per-process `runToken` scheme |
+| `item.started` (`command_execution`) | `item/started` (`commandExecution`) | rename (snake_case → camelCase); same fields plus extras (`cwd`, `processId`, `source`, `commandActions`) not needed for the mapping |
+| `item.completed` (`command_execution`) | `item/completed` (`commandExecution`) | rename; `exitCode`/`aggregatedOutput` keys renamed camelCase, same semantics |
+| `item.started` (`file_change`) | `item/started` (`fileChange`) | rename; `changes[].path` is the identical field shape |
+| `item.completed` (`file_change`) | `item/completed` (`fileChange`) | rename |
+| `item.completed` (`agent_message`, whole text) | `item/started` (inert) → N × `item/agentMessage/delta` → `item/completed` (text NOT re-emitted) | **restructure** — real streaming replaces exec's "whole reply arrives at once" (that comment in `CodexEventTranslator` is architecturally false on this transport) |
+| `item.completed` (`reasoning`) | same delta/complete shape as `agentMessage`, keyed by the same `item/agentMessage/delta` method | **restructure**, unconfirmed live either side (reasoning text never streamed in either transport during any capture here) |
+| `turn.completed` (usage inline) | `turn/completed` (no usage) + separate `thread/tokenUsage/updated` (`threadId`/`turnId`-correlated) | **restructure** — usage is unbundled from turn completion, and arrives MORE OFTEN (after every tool call, not just at turn end); `tokenUsage.total` is the same cumulative-accounting figure exec's `usage.input_tokens`/`output_tokens` already are |
+| `turn.failed` (standalone frame, `error.code`) | `turn/completed` with `turn.status == "failed"` and `turn.error` inline | **restructure** — no standalone failure frame; folds into the same notification success uses |
+
+Not part of this ticket's scope (single-agent only), but visible on the wire
+and worth naming for the next ticket: `subAgentActivity`, `collabAgentToolCall`
+(both confirmed live, shapes captured in the delegating fixture),
+`dynamicToolCall`, `imageView`, `sleep`, `imageGeneration`,
+`entered/exitedReviewMode`, `contextCompaction` (none observed live). Also
+unmapped and out of scope: `turn/diff/updated`, `account/rateLimits/updated`,
+`mcpServer/startupStatus/updated`, `remoteControl/status/changed`,
+`thread/status/changed` — none carry timeline-relevant content.
+
+**A genuine improvement, not implemented here:** `thread/tokenUsage/updated`
+also carries `tokenUsage.last` (this request's own tokens, not cumulative) and
+`modelContextWindow` in the SAME notification — exact context occupancy
+without cross-referencing the rollout log the way `CodexRolloutTelemetry` has
+to for exec. Left as a noted opportunity; mapping it would widen scope beyond
+the 9 shapes this ticket committed to.
+
+### The translator sketch and its witness
+
+`Sources/ContinuumRevivedCore/AgentProviders/CodexAppServerEventTranslator.swift`
+— pure, same I5 discipline as `CodexEventTranslator` (command bodies, tool
+output, and paths never cross into an `AgentRuntimeEvent`; generic titles
+`"Shell"`/`"Edit"`), same `AgentRuntimeObservation` side channel for the
+host-local detail store. Does not widen `AgentRuntimeEvent`. Covers the 6
+single-agent-relevant shapes above (leaves the file-edit and command-execution
+resolution logic byte-identical to exec's in spirit); does not attempt the two
+unconfirmed/out-of-scope reasoning and delegation shapes.
+
+`Sources/ContinuumRevivedCoreChecks/CodexAppServerParityChecks.swift`, wired at
+the tail of `main.swift`, in three parts:
+
+1. **Mapping pins** — synthetic app-server JSON-RPC lines (SECRET-marked
+   command/output/path/diff/error-body strings) through the new translator,
+   asserting each of the 9 shapes maps as the table above says, and that none
+   of the secrets cross into an encoded `AgentRuntimeEvent` or even the
+   whitelisted observation channel.
+2. **Single-agent parity equivalence** — replays
+   `codex-exec-single-agent-parity.jsonl` through the EXISTING
+   `CodexEventTranslator` and `codex-appserver-single-agent.jsonl` through the
+   NEW translator, reduces both to a `NormalizedShape` sequence (session/turn/
+   item event kinds, consecutive `contentDelta`s of the same stream collapsed
+   to one block, `tokenUsageUpdated` excluded and checked for presence
+   separately — both restructures are named above, so this equivalence
+   is honest about not requiring exact-count agreement on them) and asserts
+   the two sequences are IDENTICAL. They are: 13 normalized events on each
+   side. `expect(!execEvents.isEmpty && !appServerEvents.isEmpty, …)` guards
+   against the comparison being vacuously true.
+3. **The ordering-hazard witness** — a `NaiveTerminalGateTranslator` built
+   inline in the checks file (mirrors `CodexAgentRunner.emit()`'s real
+   terminal-event gate, per the decision section above: "treats turnCompleted
+   as terminal and fires it at process exit") replays the delegating fixture
+   and is asserted to DROP the child's late `commandExecution` completion and
+   see only one `turn/completed` — **RED**, demonstrated, not hypothetical.
+   The real `CodexAppServerEventTranslator`, which has no such gate (every
+   method switches independently, keyed by the `threadId` the frame itself
+   carries), replays the same fixture and is asserted to keep the child's
+   completion and report BOTH turn completions — **GREEN**.
+
+**Teeth-verified**, both directions: flipping the `commandExecution`
+completed/failed mapping turned the mapping-pin check red (`FAIL: a zero-exit
+commandExecution item/completed must map to .completed`), reverted after
+confirming; reintroducing a real "stop after the primary thread's
+turn/completed" gate into the actual translator (temporarily) turned the
+mapping-pin check red too (a second `turn/completed` in the same test got
+silently dropped) — proving the gate's absence is load-bearing, not
+incidental — reverted after confirming. `swift run ContinuumRevivedCoreChecks`
+green on the reverted state, extending the existing leg (no new matrix leg
+added).
+
+### Verdict
+
+Single-agent parity holds cleanly. The three restructures are real but
+mechanical (rename + re-shape, no lost information for the path Array ships
+today). Nothing here changes the M7/4d.3 conclusion that codex's arm is a
+**runner rewrite, not a flag** — `CodexAgentRunner`'s process-per-turn model,
+its terminal-event gate, its stderr-text resume-failure detection, and its
+no-op `observeSpawnRequests` all still need to change together, and that work
+is still gated on Program B (steering) per the decision section. What this
+ticket buys: the rewrite is no longer a leap of faith about whether app-server
+can carry what exec already carries — it demonstrably can, for the
+non-delegating path, and the one hazard that would silently corrupt a
+delegating session (the parent-closes-before-child ordering) is now pinned by
+a fixture and a witness instead of a paragraph.
+
+---
+
+## M0–M2 landings — 2026-08-24
+
+One section per landing, newest last. Commit hashes are on `array/transcript-ux`.
+
+### `a4ec37ef` — G0, the delta path (see the G0 section above)
+
+### `c5831e5d` — C1's capture and the three probe findings (see Probes above)
+
+### `4eb92ef9` + `88d00168` — C3, one stable transcript key
+
+The writer was the TILE's thread id (`"managed-<tileId>"`) and the only reader
+asked for the literal `"thread-main"`, so the companion had **never once** found
+a transcript — two ends of one channel that never named the same thing. Fixing
+the reader to match the writer would not have been enough: revealing an existing
+agent mints a fresh tile id, so every reveal orphaned the previous directory.
+The key itself was unstable.
+
+`AgentTranscriptStore.canonicalSessionID(for:)` is the key, deliberately the same
+string `AgentSupervisor.sessionId(for:)` hands pi as `--session-id` so the two
+cannot drift into two names for one conversation. The tile keeps its own thread
+id — a runtime event-routing concept, legitimately per-tile; what it stops being
+is the name of a file on disk.
+
+`migrateLegacySessionDirectories()` **adopts, never wipes.** The legacy session id
+is read out of the archive because the directory name is an FNV-1a hash and is not
+invertible; recovery goes through the ordinary `load` so an uncompacted journal
+survives; and the document is rewritten under the canonical key, which also
+rewrites the `sessionID` field INSIDE both files — without that, `load` refuses
+the migrated transcript with `identityMismatch`. **A rename alone is not a
+migration here.** Where a reveal left several directories the newest wins by its
+own `savedAt` and the losers are quarantined. Idempotent. Runs detached at launch,
+on the interactive path only.
+
+Witness teeth: stubbing the migration call fails on "both legacy agents must be
+adopted under the canonical key". The newest-wins clause later had to be made
+deterministic (`8e6e35bd`) — it was failing about two runs in three because the
+store re-snapshots on compaction with `Date()`, so the seed's timestamp depended
+on whether compaction happened to fire. **A witness for an ordering rule must not
+itself depend on ordering luck.**
+
+### `983282f2` — C0b, one role concept and three roots
+
+All three harnesses declare roles as a directory of markdown files with YAML
+frontmatter and differ only in the dot-dir, so `RoleRegistry` takes a harness and
+reads `.pi/agents`, `.claude/agents` or `.codex/agents`. The default stays pi.
+
+`toolsArguments(roleId:allowingSpawn:)` is C8's fourth blocker — the one that
+would have made shipping the other three still ship a dead feature. All twelve
+`.pi/agents/*.md` roles declare a `tools:` allowlist and none lists
+`spawn_agent`, so pi denied the verb to every roled agent even with the extension
+loaded. Array appends it, at Array's own depth cap, rather than twelve markdown
+files being hand-edited into tracking a code-level limit they cannot see.
+**Withholding beats refusing after the fact: the model never proposes what it
+cannot have** — the same shape as `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`.
+
+### `0969f281` — `ItemKind` stops throwing away the event that carried it
+
+A `String`-raw enum with a synthesized decoder threw on a value it had not heard
+of. These values are persisted in activity events and cross to the companion, so
+that is data loss: an older build meeting a newer kind loses the **event**, not
+the field. It mattered now because both B6.2 (`.compaction`) and C7 (`.subagent`)
+add a case, and adding one to the old shape would have reopened it on every
+install that had not updated. `AgentContextWindowFreshness` in the same file had
+already solved it; `ItemKind` now agrees.
+
+### `5e4ac132` + `65643eb2` — C8, pi spawning reaches the model
+
+Four independent blockers, all four or nothing. The extension is bundled
+(`Sources/ContinuumRevivedCore/Resources/PiExtensions/`), `make-app-bundle.sh`
+copies the generated resource bundle into `Contents/Resources` — placing it at the
+app's top level makes `codesign` refuse to seal the executable, verified
+empirically — an idempotent installer writes it to `~/.pi/agent/extensions/`
+(confirmed as pi's auto-discovery root by reading `dist/core/resource-loader.js`),
+and `pi --help` confirms `--extension, -e <path>`.
+
+Two corrections during the ticket, both worth keeping. `processArguments` is
+documented **pure so the matrix can pin it**, and the first version made it read
+the host's home directory — the resolution moved to `Config.extensionPaths` with
+an impure default, the same pattern the file already uses for `model`/`thinking`.
+And a `-e` pointing at a file that does not exist would fail a pi launch for a
+feature the user is not using, so `installedExtensionPaths()` resolves to `[]`
+when the file is absent.
+
+The installer's call site is `applicationDidFinishLaunching`, **not** beside
+`ToolEnvironment.bootstrap()`: that runs only on the interactive path, after the
+whole `--*-check` cascade, so no self-check leg can write into the developer's
+real `~/.pi`. Deliberately not witnessed: whether the file reached the real home
+directory. That is host state, and asserting it would make the matrix depend on a
+home directory.
+
+### `4dd62163` — B7.0, and it is sharper than the handoff said
+
+`/clear` alone was **accidentally** safe: `SecretRedactor.removeLocalPathReferences`
+eats it whole as path-shaped text. But a command WITH ARGUMENTS gets only its verb
+eaten, so `/compact focus on the auth work` named the tile *"focus on the auth
+work"* and set `displayNameSource` to `.prompt` — which disarms the naming funnel
+permanently, so no later real prompt could ever rename it.
+
+The guard goes in `visibleNamingText` because that is the only place that can
+still tell; by the time the shared resolver sees the prompt, the verb has already
+been redacted away. **A rule inherited from a side effect is not a rule.**
+
+### `8e6e35bd` — B5's classifier, and compaction reaching the ring
+
+`AgentCommandExecutionPlanner` resolves an invocation to `arrayOwned`,
+`harnessDelegated`, `skillTemplate` or `unavailable(reason:)`. Capability comes
+from the BOUND RUNNER, never `record.harness`. Discovery narrows only once it has
+happened — claude's `slash_commands` arrives per turn, so refusing on a nil list
+would disable every command until the first turn ran.
+
+B6.1's `compact_boundary` event could not reach the context ring: it was tagged
+`.unknown("claudeCompactBoundary")` because the enum lived in a file that ticket
+could not touch, and `AgentContextOccupancy.promptTokens` returns nil for
+`.unknown` — so the correctness fix was a **no-op**. The case is now named and
+authoritative. Worth recording as a pattern: *a ticket scoped away from the file
+it needs will find a way to look finished.*
+
+### `9759887c` — C2, the two fan-out bugs that hid each other
+
+`harness:` was a parameter of `fanOut` never forwarded to `spawn`, so every child
+silently ran the SETTINGS default regardless of what the caller asked for or what
+the parent was running. And `fanOut` never emitted `.childAgentSpawned`, so a
+child got durable parentage in the record and no chip in the parent's transcript.
+`handleSpawnRequest` had always emitted it; the two spawn paths simply disagreed,
+and each bug made the other harder to notice. The witness asks for a harness that
+is deliberately **not** the settings default, so a regression reads as a real
+difference rather than an accidental match.
+
+### `f575ed1e` — C7, translator half
+
+An `Agent` (formerly `Task`) call is claude announcing a child it has **already
+started inside itself**, so the request is `observedOnly`: Array may watch that
+child and must never claim to run it. That distinction comes from the request
+rather than from a harness name, which keeps it true during a migration.
+
+The announcement is keyed by the `tool_use` id, because that is the value every
+one of the child's frames carries in `parent_tool_use_id`. **A child announcement
+Array cannot re-identify later is not worth minting.**
+
+`subagent_type` joins the tool-detail whitelist (a role id, and role ids are
+publishable); `prompt` on the same tool stays out. `Agent`/`Task` reached
+`.commandExecution` through `default:`, which it is not.
+
+The witness first asserts the FIXTURE carries non-null `parent_tool_use_id`
+frames — a fixture-backed check whose fixture is empty witnesses nothing.
+
+---
+
+## M4–M6 landings — 2026-08-24 (continued)
+
+### `9c3be0b3` + `87c79afb` — codex reaches app-server, opt-in
+
+Single-agent parity holds: all 9 shapes `CodexEventTranslator` handles map to
+app-server frames — 6 renames, 3 real restructures, no gaps. The three
+restructures are worth naming because each breaks an assumption the exec
+translator states out loud: `agent_message`/`reasoning` **stream** as
+`item/agentMessage/delta` rather than arriving whole, so "the whole reply arrives
+at once" is architecturally false there; token usage arrives as a **separate**
+`thread/tokenUsage/updated` correlated by `threadId`/`turnId`; and `turn.failed`
+folds into `turn/completed` with inline error info.
+
+`CONTINUUM_CODEX_TRANSPORT=app-server` opts in; `exec` stays the default and the
+anti-cheat baseline. Two RED→GREEN findings from the ticket's own checks:
+app-server sends **no `thread/started` on `thread/resume`** (only on
+`thread/start`), unlike exec which re-emits it on every resume — so a resumed
+turn's session-ready events never fired until the notification was synthesized;
+and `run()` could hang forever if the process died before posting
+`turn/completed`, because nothing else could unblock the completion semaphore.
+
+Deliberately NOT achieved: one long-lived process for the agent's whole life.
+`AgentSupervisor` builds a fresh runner per send, which is the seam B2.2 below
+opens. Subagent mapping stays a no-op; only the comment claiming codex has no
+side channel was corrected, since that is now measurably false.
+
+### `a903f424` — pi's rpc session transport
+
+One long-lived `pi --mode rpc` child, `{id}`-correlated commands, and the event
+stream forwarded unchanged. **`PiEventTranslator`'s entire diff is two ignored
+frame types** (`response`, `extension_ui_request`) — which is exactly why pi went
+first and claude second.
+
+The ticket's teeth surfaced a real latent bug: the transport's EOF handler did not
+clear `readabilityHandler`, so process exit busy-spun.
+
+One field was inferred rather than driven — the `prompt`/`steer` payload's text
+key — because the M0 probe could not run a real multi-second turn on this
+account's billing. **Now confirmed as `message` against pi's own
+`dist/modes/rpc/rpc-types.d.ts`**, which also documents `images?: ImageContent[]`
+on the same commands (how attachments will ride) and
+`streamingBehavior?: "steer" | "followUp"` on `prompt`. Confirmed-by-declaration
+is not the same as driven, so the transport still defaults off.
+
+### `98ab78ba` — B2.2, the seam both migrations stopped at
+
+Neither transport could reach the supervisor, for the same reason: a fresh runner
+per send and no notion of one that outlives a turn. `AgentSessionRunning` is a
+REFINEMENT of `AgentRunning`, so the three one-shot runners do not conform and
+compile untouched, keeping `.sendStop(...)` as their floor.
+
+The load-bearing part is where capabilities come from: **the bound runner, never
+`record.harness`.** A harness-name table lies for the entire migration window,
+when pi-one-shot and pi-rpc are both live in one build — so a pi tile advertises
+Steer when it is running on rpc and does not when it is running one-shot, from the
+same record.
+
+### `24a80cea` — B1, narrowed to what was measured
+
+The notice fires only for pi, and only before the session has crossed pi's
+persistence watermark. The narrowness IS the design: a notice that fired on every
+Stop would be ignored, and being ignored is the same as being absent. Three
+negative cases carry most of the witness.
+
+It survives M4 rather than dying with it — rpc's SIGTERM/SIGHUP handlers looked
+like the fix, but persistence is gated by the watermark in both modes.
+
+### `31e9b3a6` + `2da3dd35` — A4, turn folding
+
+`turnRanges(facts:)` extracted first as a pure no-op with a byte-identical-output
+witness, committed alone; then `foldTurns` as a second pass over the same `[Item]`
+list. It reuses `AgentToolClusterHeaderItem` via a new `Header.scope`, so **no new
+view type**, and it runs only on the existing `factsChanged` replan path — not on
+every delta. Delta budget after: 5.9–7.0 ms against 8.3.
+
+### `6e7e2e00` — A6, and an honest stop
+
+`AgentRequestView` conformed; floors re-measured 196/175 → 198/177.
+**`ToolCallView` deliberately left unconformed**: its slots paint only
+conditionally and the fixture's single tool call trips neither, so conforming it
+today would trade one red for another. That is the audit the ticket asked for
+doing its job.
+
+### A7 — the gesture leg stays KNOWN-RED, and the re-judgement was not trustworthy
+
+`--perf-budget-gesture-transition-check` was re-run three times: **pass, 10.461 ms,
+9.835 ms** against an 8.3 ms budget. It still flaps, so the `MATRIX_KNOWN_RED`
+entry stays.
+
+But the honest note is that the machine had three agents building concurrently
+during those runs, which makes any wall-clock leg untrustworthy in both
+directions. **Re-judge this one on a quiet machine before acting on it either
+way** — the same lesson the 02:30 run taught when five terminal failures bisected
+to an asleep display rather than to the milestone. Its structural budgets are
+green, which is the part that carries information.
+
+---
+
+## M5, M6 and M8 closeout — 2026-08-24
+
+### `fec35f6c` (+ supervisor core inside `24a80cea`/`248b074e`) — C4, persistence without a tile
+
+The sole `saveSnapshot` call site lived inside `wireManagedAgentTile`, so a
+tile-less agent persisted **nothing** — and at up to 16 concurrent children,
+tile-less is the common case, not an edge case. Persistence moved into the
+supervisor, fed from the same restamped `deliver()` stream every subscriber
+already sees, debounced 200 ms with an immediate write on a turn boundary and a
+flush of pending streaming markup before the final write. The tile is a reader.
+
+**Archive quarantines, never deletes** — `<root>/<agentID>/` becomes
+`<root>/quarantine-<agentID>/`, the same rule C3's migration already follows: a
+transcript is the user's own record of their work. Teeth: gating both ingest
+paths behind `tileId != nil` fails with "the only saveSnapshot call site lived
+inside the tile."
+
+### `69a53018` — C10, status at render time
+
+`AgentReferencePayload` still carries no status, so a tick can never rewrite
+history. Status resolves in the renderer from `turnSnapshot(for:)` through
+`InboxState.state(forSnapshot:)` — P3.3's single status owner — subscribed **per
+visible chip** and unsubscribed on reuse and deinit, because at 16 children an
+unconditional subscription is a leak.
+
+The teeth that matter are the second clause: the carrying `AgentDocument` is
+encoded to `Data` twice with `.sortedKeys` and asserted **byte-identical** across
+the status change. A Swift `==` would have passed over a field that round-trips
+differently. Verified by inserting `document.version += 1` between the encodes.
+Delta budget after: 5.68–5.78 ms against 8.3.
+
+### `e4f7ec3f` — C11, lineage at fan-out scale
+
+`showContextualAgentLineage(edges:)` draws N edges bounded by
+`InboxSort.maxVisibleChildren`, and reveal-from-inbox now shows the parent's whole
+visible sibling fan rather than the one revealed agent.
+
+The fixture pins **arithmetic, not literals**: `maxChildrenPerParent² == 16` and
+`maxChildrenPerParent × 2 == InboxSort.maxVisibleChildren`, mirroring the
+`maxDepth` precedent. A witness that hardcodes 8 goes quietly wrong the day
+someone changes a cap; one that pins the relationship fails loudly.
+
+### `60e87939` + `c60ba336` — B6.2 and B6.3
+
+The compaction block kind, rendered collapsed and attributed to the harness,
+built from the real captured fields. Safe to add because `ItemKind` had already
+been made lenient — the prerequisite that would otherwise have been a data-loss
+bug in a one-line diff.
+
+**B6.3 shrank, correctly.** The probe found pi's session file is **append-only**
+through compaction, so the pre-compaction history is pi's loss and not Array's to
+recover. Surfacing the boundary honestly is the whole ticket. A negative result
+with the source read is a complete result.
+
+### `248b074e` — B4 and B5's wiring
+
+See the commit message for the reversal of the local-queue prohibition and why it
+had to be Array-side. Two honest limits recorded at the time: the sidebar does not
+change at all, because `AgentInboxRowBuilder` folds `.queued` onto `.working`; and
+claude's per-turn `slash_commands` discovery is still unwired, so every provider
+command takes the "nothing discovered yet" branch and the *"this agent doesn't
+have that command"* refusal is **unreachable** until that lands. It is the one
+piece of B5 that is designed and not delivered.
+
+A claim from the plan was also checked rather than inherited: `.notice` is **not**
+pixel-identical to `.error` in this build — a `.plans/45` T7 landing already gave
+it a distinct title, no failure badge and no retry affordance — so the caveat
+about an Array-authored `/status` reading as a failure did not apply.
+
+---
+
+## Two process findings worth keeping
+
+**The shared index bit four times in one day.** Running many agents in one
+worktree means `git add` sees everyone's work. Three agents and then I myself
+swept a peer's file into a commit; twice it was caught by `git show --stat` and
+undone, once it was left in place deliberately and said so in the commit message.
+`git commit -- <paths>` is not the fix — it commits the WORKING-TREE version of a
+shared file, not the staged hunks. The reliable pattern is: stage explicit paths,
+commit, then `git show --stat HEAD` **immediately**, and `git reset --soft HEAD~1`
+if a peer's file appears. For a partial stage on a shared file, build a patch and
+`git apply --cached`, then commit with no pathspec.
+
+**Two `--agent-supervisor-check` assertions flake under load**, and one agent
+misread them as a SIGSEGV. They are not crashes. Both sit behind
+`waitUntil(timeout: 5, pollInterval: 0.02, …)` wrapped around a real one-shot
+naming subprocess — "normal/input-failure supervisor paths did not release their
+slots" and "the capped burst did not release both accepted names" — and both pass
+on rerun. They correlate with how many agents are compiling. **Do not bisect them
+on a loaded machine**, and consider whether a five-second budget for a real
+subprocess is honest on a busy host.
+
+## T1 — A streaming response keeps a liveness signal (2026-08-25)
+
+Dylan, driving the build: *"the response looks dead... there is no indicator that
+the response is streaming in."*
+
+The transcript has exactly **one** animated element, the gyro on the tail, and
+`refreshTranscriptThinkingIndicator` switched it off the moment the last entry
+became an open assistant or reasoning entry — the whole duration of the answer.
+The predicate was `statusIsActive && !latestStreamIsVisible`, and its own comment
+said the yield was intended: "an open assistant/reasoning entry yields
+immediately on its first delta."
+
+Nothing replaced it, and that is the part that made it a real defect rather than
+a taste call. The compact status row is deliberately silent for exactly the live
+phases — `presentationWithoutThinkingIndicator` strips them and
+`footerRetainsPhase` returns `false` for
+`.thinking/.responding/.reading/.searching/.editing/.running` — *because the gyro
+was supposed to carry them*. So both surfaces went quiet together for the longest
+and most-watched part of a turn. Everything else on screen is static: an
+in-flight tool row is the string `"◐ In progress"` (`◐` is a glyph, not a
+spinner), and there is no `NSProgressIndicator`, no `repeatCount` and no `Timer`
+anywhere in the transcript renderers.
+
+Growing glyphs are not a signal. A partial paragraph is pixel-identical to a
+finished one, and a pause between sentences is indistinguishable from a stall.
+
+**Fix:** a working status is the whole authority. Side effect worth naming: a
+tool call running mid-answer now keeps the tail up too — the old predicate
+suppressed it whether or not work was happening, because it keyed on the open
+entry rather than on the work.
+
+**Two things NOT changed, having checked them.** `syncCompactStatusTick` is
+gated on `presented.activity`, the *unstripped* activity, so the 1 Hz tick and
+`setThinkingStatusText` were already correct — the words were right and only the
+visibility was wrong. And `setSettledTailStatus` still stops the gyro and keeps
+"Worked for Ns"; a settled turn must still yield.
+
+**The witness, and why this shipped in the first place.**
+`AgentTranscriptMotion.isEnabled` defaults to `false` and production flips it
+once at `ContinuumApp.swift:3921`, so every check leg and every pixel baseline
+photographs a motionless transcript. **No screenshot gate could ever have caught
+this.** So `checkStreamingResponseKeepsALivenessSignal`
+(`--agent-first-paint-check`) asserts the *decision*: it ingests real
+`turnStarted`/`contentDelta` events through the real reducer, proves the
+document actually ends in an open assistant entry (the fixture's own teeth —
+otherwise the check would pass vacuously if entry shapes drifted), then asserts
+the rule holds. Plus a negative leg (settled ⇒ no tail) and a reduce-motion leg
+(the fixed-pose fallback must keep the signal).
+
+`showsWorkingTail(statusIsActive:document:)` was extracted as a static rule for
+one reason: `statusIsActive` needs a live `AgentSupervisor` and the rule does
+not, so the witness drives the real decision without standing one up. `document`
+is taken and deliberately unread so reintroducing the old term has somewhere to
+go wrong — which is what the teeth-verification exercises.
+
+*Teeth:* restoring `&& !latestStreamIsVisible` fails with "the tail was
+suppressed while an assistant entry was streaming". Verified.
+
+**Not built, and stated as a choice:** a caret or shimmer on the streaming
+paragraph, and turning `jumpToLatestButton` into a live badge — it is a plain
+text button that cannot distinguish "content arriving now" from "you scrolled up
+ten minutes ago". Both worth doing; neither is what was reported.
+
+## T2/T4 — One row says each thing once, and the icon column carries information (2026-08-25)
+
+Dylan: *"there is a lot of doubling."* His screenshot: `Bash` over `bash`,
+`Delegate_agent` over `delegate_agent`, `Read docxFeedingZoneGenerator.js` over
+`Read: …/feedingZone/docxFeedingZoneGenerator.js`. Two tool calls made four lines
+of almost nothing.
+
+**Two independent causes, both in `observableDisclosureText`.**
+
+*Case-only.* The title takes `pureSummary ?? capitalizedPhrase(safeToolName)`;
+the body's first line took `pureSummary ?? safeToolName` — the same fallback
+*un*-capitalized. The renderer's dedupe was exact and case-sensitive, three lines
+below a `caseInsensitiveCompare` that was already the idiom. Fixed at the source:
+when there is no action sentence, a line that is only the tool name adds nothing
+over a title that is only the tool name, so none is emitted.
+
+*File echo.* The file line restated the basename the title already named. The
+argument loop right below it has had exactly this suppression since `.plans/45`;
+the file line never did.
+
+Also fixed on the way: that argument guard read `lines[0]`, which this change
+could have made an out-of-bounds crash — and which was the wrong string anyway
+whenever the title was the fallback. Both now read one `echo` value.
+
+**The witness lesson, and it cost the most time here.** I first wrote the
+render-level check as a sweep over the review fixture corpus, with a vacuity
+floor. It passed — and it *kept* passing with **either** half of the presenter fix
+reverted. The review fixtures never populate the host-local detail store, so
+`payload.summary` is nil on every row and the doubling cannot appear in that
+surface at all. A floor counting rows with a visible second line does not save a
+check whose surface cannot produce the defect. Re-sited:
+
+- **Root cause, `AgentToolDetailStoreChecks`** over a real store, with
+  independent teeth for each half. Its old assertion *pinned the doubling*
+  (`"Edited File.swift\nChanged: …/project/File.swift"`) and is now the opposite.
+  A `bash`-with-affected-files case was added so the abbreviation and
+  no-absolute-path assertions still have a live file line to run against —
+  otherwise removing the doubled line would have left them vacuous.
+- **Render-level wall, `--transcript-rhythm-check`**, driving a real
+  `ToolCallView` with the exact payload the bug produced, plus a negative leg: a
+  body line that genuinely adds a fact must survive, or the fix is just muting
+  detail. The renderer dedupe is now case-insensitive, which is what makes that
+  witness able to fail.
+
+*Teeth, all verified:* reverting the file suppression, the first-line
+suppression, or the case-insensitive compare each fails with its own message.
+
+**T4, the glyph vocabulary.** `bubble.left` was *both* the reasoning glyph and the
+glyph for every delegation verb, so `delegate_agent` rendered as a thought.
+Delegation now resolves to `person.2`, tested before `read`/`search` because a
+delegation tool name can contain either, and rhyming with the chip the row
+becomes. `"run "` and `"cat "` carried trailing spaces and so could never match a
+bare tool name. And `CanvasSymbolImage.image(named:)` returns nil for a symbol
+this OS lacks, straight into `iconView.image` — a genuinely blank column,
+contradicting the mapping's own promise to "degrade to today's behaviour rather
+than to a blank column"; `symbolImage(forToolNamed:)` now falls back.
+
+`PiEventTranslator` and `ManagedTranscriptRehydrator` both lacked the `.subagent`
+case `ClaudeEventTranslator` has, so a rehydrated delegation bucketed as a
+command while the live one did not.
+
+## T3 — A folded duration is a span, not a sum (2026-08-25)
+
+Dylan: *"the working time isn't cumulative, it restarts often? for a new tool
+call?"*
+
+`clusterSummaryText` accumulated `totalDuration += detail.duration` over each
+member's own `endedAt - startedAt`. Its doc comment admitted the shape — "sums
+only what the detail store actually knows" — but the consequence was not written
+down: **every interval between tools was excluded**, which is all of the model's
+thinking time. Three 30 ms `Bash` calls read `0.1s` however long the run took.
+And the turn-scope header's "Worked for …" used the same sum, so the one figure
+claiming to describe a whole turn was the least accurate number on screen.
+
+Two scopes, two sets of endpoints:
+
+- **A tool cluster** spans its members' detail records, earliest `startedAt` to
+  latest `endedAt`. Still host-local, still expires with the record — so it falls
+  back to the members' entry dates.
+- **A turn** spans its entries' `createdAt`, which is document state and
+  therefore survives the 1 h detail TTL.
+
+**The thing that made this more than a `min`/`max` swap.** A turn header
+deliberately omits the turn-start row — the user prompt stays rendered because
+the turn separator and the hover "sent at" reveal both key off it — and may omit a
+terminal assistant row. Those two omitted rows are *exactly* the endpoints a
+turn's duration needs, and every folded member usually belongs to one assistant
+entry. So the first implementation measured a span over `memberIndexes`, got zero,
+and printed no duration at all — indistinguishable from the old bug. `Header`
+now carries `turnRange` for turn scope, which is not derivable from its members.
+
+**Witness:** `checkAFoldedTurnReportsASpanNotASum` in the gating
+`--transcript-rhythm-check`, over a document with **no host-local detail records
+at all** — the sharpest form of the defect, because the old code's
+`knowsAnyDuration` was then false and it printed no duration while the document
+had honest timestamps the whole time. Four brief tools spread over 45 s; the
+header must read 45 s. RED first, twice, and for two different real reasons:
+`Worked · 4 tools` at HEAD, and again on the member-span implementation.
+
+**One thing the plan asked for that I did not do.** It said the turn header and
+the settled tail's "Worked for Ns" should be asserted to agree. They measure
+genuinely different quantities — the tail anchors on `submittedAt`, which precedes
+the first entry and so includes spawn/cold-start dead air the document cannot see.
+They will read close, not equal. Asserting equality would have pinned a falsehood,
+so the two are left as what they honestly are.
+
+## T5 — Array's own pi spawn tool had never been reachable (2026-08-25)
+
+Dylan: *"delegate agent in Pi doesn't work."* Two independent causes; this is the
+one that was Array's own bug.
+
+`RoleRegistry.toolsArguments(roleId:allowingSpawn:)` has carried a comment since
+C8 saying *"The caller passes `allowingSpawn: depth < maxSpawnDepth`"*. **No
+production caller ever did.** Both went through the convenience overload, which
+hardcodes `false`; `allowingSpawn: true` appeared only in a check. So every roled
+pi agent was denied `spawn_agent` — while the extension itself was bundled,
+installed and correctly passed as `-e`. Three of four blockers fixed, the feature
+still dead.
+
+**Sharpening the claim changed the witness.** A *roleless* pi agent sends no
+`--tools` at all, and pi treats an absent allowlist as permit-everything
+(`agent-session.js`), so a roleless agent has had both verbs all along — almost
+certainly how `Fixtures/spawn-agent-tool-call.jsonl` was captured. The defect is
+specific to ROLED agents, so a roleless witness would have passed while the bug
+stood. Both witnesses use a roled record, and one asserts the roleless case still
+sends nothing, because passing `--tools` there would *narrow* what it can do.
+
+**T5.1, the seam.** `runnerConfig` is `nonisolated` and pure over one record;
+`depth(of:)` walks the supervisor's record tree on the main actor. The factory
+seam now takes `AgentRunnerLaunch { record, spawnDepth }` — a struct rather than a
+second parameter so the ~60 `makeRunner: { _ in … }` injections keep compiling and
+only the ~14 that read the record change, which the compiler enumerated
+exhaustively. `spawnDepth` is **required with no default**: a defaulted parameter
+is exactly how this bug happened once. `maxSpawnDepth` became `nonisolated`.
+`RoleRegistry.resolve` deliberately stays at `false` — it computes spawn-time
+flags for a child whose depth is not yet known, and `runnerConfig` re-derives the
+live list every turn.
+
+**T5.2, and it is a judgement call worth flagging.** `spawnToolNames(for: .pi)`
+returned `["spawn_agent"]` and `toolsArguments` appended only `.first`. pi has
+**two** delegation verbs and only one is Array's: `delegate_agent` comes from a
+third-party extension Dylan installed himself. Because `--tools` is a hard
+allowlist that covers extension tools, T6 would have been dead on arrival for
+roled agents without this. All missing verbs are now appended. **Measured, not
+assumed:** naming a tool that is not installed is silently filtered by pi — a
+probe with `--tools 'read,definitely_not_a_tool'` exited 0 with a normal session.
+
+**Witnesses.** `--strict-agent-harness-check` pins the argv for a roled record at
+depth 0, 1 and the cap. `--agent-supervisor-check`'s `checkSpawnFromToolCall` is
+the one that matters: it takes the depth from the supervisor's own record tree, so
+it fails on a supervisor that never threads it — `runnerConfig` alone would go
+green because the check would be choosing the depth itself. It also asserts the
+act still tests what it claims (the child really is below the cap) before
+asserting the outcome, and that the grandchild AT the cap is offered nothing.
+
+*Teeth, verified:* reverting the call site to `allowingSpawn: false` fails at
+depth 0; changing `<` to `<=` fails at the cap.
+
+## T6 — a pi delegated child gets a tile, a transcript, and an honest end (2026-08-25)
+
+The other half of *"delegate agent in Pi doesn't work."* `delegate_agent` runs its
+child as a separate `pi --mode json -p --no-session` process and the parent
+appends that child's stdout to `.pi/agent-runs/<runId>/events.jsonl`. So the
+claude design — route the child's frames off the parent's stream by
+`parent_tool_use_id` — has no pi analogue. The child has to be read from a file.
+
+**Two probes ran first, in a throwaway /tmp repo, and both mattered.**
+
+1. **Does the parent outlive a background child?** Everything rests on it.
+   Measured: yes, decisively. A `background: true` delegation returns its tool
+   result in milliseconds but the parent PROCESS blocks until the child exits — it
+   sat idle for 79 s waiting on a 75 s child and exited 41 ms after the child's
+   `finished` line. So Array can tail the run for the child's whole life from
+   inside the parent's runner. (The extension's own source comment predicts the
+   opposite for one-shot sessions; it is wrong for this path.)
+2. **Is the child's prose recoverable?** This one changed the design.
+   `message_update` deltas exist *during* the run and the completion rewrite
+   strips **every one of them** (24 → 0). A completed run holds its text only in
+   `message_end`. Replaying a finished run without reading completed messages
+   yields tools, turns and usage and **not one word**.
+
+Two more measured facts that shaped the code: compaction is temp-file + rename, so
+the **inode changes** — an fd-holding tailer would keep reading a deleted inode
+forever; and `result.details` carries `runId` *and* `task`, so the prompt body is
+on the parent's wire and has to be deliberately not read.
+
+**What landed.**
+
+- `SpawnRequest.parsePiDelegateTool` — its own parser, not folded into `parse`,
+  because a `delegate_agent` child is already running and must be `observedOnly`.
+  Every argument name differs (`agent`/`task`/`worktree`), which is why the
+  existing parser returned nil twice over.
+- Identity on the **tool call id**, never the `runId`: the runId embeds a
+  timestamp and a random suffix, so a runId-keyed identity mints a fresh child on
+  every re-observation. The runId arrives separately, validated as a path
+  component, on `onObservedRun`.
+- `PiEventTranslator(replayingCompletedMessages:)`, default off so the live path
+  stays byte-identical. `role == "user"` is skipped unconditionally: in a child's
+  own file that line is the `Task: …` prompt body.
+- `RunArtifactsWatcher.setWatchedRunIds` — **mandatory, not tuning**. Array's own
+  checkout has 143 run directories; unfiltered, the watcher stats four paths in
+  every one of them every 0.25 s and reads them all on first scan.
+- `RunArtifact.pid` + `isFinished(isProcessAlive:)`. Array's own parent process
+  writes these runs, so a `running` status that survives a restart is stale by
+  construction, and believing it is the resurrection bug.
+- The claude-only `runner as? ClaudeAgentRunner` downcast became two capability
+  protocols. **That downcast is why this whole path was unreachable for pi.**
+- Cursors are never persisted and tailing never resumes after a relaunch: the
+  child's events were already written to its transcript when delivered, so
+  replaying would duplicate a transcript. A relaunch does one `run.json` read per
+  child and says out loud if the run died with the last session.
+
+**Witness.** `checkPiDelegatedRunTailing` in `--agent-supervisor-check`, driven
+entirely through production — a real supervisor, the real translator, the real
+`runner as? ObservedRunReporting` wiring, the real watcher, the real `restore()`.
+`FixtureStreamRunner` was given the new capability so the subscription is
+exercised rather than bypassed; a check that called `bindObservedRun` itself would
+pass on a supervisor that never subscribed, which is *exactly* the defect. Six
+properties: one read-only child keyed on the tool call id with the task body off
+the event boundary; the child's own work on the child; appending delivers only
+what is new; the completion rewrite closes the run instead of replaying it; a
+relaunch adds no child and no duplicate events; a stale `running` with a dead pid
+reads as over.
+
+*Teeth:* removing the `ObservedRunReporting` subscription fails with "the
+delegated child received none of its own work — the run was never tailed".
+Removing the parse fails with "expected exactly one delegation, got 0". Dropping
+the replay flag fails with "recovered no assistant prose".
+
+**Two process notes.** The witness first failed for two reasons that were mine,
+not the code's: the fixture runner emits its whole stream synchronously inside
+`run`, so a parent spawned WITH a prompt replays before a subscriber can attach
+(the existing spawn check already knew this — spawn with `prompt: nil`, subscribe,
+then `send`); and the suite's shared `config` is claude's, so a pi agent refuses
+it. `warn: { _ in }` hid both for three iterations — a check that swallows the
+supervisor's own warnings debugs blind.
+
+`--agent-supervisor-check` failed once on "one Undo did not restore the complete
+pre-insertion query", immediately after a 23 s build. 4/4 clean on a quiet
+machine, and HEAD passes 3/3 — it is the known load flake in this leg, not a
+regression.
+
+## Gate: full matrix, 2026-08-25
+
+**181 legs run, 6 expected KNOWN-RED, no unexpected passes, no real failures.
+Matrix passed.**
+
+KNOWN-RED, all pre-existing and none of them touched here: `--nav-mode-check`,
+`--perf-budget-zoom-check`, `--canvas-zoom-invalidation-probe-check`,
+`--perf-budget-gesture-transition-check`, `--perf-budget-magnify-slope-check`,
+`scripts/check-root-docs.sh`.
+
+**Two process findings, both about judging a run rather than about the code.**
+
+1. **The first run halted on the iOS build and I nearly read it as a pass.** The
+   two new protocol conformances sat outside the `#if os(macOS)` blocks their
+   runner types live in, so `swift build --product Array` was green and the iOS
+   target could not find the types. Every leg after the build was voided.
+   `swift build` (no `--product`) would have caught it; `--product Array` cannot.
+2. **The second run aborted at `git diff --check`** on trailing newlines the same
+   edit introduced, so `matrix_report` never printed — and the shell's exit code
+   was 0 anyway, because it reflected the backgrounded wrapper rather than the
+   script. Six legs had run out of 181. **The leg COUNT is the thing a halt hides;
+   the exit code is not evidence.** This is the same lesson as `865b0d3` (4 of 135
+   legs), arriving in a new costume: last time the halt was a failing leg, this
+   time it was a whitespace check.
+
+**`--perf-budget-gesture-transition-check` re-judged.** The earlier note that it
+PASSED while listed was one observation. It failed here, so it stays on the
+allowlist and the note is withdrawn — the flapping is real and the entry is
+correct.
+
+## T7 — a refused spawn says something actionable (2026-08-25, from a live run)
+
+Dylan, driving the build: *"using pi delegating agents failed... but then it looks
+like it worked, but why can i open the sub agent tile?"* with
+`spawn_agent refused: the requested role is not defined in this project`.
+
+**Two findings, and the first is the good news.** `spawn_agent` was OFFERED and
+CALLED — which is what T5 was for. It then refused because
+`~/array-transcript-verify` has no `.pi/agents` directory at all.
+
+**Correction worth recording: T5.2 did not cause this and could not have
+prevented it.** The agent in question is ROLELESS, so `toolsArguments` returns
+`[]`, no `--tools` reaches pi, and pi treats an absent allowlist as
+permit-everything — so a roleless pi agent has always had `spawn_agent`. T5 fixed
+*roled* agents. This refusal is pre-existing behaviour meeting an empty project.
+
+**The message was the defect.** "The requested role is not defined in this
+project" reads as a typo when the truth is that the project defines no roles at
+all. Split into `projectDeclaresNoRoles(directory:)`, which names the directory to
+add a role to and still refuses to echo the requested role id — the P2D.2 witness
+holds that out of every event on the parent's stream and this reason would have
+been the one hole in it.
+
+**The tile question, answered from the store rather than from reasoning.** The
+refusal minted nothing: `refuseSpawn` emits an error item and returns nil. Checked
+the live dev store — zero `agentReference` blocks anywhere (transcripts, canvas,
+managed-sessions), and the only two child records are **claude** children of
+`A11B2A43…`, both still titled `toolu_…`, i.e. stale records from before the
+naming fix in `52a57d0a`. **No pi child was created, so there is no pi subagent
+tile.** The openable ones are old claude subagents.
+
+**Witness:** `checkRefusedSpawnIsActionableAndLeavesNothing` in
+`--agent-supervisor-check`, driving the real `handleSpawnRequest`. Asserts the
+refusal names the directory, does NOT echo the role, and — the half Dylan's
+question was actually about — leaves **no record, no `childAgentSpawned`, and
+therefore no openable tile**. Plus a negative leg: a role the project DOES define
+still spawns, so the guard is not a blanket refusal.
+
+*Teeth:* removing the guard fails with the exact string from the screenshot.
+
+**Still open, and bigger than this ticket.** `spawn_agent` is inert by design — the
+extension returns `spawned: <role>` whatever happens — so the MODEL is told its
+delegation succeeded while Array refuses it. The transcript is honest to the user
+and dishonest to the model, and the model then reasons about children that do not
+exist. That is a real design problem and it is not fixed here.
+
+## T8 — transcript links, surfaced Codex descendants, and focus lineage (2026-08-26)
+
+The release slice is specified and evidenced in
+`.plans/51-transcript-links-subagents-lineage.md`. It closes three seams that were
+individually small but collectively blocked a credible transcript feel test.
+
+**Links.** A normal transcript web-link click creates a fresh Array browser tile
+beside the agent and in the agent's resolved zone. A repeated click creates a
+second tile. Command-click and the context menu retain an explicit system-browser
+route. Local-file, `continuum:`, and rejected-scheme behavior is unchanged.
+
+**Delegation.** Claude references are content-sized outlined capsules with an
+inert surrounding row. Codex app-server is now the default transport and its
+structured provider identities are routed into observed-only child and nested
+grandchild agents. Parent completion waits for announced live descendants, so a
+late child's output and terminal state are not truncated or leaked into the
+parent transcript. `CONTINUUM_CODEX_TRANSPORT=exec` remains the explicit escape
+hatch, and fallback cannot replay a prompt after a turn has been accepted.
+
+**Lineage.** Parent or child focus now shows the parent's visible direct-child
+fan above opaque tiles and below focus/HUD chrome. One screen-space compound path
+and one dash-phase animation serve the entire bounded fan (eight children), with
+a restrained accent stroke, static arrowheads, Reduce Motion fallback, and lifecycle
+suspension. The overlay never participates in hit-testing.
+
+**First feel-pass correction, 2026-08-26.** The delegated controls were too
+cramped and read as anonymous text pills. They now centre a guaranteed agent
+glyph with the label, use balanced padding and a softer rounded-rectangle radius,
+and tint glyph/boundary/faint resting wash from live semantic state. The lineage
+halo read as a black outline in dark mode, so it was removed; the already
+priority-visible marching stroke was reduced to 1.25 points at 62% opacity.
+
+The follow-up screenshot also proved AppKit's button-cell centring was not
+centring the icon/title union. The universal agent-reference renderer now lays
+out an explicit 14-point glyph, four-point gap, and measured title as one centred
+group. The outer chip is inset so that title lands exactly on the existing tool
+action reading column. This is a single provider-neutral render path: Pi, Codex,
+and Claude do not carry separate capsule layouts.
+
+One final Codex screenshot showed two overlapping labels: the new explicit title
+plus `NSButtonCell`'s own painted title. The cell is now forced empty and its
+drawing is suppressed, leaving it responsible only for interaction, keyboard
+activation, and accessibility. The focused witness asserts that invariant and
+can emit a real PNG row for visual inspection.
+
+**Gate.** Focused link, first-paint, relationship-geometry, Codex backend/parity/
+runner, and supervisor witnesses passed. The strict harness and regenerated
+384-record matrix inventory passed. The complete
+`CONTINUUM_SKIP_UI_BASELINES=1 scripts/run-matrix.sh` run executed all 181 legs
+and passed: four established performance probes were expected-red, while the
+known-flaky gesture-transition probe happened to pass and remains allowlisted.
+UI baseline comparisons were intentionally skipped; live UI and bundle/codesign
+checks still ran. The remaining gate is a human feel pass in the isolated
+`~/Desktop/Array Transcript.app`; this work must not overwrite
+`/Applications/Array.app`.

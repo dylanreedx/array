@@ -124,18 +124,6 @@ MATRIX_KNOWN_RED=(
   # always-render-live constraint forbids. Published in
   # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
   --perf-budget-magnify-slope-check
-  # The streaming axis's product target. Still RED, but NOT for the reason it was
-  # published: the incremental row index (.plans/22 Slice 4) took the delta from
-  # 10,000 block visits to 1, with fullFlattens 0 and slope 0, and the wall clock
-  # did not move — exactly the pattern the retained world plane hit one axis over.
-  # Every COUNT budget is green; only worstDeltaDuration is over. A profile puts
-  # the remaining 36 ms in two other per-delta O(history) passes that the row
-  # index never touched: prepareToolDetailLifecycle rebuilding a dictionary over
-  # every entry (~35%), and applyUnscrolled's presentation passes — the rowsByID
-  # rebuild, the snapshot append, the role-change scan (~56%). Both are named in
-  # Slice 4 and neither is started. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-transcript-delta-check
   # Inherited host-calibration red on macOS 26.6.1 / SDK 26.5 (2026-08-21).
   # The exact 0.5.7 release commit fails 3/3 at 8.93-10.20 ms and this candidate
   # fails 3/3 at 10.80-11.35 ms against the 8.3 ms coarse worst-step alarm.
@@ -143,16 +131,19 @@ MATRIX_KNOWN_RED=(
   # chrome/layout work, zero interleave excess, and <=0.31 ms handoff overhead.
   # Keep the strict target; remove this only after a display/OS-calibrated
   # witness replaces the single worst-sample alarm.
+  # RE-JUDGED on a quiet machine, 2026-08-25, because the run reported it as an
+  # unexpected PASS and this script says to remove such a leg. Do NOT: five
+  # consecutive runs measured worstStepDuration at 7.878 / 7.737 / 7.817 / 8.041 /
+  # 8.296 ms against a budget of 8.300. It passes by four MICROseconds at the top
+  # of its own spread, so it is a coin flip, not a fixed leg — removing it makes
+  # the gate red on any run that is not idle. It leaves this list when the
+  # measurement has headroom, not when one run happens to land under.
   --perf-budget-gesture-transition-check
   # This display-dependent speed tripwire is calibrated to ~2.9 ms/live tile,
   # but the exact 0.5.7 release commit measures 4.86 ms and this candidate 5.04
   # ms on the same host. All correctness assertions inside the leg stay green.
   # Preserve the tripwire as an inherited RED; do not weaken or rebaseline it.
   --tile-surface-residency-check
-  # `check-root-docs.sh` demands 9 README markers from the pre-65d420a doc
-  # taxonomy, one of which ("Continuum Revived") now contradicts the
-  # user-visible-identity rule. It must leave this list when its cause is fixed.
-  scripts/check-root-docs.sh
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.

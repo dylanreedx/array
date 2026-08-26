@@ -247,6 +247,46 @@ public final class ProcessGroupChild: @unchecked Sendable {
         return 128 + (raw & 0x7F)
     }
 
+    // MARK: - Draining
+
+    /// Read whatever remains on `handle` without EVER blocking past `cap`.
+    ///
+    /// The runners used to call `readDataToEndOfFile()` after the leader's
+    /// `wait()`, and that is the exact trap `pollExitRaw` documents from the
+    /// other side: a normally-exited leader can leave a descendant (a Task
+    /// subagent, an MCP server, a backgrounded shell) holding the inherited
+    /// write end of fd 1/2, and end-of-file then arrives only when THAT process
+    /// exits — potentially never. This is the bounded form: non-blocking reads,
+    /// a short poll between empty ones, done at EOF or at the deadline,
+    /// whichever comes first. Callers terminate the group first (as the one-shot
+    /// path does), so in practice EOF is immediate; the cap is the backstop.
+    public static func drainRemainder(of handle: FileHandle, cap: TimeInterval = 2.0) -> Data {
+        let descriptor = handle.fileDescriptor
+        guard descriptor >= 0 else { return Data() }
+        let flags = fcntl(descriptor, F_GETFL)
+        if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let deadline = Date().addingTimeInterval(max(0, cap))
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                read(descriptor, bytes.baseAddress!, bytes.count)
+            }
+            if count > 0 {
+                collected.append(contentsOf: buffer.prefix(count))
+                continue
+            }
+            if count == 0 { break }  // EOF: every write end is closed.
+            if errno != EAGAIN && errno != EWOULDBLOCK { break }
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { break }
+            var descriptorSet = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let pollResult = poll(&descriptorSet, 1, Int32(min(remaining * 1000, 50)))
+            if pollResult < 0 && errno != EINTR { break }
+        }
+        return collected
+    }
+
     // MARK: - Stopping
 
     /// The two graces this codebase uses, as VALUES rather than two code paths.

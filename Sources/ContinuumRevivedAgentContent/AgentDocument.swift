@@ -76,6 +76,20 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
     /// nil — never "now", which would be a fabricated timestamp on real history.
     public var createdAt: Date?
 
+    /// Wall clock at which this entry was CLOSED, i.e. the `finishEntry`
+    /// mutation.
+    ///
+    /// `createdAt` is stamped on `beginEntry`, which for an assistant entry is
+    /// the moment of its FIRST TOKEN — so a span measured from `createdAt` to
+    /// `createdAt` across a turn reports time-to-first-token and excludes the
+    /// entire answer. This is the other endpoint, and it is the only one that
+    /// makes a turn's duration mean what it says.
+    ///
+    /// Optional for the same reasons `createdAt` is, plus one more: an entry that
+    /// is still open genuinely has no end yet, and a reader must show nothing
+    /// rather than pretend the turn ended now.
+    public var finishedAt: Date?
+
     public init(
         id: AgentNodeID,
         revision: UInt64 = 0,
@@ -83,7 +97,8 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         provenance: AgentProvenance,
         lifecycle: AgentEntryLifecycle = .open(markupBlockID: nil),
         blocks: [AgentBlock] = [],
-        createdAt: Date? = nil
+        createdAt: Date? = nil,
+        finishedAt: Date? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -92,10 +107,11 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         self.lifecycle = lifecycle
         self.blocks = blocks
         self.createdAt = createdAt
+        self.finishedAt = finishedAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, revision, role, provenance, lifecycle, blocks, createdAt
+        case id, revision, role, provenance, lifecycle, blocks, createdAt, finishedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -108,6 +124,7 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
             ?? .open(markupBlockID: nil)
         blocks = try container.decode([AgentBlock].self, forKey: .blocks)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
     }
 }
 

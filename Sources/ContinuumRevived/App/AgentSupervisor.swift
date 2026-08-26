@@ -65,7 +65,34 @@ extension AgentRunning {
     }
 }
 
+/// B2.2 — a REFINEMENT, deliberately not a wider `AgentRunning`.
+///
+/// A session runner holds one provider process for the agent's whole life, which
+/// is what makes mid-turn steering and a clean interrupt possible at all. The
+/// three one-shot runners do not conform and compile untouched, keeping
+/// `.sendStop(...)` as their conservative floor; the supervisor composes real
+/// capabilities only when a session runner is actually bound.
+///
+/// **Capabilities come from the BOUND RUNNER, never from `record.harness`.** A
+/// harness-name table lies for the entire migration window, when pi-one-shot and
+/// pi-rpc are both live in one build — and the thing that will execute the intent
+/// is the only honest source for what it can do.
+protocol AgentSessionRunning: AgentRunning {
+    var sessionCapabilities: PiRpcSessionCapabilities { get }
+    /// Turn-boundary steering. pi documents delivery as AFTER the current
+    /// assistant turn finishes its tool calls and before the next LLM call
+    /// (`agent-session.js:986`) — it is not mid-tool interruption, and no comment
+    /// or UI string may promise that it is.
+    func steer(_ text: String) throws
+    /// Clean, awaited, no signal — and therefore no lost session file.
+    func interrupt() throws
+    @discardableResult
+    func command(_ type: String, payload: [String: Any]) throws -> [String: Any]
+}
+
 extension PiAgentRunner: AgentRunning {}
+extension PiRpcAgentRunner: AgentRunning {}
+extension PiRpcAgentRunner: AgentSessionRunning {}
 extension ClaudeAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentRunning {}
 
@@ -842,6 +869,16 @@ enum AgentNameOneShot {
     }
 }
 
+/// One-way latch: did this run deliver a `.turnCompleted`? Set and read on the
+/// main queue in production — the lock exists so the compiler can prove the
+/// capture by the runner's `@Sendable` event closure is safe.
+private final class TerminalDeliveryLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
+}
+
 @MainActor
 final class AgentSupervisor {
     /// How much of an agent's event history a late subscriber replays. Capped
@@ -852,7 +889,7 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
-    private let makeRunner: (AgentRecord) -> AgentRunning
+    private let makeRunner: (AgentRunnerLaunch) -> AgentRunning
     private let warn: (String) -> Void
     /// The production writer is `AgentStore.upsert`. The optional seam exists only
     /// for deterministic checks that need to model an AtomicWriter throw before or
@@ -880,6 +917,11 @@ final class AgentSupervisor {
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
     private let submissionRecoveryStore: AgentComposerDraftStore?
+    /// C4: persistence must not require a tile. `nil` in every check that does
+    /// not pass one (the overwhelming majority), so building/ingesting the
+    /// per-agent projection below is skipped entirely rather than adding
+    /// per-event cost to hundreds of unrelated fixtures.
+    private let transcriptStore: AgentTranscriptStore?
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -890,6 +932,13 @@ final class AgentSupervisor {
     private var runners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
+    /// C4: the semantic document, built here so it exists whether or not any
+    /// tile is attached — a tile-less child (the common case at fan-out) used
+    /// to persist nothing, because the only `saveSnapshot` call site lived
+    /// inside the tile's own event hook. Uninjected (no `transcriptStore`)
+    /// means this stays empty; a check that never passes a store pays nothing.
+    private var transcriptProjections: [AgentID: ManagedAgentTranscriptModel] = [:]
+    private var transcriptPersistenceTasks: [AgentID: Task<Void, Never>] = [:]
     /// Queue 91 P2 host-local projection. Never persisted or published: it carries
     /// concrete checkout/current/tool-target URLs that are outside I5's wire model.
     private var locationProjectors: [AgentID: AgentLocationProjector] = [:]
@@ -908,6 +957,27 @@ final class AgentSupervisor {
     /// events can arrive back-to-back; ordering them prevents a late restore from
     /// racing a successful confirmation and makes replay/rebind idempotent.
     private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
+
+    // MARK: - B4 follow-up queue
+    //
+    /// Mirrors `AgentComposerDraftStore`'s durable per-agent queue for
+    /// synchronous UI reads (pending chips). The store is the source of truth;
+    /// this cache is refreshed after every mutation this supervisor performs
+    /// and hydrated lazily on first read for an agent restored across launch.
+    private var queuedMessagesCache: [AgentID: [AgentComposerQueuedMessage]] = [:]
+    /// Queue mutations against the durable store are serialized per agent, the
+    /// same reason `submissionRecoveryTasks` is: back-to-back UI actions and a
+    /// `turnCompleted` drain must not race each other's read-modify-write.
+    private var queueOpTasks: [AgentID: Task<Void, Never>] = [:]
+    /// Set on `.interrupted`. A user who interrupted wants to look first, so
+    /// the held queue is not auto-drained into a turn they did not ask for.
+    /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
+    private var pausedQueues: Set<AgentID> = []
+    /// The outcome of the turn that just freed a runner slot, read by
+    /// `clearRunner` — the one moment the slot is actually free to accept the
+    /// next send. Set in `deliver`'s `.turnCompleted` handling, same as the
+    /// submission-recovery branch beside it.
+    private var pendingQueueOutcome: [AgentID: TurnOutcome] = [:]
 
     /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
     /// a provider process may remain alive while its turn is ready, and that must
@@ -955,14 +1025,15 @@ final class AgentSupervisor {
 
     init(
         store: AgentStore,
-        makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.productionRunner,
+        makeRunner: @escaping (AgentRunnerLaunch) -> AgentRunning = AgentSupervisor.productionRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
         nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
         attachmentStore: AgentComposerAttachmentStore? = nil,
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
-        codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil
+        codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
+        transcriptStore: AgentTranscriptStore? = nil
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -974,6 +1045,7 @@ final class AgentSupervisor {
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
         self.submissionRecoveryStore = submissionRecoveryStore
+        self.transcriptStore = transcriptStore
         self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
             guard let threadId = record.codexThreadId else { return nil }
             return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
@@ -1039,18 +1111,45 @@ final class AgentSupervisor {
     /// is pure and pinned in the matrix (`AgentBackendConfig.route`); only the
     /// backend preference and the availability reads are live. The DEFAULT
     /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
-    nonisolated static func productionRunner(for record: AgentRecord) -> AgentRunning {
+    nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        let record = launch.record
         switch record.harness {
         case .claudeCode: return claudeRunner(for: record)
         case .codex: return codexRunner(for: record)
-        case .pi: return piRunner(for: record)
+        case .pi: return piRunner(for: launch)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
     }
 
     /// The only `PiAgentRunner(` construction in the app.
-    nonisolated static func piRunner(for record: AgentRecord) -> AgentRunning {
-        PiAgentRunner(config: runnerConfig(for: record))
+    ///
+    /// M4: the rpc session transport is opt-in, and the one-shot path stays on
+    /// disk as both the fallback and the anti-cheat baseline — a leg that proves
+    /// the new transport translates identically has to be able to run the old one.
+    /// It defaults OFF because one field of the rpc command payload had not been
+    /// verified against a live multi-second turn when it was written; the shape is
+    /// confirmed against pi's own `rpc-types.d.ts`, but confirmed-by-declaration is
+    /// not the same as driven.
+    nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
+        guard piSessionTransportEnabled() else {
+            return PiAgentRunner(config: config)
+        }
+        return PiRpcAgentRunner(config: config)
+    }
+
+    /// Env-gated, like the codex transport switch, so a self-check leg and a
+    /// release build both take the shipped path unless a developer asks.
+    nonisolated static func piSessionTransportEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["CONTINUUM_PI_TRANSPORT"] == "rpc"
+    }
+
+    /// The session runner bound to this agent RIGHT NOW, or nil.
+    ///
+    /// The one honest source for what the composer may offer. Reading it from the
+    /// bound runner rather than from `record.harness` is the whole point of B2.2.
+    func sessionRunner(for id: AgentID) -> AgentSessionRunning? {
+        runners[id] as? AgentSessionRunning
     }
 
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
@@ -1064,12 +1163,33 @@ final class AgentSupervisor {
     /// pass through as `--effort` only on exact match, and the role's
     /// pi-specific `--tools` args are deliberately not forwarded — claude
     /// runs its own toolset.
+    ///
+    /// B7.1: `claudeSessionId(for:)` is the SEED — what a fresh agent (no
+    /// adopted id yet) uses. `record.providerSessionId`, when set, is what
+    /// claude itself has reported since (captured from `system/init`), which
+    /// is authoritative once `--fork-session` (B7.2) has minted an id Array
+    /// could not have predicted.
     nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
-        ClaudeAgentRunner.Config(
+        // B7.2 — a pending `/clear` rotation overrides the normal sessionId
+        // choice entirely: this ONE launch resumes-and-forks the OLD session
+        // (`record.pendingSessionForkFrom`) instead of continuing on
+        // `providerSessionId`/the derived seed. `AgentSupervisor
+        // .ingestRuntimeObservation` clears the pending marker the moment the
+        // forked id comes back and is adopted into `providerSessionId`.
+        if let forkFrom = record.pendingSessionForkFrom {
+            return ClaudeAgentRunner.Config(
+                model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
+                effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
+                sessionId: forkFrom,
+                forkSession: true
+            )
+        }
+        return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
-            sessionId: claudeSessionId(for: record.id),
+            sessionId: record.providerSessionId ?? claudeSessionId(for: record.id),
             // An agent that has never had a turn cannot have a conversation to
             // resume, so resume-first would spawn a CLI process purely to be told
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
@@ -1106,7 +1226,15 @@ final class AgentSupervisor {
     /// files are tracked in the repository, so an isolated agent's worktree carries
     /// the same `.pi/agents` its project does, and editing a role file takes effect on
     /// the next run instead of being frozen at spawn time.
-    nonisolated static func runnerConfig(for record: AgentRecord) -> PiAgentRunner.Config {
+    /// `spawnDepth` is REQUIRED and has no default. `toolsArguments`' own comment
+    /// has said since C8 that "the caller passes `allowingSpawn: depth <
+    /// maxSpawnDepth`" — and no production caller ever did, so Array's pi spawn
+    /// tool was denied to every ROLED agent for the whole time it shipped. A
+    /// defaulted parameter is exactly how that happened once; it does not get a
+    /// second chance.
+    nonisolated static func runnerConfig(
+        for record: AgentRecord, spawnDepth: Int
+    ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
         // spawn time (`handleSpawnRequest`), and a role file edited since must not
@@ -1118,16 +1246,24 @@ final class AgentSupervisor {
             model: record.model,
             thinking: record.thinking,
             cwd: cwd,
-            sessionId: sessionId(for: record.id),
+            // B7.1: `sessionId(for:)` is the SEED a fresh agent uses;
+            // `record.providerSessionId` — nothing populates it for pi today,
+            // since Array's own `--session-id` is authoritative there, but the
+            // field is provider-neutral (mirrors `codexThreadId`) — would win
+            // if a future pi path ever needed to adopt an id it did not mint.
+            sessionId: record.providerSessionId ?? sessionId(for: record.id),
             // Only scan for roles when this agent HAS one. `toolsArguments(roleId:)`
             // returns [] for nil, so building a registry first was a directory
             // enumeration plus a frontmatter parse of every role file — on the main
             // actor, on every turn — to compute an empty array for the common case.
             // Array's own project has 12 role files; a roleless agent read all of
             // them before each prompt.
+            // T5 — the spawn verbs are appended only below Array's own cap, so the
+            // model is never OFFERED a verb it cannot use. That is better than
+            // refusing after the fact: it never proposes what it cannot have.
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
-                    .toolsArguments(roleId: $0)
+                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
             } ?? []
         )
     }
@@ -1209,6 +1345,22 @@ final class AgentSupervisor {
             guard record.codexThreadId != value else { return }
             var updated = record
             updated.codexThreadId = value
+            records[id] = updated
+            persist(updated)
+            return
+        }
+        // B7.1 — claude's own reported session id. Same shape and same
+        // inequality guard as `.threadId` above (a no-op when `system/init`
+        // re-echoes the id a normal, non-forked resume already has).
+        if case let .providerSessionId(value) = observation {
+            // B7.2: a pending fork clears the moment its new id is adopted —
+            // checked before the inequality shortcut below, since the whole
+            // point of a fork was to stop using the id `record.providerSessionId`
+            // held before it, and that stale marker must not survive a no-op.
+            guard record.providerSessionId != value || record.pendingSessionForkFrom != nil else { return }
+            var updated = record
+            updated.providerSessionId = value
+            updated.pendingSessionForkFrom = nil
             records[id] = updated
             persist(updated)
             return
@@ -1403,6 +1555,13 @@ final class AgentSupervisor {
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
         }
+        // T6.6: every observed pi child restored above may have a delegated run
+        // that died with the previous session. Settle each one's fate from its
+        // `run.json` — one read, never `events.jsonl`, and never a watcher — so a
+        // child tile does not sit apparently mid-turn forever. Runs at the END,
+        // because it needs every restored record in `records` to resolve a child's
+        // parent.
+        reconcileObservedRunsAfterRestore()
         return report
     }
 
@@ -2035,6 +2194,13 @@ final class AgentSupervisor {
         records[id] = record
         persist(record)
 
+        // C4: the user's own words, echoed into the same durable transcript the
+        // provider's events land in. Without this a tile-less agent's saved
+        // transcript would be missing the prompt that started every turn — the
+        // tile used to supply this echo itself (`appendUserPrompt`), which is
+        // exactly the tile-shaped dependency this ticket removes.
+        recordTranscriptUserPrompt(prompt, for: id)
+
         // Stamp the spawn-window anchor BEFORE the runner is built, so the
         // interval covers makeRunner (which for pi walks `.pi/agents`) and the
         // dispatch, not just the provider's silence.
@@ -2044,7 +2210,9 @@ final class AgentSupervisor {
         // speaks for it. Cleared here rather than in `stop` because the throw it
         // guards arrives strictly after `stop` returns.
         stopRequestedAgents.remove(id)
-        let runner = makeRunner(record)
+        // `depth(of:)` walks the parent chain, which the caps bound at 3 links,
+        // once per turn — not on any per-delta path.
+        let runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
@@ -2061,12 +2229,82 @@ final class AgentSupervisor {
                 self?.ingestRuntimeObservation(observation, for: id)
             }
         }
+        // C7: a claude subagent's own work, routed to the CHILD rather than the
+        // parent. The child's id is re-derived from the same (parent, tool_use_id)
+        // pair the announcement used, so a frame that arrives before, after, or
+        // without its announcement still lands on the right agent.
+        //
+        // T6.5: asked for as a CAPABILITY, not as a class. The downcast was
+        // `runner as? ClaudeAgentRunner`, which made this whole path unreachable
+        // for every other harness — including pi, whose delegation Dylan was
+        // actually using.
+        if let observing = runner as? SubagentEventObserving {
+            observing.observeSubagentEvents { [weak self] toolUseID, event in
+                DispatchQueue.main.async {
+                    self?.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                }
+            }
+        }
+        // Codex app-server keys every frame by a provider thread id and can nest
+        // descendants. Keep that provider identity local, map the primary to the
+        // root Array agent, and adopt each announced child beneath the mapped
+        // provider parent.
+        if let observing = runner as? ProviderSubagentActivityObserving {
+            providerThreadAgentRoutes[id] = [:]
+            pendingProviderThreadEvents[id] = [:]
+            observing.observeProviderSubagentActivity { [weak self] activity in
+                DispatchQueue.main.async {
+                    self?.handleProviderSubagentActivity(activity, rootAgentID: id)
+                }
+            }
+        }
+        // T6: pi's delegated child does not stream on the parent at all — it
+        // writes its own run directory — so its runner reports a LOCATION and the
+        // supervisor tails it. Different mechanism, same destination: the child's
+        // own thread, through `deliverSubagentEvent`.
+        if let reporting = runner as? ObservedRunReporting {
+            reporting.observeObservedRuns { [weak self] handle in
+                DispatchQueue.main.async {
+                    self?.bindObservedRun(handle, parent: id)
+                }
+            }
+        }
         let threadId = Self.threadId(for: id)
+        // The translators mint `.turnCompleted` only from a provider result line.
+        // A CLI that dies without one (crash mid-line, init never parsed, silent
+        // exit 0) must not leave the turn open forever — the supervisor watches
+        // for the terminal event itself and closes the turn when the runner
+        // returns or throws without having delivered one.
+        let sawTurnCompleted = TerminalDeliveryLatch()
+        let harnessName = record.harness?.rawValue ?? "agent"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try runner.run(prompt: prompt) { event in
                     let bound = event.withThreadId(threadId)
-                    DispatchQueue.main.async { self?.deliver(bound, to: id) }
+                    DispatchQueue.main.async {
+                        if case .turnCompleted = bound { sawTurnCompleted.set() }
+                        self?.deliver(bound, to: id)
+                    }
+                }
+                // Dispatched from the same runner thread AFTER `run` returned, so
+                // main-queue FIFO serializes this behind every queued delivery.
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard !sawTurnCompleted.isSet else { return }
+                    // A stop already closes the turn through its own synchronous
+                    // `.sessionStateChanged(.stopped)`; a "no result" mint over it
+                    // would misreport a deliberate stop as a runner defect.
+                    guard !self.stopRequestedAgents.contains(id) else { return }
+                    let message = "The \(harnessName) process exited without reporting a result."
+                    self.appendAgentDiagnostics(
+                        "harness=\(harnessName) exit=no-result \(message)", agentID: id)
+                    self.deliver(
+                        .turnCompleted(
+                            threadId: threadId,
+                            turnId: "no-result:\(threadId)",
+                            outcome: .interrupted,
+                            errorMessage: message),
+                        to: id)
                 }
             } catch {
                 let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
@@ -2091,6 +2329,7 @@ final class AgentSupervisor {
                     // the flag was set would still overwrite the stopped state. It
                     // also covers any runner that has not adopted `AgentRunStopped`.
                     if runnerSaidStopped || self.stopRequestedAgents.contains(id) {
+                        self.noticePiConversationLoss(id)
                         self.deliver(
                             .turnCompleted(
                                 threadId: threadId,
@@ -2101,12 +2340,68 @@ final class AgentSupervisor {
                         return
                     }
                     fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
+                    // The fputs above is /dev/null for a GUI launched via `open`;
+                    // this line is the trail that survives the process.
+                    self.appendAgentDiagnostics(
+                        "harness=\(harnessName) exit=threw \(message)", agentID: id)
                     self.deliver(.runtimeError(threadId: threadId, message: message), to: id)
+                    // `.runtimeError` shows the error row; a `.turnCompleted` is
+                    // still owed so every consumer of turn liveness sees the turn
+                    // END — unless the runner already closed it before throwing.
+                    if !sawTurnCompleted.isSet {
+                        self.deliver(
+                            .turnCompleted(
+                                threadId: threadId,
+                                turnId: "failed:\(threadId)",
+                                outcome: .failed,
+                                errorMessage: message),
+                            to: id)
+                    }
                 }
             }
             DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
         }
         return true
+    }
+
+    /// Agents whose provider has produced enough output that pi would have written
+    /// its session file. See `deliver`.
+    private var piPersistenceWatermarkReached: Set<AgentID> = []
+
+    /// B1 — say it out loud at the moment of loss.
+    ///
+    /// Measured 2026-08-22 and re-measured 2026-08-24: signalling a pi process
+    /// before its session has produced one assistant message leaves the session
+    /// directory created and EMPTY, and a rerun with the same `--session-id`
+    /// reports no session found and starts fresh. M1.7 made that quieter, not
+    /// better: the error row that used to hint at it became a clean "Interrupted"
+    /// over a destroyed conversation.
+    ///
+    /// Deliberately narrow. It is not every stop — a long-lived session crosses the
+    /// watermark once, early, and then loses at most the in-flight message — and it
+    /// is not every harness: claude's SIGINT ends the turn and keeps the session,
+    /// and codex is unaffected. A warning that fired on every Stop would be
+    /// ignored, and being ignored is the same as being absent.
+    ///
+    /// It also survives the rpc migration rather than dying with it: rpc registers
+    /// SIGTERM/SIGHUP handlers that one-shot mode does not, but persistence is
+    /// gated by the watermark in BOTH modes, so the first turn stays exposed.
+    private func noticePiConversationLoss(_ id: AgentID) {
+        guard records[id]?.harness == .pi else { return }
+        guard !piPersistenceWatermarkReached.contains(id) else { return }
+        let threadId = Self.threadId(for: id)
+        deliver(.itemStarted(
+            threadId: threadId,
+            itemId: "pi-session-discarded:\(threadId)",
+            kind: .error,
+            title: "Stopped before Pi saved anything — this conversation was discarded, and the next message starts fresh."
+        ), to: id)
+        deliver(.itemCompleted(
+            threadId: threadId,
+            itemId: "pi-session-discarded:\(threadId)",
+            kind: .error,
+            status: .failed
+        ), to: id)
     }
 
     /// Why a prompt for `id` would be refused right now, or nil if it would be
@@ -2165,6 +2460,18 @@ final class AgentSupervisor {
         id: UUID?
     ) -> String? {
         let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        // B7.0: a COMMAND INVOCATION IS NOT A NAME, and this is the only place
+        // that can tell — the redaction below strips the leading `/compact` as
+        // path-shaped text, so by the time the shared resolver sees the prompt
+        // the command is already gone and only its ARGUMENTS are left. That is
+        // what named a tile "focus on the auth work" after `/compact focus on
+        // the auth work`, with `displayNameSource` left at `.prompt` so the
+        // funnel never re-armed and no later prompt could rename it.
+        //
+        // A bare `/clear` was accidentally safe for the same reason — the
+        // redactor ate the whole thing — which is exactly why the rule needs to
+        // be stated rather than inherited from a side effect.
+        guard !AgentName.isCommandInvocation(bounded) else { return nil }
         // Reject identifiers before stripping local-path-shaped text. Model ids
         // contain a slash, so sanitizing first could turn `provider/model` into
         // the plausible-looking title `provider` and bypass the shared guard.
@@ -2189,6 +2496,10 @@ final class AgentSupervisor {
         stopRequestedAgents.insert(id)
         runners[id]?.stop()
         runners[id] = nil
+        // T6: the parent's process group is what runs its delegated children, so
+        // stopping the parent kills them. Keeping a watcher polling their run
+        // directories afterwards would poll files nothing will ever write again.
+        stopObservedRuns(for: id)
         notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
     }
@@ -2200,6 +2511,12 @@ final class AgentSupervisor {
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
         for id in Array(runners.keys) { stop(id) }
+        // `stop(id)` reaches `stopObservedRuns(for: id)` only for a parent still
+        // in `runners`. A parent whose runner had already exited but whose
+        // observed children were still being tailed (B: quiet-forever until the
+        // liveness sweep or a relaunch) would otherwise survive `stopAll` with a
+        // live watcher and timer outliving the session that started it.
+        for parent in Array(observedRunWatchers.keys) { stopObservedRuns(for: parent) }
     }
 
     // MARK: - Orchestration (P2D.2)
@@ -2211,7 +2528,7 @@ final class AgentSupervisor {
     /// A cap exists because the request is MODEL-AUTHORED (the packet's watch-out): a
     /// prompt that tells a worker to delegate produces workers that delegate, and
     /// every one of them is a Pi process. Nothing else in the app bounds that.
-    static let maxSpawnDepth = 2
+    nonisolated static let maxSpawnDepth = 2
     /// How many children one parent may have. Same reason, the other axis: a single
     /// turn can emit as many tool calls as the model likes.
     static let maxChildrenPerParent = 4
@@ -2228,6 +2545,23 @@ final class AgentSupervisor {
         /// P2D.3 — the request named a role this project does not define, or defines
         /// with a model/thinking value Pi would have to guess at.
         case roleUnresolved
+        /// The project declares NO roles at all for this harness, so every named
+        /// role would refuse. Split from `roleUnresolved` because the two have
+        /// different fixes and only this one is actionable: "the requested role is
+        /// not defined in this project" reads as a typo when the truth is that the
+        /// project has no `.pi/agents` directory. Observed live on 2026-08-25.
+        case projectDeclaresNoRoles(directory: String)
+        /// C12 — the parent runs codex. `codex exec --json` (measured, `.plans/46`)
+        /// emits no wire representation for subagent activity at all: even with
+        /// `features.multi_agent_v2=true` set and delegation genuinely happening,
+        /// Array receives nothing about the child on the transport it runs. The
+        /// honest refusal is about OBSERVABILITY, not capability — codex itself can
+        /// spawn; Array cannot see it happen, so it will not pretend to run it.
+        case codexSubagentsUnobservable
+        /// C12 — the parent is a claude `Agent` subagent Array only mirrors
+        /// (`AgentCapabilities.observedReadOnly`): read-only transcript, not
+        /// locally managed, no runner. There is nothing for a spawn to go through.
+        case observedParentCannotSpawn
         /// What the parent's transcript says. `worktreeFailed` deliberately does not
         /// name the git error: `WorktreeManager`'s failures quote paths. `roleUnresolved`
         /// deliberately does not name the role id either — not because an id is unsafe
@@ -2238,6 +2572,12 @@ final class AgentSupervisor {
             switch self {
             case .unknownParent:
                 return "the requesting agent is not known to this session"
+            case let .projectDeclaresNoRoles(directory):
+                // The DIRECTORY name, never the requested role id — the P2D.2
+                // witness holds the role out of every event on the parent's stream
+                // and a reason that echoed it would be the one hole in that. A
+                // relative directory name is project structure, not host state.
+                return "this project defines no agent roles — add one to \(directory) to delegate"
             case let .depthCapped(depth, cap):
                 return "spawn depth \(depth) exceeds the cap of \(cap)"
             case let .childCapped(children, cap):
@@ -2246,8 +2586,497 @@ final class AgentSupervisor {
                 return "its isolated checkout could not be created"
             case .roleUnresolved:
                 return "the requested role is not defined in this project"
+            case .codexSubagentsUnobservable:
+                return "Array cannot observe codex subagents on the transport it runs"
+            case .observedParentCannotSpawn:
+                return "this agent is mirrored, not run, and has no runner to spawn through"
             }
         }
+    }
+
+    // MARK: - Observed pi runs (T6)
+
+    /// One bound `delegate_agent` run: which child it feeds, how far it has been
+    /// read, and the translator carrying that child's stream position.
+    private struct ObservedRunBinding {
+        /// Stored directly rather than re-derived via `records[childID]?.parentAgentID`
+        /// on every use: the child record may not exist yet (see `bindObservedRun`),
+        /// and a lookup that returns nil in that window used to read as "not mine"
+        /// and get the parent's only watcher torn down out from under a still-open
+        /// binding — see `refreshObservedRunWatchers`.
+        let parent: AgentID
+        let childID: AgentID
+        let toolUseID: String
+        var consumedEventCount = 0
+        /// The last `run.json` this binding has seen. Set from every snapshot
+        /// `ingestObservedRunUpdate` processes, and read by `sweepObservedRunLiveness`
+        /// to reach a terminal state WITHOUT depending on the directory changing
+        /// again — see that function.
+        var lastKnownPid: Int?
+        var lastKnownStatus: RunArtifact.Status?
+        /// Per child, because a `PiEventTranslator` carries stream state (thread id,
+        /// turn counter). One shared translator would interleave two children's
+        /// turns into one.
+        ///
+        /// `replayingCompletedMessages` is the whole reason this path can show the
+        /// child's prose: the extension rewrites `events.jsonl` when the run ends
+        /// and the rewrite strips every `message_update`, so a completed run holds
+        /// its text only in `message_end`.
+        var translator: PiEventTranslator
+    }
+
+    /// (parent, toolUseID)-derived child ids that `adoptObservedChild` REFUSED
+    /// (the depth or per-parent sibling cap), as opposed to merely not having
+    /// minted yet. `bindObservedRun` consults this so it can tell "the child
+    /// doesn't exist yet" (buffer — it may still arrive) from "the child will
+    /// never exist" (don't start tailing work with nowhere to go).
+    private var refusedObservedChildIDs: Set<AgentID> = []
+
+    /// Bind a delegated run to the child it belongs to, and start watching for it.
+    ///
+    /// Called on the main actor from the runner's report. The child may not exist
+    /// yet — `tool_execution_end` can be translated before the main-actor hop that
+    /// adopted the child from `tool_execution_start` has run — so the binding is
+    /// keyed by the tool call id and `deliverSubagentEvent` buffers anything that
+    /// arrives early, exactly as the claude path does. That is distinct from a
+    /// child that will NEVER exist because `adoptObservedChild` already refused
+    /// it (past the per-parent cap): tailing that run would buffer into
+    /// `pendingSubagentEvents` forever, for a destination that cannot appear.
+    private func bindObservedRun(_ handle: ObservedRunHandle, parent: AgentID) {
+        guard let parentRecord = records[parent] else { return }
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parent.rawValue, toolUseID: handle.toolUseID))
+        // Re-observation converges: the same (parent, toolUseID) pair rebinds the
+        // same cursor rather than starting a second one. Keyed on the tool call id
+        // and never on the runId, which embeds a timestamp and a random suffix.
+        if observedRunBindings[handle.runId] != nil { return }
+        if records[childID] == nil, refusedObservedChildIDs.contains(childID) { return }
+        observedRunBindings[handle.runId] = ObservedRunBinding(
+            parent: parent,
+            childID: childID,
+            toolUseID: handle.toolUseID,
+            translator: PiEventTranslator(
+                workingDirectory: URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true),
+                replayingCompletedMessages: true))
+        // The runId is persisted on the CHILD, in the existing provider-neutral
+        // field, so a relaunch can reconcile the run's fate without a schema
+        // change. It is deliberately NOT used to resume tailing — see
+        // `reconcileObservedRunsAfterRestore`.
+        if var child = records[childID], child.providerSessionId != handle.runId {
+            child.providerSessionId = handle.runId
+            records[childID] = child
+            try? upsertRecord(child)
+        }
+        startObservedRunWatcher(for: parent, parentRecord: parentRecord)
+        ensureObservedRunLivenessSweepRunning()
+    }
+
+    /// One watcher per PARENT, not per child: the run store is a single directory
+    /// and four children of one parent are four subdirectories of it.
+    private func startObservedRunWatcher(for parent: AgentID, parentRecord: AgentRecord) {
+        let root = URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true)
+            .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+        // Scoped to THIS parent's own bindings. An unfiltered set (every open
+        // binding across every parent) would hand a parent's watcher run ids that
+        // live under a different parent's `.pi/agent-runs` root entirely, and it
+        // also breaks re-arming: closing then rebinding a run under this parent
+        // must not depend on some OTHER parent's bindings for the watcher to see
+        // it as "mine".
+        let watched = Set(observedRunBindings.filter { $0.value.parent == parent }.keys)
+        if let existing = observedRunWatchers[parent] {
+            existing.setWatchedRunIds(watched)
+            return
+        }
+        let watcher = RunArtifactsWatcher(rootURL: root)
+        observedRunWatchers[parent] = watcher
+        // MANDATORY, not a tuning knob: `.pi/agent-runs` accumulates a directory
+        // per run forever (143 in Array's own checkout), and an unfiltered watcher
+        // stats four paths in every one of them every 0.25s.
+        watcher.setWatchedRunIds(watched)
+        watcher.start { [weak self] update in
+            DispatchQueue.main.async {
+                self?.ingestObservedRunUpdate(update, parent: parent)
+            }
+        }
+    }
+
+    private func ingestObservedRunUpdate(_ update: RunArtifactsWatcherUpdate, parent: AgentID) {
+        for (runId, snapshot) in update.snapshots {
+            guard var binding = observedRunBindings[runId] else { continue }
+            let events = snapshot.events.events
+            // The file was REWRITTEN, not appended: the extension compacts it at
+            // completion via temp-file + rename, which also changes the inode
+            // (`RunEventsArtifact.rewrote`, computed from that inode by the
+            // watcher). `events` here is the FRESH file's content from byte 0 —
+            // not a continuation of what this binding already delivered — so
+            // slicing at `consumedEventCount` would misread whatever the old
+            // cursor's position happens to land on inside the new file. A count
+            // comparison alone cannot tell this apart from an ordinary append
+            // that grew past the cursor (a compaction that removes fewer lines
+            // than were already consumed is NOT shorter than the cursor), which
+            // is exactly the bug this replaces. Close instead: losing a few
+            // post-compaction lines beats duplicating a transcript.
+            if snapshot.events.rewrote {
+                // Removed rather than kept as a closed tombstone: a runId is
+                // never reused, so nothing will ever look this entry up again,
+                // and a tombstone is exactly what would keep the liveness sweep
+                // timer (B) alive for the rest of the app's life over a run that
+                // finished minutes ago.
+                observedRunBindings.removeValue(forKey: runId)
+                refreshObservedRunWatchers()
+                stopObservedRunLivenessSweepIfIdle()
+                continue
+            }
+            if events.count > binding.consumedEventCount {
+                // A partial trailing line needs no special handling: it fails to
+                // parse, is counted as bad, and is simply absent from this array —
+                // so it arrives at this same index on the next read.
+                for artifact in events[binding.consumedEventCount..<events.count] {
+                    for event in binding.translator.translate(line: artifact.rawJSON) {
+                        deliverSubagentEvent(
+                            event, parent: parent, toolUseID: binding.toolUseID)
+                    }
+                }
+                binding.consumedEventCount = events.count
+            }
+            binding.lastKnownPid = snapshot.run.pid
+            binding.lastKnownStatus = snapshot.run.status
+            if snapshot.run.isFinished() {
+                observedRunBindings.removeValue(forKey: runId)
+            } else {
+                observedRunBindings[runId] = binding
+            }
+        }
+        refreshObservedRunWatchers()
+        stopObservedRunLivenessSweepIfIdle()
+    }
+
+    /// Narrow every watcher to the runs still open, and stop the ones with none —
+    /// so a parent that finished delegating stops polling entirely.
+    private func refreshObservedRunWatchers() {
+        let open = Set(observedRunBindings.keys)
+        for (parent, watcher) in observedRunWatchers {
+            let mine = open.filter { runId in observedRunBindings[runId]?.parent == parent }
+            if mine.isEmpty {
+                watcher.stop()
+                observedRunWatchers.removeValue(forKey: parent)
+            } else {
+                watcher.setWatchedRunIds(Set(mine))
+            }
+        }
+    }
+
+    /// A watcher only notices a run ending when its DIRECTORY changes. If the
+    /// child process is killed outright, or the extension dies before writing a
+    /// terminal `run.json`, the directory goes quiet forever — no update ever
+    /// reaches `ingestObservedRunUpdate` again, so its `isFinished()` check (the
+    /// one place a binding closes on its own) never runs, and a 0.25s timer polls
+    /// a dead run for the rest of the app's life while the child tile sits stuck
+    /// mid-turn.
+    ///
+    /// This reaches a terminal state a different way: the pid, not the
+    /// directory, using the same liveness probe `RunArtifact.isFinished` and
+    /// `reconcileObservedRunsAfterRestore` use. Deliberately conservative — a
+    /// binding is only ever checked here once it has ALREADY reported a pid and a
+    /// non-terminal status, so a run that is merely slow to produce its first
+    /// output (no snapshot processed yet) is never closed early.
+    private func sweepObservedRunLiveness() {
+        guard !observedRunBindings.isEmpty else {
+            observedRunLivenessTimer?.cancel()
+            observedRunLivenessTimer = nil
+            return
+        }
+        var didClose = false
+        for (runId, binding) in observedRunBindings {
+            guard let pid = binding.lastKnownPid, pid > 0 else { continue }
+            switch binding.lastKnownStatus {
+            case .some(.running), .some(.queued): break
+            default: continue
+            }
+            guard !RunArtifact.processIsAlive(pid) else { continue }
+            observedRunBindings.removeValue(forKey: runId)
+            didClose = true
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: binding.childID),
+                turnId: "\(Self.threadId(for: binding.childID))#observed-\(runId)",
+                outcome: .interrupted,
+                errorMessage: "This delegated run ended unexpectedly (its process is no longer running)."
+            ), to: binding.childID)
+        }
+        if didClose {
+            refreshObservedRunWatchers()
+            stopObservedRunLivenessSweepIfIdle()
+        }
+    }
+
+    private func ensureObservedRunLivenessSweepRunning() {
+        guard observedRunLivenessTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        // `@Sendable` here is load-bearing, same as `SessionObserver.scheduleDetectionTimer`:
+        // without it, Swift infers this closure literal (written inside an
+        // `@MainActor` method) as MainActor-isolated by default, and the runtime
+        // traps (`_dispatch_assert_queue_fail`) the instant GCD invokes it on
+        // the timer's own queue instead of the main queue. `Task { @MainActor in }`
+        // is the real, explicit hop back onto the actor.
+        timer.setEventHandler { @Sendable [weak self] in
+            Task { @MainActor [weak self] in
+                self?.sweepObservedRunLiveness()
+            }
+        }
+        observedRunLivenessTimer = timer
+        timer.resume()
+    }
+
+    /// Stop watching this parent's runs, and forget their cursors. Safe to call
+    /// on an id that is a CHILD (see `stopObservedRun(forChild:)`) or has no
+    /// observed runs at all — both are no-ops.
+    func stopObservedRuns(for parent: AgentID) {
+        observedRunWatchers.removeValue(forKey: parent)?.stop()
+        for (runId, binding) in observedRunBindings where binding.parent == parent {
+            observedRunBindings.removeValue(forKey: runId)
+        }
+        stopObservedRunLivenessSweepIfIdle()
+    }
+
+    /// The other direction: `id` is the CHILD being torn down (e.g. archived on
+    /// its own, independent of its parent), not the parent. Closes just that
+    /// child's own binding, leaving its siblings' tailing untouched.
+    private func stopObservedRun(forChild childID: AgentID) {
+        guard let runId = observedRunBindings.first(where: { $0.value.childID == childID })?.key
+        else { return }
+        observedRunBindings.removeValue(forKey: runId)
+        refreshObservedRunWatchers()
+        stopObservedRunLivenessSweepIfIdle()
+    }
+
+    private func stopObservedRunLivenessSweepIfIdle() {
+        guard observedRunBindings.isEmpty else { return }
+        observedRunLivenessTimer?.cancel()
+        observedRunLivenessTimer = nil
+    }
+
+    /// After a restore, settle what happened to every observed run — and never
+    /// resume tailing one.
+    ///
+    /// The cursor is deliberately not persisted. The child's events were already
+    /// written to its transcript as they were delivered, so replaying the file
+    /// would duplicate a transcript. And Array's own parent `pi` process is what
+    /// writes these runs, so an app relaunch GUARANTEES the run is defunct: a
+    /// `status: "running"` that survives a restart is stale, and believing it is
+    /// the resurrection bug — Array would wait forever for a child that died with
+    /// the previous session. One `run.json` read per child, never `events.jsonl`,
+    /// and no watcher.
+    func reconcileObservedRunsAfterRestore() {
+        for (childID, record) in records
+        where record.capabilities == .observedReadOnly && record.harness == .pi {
+            guard let runId = record.providerSessionId,
+                  let parentID = record.parentAgentID,
+                  let parentRecord = records[parentID]
+            else { continue }
+            let runJSON = URL(fileURLWithPath: parentRecord.lastObservedWhere, isDirectory: true)
+                .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+                .appendingPathComponent(runId, isDirectory: true)
+                .appendingPathComponent("run.json", isDirectory: false)
+            let run = RunArtifactsReader.readRunJSON(at: runJSON)
+            guard run.isFinished() else { continue }
+            noteObservedRunEndedBeforeRestore(childID: childID, status: run.status)
+        }
+    }
+
+    /// Say out loud that a delegated run did not survive the restart, rather than
+    /// leaving a child tile apparently mid-turn forever.
+    private func noteObservedRunEndedBeforeRestore(
+        childID: AgentID, status: RunArtifact.Status
+    ) {
+        guard observedRunsReconciled.insert(childID).inserted else { return }
+        let outcome: TurnOutcome = status == .done ? .completed : .interrupted
+        deliver(.turnCompleted(
+            threadId: Self.threadId(for: childID),
+            turnId: "\(Self.threadId(for: childID))#observed",
+            outcome: outcome,
+            errorMessage: status == .done
+                ? nil
+                : "This delegated run ended with the previous session (\(status.rawValue))."
+        ), to: childID)
+    }
+
+    /// Routes one frame of a claude subagent's work to the child it belongs to.
+    ///
+    /// The child is found by re-deriving its id, never by looking up a table the
+    /// announcement had to populate first. Claude does not promise that the
+    /// `Agent` tool_use block is flushed before the child's first frame, and a
+    /// race there would silently drop the opening of every child transcript. If
+    /// the record does not exist yet the announcement simply has not landed, so
+    /// the frame is held and replayed once it does.
+    private func deliverSubagentEvent(_ event: AgentRuntimeEvent, parent: AgentID, toolUseID: String) {
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parent.rawValue, toolUseID: toolUseID))
+        guard records[childID] != nil else {
+            pendingSubagentEvents[childID, default: []].append(event)
+            return
+        }
+        flushPendingSubagentEvents(for: childID)
+        deliver(event.withThreadId(Self.threadId(for: childID)), to: childID)
+    }
+
+    /// Frames that arrived before their child's record existed.
+    /// Bound `delegate_agent` runs, keyed by runId. See `bindObservedRun`.
+    private var observedRunBindings: [String: ObservedRunBinding] = [:]
+    /// One watcher per parent over its `.pi/agent-runs` directory.
+    private var observedRunWatchers: [AgentID: RunArtifactsWatcher] = [:]
+    /// Children already told their run died with the last session, so a second
+    /// restore pass cannot say it twice.
+    private var observedRunsReconciled: Set<AgentID> = []
+    /// One shared timer sweeping every open `ObservedRunBinding` for a dead pid —
+    /// see `sweepObservedRunLiveness`. Lazily started by the first binding, torn
+    /// down by `stopObservedRunLivenessSweepIfIdle` once none remain.
+    private var observedRunLivenessTimer: DispatchSourceTimer?
+    private var pendingSubagentEvents: [AgentID: [AgentRuntimeEvent]] = [:]
+    private var providerThreadAgentRoutes: [AgentID: [String: AgentID]] = [:]
+    private var pendingProviderThreadEvents: [AgentID: [String: [AgentRuntimeEvent]]] = [:]
+
+    private func handleProviderSubagentActivity(
+        _ activity: ProviderSubagentActivity,
+        rootAgentID: AgentID
+    ) {
+        switch activity {
+        case let .primaryThread(providerThreadID):
+            providerThreadAgentRoutes[rootAgentID, default: [:]][providerThreadID] = rootAgentID
+
+        case let .childAnnounced(parentProviderThreadID, childProviderThreadID, sourceItemID, displayLabel):
+            guard let parentAgentID = providerThreadAgentRoutes[rootAgentID]?[parentProviderThreadID]
+            else { return }
+            let request = SpawnRequest(
+                role: nil,
+                prompt: "Codex delegated work",
+                isolated: false,
+                sourceItemID: sourceItemID,
+                observedOnly: true,
+                displayLabel: displayLabel
+            )
+            guard let childAgentID = handleSpawnRequest(request, from: parentAgentID) else { return }
+            providerThreadAgentRoutes[rootAgentID, default: [:]][childProviderThreadID] = childAgentID
+            let pending = pendingProviderThreadEvents[rootAgentID]?
+                .removeValue(forKey: childProviderThreadID) ?? []
+            for event in pending {
+                deliver(event.withThreadId(Self.threadId(for: childAgentID)), to: childAgentID)
+            }
+
+        case let .threadEvent(providerThreadID, event):
+            guard let target = providerThreadAgentRoutes[rootAgentID]?[providerThreadID] else {
+                pendingProviderThreadEvents[rootAgentID, default: [:]][providerThreadID, default: []]
+                    .append(event)
+                return
+            }
+            // Primary events already travel through AgentRunning.onEvent. This
+            // channel is for provider-owned descendants only.
+            guard target != rootAgentID else { return }
+            deliver(event.withThreadId(Self.threadId(for: target)), to: target)
+        }
+    }
+
+    private func flushPendingSubagentEvents(for childID: AgentID) {
+        guard let held = pendingSubagentEvents.removeValue(forKey: childID), !held.isEmpty
+        else { return }
+        let threadId = Self.threadId(for: childID)
+        for event in held { deliver(event.withThreadId(threadId), to: childID) }
+    }
+
+    /// Mints the read-only record for a subagent the HARNESS runs.
+    ///
+    /// The whole design turns on `AgentCapabilities.observedReadOnly` — declared
+    /// since P2 and, until now, used nowhere in production. A claude `Agent`
+    /// subagent has no process of Array's, so it must never offer a composer or a
+    /// working Stop; and it needs no new `AgentRuntimeEvent`, because
+    /// `.childAgentSpawned` and the durable `agentReference` block already carry
+    /// nesting for children Array owns. Minting a real record is what lets a
+    /// harness-run child reuse all of it — `parentAgentID` alone then makes
+    /// `InboxSort` nest it, `ChildRollup` count it, and the lineage overlay draw
+    /// it, with no widening of the sync boundary anywhere.
+    ///
+    /// **Idempotent by construction.** The same child is announced again on every
+    /// restore and re-observation, and the id is derived from
+    /// `(parentAgentID, tool_use_id)`, so a second sighting converges on the same
+    /// record instead of minting a duplicate.
+    private func adoptObservedChild(
+        _ request: SpawnRequest,
+        from parentId: AgentID,
+        parent: AgentRecord
+    ) -> AgentID? {
+        guard let toolUseID = request.sourceItemID, !toolUseID.isEmpty else {
+            // Without the announcing call's id there is no stable identity, and a
+            // child Array cannot re-identify later is not worth minting.
+            return refuseSpawn(.roleUnresolved, for: parentId)
+        }
+        let childID = AgentID(rawValue: AgentRecord.observedChildID(
+            parentAgentID: parentId.rawValue, toolUseID: toolUseID))
+        if records[childID] != nil { return childID }
+
+        // The caps still bind. They are the only thing bounding a MODEL-authored
+        // spawn request, and an observed child costs a row, a sidebar slot and a
+        // live subscription even though it costs no process.
+        //
+        // Every refusal below records `childID` in `refusedObservedChildIDs`
+        // BEFORE returning — that is what lets `bindObservedRun` tell "this
+        // child hasn't been minted yet" from "this child will never be minted"
+        // for the run its own tool call announced, and refuse to start tailing
+        // work with nowhere to go.
+        let depth = depth(of: parentId) + 1
+        guard depth <= Self.maxSpawnDepth else {
+            refusedObservedChildIDs.insert(childID)
+            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
+        }
+        let siblings = children(of: parentId).count
+        guard siblings < Self.maxChildrenPerParent else {
+            refusedObservedChildIDs.insert(childID)
+            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
+        }
+
+        let projectRoot = Self.repositoryRoot(of: parent)
+        // `prompt: nil` deliberately: the child is already running its task inside
+        // claude, and sending it one here would start a SECOND conversation that
+        // Array would then be unable to stop.
+        _ = makeAgent(
+            id: childID,
+            role: request.role,
+            prompt: nil,
+            cwd: projectRoot,
+            projectRoot: projectRoot,
+            checkoutRoot: projectRoot,
+            homeRelativePath: parent.homeRelativePath,
+            worktreeId: nil,
+            worktreeBranch: nil,
+            harness: parent.harness ?? AgentHarnessConfig.resolved(),
+            model: parent.model,
+            thinking: parent.thinking,
+            projectId: parent.projectId,
+            parentAgentID: parentId,
+            // NOT the tool_use id. That is an identity, not a name, and letting
+            // it reach the naming funnel is what titled every child tile
+            // `toolu_01NFqGS…`. The label the model wrote for its own call is
+            // the honest title; its role is the fallback; and if it gave
+            // neither, the parent-relative ordinal already handles it.
+            sourceItemId: nil,
+            tileId: nil,
+            displayName: request.displayLabel ?? request.role
+        )
+        guard var child = records[childID] else { return nil }
+        child.capabilities = .observedReadOnly
+        records[childID] = child
+        persist(child)
+        // Anything that arrived before the record existed replays now, in order.
+        flushPendingSubagentEvents(for: childID)
+        deliver(.childAgentSpawned(
+            threadId: Self.threadId(for: parentId),
+            childAgentID: childID.rawValue,
+            parentAgentID: parentId.rawValue,
+            displayName: child.humanDisplayName,
+            sourceItemID: toolUseID,
+            provider: (parent.harness ?? AgentHarnessConfig.resolved()).rawValue,
+            spawnedAt: Date()
+        ), to: parentId)
+        return childID
     }
 
     /// Turns an observed `spawn_agent` call into a real child agent.
@@ -2269,31 +3098,73 @@ final class AgentSupervisor {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
+        // C7: an OBSERVED child is not a spawn at all. claude has already started
+        // it inside itself by the time the `Agent` call reaches us, so there is
+        // nothing to launch — only a record to mint so the child's own frames have
+        // somewhere to land and the parent gets a chip.
+        if request.observedOnly {
+            return adoptObservedChild(request, from: parentId, parent: parent)
+        }
+        // C12 — a mirrored subagent has no runner behind it at all: refuse before
+        // even asking what harness it claims, since that field describes who
+        // PRODUCED it, not something Array can spawn through.
+        guard parent.capabilities != .observedReadOnly else {
+            return refuseSpawn(
+                .observedParentCannotSpawn, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
+        }
         guard let parentHarness = parent.harness else {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
-            return refuseSpawn(.roleUnresolved, for: parentId)
+            return refuseSpawn(
+                .roleUnresolved, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
+        }
+        // C12 — codex delegation may genuinely be happening; Array's transport
+        // (`codex exec --json`) has no wire representation for it, so refuse
+        // honestly about observability rather than silently producing nothing or
+        // claiming codex itself cannot spawn.
+        guard parentHarness != .codex else {
+            return refuseSpawn(
+                .codexSubagentsUnobservable, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
-            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
+            return refuseSpawn(
+                .depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         let siblings = children(of: parentId).count
         guard siblings < Self.maxChildrenPerParent else {
-            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
+            return refuseSpawn(
+                .childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         // The role resolves against the PROJECT's registry, not the parent's possibly
         // isolated checkout — and after the caps, so a request that was going to be
         // refused anyway is refused for the reason that actually stopped it.
         let projectRoot = Self.repositoryRoot(of: parent)
         let resolvedRole: RoleRegistry.Resolution
+        let registry = RoleRegistry(projectRoot: projectRoot)
+        // A named role in a project with no roles is not a typo, and saying "the
+        // requested role is not defined" invites reading it as one. Checked before
+        // `resolve`, because resolve cannot tell the two apart.
+        if request.role != nil, registry.definesNoRoles {
+            return refuseSpawn(
+                .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: parentHarness)),
+                for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
+        }
         do {
-            resolvedRole = try RoleRegistry(projectRoot: projectRoot).resolve(
+            resolvedRole = try registry.resolve(
                 roleId: request.role,
                 inheriting: AgentModelConfig.Resolution(model: parent.model, thinking: parent.thinking)
             )
         } catch {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(.roleUnresolved, for: parentId)
+            return refuseSpawn(
+                .roleUnresolved, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
         do {
             let childID = try spawn(
@@ -2307,6 +3178,26 @@ final class AgentSupervisor {
                 parentAgentID: parentId,
                 isolated: request.isolated
             )
+            // The child record remembers the tool call that asked for it, so its
+            // terminal `.turnCompleted` in `deliver` can rewrite the result file
+            // even across a relaunch. Distinct from `sourceItemId` (fan-out and
+            // naming semantics) on purpose.
+            if let handle = SpawnResultFile.validatedHandle(request.sourceItemID),
+               var child = records[childID] {
+                child.spawnResultHandle = handle
+                records[childID] = child
+                persist(child)
+                SpawnResultFile.write(
+                    SpawnResultFile(
+                        toolCallId: handle,
+                        status: .spawned,
+                        agentId: childID.rawValue,
+                        role: request.role
+                    ),
+                    parentCwd: parent.cwd,
+                    warn: warn
+                )
+            }
             let childName = records[childID]?.humanDisplayName ?? "Subagent"
             deliver(.childAgentSpawned(
                 threadId: Self.threadId(for: parentId),
@@ -2322,7 +3213,9 @@ final class AgentSupervisor {
             // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
             // so a failed worktree is a failed spawn — reported, not downgraded.
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(.worktreeFailed, for: parentId)
+            return refuseSpawn(
+                .worktreeFailed, for: parentId,
+                handle: request.sourceItemID, requestedRole: request.role)
         }
     }
 
@@ -2333,9 +3226,14 @@ final class AgentSupervisor {
     /// tool and the tool's effect did not happen — and because the bridge already
     /// renders `.itemCompleted(.failed)` on the timeline while collapsing the title to
     /// a safe token on the way to the phone.
-    private func refuseSpawn(_ refusal: SpawnRefusal, for parentId: AgentID) -> AgentID? {
+    private func refuseSpawn(
+        _ refusal: SpawnRefusal,
+        for parentId: AgentID,
+        handle: String? = nil,
+        requestedRole: String? = nil
+    ) -> AgentID? {
         warn("AgentSupervisor: refusing \(SpawnRequest.toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
-        guard records[parentId] != nil else { return nil }
+        guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
         deliver(.itemStarted(
@@ -2350,6 +3248,25 @@ final class AgentSupervisor {
             kind: .error,
             status: .failed
         ), to: parentId)
+        // The MODEL's copy of the refusal. The transcript items above are
+        // UI-only — the extension's `spawn_agent` has already answered
+        // "spawned" by the time this runs, so without this file the model's
+        // only view of a refused spawn is a success. `wait_agents` reads it as
+        // a terminal status. Local file under the parent's own cwd, so echoing
+        // the reason (already role-free, path-free) breaks no I5 boundary.
+        if let handle = SpawnResultFile.validatedHandle(handle) {
+            SpawnResultFile.write(
+                SpawnResultFile(
+                    toolCallId: handle,
+                    status: .refused,
+                    role: requestedRole,
+                    reason: refusal.reason,
+                    endedAt: Date()
+                ),
+                parentCwd: parent.cwd,
+                warn: warn
+            )
+        }
         return nil
     }
 
@@ -2565,10 +3482,16 @@ final class AgentSupervisor {
                 continue
             }
             do {
+                // C2: `harness` was accepted by this function and never forwarded,
+                // so every fan-out child silently took `AgentHarnessConfig.resolved()`
+                // — the SETTINGS default — regardless of what the caller asked for
+                // or what the parent was running. Settings seed new agents; they do
+                // not get to re-decide an existing one's runner.
                 let id = try spawn(
                     role: role,
                     prompt: item.prompt,
                     cwd: cwd,
+                    harness: harness,
                     model: model,
                     thinking: thinking,
                     projectId: projectId,
@@ -2578,6 +3501,22 @@ final class AgentSupervisor {
                     displayName: item.displayName
                 )
                 report.launched.append((item.id, id))
+                // C2: and `fanOut` never emitted this, so a fan-out child got
+                // durable parentage in the record and NO chip in the parent's
+                // transcript — the one surface where an orchestrator can see what
+                // it started. `handleSpawnRequest` has always emitted it; the two
+                // spawn paths simply disagreed.
+                if let parentAgentID {
+                    deliver(.childAgentSpawned(
+                        threadId: Self.threadId(for: parentAgentID),
+                        childAgentID: id.rawValue,
+                        parentAgentID: parentAgentID.rawValue,
+                        displayName: records[id]?.humanDisplayName ?? "Subagent",
+                        sourceItemID: item.id,
+                        provider: harness.rawValue,
+                        spawnedAt: Date()
+                    ), to: parentAgentID)
+                }
             } catch {
                 warn("AgentSupervisor.fanOut: no agent for item \(item.id): \(error)")
                 report.refused.append((item.id, .worktreeFailed))
@@ -2658,6 +3597,15 @@ final class AgentSupervisor {
             report.wasRunning = true
             stop(id)
         }
+        // `stop(id)` above only reaches `stopObservedRuns(for: id)` when `id` had
+        // a live runner. An archived PARENT whose runner had already exited (its
+        // observed children may still be tailing — B's liveness sweep had not
+        // closed them yet) would otherwise leave their watcher and bindings
+        // running against a directory nothing is coming back to read. And `id`
+        // may itself be the CHILD being archived, independent of its parent —
+        // that closes just this one binding. Both are no-ops when they don't apply.
+        stopObservedRuns(for: id)
+        stopObservedRun(forChild: id)
         // THE DURABLE DELETE COMES FIRST (from the cross-review). Removing a worktree
         // for a record that is still on disk is the worst combination available: the
         // next launch restores an agent whose checkout is gone. If the store refuses,
@@ -2670,6 +3618,16 @@ final class AgentSupervisor {
             return report
         }
         cleanUpWorktree(of: record, into: &report)
+        // A spawned child's result file goes with the child. Archiving the
+        // PARENT deliberately leaves its `spawn-results/` directory alone —
+        // `.array/` is project-local scratch and the parent's cwd may already
+        // be gone with its worktree.
+        if let handle = record.spawnResultHandle,
+           let parentID = record.parentAgentID,
+           let parent = records[parentID] {
+            try? FileManager.default.removeItem(
+                at: SpawnResultFile.url(parentCwd: parent.cwd, handle: handle))
+        }
 
         records.removeValue(forKey: id)
         history.removeValue(forKey: id)
@@ -2680,6 +3638,18 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
+        // C4: cancel a pending save before quarantining, so a debounced write
+        // in flight cannot land AFTER the move and recreate the directory the
+        // move just cleared out. The transcript is the user's own record of
+        // their work (the same rule the C3 migration follows) — quarantined,
+        // never `rm`'d, so a deleted agent's history is still on disk if
+        // someone goes looking for it.
+        transcriptPersistenceTasks[id]?.cancel()
+        transcriptPersistenceTasks.removeValue(forKey: id)
+        transcriptProjections.removeValue(forKey: id)
+        if let transcriptStore {
+            Task.detached { _ = await transcriptStore.quarantineTranscript(agentID: id) }
+        }
         // P6.4: the in-memory watermark throttle goes with the agent. The durable
         // watermark is deleted with the record, and a recycled id must not inherit
         // this supervisor's write cadence.
@@ -3255,7 +4225,7 @@ final class AgentSupervisor {
     }
 
     func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
-        guard records[id] != nil else { return nil }
+        guard let record = records[id] else { return nil }
         let facts = turnFacts[id] ?? TurnFacts()
         let state: AgentTileOperationalState
         if let requestID = facts.requestOrder.first(where: { facts.pendingRequests[$0] != nil }),
@@ -3283,22 +4253,41 @@ final class AgentSupervisor {
         }
 
         let occupied = runners[id] != nil
+        // C5 — `AgentCapabilities` becomes load-bearing here, its first production
+        // use. A mirrored child has no runner of Array's, so no send and no stop
+        // are honest at ANY moment, not merely at this one.
+        let mirrored = !record.capabilities.locallyManaged
+        // B2.2 — steer is a fact about the BOUND RUNNER, composed only when a
+        // session runner is actually bound: it is real mid-turn delivery into
+        // that runner's own process, so a harness mid-migration never advertises
+        // a verb the process behind it cannot perform.
+        let session = mirrored ? nil : (runners[id] as? AgentSessionRunning)
+        let steerable = session?.sessionCapabilities.supportedCommands.contains("steer") ?? false
+        // B4 — queue is Array's own capability, not the harness's. Queueing never
+        // asks the bound runner to do anything while it is busy; Array holds the
+        // text and sends it as an ORDINARY prompt once `turnCompleted` frees the
+        // runner. That is honest for every harness with an occupied runner,
+        // one-shot or session-backed alike — there is no RPC to gate on.
+        let queueable = occupied && !mirrored
         return AgentTileTurnSnapshot(
             state: state,
-            capabilities: .sendStop(
-                canSend: !occupied && state.acceptsNewTurn,
+            capabilities: AgentTurnCapabilities(
+                canSend: !mirrored && !occupied && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
                 // genuinely kills a spawning (pre-turnStarted) or draining
                 // (post-settle) process, so gating on `execution == .working`
                 // under-advertised the transport — and painted the two windows
                 // "Unavailable" on the composer.
-                canStop: occupied
+                canStop: !mirrored && occupied && record.capabilities.canStop,
+                canSteer: steerable && occupied,
+                canQueue: queueable && occupied
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
             // sidebar and the tile header measured different durations for one turn.
             turnStartedAt: facts.turnStartedAt,
-            submittedAt: facts.submittedAt
+            submittedAt: facts.submittedAt,
+            isMirrored: mirrored
         )
     }
 
@@ -3317,6 +4306,9 @@ final class AgentSupervisor {
                 PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID),
                 to: agentID
             ) else { return .refused(.invalidAttachment) }
+            // B4: an explicit Send releases a queue this agent's last turn left
+            // paused after an interrupt — the user looked, and is choosing to act.
+            pausedQueues.remove(agentID)
             return .accepted
         case .sendPrompt(let draft):
             var prompt = draft
@@ -3345,6 +4337,7 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
                 return .refused(.invalidAttachment)
             }
+            pausedQueues.remove(agentID)
             return .accepted
         case .stop:
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
@@ -3354,17 +4347,92 @@ final class AgentSupervisor {
             return .accepted
         case .providerCommand(let invocation):
             guard invocation.surface != .cli else { return .refused(.unsupported) }
-            let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !native.isEmpty else { return .refused(.emptyDraft) }
-            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            guard sendPrepared(
-                PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
-                to: agentID
-            ) else { return .refused(.invalidAttachment) }
+            // B5 — routed through the classifier instead of unconditionally
+            // serializing and sending. `AgentCommandExecutionPlanner` decides per
+            // invocation whether Array performs it, the harness does, it expands
+            // into an ordinary prompt, or it cannot run here at all — never
+            // derived from `record.harness`, always from the BOUND runner (the
+            // same rule `turnSnapshot` already follows for steer/queue).
+            guard let descriptor = AgentCommandCatalog.allBaselines()
+                .first(where: { $0.id == invocation.descriptorID }) else {
+                return .refused(.unsupported)
+            }
+            switch AgentCommandExecutionPlanner.resolve(
+                descriptor, capabilities: sessionCommandCapabilities(for: agentID)
+            ) {
+            case .arrayOwned:
+                // Array performs it and authors the reply itself as a `.system`
+                // notice — it never reaches the CLI as text, so no runtime event
+                // is invented and no turn is spent.
+                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                if descriptor.name == "clear" {
+                    // B7.2 — `/clear` is not just a notice: it is one transaction
+                    // over session rotation, the stale context meter, naming, and
+                    // subagent chips, or it is worse than doing nothing.
+                    performClearCommand(descriptor, for: agentID)
+                } else {
+                    appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                }
+                return .accepted
+            case .harnessDelegated, .skillTemplate:
+                let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !native.isEmpty else { return .refused(.emptyDraft) }
+                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard sendPrepared(
+                    PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
+                    to: agentID
+                ) else { return .refused(.invalidAttachment) }
+                return .accepted
+            case .unavailable:
+                // Disabled with a reason, never degraded into prose: codex and pi
+                // hand a leading slash straight to the model, spending a real paid
+                // turn answering conversationally about a command that means
+                // nothing to them in this mode.
+                return .refused(.unsupported)
+            }
+        case .queue(let draft):
+            // B4 — this REVERSES the prohibition that used to sit here. That rule
+            // was aimed at faking steering by silently replaying a send later; about
+            // THAT it stays correct. Queueing is a different act: the user explicitly
+            // asked to hold this message until the current turn ends, and Array must
+            // be the one holding it, because neither claude nor pi exposes a
+            // cancel-the-queue verb (claude reports `still_queued` with no cancel;
+            // pi's rpc surface has `abort`/`abort_bash`/`abort_retry` and no
+            // `cancel_follow_up`). Write-ahead into the harness's own queue would
+            // make "cancel what I queued" unimplementable, so the harness never
+            // holds more than one pending message and retaining text in a local
+            // queue is exactly the mechanism that keeps a cancel honest.
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canQueue, let store = submissionRecoveryStore else {
+                return .refused(.unsupported)
+            }
+            let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+            do {
+                // Validate now, the same way an ordinary send does, so a queued
+                // message cannot die silently for an attachment reason the user
+                // had no chance to see at the moment they asked to queue it.
+                _ = try await attachmentStore.preparePromptAttachments(for: agentID, draftAttachments: draftImageAttachments)
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for queued message, agent \(agentID.rawValue.uuidString)")
+                return .refused(.invalidAttachment)
+            }
+            let fileReferences = prompt.fileReferences.map {
+                AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+            }
+            _ = await store.enqueueMessage(
+                text: prompt.text,
+                imageAttachments: draftImageAttachments,
+                fileReferences: fileReferences,
+                for: agentID
+            )
+            queuedMessagesCache[agentID] = await store.queuedMessages(for: agentID)
+            notifyTurnCapabilitiesChanged(agentID)
             return .accepted
-        case .steer, .queue, .command:
-            // Today's compiled runner has none of these RPCs. Never simulate one by
-            // replaying send or retaining text in a local queue.
+        case .steer, .command:
+            // Today's compiled runner exercises neither of these. Never simulate
+            // one by replaying send.
             return .refused(.unsupported)
         }
     }
@@ -3820,6 +4888,14 @@ final class AgentSupervisor {
         subscribers[id]?.count ?? 0
     }
 
+    /// How many `delegate_agent` runs are currently bound and being tailed. The
+    /// otherwise-unobservable diagnostic C's fix exists for: a run bound to a
+    /// child `adoptObservedChild` will never mint (past the per-parent cap)
+    /// buffers into `pendingSubagentEvents` forever with no external symptom
+    /// except this number never coming back down. Read-only, no production
+    /// caller — the same reason `subscriberCount(for:)` exists.
+    var observedRunBindingCount: Int { observedRunBindings.count }
+
     // MARK: - QA observer counts (M1.4, `.plans/46`)
 
     /// Of the four things `ManagedAgentTileNSView.detach()` releases, only the
@@ -3845,6 +4921,315 @@ final class AgentSupervisor {
     private func removeSubscriber(_ token: UUID, for id: AgentID) {
         subscribers[id]?.removeValue(forKey: token)
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
+    }
+
+    // MARK: - Transcript persistence (C4)
+
+    /// Feeds one provider event into the durable semantic document, then
+    /// schedules a save. A no-op with no `transcriptStore` injected, which is
+    /// every check that does not pass one.
+    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.ingest(event)
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
+    }
+
+    /// Echoes the user's own prompt into the durable document. `send` used to
+    /// rely entirely on the tile calling `appendUserPrompt` for this; a
+    /// tile-less agent (fan-out's common case) never had a tile to ask.
+    private func recordTranscriptUserPrompt(_ prompt: AgentPrompt, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        guard let promptID = AgentNodeID(rawValue: "supervisor-prompt-\(UUID().uuidString)") else { return }
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.appendUserPrompt(id: promptID, prompt: prompt)
+        transcriptProjections[id] = projection
+        // A user's own words must not wait behind the streaming debounce below.
+        scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    // MARK: - B5 command classifier
+
+    /// Capability facts for `AgentCommandExecutionPlanner`.
+    ///
+    /// **This comment used to describe something the body does not do**, and the
+    /// difference is a live defect rather than a documentation nicety. It claimed
+    /// the facts came "from the BOUND runner's harness rather than a stored
+    /// preference — the same rule `turnSnapshot` already follows", and that
+    /// "every compiled runner today is one-shot". Both were false by 2026-08-25:
+    /// the body switches on `records[id]?.harness`, which IS the stored record and
+    /// not the bound runner, and `PiRpcAgentRunner`/`PiRpcTransport` ship a
+    /// session runner with `steer`, `interrupt` and a generic `command`.
+    ///
+    /// The consequence is `.plans/49` §3.4: a pi agent whose rpc runner is bound
+    /// and can genuinely take `/compact` is told it cannot, because this returns
+    /// `.oneShotProse` for `.pi` unconditionally. Fixing that means consulting the
+    /// bound runner the way `AgentSessionRunning.sessionCapabilities` already does
+    /// for steer — deliberately NOT done here, because it changes what the
+    /// composer offers and belongs with the rest of the advertise-then-refuse
+    /// work, not smuggled in behind a comment correction.
+    ///
+    /// Measured 2026-08-24: `claude -p` interprets `/help`, `/status`,
+    /// `/compact` itself (synthetic zero-token replies); `codex exec --json`
+    /// and `pi -p --mode json` both hand the literal text to the model, which
+    /// spends a real paid turn answering conversationally.
+    private func sessionCommandCapabilities(for id: AgentID) -> AgentSessionCommandCapabilities {
+        switch records[id]?.harness {
+        case .claudeCode: return .claudeOneShot
+        case .codex, .pi, nil: return .oneShotProse
+        }
+    }
+
+    /// B7.2 — `/clear`, in one transaction. `/clear` alone used to be
+    /// accidentally-fine only because nothing else was wired: it appended a
+    /// notice and left the stale context meter, the disarmed naming funnel,
+    /// the orphaned subagent chips, and the un-reset replay/telemetry state
+    /// all in place. Every effect below commits together in this one method
+    /// (all in-memory writes, then one persist, then the notice); there is no
+    /// intermediate state where only some of them have happened.
+    private func performClearCommand(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+        guard var record = records[id] else { return }
+
+        // 1. Rotate the session. claude only — pi's session id is Array's own
+        //    (no forking needed) and codex has no established rotate
+        //    mechanism. `/clear` spends no turn, same as every other
+        //    Array-owned command, so this MARKS the next launch to
+        //    `--resume <current> --fork-session` rather than eagerly
+        //    spawning a claude process here; `ingestRuntimeObservation`
+        //    adopts the forked id and clears the marker once that launch's
+        //    `system/init` reports it.
+        if record.harness == .claudeCode {
+            record.pendingSessionForkFrom = record.providerSessionId ?? Self.claudeSessionId(for: id)
+        }
+
+        // 2. The stale-but-numeric context meter must not re-seed from a
+        //    conversation the harness is about to forget.
+        record.lastContextWindow = nil
+
+        // 3. Re-arm naming: both fields the funnel actually checks
+        //    (`displayNameSource == .sentinel && namingRequest == nil`) —
+        //    B7.0 is exactly the story of a half-disarm going unnoticed.
+        record.displayNameSource = .sentinel
+        record.namingRequest = nil
+
+        records[id] = record
+        persist(record)
+
+        // 4. Drop subagent chips: sever the parent link for every child
+        //    spawned under this thread, so the supervisor's own bookkeeping
+        //    agrees with the fact that a forked/cleared conversation cannot
+        //    see them anymore — the disagreement C10 was making visible.
+        for childID in children(of: id) {
+            guard var child = records[childID] else { continue }
+            child.parentAgentID = nil
+            records[childID] = child
+            persist(child)
+        }
+
+        // 5. Clear the 500-entry replay buffer (`history[id]`) and the live
+        //    cumulative context-window cache (`contextWindowSnapshots[id]`
+        //    — the in-memory counterpart to the persisted
+        //    `record.lastContextWindow` cleared in step 2).
+        history[id] = []
+        contextWindowSnapshots[id] = nil
+
+        // 6. The boundary, as a Tier A notice — the transcript keeps its
+        //    history and says where the model's memory ends.
+        appendArrayOwnedCommandNotice(descriptor, for: id)
+    }
+
+    /// Tier A of the classifier: Array performs the command itself and authors
+    /// the reply as a `.system` notice, never as text sent to the CLI. No new
+    /// runtime event, no I5 pressure — `AgentTranscriptProjection.appendNotice`
+    /// is already idempotent and already carries `provenance: .localNotice`.
+    private func appendArrayOwnedCommandNotice(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+        guard transcriptStore != nil else { return }
+        let (title, body) = Self.arrayOwnedCommandNoticeText(descriptor, record: records[id])
+        var projection = transcriptProjections[id]
+            ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        projection.appendNotice(id: "array-command-\(descriptor.id)", title: title, text: body)
+        transcriptProjections[id] = projection
+        scheduleTranscriptPersist(for: id, final: true)
+    }
+
+    private static func arrayOwnedCommandNoticeText(
+        _ descriptor: AgentCommandDescriptor, record: AgentRecord?
+    ) -> (title: String, body: String) {
+        switch descriptor.name {
+        case "clear":
+            return (
+                "Conversation cleared",
+                "Array marked a fresh boundary here. Earlier turns remain in this transcript but are no longer part of the active context."
+            )
+        case "status":
+            let harness = record?.harness?.rawValue ?? "unassigned"
+            let model = record?.model ?? "default"
+            return ("Agent status", "Harness: \(harness) · Model: \(model)")
+        case "help":
+            let names = AgentCommandCatalog.arrayCommands().map { "/\($0.name)" }.joined(separator: ", ")
+            return ("Array commands", names)
+        default:
+            return (descriptor.name.capitalized, descriptor.detail ?? "Handled by Array.")
+        }
+    }
+
+    /// A turn's outcome or an error/stop is a real boundary worth writing
+    /// immediately; everything else (principally `contentDelta`, which arrives
+    /// per token) is debounced the same 200ms the tile used to debounce it by.
+    private static func isTranscriptPersistBoundary(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnCompleted, .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
+        guard let store = transcriptStore else { return }
+        // Assistant/reasoning content deltas parse into blocks off a scheduled
+        // deadline (the tile drove that off a real `RunLoop` timer); nothing
+        // here runs that clock, so a boundary write must flush the pending
+        // streaming markup itself or the just-streamed reply is silently
+        // absent from what gets saved.
+        if final, var projection = transcriptProjections[id] {
+            _ = projection.flushPendingStreamingMarkup()
+            transcriptProjections[id] = projection
+        }
+        guard let document = transcriptProjections[id]?.document else { return }
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        transcriptPersistenceTasks[id]?.cancel()
+        transcriptPersistenceTasks[id] = Task { [weak self] in
+            if !final { try? await Task.sleep(for: .milliseconds(200)) }
+            guard !Task.isCancelled, let self else { return }
+            try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
+            self.transcriptPersistenceTasks.removeValue(forKey: id)
+        }
+    }
+
+    // MARK: - B4 follow-up queue
+
+    /// Synchronous snapshot for the tile/composer to render pending chips.
+    /// Hydrates the cache from durable storage on first read for an agent this
+    /// process has not queued anything for yet (e.g. restored across launch).
+    func queuedMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
+        if queuedMessagesCache[id] == nil { hydrateQueueCache(for: id) }
+        return queuedMessagesCache[id] ?? []
+    }
+
+    /// Whether this agent's queue is held after an interrupted turn — the UI
+    /// paints chips distinctly rather than implying they are about to run.
+    func isQueuePaused(for id: AgentID) -> Bool {
+        pausedQueues.contains(id)
+    }
+
+    private func hydrateQueueCache(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id] = []
+        Task { @MainActor [weak self] in
+            let messages = await store.queuedMessages(for: id)
+            guard let self else { return }
+            self.queuedMessagesCache[id] = messages
+            if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
+        }
+    }
+
+    /// Deletes one visible chip. Direct manipulation of Array's own queue,
+    /// never the turn in flight — the two-verb Stop stays two verbs: the
+    /// primary control still means only "interrupt the current turn".
+    func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id]?.removeAll { $0.id == messageID }
+        notifyTurnCapabilitiesChanged(id)
+        runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
+    }
+
+    /// "Clear queued" — every chip at once, still without touching the turn in
+    /// flight.
+    func clearQueuedMessages(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        queuedMessagesCache[id] = []
+        notifyTurnCapabilitiesChanged(id)
+        runQueueOp(for: id) { await store.clearQueue(for: id) }
+    }
+
+    /// Explicit resume after an interrupt, distinct from the next Send: this
+    /// keeps the composer untouched and drains immediately if the runner is
+    /// already free.
+    func resumeQueue(for id: AgentID) {
+        guard pausedQueues.contains(id) else { return }
+        pausedQueues.remove(id)
+        notifyTurnCapabilitiesChanged(id)
+        if runners[id] == nil { drainQueue(for: id) }
+    }
+
+    private func runQueueOp(for id: AgentID, _ operation: @escaping @Sendable () async -> Void) {
+        guard let store = submissionRecoveryStore else { return }
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            await operation()
+            guard let self else { return }
+            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// Called from `clearRunner`, the one moment a runner slot actually frees.
+    /// `.interrupted` holds the queue instead of draining it (see
+    /// `pausedQueues`); every other outcome (`.completed`, `.failed`,
+    /// `.cancelled`) writes the next queued item as an ordinary send.
+    private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
+        guard submissionRecoveryStore != nil else { return }
+        if outcome == .interrupted {
+            pausedQueues.insert(id)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        guard !pausedQueues.contains(id) else { return }
+        drainQueue(for: id)
+    }
+
+    private func drainQueue(for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            guard let message = await store.dequeueNextQueuedMessage(for: id) else { return }
+            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+            let prompt: AgentPrompt
+            do {
+                let prepared = try await self.attachmentStore.preparePromptAttachments(
+                    for: id,
+                    draftAttachments: message.imageAttachments
+                )
+                let fileReferences = message.fileReferences.map {
+                    AgentPromptFileReference(
+                        displayName: $0.displayName,
+                        contentType: $0.contentType,
+                        fileURL: URL(fileURLWithPath: $0.path)
+                    )
+                }
+                prompt = AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
+            } catch {
+                self.warn("AgentSupervisor: dropping queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+                return
+            }
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
+                // The runner became busy again in the same beat (a fresh
+                // interactive send won the race) — put the message back rather
+                // than lose it.
+                await store.requeueMessageAtFront(message, for: id)
+                self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+                self.notifyTurnCapabilitiesChanged(id)
+                return
+            }
+        }
     }
 
     private enum SubmissionRecoveryAction {
@@ -3883,6 +5268,27 @@ final class AgentSupervisor {
     }
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        // B1 — pi's persistence watermark, tracked because a stop before it costs
+        // the user the whole conversation and Array is the only thing that can say
+        // so. `SessionManager._persist()` (`session-manager.js:717-751`, shared by
+        // json and rpc alike) holds every completed entry in memory until the
+        // session has produced ONE assistant message; after that each message is
+        // written synchronously before its event even reaches stdout.
+        //
+        // So the exposure is the FIRST turn of a brand-new session, not every stop
+        // — which is why this is a watermark and not a blanket warning. Approximated
+        // conservatively from the normalized stream: any assistant content or any
+        // completed turn means pi has almost certainly crossed it.
+        switch event {
+        case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
+            piPersistenceWatermarkReached.insert(id)
+        case .contentDelta:
+            piPersistenceWatermarkReached.insert(id)
+        case let .turnCompleted(_, _, outcome, _) where outcome == .completed:
+            piPersistenceWatermarkReached.insert(id)
+        default:
+            break
+        }
         switch event {
         case let .turnCompleted(_, _, outcome, _):
             if outcome == .completed {
@@ -3890,6 +5296,11 @@ final class AgentSupervisor {
             } else {
                 enqueueSubmissionRecovery(.restore, for: id)
             }
+            // B4: recorded here, read by `clearRunner` — the one moment the
+            // runner slot is actually free to accept the next send. This event
+            // still fires while `runners[id]` holds the OLD runner (the process
+            // hop that clears it is dispatched separately, after this one).
+            pendingQueueOutcome[id] = outcome
         case .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
             enqueueSubmissionRecovery(.restore, for: id)
         default:
@@ -3910,6 +5321,13 @@ final class AgentSupervisor {
             buffer.removeFirst(buffer.count - Self.replayCap)
         }
         history[id] = buffer
+
+        // C4: fed here rather than by the tile, so a child that never gets a
+        // tile (the common case at fan-out) is not silently unsaved. `deliver`
+        // is where every event already carries this agent's own thread id
+        // (restamped before this point), the same precondition the tile's
+        // model relied on.
+        ingestTranscriptEvent(event, for: id)
 
         if var record = records[id] {
             record.lastActivityAt = max(record.lastActivityAt, now)
@@ -3973,6 +5391,15 @@ final class AgentSupervisor {
             continuation.yield(event)
         }
 
+        // A spawned child's turn ending is the moment its result becomes
+        // collectable: rewrite the parent's `spawn-results/<handle>.json` from
+        // `spawned` to a terminal status, carrying the child's final assistant
+        // text. After `ingestTranscriptEvent` above on purpose — the projection
+        // must already hold this turn's last assistant entry.
+        if case let .turnCompleted(_, _, outcome, errorMessage) = event {
+            writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: errorMessage)
+        }
+
         // P2D.6: the agent finished the work its item was fanned out for, so the
         // item is done. Only `.completed` — a turn that failed or was aborted has
         // not done the work, and checking the row off would lose it. Last, after
@@ -3984,6 +5411,46 @@ final class AgentSupervisor {
             completedFanOutItems.insert(itemId)
             onFanOutItemCompleted?(itemId, id)
         }
+    }
+
+    /// The child half of the `spawn_agent` result-file channel. No-op for any
+    /// agent without a spawn handle (user-created agents, observed children) and
+    /// for a child whose parent is gone — nothing is waiting on the file then.
+    /// A later turn of the same child overwrites with its own final text: the
+    /// last answer is the freshest one, and `wait_agents` only reads during the
+    /// parent's own turn.
+    private func writeTerminalSpawnResult(for id: AgentID, outcome: TurnOutcome, errorMessage: String?) {
+        guard let child = records[id],
+              let handle = child.spawnResultHandle,
+              let parentID = child.parentAgentID,
+              let parent = records[parentID] else { return }
+        let status: SpawnResultFile.Status
+        switch outcome {
+        case .completed: status = .completed
+        case .failed: status = .failed
+        case .interrupted, .cancelled: status = .interrupted
+        }
+        var finalText: String?
+        var finalTextTruncated: Bool?
+        if status == .completed, let text = transcriptProjections[id]?.finalAssistantText {
+            let capped = SpawnResultFile.cappedFinalText(text)
+            finalText = capped.text
+            finalTextTruncated = capped.truncated ? true : nil
+        }
+        SpawnResultFile.write(
+            SpawnResultFile(
+                toolCallId: handle,
+                status: status,
+                agentId: id.rawValue,
+                role: child.role,
+                reason: errorMessage,
+                finalText: finalText,
+                finalTextTruncated: finalTextTruncated,
+                endedAt: Date()
+            ),
+            parentCwd: parent.cwd,
+            warn: warn
+        )
     }
 
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
@@ -4129,7 +5596,44 @@ final class AgentSupervisor {
         if runners[id] === runner {
             runners[id] = nil
             notifyTurnCapabilitiesChanged(id)
+            // B4: this is the actual moment the runner slot frees, not the
+            // `.turnCompleted` event itself — that event still fires while
+            // `runners[id]` holds this very runner, so draining there would
+            // refuse against an occupied slot every time.
+            if let outcome = pendingQueueOutcome.removeValue(forKey: id) {
+                handleQueueOnTurnCompleted(outcome: outcome, for: id)
+            }
         }
+    }
+
+    /// Failure-time diagnostics that survive the process. The supervisor's other
+    /// trail is `fputs(stderr)`/`warn`, which for a GUI app launched via `open`
+    /// goes to /dev/null — so WHY a runner died was unrecoverable after the fact.
+    /// One line per failure, redacted upstream by `SecretRedactor` (never prompt
+    /// text or command bodies), appended under the app-support root the store
+    /// already owns — which is what keeps checks off the real file. Rotated at
+    /// 1 MB to a single `.old`; never on a hot path.
+    private func appendAgentDiagnostics(_ message: String, agentID: AgentID) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) "
+            + "agent=\(agentID.rawValue.uuidString) \(message)\n"
+        let url = store.layout.applicationSupportDirectory
+            .appendingPathComponent("agent-diagnostics.log", isDirectory: false)
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int,
+           size > 1_048_576 {
+            let old = url.appendingPathExtension("old")
+            try? fileManager.removeItem(at: old)
+            try? fileManager.moveItem(at: url, to: old)
+        }
+        if !fileManager.fileExists(atPath: url.path) {
+            fileManager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(line.utf8))
     }
 
     private func persist(_ record: AgentRecord) {
@@ -5692,7 +7196,13 @@ func runAgentSupervisorChecks() async throws {
                     startedAt: locationObservedAt,
                     updatedAt: locationObservedAt,
                     evidenceSource: .toolEvent)),
-        ])
+        ],
+        // Every assertion below reads MID-TURN state (the stale timer, the live
+        // projector). A script that returned would now be closed by the
+        // supervisor's no-result mint — correctly, but that is section 23's
+        // subject, not this one's — so the run stays open until the explicit
+        // stop at the end of the section.
+        holdUntilStopped: true)
     let locationSupervisor = AgentSupervisor(store: locationStore, makeRunner: { _ in locationRunner })
     let locationAgentId = locationSupervisor.spawn(
         role: nil,
@@ -5776,6 +7286,7 @@ func runAgentSupervisorChecks() async throws {
           !locationTile.qaLocationStaleTimerActive else {
         throw fail("detached tile froze current What after removing its observer/timer instead of demoting it to recent")
     }
+    locationSupervisor.stop(locationAgentId)
 
     // Exercise the real native location band at narrow width. Externality has its
     // own fixed marker lane, so tail truncation can never turn an outside fact into
@@ -6010,7 +7521,7 @@ func runAgentSupervisorChecks() async throws {
     guard let record = supervisor.records[agentId] else {
         throw fail("the supervisor lost the record it spawned")
     }
-    guard AgentSupervisor.piRunner(for: record) is PiAgentRunner else {
+    guard AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is PiAgentRunner else {
         throw fail("the default runner factory does not produce a PiAgentRunner")
     }
     guard AgentSupervisor.claudeRunner(for: record) is ClaudeAgentRunner else {
@@ -6064,6 +7575,10 @@ func runAgentSupervisorChecks() async throws {
 
     let cleanupReport = try await checkArchiveCleanup(config: config, fail: fail)
 
+    // MARK: 11b · a tile-less agent still persists, and archive quarantines its transcript (C4)
+
+    let transcriptPersistenceReport = try await checkTranscriptPersistenceWithoutTile(config: config, cwd: cwd, fail: fail)
+
     // MARK: 12 · a tile SAYS which checkout its agent is about to touch (P2C.4)
 
     let branchReport = try await checkBranchChip(config: config, fail: fail)
@@ -6071,6 +7586,10 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 13 · an observed spawn_agent call becomes a child agent (P2D.2)
 
     let spawnCallReport = try await checkSpawnFromToolCall(fail: fail)
+
+    // MARK: 13b · a spawn's result is COLLECTABLE: refused/spawned/terminal reach the model's file channel
+
+    let spawnResultReport = try await checkSpawnResultFileChannel(fail: fail)
 
     // MARK: 14 · a turn you did not watch is unread, and looking clears it (P3.3)
 
@@ -6101,8 +7620,299 @@ func runAgentSupervisorChecks() async throws {
 
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 21 · a status tick never rewrites the document (C10)
+
+    let agentReferenceStatusReport = try await checkAgentReferenceLiveStatus(config: config, cwd: cwd, fail: fail)
+
+    // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
+
+    let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
+
+    // MARK: 23 · a runner that dies without a result still ends the turn
+
+    // D1 (2026-08-26): the translators mint `.turnCompleted` only from a provider
+    // result line. A CLI that exits 0 without one (crash mid-line, init never
+    // parsed, silent death) made `run()` return normally, the do-block fell
+    // through to `clearRunner`, and NOTHING ever told the tile the turn ended —
+    // it showed "Working" forever. The supervisor now closes the turn itself.
+    let noResultStore = AgentStore(
+        applicationSupportDirectory: root.appendingPathComponent("no-result", isDirectory: true))
+    let noResultRunner = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: scriptThread, turnId: "t-lost"),
+        .contentDelta(threadId: scriptThread, turnId: "t-lost", streamKind: .assistant, delta: "half an answer"),
+    ])
+    let noResultSupervisor = AgentSupervisor(store: noResultStore, makeRunner: { _ in noResultRunner })
+    let noResultId = noResultSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let noResultInbox = EventInbox()
+    let noResultStream = noResultSupervisor.events(for: noResultId)
+    let noResultTask = Task { @MainActor in for await event in noResultStream { noResultInbox.append(event) } }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { noResultSupervisor.subscriberCount(for: noResultId) == 1 }) else {
+        throw fail("no-result exit: the subscriber never registered")
+    }
+    noResultSupervisor.send("a prompt whose result will be lost", to: noResultId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        noResultInbox.events.contains { if case .turnCompleted = $0 { return true } else { return false } }
+    }) else {
+        throw fail(
+            "no-result exit: the runner returned without a result event and no .turnCompleted was "
+            + "ever delivered — the tile shows Working forever")
+    }
+    let noResultCompletions = noResultInbox.events.compactMap { event -> (turnId: String, outcome: TurnOutcome, message: String?)? in
+        if case let .turnCompleted(_, turnId, outcome, message) = event { return (turnId, outcome, message) }
+        return nil
+    }
+    guard noResultCompletions.count == 1 else {
+        throw fail("no-result exit: expected exactly one minted .turnCompleted, got \(noResultCompletions.count)")
+    }
+    guard noResultCompletions[0].outcome == .interrupted else {
+        throw fail("no-result exit: the minted completion's outcome is \(noResultCompletions[0].outcome), expected .interrupted")
+    }
+    guard noResultCompletions[0].message?.contains("exited without reporting a result") == true else {
+        throw fail("no-result exit: the minted completion carries no explanation: \(String(describing: noResultCompletions[0].message))")
+    }
+    // The mint must be TERMINAL: behind every event the runner queued, never before.
+    guard case .turnCompleted = noResultInbox.events.last! else {
+        throw fail("no-result exit: the minted completion was not the last event delivered — \(noResultInbox.events.map(eventLabel))")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { noResultSupervisor.isRunning(noResultId) == false }) else {
+        throw fail("no-result exit: the runner slot was never cleared")
+    }
+
+    // D1-catch: a runner that THROWS mid-turn (not a stop) must both show the
+    // error row (.runtimeError, unchanged) AND close the turn (.turnCompleted),
+    // each exactly once — the error alone left the tile's liveness dangling.
+    struct RunnerExploded: Error, CustomStringConvertible {
+        var description: String { "checks-runner-exploded mid-turn" }
+    }
+    let thrownRunner = ScriptedAgentRunner(
+        script: [.turnStarted(threadId: scriptThread, turnId: "t-thrown")],
+        stopError: RunnerExploded())
+    let thrownSupervisor = AgentSupervisor(store: noResultStore, makeRunner: { _ in thrownRunner })
+    let thrownId = thrownSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, model: config.model, thinking: config.thinking)
+    let thrownInbox = EventInbox()
+    let thrownStream = thrownSupervisor.events(for: thrownId)
+    let thrownTask = Task { @MainActor in for await event in thrownStream { thrownInbox.append(event) } }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { thrownSupervisor.subscriberCount(for: thrownId) == 1 }) else {
+        throw fail("thrown mid-turn: the subscriber never registered")
+    }
+    thrownSupervisor.send("a prompt whose runner throws", to: thrownId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        thrownInbox.events.contains { if case .turnCompleted = $0 { return true } else { return false } }
+    }) else {
+        throw fail("thrown mid-turn: no closing .turnCompleted was delivered after the runtime error")
+    }
+    let thrownErrors = thrownInbox.events.filter { if case .runtimeError = $0 { return true } else { return false } }
+    let thrownCompletions = thrownInbox.events.compactMap { event -> TurnOutcome? in
+        if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
+        return nil
+    }
+    guard thrownErrors.count == 1 else {
+        throw fail("thrown mid-turn: expected exactly one .runtimeError, got \(thrownErrors.count)")
+    }
+    guard thrownCompletions == [.failed] else {
+        throw fail("thrown mid-turn: expected exactly one closing .turnCompleted(.failed), got \(thrownCompletions)")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { thrownSupervisor.isRunning(thrownId) == false }) else {
+        throw fail("thrown mid-turn: the runner slot was never cleared")
+    }
+
+    // D4: WHY a runner died must survive the process. For a GUI app launched via
+    // `open`, stderr is /dev/null, so the fputs trail was unrecoverable. Both
+    // failure paths above append one redacted line to a durable file under the
+    // (isolated) app-support root.
+    let diagnosticsLog = noResultStore.layout.applicationSupportDirectory
+        .appendingPathComponent("agent-diagnostics.log", isDirectory: false)
+    guard let diagnosticsText = try? String(contentsOf: diagnosticsLog, encoding: .utf8) else {
+        throw fail("diagnostics: no agent-diagnostics.log was written at \(diagnosticsLog.path)")
+    }
+    guard diagnosticsText.contains("checks-runner-exploded") else {
+        throw fail("diagnostics: the thrown runner's redacted message never reached the log: \(diagnosticsText)")
+    }
+    guard diagnosticsText.contains("exited without reporting a result") else {
+        throw fail("diagnostics: the no-result exit left no trail in the log: \(diagnosticsText)")
+    }
+    noResultTask.cancel()
+    thrownTask.cancel()
+    let deadRunnerReport = "a runner that returned with no result minted one terminal "
+        + ".turnCompleted(.interrupted), a mid-turn throw delivered .runtimeError plus one closing "
+        + ".turnCompleted(.failed), and both left a redacted line in agent-diagnostics.log"
+
+    let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
+    let codexSubagentReport = try await checkCodexProviderSubagentRouting(fail: fail)
+    let refusalReport = try await checkRefusedSpawnIsActionableAndLeavesNothing(fail: fail)
+    let observedCapReport = try await checkObservedRunCapRefusalDoesNotBufferForever(fail: fail)
+    let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
+    let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+}
+
+/// B7.2 — `/clear`'s one-transaction contract, driven through the real
+/// production dispatch (`AgentSupervisor.accept(.providerCommand(…))`) rather
+/// than calling `performClearCommand` directly, so a regression that only
+/// wires the classifier back to the OLD notice-only path still fails here.
+///
+/// Every one of the five stored/live effects is seeded through a REAL prior
+/// state (a delivered `.contextWindowUpdated`, a disarmed naming source, a
+/// real child record, a populated replay buffer) rather than asserting
+/// against a hand-built "already cleared" fixture, so a `/clear` that does
+/// nothing to a field that started out already-clear would not pass by
+/// accident.
+@MainActor
+func checkClearCommandTransaction(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-clear-command-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    let createdAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let parentID = AgentID(rawValue: UUID())
+    let childID = AgentID(rawValue: UUID())
+
+    // Seeded pre-cleared so every assertion below proves a real transition,
+    // not an already-clear fixture read back unchanged.
+    let parent = AgentRecord(
+        id: parentID,
+        displayName: "old prompt-derived name",
+        displayNameSource: .prompt,
+        namingRequest: NamingRequest(expectedName: "old prompt-derived name"),
+        harness: .claudeCode,
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        createdAt: createdAt,
+        lastActivityAt: createdAt,
+        lastContextWindow: AgentContextWindowSnapshot(
+            usedTokens: 9_000, maxTokens: 10_000, observedAt: createdAt,
+            source: .claudeResultUsage, freshness: .live),
+        providerSessionId: "claude-old-session-id"
+    )
+    let child = AgentRecord(
+        id: childID,
+        displayName: "child",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        parentAgentID: parentID,
+        createdAt: createdAt,
+        lastActivityAt: createdAt
+    )
+    try store.upsert(parent)
+    try store.upsert(child)
+
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("agent-transcripts", isDirectory: true))
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [], holdUntilStopped: false)
+    }, transcriptStore: transcriptStore)
+    supervisor.restore()
+
+    guard supervisor.children(of: parentID) == [childID] else {
+        throw fail("clear-command fixture: the seeded child did not restore as a child of the parent")
+    }
+    // The in-memory cumulative telemetry cache and the replay buffer both need
+    // real prior content — a live `.contextWindowUpdated` populates
+    // `contextWindowSnapshots[id]` (distinct from the persisted
+    // `record.lastContextWindow` seeded above) and `history[id]`, exactly like
+    // a real turn would.
+    let liveSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 9_500, maxTokens: 10_000, observedAt: createdAt,
+        source: .claudeResultUsage, freshness: .live)
+    supervisor.qaDeliver(.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot), to: parentID)
+    guard supervisor.contextWindowSnapshot(for: parentID) == liveSnapshot else {
+        throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache")
+    }
+    var preClearReplay: [AgentRuntimeEvent] = []
+    for await event in supervisor.events(for: parentID) { preClearReplay.append(event); break }
+    guard preClearReplay == [.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot)] else {
+        throw fail("clear-command fixture: the replay buffer did not carry the delivered event")
+    }
+
+    let invocation = AgentCommandInvocation(descriptorID: "array:clear", name: "clear", surface: .array)
+    let outcome = await supervisor.accept(.providerCommand(invocation), for: parentID)
+    guard case .accepted = outcome else {
+        throw fail("clear command: expected .accepted, got \(outcome)")
+    }
+
+    // 1 · session rotation MARKED (claude only) — an eager launch is not what
+    //     `/clear` does; it defers to the next real turn (see
+    //     `performClearCommand`'s doc comment).
+    guard supervisor.records[parentID]?.pendingSessionForkFrom == "claude-old-session-id" else {
+        throw fail("clear command: did not mark the old session for --fork-session rotation, got \(String(describing: supervisor.records[parentID]?.pendingSessionForkFrom))")
+    }
+    guard AgentSupervisor.claudeRunnerConfig(for: supervisor.records[parentID]!).forkSession,
+          AgentSupervisor.claudeRunnerConfig(for: supervisor.records[parentID]!).sessionId == "claude-old-session-id" else {
+        throw fail("clear command: the next claude runner config did not route through the fork")
+    }
+
+    // 2 · lastContextWindow cleared (persisted).
+    guard supervisor.records[parentID]?.lastContextWindow == nil,
+          try store.load(id: parentID)?.lastContextWindow == nil else {
+        throw fail("clear command: lastContextWindow survived, would re-seed a stale meter after relaunch")
+    }
+
+    // 3 · naming re-armed — both fields the funnel actually gates on.
+    guard supervisor.records[parentID]?.displayNameSource == .sentinel,
+          supervisor.records[parentID]?.namingRequest == nil else {
+        throw fail("clear command: naming was not re-armed (source=\(String(describing: supervisor.records[parentID]?.displayNameSource)), request=\(String(describing: supervisor.records[parentID]?.namingRequest)))")
+    }
+
+    // 4 · subagent chip dropped — the supervisor's own parent/child bookkeeping
+    //     now agrees that the cleared thread cannot see this child anymore.
+    guard supervisor.children(of: parentID).isEmpty,
+          supervisor.records[childID]?.parentAgentID == nil,
+          try store.load(id: childID)?.parentAgentID == nil else {
+        throw fail("clear command: the child's parent link was not severed")
+    }
+
+    // 5 · the 500-entry replay buffer AND the live cumulative telemetry cache
+    //     both reset — the persisted lastContextWindow (assertion 2) is a
+    //     DIFFERENT storage location from this in-memory cache.
+    guard supervisor.contextWindowSnapshot(for: parentID) == nil else {
+        throw fail("clear command: the live cumulative context-window cache survived")
+    }
+    // `events(for:)` replays its buffer then stays open on the live stream, so
+    // proving "empty" needs a bounded read: deliver one new sentinel and
+    // confirm IT comes first. If the pre-clear event had survived, FIFO replay
+    // order would hand it back before the sentinel.
+    let sentinelSnapshot = AgentContextWindowSnapshot(
+        usedTokens: 1, maxTokens: 2, observedAt: createdAt,
+        source: .claudeResultUsage, freshness: .live)
+    supervisor.qaDeliver(.contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot), to: parentID)
+    var firstReplayedAfterClear: AgentRuntimeEvent?
+    for await event in supervisor.events(for: parentID) { firstReplayedAfterClear = event; break }
+    guard firstReplayedAfterClear == .contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot) else {
+        throw fail("clear command: the replay buffer was not cleared — got \(String(describing: firstReplayedAfterClear)) before the post-clear sentinel")
+    }
+
+    // 6 · the boundary, as a Tier A notice: the transcript keeps its history.
+    // Debounced persistence (`scheduleTranscriptPersist`), so poll rather than
+    // assert on the first read.
+    let sessionID = AgentTranscriptStore.canonicalSessionID(for: parentID)
+    var noticeDocument: AgentDocument?
+    let deadline = Date().addingTimeInterval(3)
+    while noticeDocument == nil {
+        noticeDocument = try await transcriptStore.load(agentID: parentID, sessionID: sessionID)
+        if noticeDocument != nil { break }
+        if Date() >= deadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard let document = noticeDocument,
+          document.entries.contains(where: { entry in
+              guard case .localNotice = entry.provenance else { return false }
+              return true
+          }) else {
+        throw fail("clear command: no Tier A notice was appended to the persisted transcript")
+    }
+
+    return "B7.2 clear-command transaction: session fork marked and routed, lastContextWindow cleared, naming re-armed, subagent chip dropped, replay buffer and cumulative telemetry reset, boundary notice appended — all through the real .providerCommand dispatch"
 }
 
 @MainActor
@@ -6818,6 +8628,35 @@ private func checkAgentNameContract<Failure: Error>(
           supervisor.records[manuallyKeptSentinel]?.displayName == AgentRecord.defaultAgentName,
           supervisor.records[manuallyKeptSentinel]?.displayNameSource == .manual else {
         throw fail("a manual sentinel rename was overwritten by the next prompt")
+    }
+
+    // B7.0: a slash command must never name the tile. The funnel must stay
+    // armed at `.sentinel` through a `/`-prefixed first prompt, so a later
+    // ordinary prompt is still free to name it.
+    let commandFirst = supervisor.spawn(
+        role: "operator", prompt: nil, cwd: cwd,
+        model: config.model, thinking: config.thinking
+    )
+    let beforeCommandRunCount = runner.runCount
+    supervisor.send("/compact focus on the auth work", to: commandFirst)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount == beforeCommandRunCount + 1 && !supervisor.isRunning(commandFirst)
+    }) else {
+        throw fail("the slash-command first prompt did not finish in the deterministic naming runner")
+    }
+    guard supervisor.records[commandFirst]?.displayName == AgentRecord.defaultAgentName,
+          supervisor.records[commandFirst]?.displayNameSource == .sentinel else {
+        throw fail("a slash command named the tile: \(String(describing: supervisor.records[commandFirst]?.displayName)), source \(String(describing: supervisor.records[commandFirst]?.displayNameSource))")
+    }
+    supervisor.send("Actually rename me", to: commandFirst)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount == beforeCommandRunCount + 2 && !supervisor.isRunning(commandFirst)
+    }) else {
+        throw fail("the ordinary prompt after a slash command did not finish")
+    }
+    guard supervisor.records[commandFirst]?.displayName == "Actually rename me",
+          supervisor.records[commandFirst]?.displayNameSource == .prompt else {
+        throw fail("displayNameSource did not stay armed after a slash command, so a later real prompt could not name the tile: \(String(describing: supervisor.records[commandFirst]?.displayName)), source \(String(describing: supervisor.records[commandFirst]?.displayNameSource))")
     }
 
     // P4.3: the generation marker is durable, and both halves of the CAS are
@@ -7692,7 +9531,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         throw fail("turn-state negative witness: empty choices fabricated a freeform response capability")
     }
 
-    guard await supervisor.accept(.queue("not supported"), for: id) == .refused(.unsupported) else {
+    guard await supervisor.accept(.queue(AgentPrompt("not supported")), for: id) == .refused(.unsupported) else {
         throw fail("turn-state: conservative runtime accepted a fabricated queue intent")
     }
     let draftBeforeRefusal = "keep this draft"
@@ -8074,7 +9913,7 @@ func runAgentRestoreChecks() async throws {
     let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: turn)])
     let supervisor = AgentSupervisor(
         store: store,
-        makeRunner: { queue.next($0) },
+        makeRunner: { queue.next($0.record) },
         codexRestoredContextSnapshot: { record in
             record.id == codexExact.id ? repairedExactSnapshot : nil
         })
@@ -8146,6 +9985,28 @@ func runAgentRestoreChecks() async throws {
     // depends on it entirely.
     guard AgentSupervisor.sessionId(for: tiled.id) == "array-agent-\(tiled.id.rawValue.uuidString)" else {
         throw fail("the restored agent's Pi session id is not derived from its id: \(AgentSupervisor.sessionId(for: tiled.id))")
+    }
+    // B7.1 — the pure seed functions above must still hold for a FRESH agent
+    // (this is the cheap way that ticket goes wrong: a resolver that shadows
+    // the seed for every agent, not just one that has adopted a real id).
+    // `tiled.providerSessionId` is nil, so both the claude and pi runner
+    // configs must still derive from the agent id exactly as before.
+    guard let tiledRecord = supervisor.records[tiled.id], tiledRecord.providerSessionId == nil else {
+        throw fail("fixture setup drifted: the restored fresh agent already carries a providerSessionId")
+    }
+    guard AgentSupervisor.claudeRunnerConfig(for: tiledRecord).sessionId
+            == AgentSupervisor.claudeSessionId(for: tiled.id),
+          AgentSupervisor.runnerConfig(for: tiledRecord, spawnDepth: 0).sessionId
+            == AgentSupervisor.sessionId(for: tiled.id) else {
+        throw fail("a fresh agent's runner configs must still use the derived seed, not a nil providerSessionId")
+    }
+    // And once claude has reported its own id (captured via the
+    // `.providerSessionId` runtime observation, `--fork-session`'s case),
+    // the claude runner config must adopt it instead of re-deriving.
+    var adopted = tiledRecord
+    adopted.providerSessionId = "claude-forked-session-id"
+    guard AgentSupervisor.claudeRunnerConfig(for: adopted).sessionId == "claude-forked-session-id" else {
+        throw fail("the claude runner config did not adopt a stored providerSessionId over the derived seed")
     }
     // THE REASON THE BOOT WALK NEEDS THIS: the tile finds its own agent instead of
     // spawning a second one over the top of a surviving record.
@@ -8775,7 +10636,14 @@ private func checkLiveV2TileMigration<Failure: Error>(
     cwd: URL,
     fail: (String) -> Failure
 ) async throws -> String {
-    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    // The runner is a transport stub — the turn shapes under test are
+    // hand-delivered via `qaDeliver`. It still closes its own turn like a real
+    // provider does, because a runner that returns WITHOUT a `.turnCompleted` is
+    // now (correctly) closed by the supervisor's no-result mint, and that
+    // interrupted completion is section 23's subject, not this leg's.
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: [
+        .turnCompleted(threadId: "v2-stub", turnId: "composer-turn", outcome: .completed, errorMessage: nil)
+    ]) })
     let tileID = UUID()
     let agentID = supervisor.spawn(
         role: "migration-check",
@@ -9074,7 +10942,7 @@ private func checkTileIsASubscriber(
         ScriptedAgentRunner(script: turnTwo),
         blocking
     ])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
     let tileId = UUID()
     let agentId = supervisor.spawn(
         role: nil,
@@ -9220,7 +11088,7 @@ private func checkTileIsASubscriber(
         .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil)
     ]
     let otherQueue = ScriptedRunnerQueue([ScriptedAgentRunner(script: otherTurn)])
-    let otherSupervisor = AgentSupervisor(store: store, makeRunner: { otherQueue.next($0) })
+    let otherSupervisor = AgentSupervisor(store: store, makeRunner: { otherQueue.next($0.record) })
     let otherAgentId = otherSupervisor.spawn(
         role: nil,
         prompt: "other prompt",
@@ -9303,7 +11171,7 @@ private func checkDetachOutlivesItsTile(
     // The second turn blocks, so the agent is provably mid-work when its tile closes.
     let blocking = ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t2")], holdUntilStopped: true)
     let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: firstTurn), blocking])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     // Spawned with NO tile, then bound by `attach` — the operation P2A.5 adds, and
     // the one Phase 3's "open in tile" will reach.
@@ -9627,7 +11495,7 @@ private func checkHeadlessAgents(
         ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t1")], holdUntilStopped: true)
     }
     let queue = ScriptedRunnerQueue(scripted)
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     // A canvas with NO tiles on it, carried through the whole section.
     var canvasState = CanvasState(
@@ -9835,6 +11703,7 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
     private var runtimeObservationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
+    private var observedRunHandler: (@Sendable (ObservedRunHandle) -> Void)?
     private var promptsStorage: [String] = []
     private var agentPromptsStorage: [AgentPrompt] = []
 
@@ -9855,6 +11724,9 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
         if let handler = lock.withLock({ runtimeObservationHandler }) {
             translator.onRuntimeObservation = handler
         }
+        if let handler = lock.withLock({ observedRunHandler }) {
+            translator.onObservedRun = handler
+        }
         for line in lines {
             for event in translator.translate(line: line) { onEvent(event) }
         }
@@ -9871,6 +11743,153 @@ final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
     ) {
         lock.withLock { runtimeObservationHandler = handler }
     }
+}
+
+/// The fixture runner reports observed runs too, so the supervisor's
+/// `runner as? ObservedRunReporting` wiring is exercised by the real production
+/// path rather than bypassed by a check that calls `bindObservedRun` itself.
+extension FixtureStreamRunner: ObservedRunReporting {
+    func observeObservedRuns(_ handler: @escaping @Sendable (ObservedRunHandle) -> Void) {
+        lock.withLock { observedRunHandler = handler }
+    }
+}
+
+/// Offline Codex app-server double for the supervisor seam. Announcements are
+/// emitted first so the check can subscribe to the adopted descendants; their
+/// transcript frames wait behind `releaseDescendantEvents()`.
+private final class ProviderSubagentFixtureRunner:
+    AgentRunning, ProviderSubagentActivityObserving, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let descendantGate = DispatchSemaphore(value: 0)
+    private var activityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
+
+    func observeProviderSubagentActivity(
+        _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
+    ) {
+        lock.withLock { activityHandler = handler }
+    }
+
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        guard let activity = lock.withLock({ activityHandler }) else { return }
+        let parent = "codex-provider-parent"
+        let child = "codex-provider-child"
+        let grandchild = "codex-provider-grandchild"
+        activity(.primaryThread(providerThreadID: parent))
+        activity(.childAnnounced(
+            parentProviderThreadID: parent, childProviderThreadID: child,
+            sourceItemID: "codex-child-call", displayLabel: "Scout"))
+        activity(.childAnnounced(
+            parentProviderThreadID: child, childProviderThreadID: grandchild,
+            sourceItemID: "codex-grandchild-call", displayLabel: "Verifier"))
+        guard descendantGate.wait(timeout: .now() + 10) == .success else { return }
+        activity(.threadEvent(providerThreadID: child, event: .turnStarted(
+            threadId: child, turnId: "codex-child-turn")))
+        activity(.threadEvent(providerThreadID: child, event: .contentDelta(
+            threadId: child, turnId: "codex-child-turn",
+            streamKind: .assistant, delta: "child routed")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .turnStarted(
+            threadId: grandchild, turnId: "codex-grandchild-turn")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .contentDelta(
+            threadId: grandchild, turnId: "codex-grandchild-turn",
+            streamKind: .assistant, delta: "grandchild routed")))
+        activity(.threadEvent(providerThreadID: grandchild, event: .turnCompleted(
+            threadId: grandchild, turnId: "codex-grandchild-turn",
+            outcome: .completed, errorMessage: nil)))
+        activity(.threadEvent(providerThreadID: child, event: .turnCompleted(
+            threadId: child, turnId: "codex-child-turn",
+            outcome: .completed, errorMessage: nil)))
+        onEvent(.turnCompleted(
+            threadId: parent, turnId: "codex-parent-turn",
+            outcome: .completed, errorMessage: nil))
+    }
+
+    func stop() { descendantGate.signal() }
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    func observeRuntimeObservations(
+        _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
+    ) {}
+    func releaseDescendantEvents() { descendantGate.signal() }
+}
+
+@MainActor
+private func checkCodexProviderSubagentRouting(
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-codex-subagent-routing-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let runner = ProviderSubagentFixtureRunner()
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in runner })
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let parentID = supervisor.spawn(
+        role: nil, prompt: nil,
+        cwd: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+        harness: .codex, model: config.model, thinking: config.thinking)
+    let parentInbox = EventInbox()
+    let parentTask = Task { @MainActor in
+        for await event in supervisor.events(for: parentID) { parentInbox.append(event) }
+    }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentID) == 1
+    }) else { throw fail("Codex routing: the parent subscriber never registered") }
+
+    supervisor.send("delegate twice", to: parentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        guard let child = supervisor.children(of: parentID).first else { return false }
+        return supervisor.children(of: child).count == 1
+    }) else {
+        throw fail("Codex routing: structured announcements did not create a nested child and grandchild")
+    }
+    guard let childID = supervisor.children(of: parentID).first,
+          let grandchildID = supervisor.children(of: childID).first,
+          let childRecord = supervisor.records[childID],
+          let grandchildRecord = supervisor.records[grandchildID]
+    else { throw fail("Codex routing: adopted descendant records disappeared") }
+    guard childRecord.capabilities == .observedReadOnly,
+          grandchildRecord.capabilities == .observedReadOnly,
+          childRecord.harness == .codex,
+          grandchildRecord.harness == .codex else {
+        throw fail("Codex routing: provider-owned descendants must remain read-only Codex records")
+    }
+
+    let childInbox = EventInbox()
+    let grandchildInbox = EventInbox()
+    let childTask = Task { @MainActor in
+        for await event in supervisor.events(for: childID) { childInbox.append(event) }
+    }
+    let grandchildTask = Task { @MainActor in
+        for await event in supervisor.events(for: grandchildID) { grandchildInbox.append(event) }
+    }
+    defer { childTask.cancel(); grandchildTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: childID) == 1
+            && supervisor.subscriberCount(for: grandchildID) == 1
+    }) else { throw fail("Codex routing: descendant subscribers never registered") }
+
+    runner.releaseDescendantEvents()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        childInbox.events.contains {
+            if case .contentDelta(_, _, _, "child routed") = $0 { return true }
+            return false
+        } && grandchildInbox.events.contains {
+            if case .contentDelta(_, _, _, "grandchild routed") = $0 { return true }
+            return false
+        }
+    }) else {
+        throw fail("Codex routing: provider thread events did not reach their own descendant transcripts")
+    }
+    guard !parentInbox.events.contains(where: {
+        if case .contentDelta(_, _, _, let delta) = $0 {
+            return delta == "child routed" || delta == "grandchild routed"
+        }
+        return false
+    }) else { throw fail("Codex routing: descendant content leaked into the parent transcript") }
+
+    return "structured Codex provider activity adopted one read-only child plus a nested grandchild and routed each provider thread only to its own transcript"
 }
 
 /// A runner factory that hands a distinct runner to each agent and remembers which
@@ -9892,6 +11911,691 @@ private final class SpawnedRunnerFactory {
         runners[record.id] = runner
         return runner
     }
+}
+
+/// T7 — a refused spawn says something actionable, and leaves nothing behind.
+///
+/// Observed live 2026-08-25 on a scratch project with no `.pi/agents` directory:
+/// the model was offered `spawn_agent` (a roleless pi agent sends no `--tools`, so
+/// pi permits every tool), called it with a role it invented, and got
+/// "spawn_agent refused: the requested role is not defined in this project" —
+/// which reads as a typo when the truth is the project has no roles at all.
+///
+/// The second assertion is the one Dylan's question was really about: a refusal
+/// must mint NO record, NO chip and therefore NO openable tile. A refusal that
+/// left a half-built child would be worse than the dead end it replaced.
+@MainActor
+private func checkRefusedSpawnIsActionableAndLeavesNothing(
+    fail: (String) -> Error
+) async throws -> String {
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-refusal-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Deliberately NO .pi/agents directory — the live condition.
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let store = AgentStore(applicationSupportDirectory: root)
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    }, warn: { _ in })
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    let inbox = EventInbox()
+    let stream = supervisor.events(for: parentId)
+    let task = Task { @MainActor in for await e in stream { inbox.append(e) } }
+    defer { task.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T7: the parent's subscriber never registered")
+    }
+
+    // The real production dispatch, with a role the project cannot define.
+    let refused = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false),
+        from: parentId)
+    guard refused == nil else {
+        throw fail("T7: a role in a project with no roles was not refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        inbox.events.contains { "\($0)".contains("refused") }
+    }) else {
+        throw fail("T7: the refusal was never said in the parent's transcript")
+    }
+    let said = inbox.events.map { "\($0)" }.joined(separator: "\n")
+    guard said.contains(RoleRegistry.directoryName(for: .pi)) else {
+        throw fail("T7: the refusal did not name the directory a role would go in, so it is not actionable: \(said)")
+    }
+    // And it still must not echo the requested role — the P2D.2 witness holds that
+    // out of every event on the parent's stream and this reason would be the hole.
+    guard !said.contains("researcher") else {
+        throw fail("T7: the refusal echoed the requested role id onto the parent's stream")
+    }
+    // THE second half: nothing was created. No record, so no chip and no tile.
+    guard supervisor.children(of: parentId).isEmpty else {
+        throw fail("T7: a REFUSED spawn left \(supervisor.children(of: parentId).count) child record(s) behind — an openable tile for an agent that never existed")
+    }
+    guard !said.contains("childAgentSpawned") else {
+        throw fail("T7: a refused spawn announced a child, which mints a chip for an agent that does not exist")
+    }
+
+    // A role that IS defined still spawns, so the new guard is not a blanket refusal.
+    let rolesDir = cwd.appendingPathComponent(RoleRegistry.directoryName(for: .pi), isDirectory: true)
+    try FileManager.default.createDirectory(at: rolesDir, withIntermediateDirectories: true)
+    try "---\nname: researcher\ndescription: Looks things up.\ntools: read, grep\n---\nLook things up.\n"
+        .write(to: rolesDir.appendingPathComponent("researcher.md"), atomically: true, encoding: .utf8)
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false),
+        from: parentId) != nil
+    else {
+        throw fail("T7: a role the project DOES define was refused — the guard is too broad")
+    }
+
+    return "a spawn naming a role in a project with no roles refuses with the directory to add one to, without echoing the role, and leaves no record, no chip and no tile; a defined role still spawns"
+}
+
+/// T6 — a pi `delegate_agent` child gets a tile, a transcript, and an honest end.
+///
+/// Driven entirely through production: a real `AgentSupervisor`, the real
+/// `PiEventTranslator` inside a runner, the real `runner as? ObservedRunReporting`
+/// wiring, the real `RunArtifactsWatcher`, and the real `restore()`. Nothing here
+/// calls `bindObservedRun` or `ingestObservedRunUpdate` directly — a check that
+/// did would pass on a supervisor that never subscribed, which is precisely the
+/// defect being fixed (the subscription used to be `runner as? ClaudeAgentRunner`,
+/// so it was unreachable for pi).
+///
+/// Six properties:
+///   1. The parent's `delegate_agent` call mints exactly ONE child, read-only,
+///      keyed on the tool call id — and the child's `task` reaches no event.
+///   2. The child's own work, read from its run directory, lands on the CHILD.
+///   3. Appending more lines delivers only the new ones — no re-delivery.
+///   4. The completion REWRITE (temp-file + rename, which also changes the inode)
+///      closes the run instead of being read as new content.
+///   5. A relaunch over the same store adds no children and replays no events,
+///      and says out loud that the run died with the previous session.
+///   6. A run still marked `running` with a dead pid is treated as finished, not
+///      waited on forever.
+@MainActor
+private func checkPiDelegatedRunTailing(
+    fail: (String) -> Error
+) async throws -> String {
+    // A pi-owned model: the harness gate in `send` refuses anything else, and the
+    // suite's shared `config` is claude's.
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-pi-delegate-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+
+    func fixture(_ name: String) throws -> [String] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/\(name)", isDirectory: false)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            throw fail("T6: missing fixture \(name) at \(url.path)")
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    }
+    let parentLines = try fixture("pi-delegate-agent-turn.jsonl")
+    let childLines = try fixture("pi-delegate-run-events.jsonl")
+    let runId = "code-scout-20260825T141759Z-a23808"
+    let taskText = "Survey the recipe column helpers and report what they share."
+
+    let runDir = cwd.appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let eventsURL = runDir.appendingPathComponent("events.jsonl", isDirectory: false)
+    let runJSONURL = runDir.appendingPathComponent("run.json", isDirectory: false)
+    // Only the first half is on disk when the parent's call is observed — the child
+    // is still working.
+    let firstHalf = Array(childLines.prefix(9))
+    try (firstHalf.joined(separator: "\n") + "\n").write(to: eventsURL, atomically: true, encoding: .utf8)
+    // Real appends while the run is live, matching what the extension actually
+    // does: it keeps one file descriptor open and writes to it, so the file's
+    // inode does NOT change until the completion rewrite (MARK 4). Using
+    // `write(atomically:true)` here instead — a temp-file + rename every
+    // "append" — would change the inode on every call, which is not what a
+    // live run does and would make every one of these writes look like the
+    // completion rewrite to the A fix under test.
+    func appendToEvents(_ text: String) throws {
+        let handle = try FileHandle(forWritingTo: eventsURL)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+    }
+    // A live pid so the run is not read as already finished. Our own pid is alive
+    // by construction, which beats inventing one that might be recycled.
+    let livePid = ProcessInfo.processInfo.processIdentifier
+    func writeRunJSON(status: String, pid: Int32) throws {
+        try #"{"id":"\#(runId)","role":"code-scout","status":"\#(status)","pid":\#(pid)}"#
+            .write(to: runJSONURL, atomically: true, encoding: .utf8)
+    }
+    try writeRunJSON(status: "running", pid: livePid)
+
+    let store = AgentStore(applicationSupportDirectory: root)
+    let delegateWarnings = NSMutableArray()
+    let parentRunner = FixtureStreamRunner(lines: parentLines)
+    var supervisor: AgentSupervisor! = AgentSupervisor(
+        store: store,
+        makeRunner: { launch -> AgentRunning in
+            launch.record.parentAgentID == nil
+                ? parentRunner
+                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        },
+        warn: { delegateWarnings.add($0) })
+    // Spawned WITHOUT a prompt so the id exists before the runner is needed, and
+    // so the subscriber is attached before the fixture stream replays — the
+    // fixture runner emits its whole stream synchronously inside `run`.
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    // MARK: 1 · one observed child, and the task body stays out of the events
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T6: the parent's subscriber never registered")
+    }
+    supervisor.send("delegate the survey", to: parentId)
+
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.records.values.contains { $0.parentAgentID == parentId }
+    }) else {
+        throw fail("T6: the delegate_agent call produced no child at all; records \(supervisor.records.count); warnings \(delegateWarnings); parent events \(parentInbox.events.map { "\($0)" }.prefix(20))")
+    }
+    let children = supervisor.records.values.filter { $0.parentAgentID == parentId }
+    guard children.count == 1, let child = children.first else {
+        throw fail("T6: expected one delegated child, got \(children.count)")
+    }
+    guard child.capabilities == AgentCapabilities.observedReadOnly else {
+        throw fail("T6: a delegated child must be observedReadOnly — Array does not run it; got \(child.capabilities)")
+    }
+    let expectedChildID = AgentID(rawValue: AgentRecord.observedChildID(
+        parentAgentID: parentId.rawValue, toolUseID: "call_fixture_delegate_1"))
+    guard child.id == expectedChildID else {
+        throw fail("T6: the child is not keyed on its tool call id, so re-observation would mint a duplicate")
+    }
+    for event in parentInbox.events {
+        guard !"\(event)".contains(taskText) else {
+            throw fail("T6: the child's task body crossed the parent's event boundary: \(event)")
+        }
+    }
+
+    // MARK: 2 · the child's own work arrives on the child
+
+    let childInbox = EventInbox()
+    let childStream = supervisor.events(for: child.id)
+    let childTask = Task { @MainActor in for await e in childStream { childInbox.append(e) } }
+    defer { childTask.cancel() }
+
+    func childText() -> String { childInbox.events.map { "\($0)" }.joined(separator: "\n") }
+    guard await waitUntil(timeout: 15, pollInterval: 0.05, {
+        childText().contains("grep") || childText().contains("read")
+    }) else {
+        throw fail("T6: the delegated child received none of its own work — the run was never tailed")
+    }
+    let afterFirstHalf = childInbox.events.count
+
+    // MARK: 3 · appending delivers only what is new
+
+    let secondHalf = Array(childLines.dropFirst(firstHalf.count))
+    try appendToEvents(secondHalf.joined(separator: "\n") + "\n")
+    guard await waitUntil(timeout: 15, pollInterval: 0.05, {
+        childText().contains("shared descriptor")
+    }) else {
+        throw fail("T6: the child's completed prose never arrived — a finished run keeps its text only in message_end")
+    }
+    let readCount = childInbox.events.filter { "\($0)".contains("grep") }.count
+    guard readCount <= 1 else {
+        throw fail("T6: the child's grep call was delivered \(readCount) times — the cursor re-read consumed lines")
+    }
+    guard childInbox.events.count > afterFirstHalf else {
+        throw fail("T6: appending to the run delivered nothing")
+    }
+
+    // MARK: 4 · the completion rewrite closes the run rather than replaying it
+    //
+    // This is deliberately the case a size/line-count comparison gets WRONG,
+    // not the easy one: `secondHalf` above already brought `consumedEventCount`
+    // up to the full 16 lines of `childLines`. A rewritten file that is
+    // SHORTER than 16 is caught by a naive shrink check too — that was the
+    // pre-existing (and passing) coverage. A rewritten file with MORE than 16
+    // lines is the one a shrink check misses entirely: `newCount(20) is not <
+    // consumedCount(16)`, so the old logic fell straight into the "grew, so
+    // it's new content" branch and delivered `events[16..<20]` of the REWRITTEN
+    // file — content that has nothing to do with what actually came after line
+    // 16 of the ORIGINAL file, because there is no "after line 16" continuity
+    // across a rename. Every line below is a distinct, checkable marker for
+    // exactly that reason: if any of it reaches the child, the cursor treated
+    // the new file as a continuation of the old one instead of noticing the
+    // file itself changed.
+    let poisonedRewrite = (0..<20).map {
+        #"{"ts":"2026-08-25T14:19:00.000Z","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"POISON-\#($0)"}]}}"#
+    }.joined(separator: "\n") + "\n"
+    try poisonedRewrite.write(to: eventsURL, atomically: true, encoding: .utf8)
+    try writeRunJSON(status: "done", pid: livePid)
+    let settled = childInbox.events.count
+    try? await Task.sleep(nanoseconds: 2_000_000_000)
+    guard childInbox.events.count == settled else {
+        throw fail("T6: the compaction rewrite was read as new content and replayed \(childInbox.events.count - settled) events")
+    }
+    guard !childText().contains("POISON-") else {
+        throw fail("T6: a rewritten file LONGER than the consumed cursor (20 lines vs. 16 already read) was sliced as if it continued the old file — the child received content from the wrong file: \(childText())")
+    }
+
+    // MARK: 5 · a relaunch adds nothing and says the run is over
+
+    supervisor = nil
+    let relaunched = AgentSupervisor(store: store, makeRunner: { _ in
+        ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    }, warn: { _ in })
+    let relaunchInbox = EventInbox()
+    _ = relaunched.restore()
+    guard relaunched.records.values.filter({ $0.parentAgentID == parentId }).count == 1 else {
+        throw fail("T6: the relaunch minted a duplicate child — identity is not stable across a restart")
+    }
+    let relaunchedChildStream = relaunched.events(for: child.id)
+    let relaunchTask = Task { @MainActor in
+        for await e in relaunchedChildStream { relaunchInbox.append(e) }
+    }
+    defer { relaunchTask.cancel() }
+    try? await Task.sleep(nanoseconds: 1_500_000_000)
+    // The cursor is deliberately not persisted, so a relaunch must NOT re-read the
+    // file: the child's events were already written to its transcript when they
+    // were delivered, and replaying would duplicate a transcript.
+    guard !relaunchInbox.events.contains(where: { "\($0)".contains("shared descriptor") }) else {
+        throw fail("T6: the relaunch replayed the child's run and duplicated its transcript")
+    }
+
+    // MARK: 6 · a stale `running` is finished, not waited on
+
+    // Array's own parent pi process writes these files, so a `running` status that
+    // survives a restart is stale by construction. A dead pid must read as over.
+    let stale = RunArtifact(
+        id: runId, role: "code-scout", status: .running, task: nil, cwd: nil,
+        createdAt: nil, updatedAt: nil, pid: 999_999_999, rawJSON: nil)
+    guard stale.isFinished(isProcessAlive: { _ in false }) else {
+        throw fail("T6: a `running` run with a dead pid was treated as live — Array would wait for a child that died with the last session")
+    }
+    let live = RunArtifact(
+        id: runId, role: "code-scout", status: .running, task: nil, cwd: nil,
+        createdAt: nil, updatedAt: nil, pid: 4242, rawJSON: nil)
+    guard !live.isFinished(isProcessAlive: { _ in true }) else {
+        throw fail("T6: a genuinely running run was treated as finished, which would stop tailing a live child")
+    }
+
+    return "one pi delegate_agent call became one read-only child keyed on its tool call id, its run was tailed into the child's own transcript without re-delivery, a completion rewrite closed it instead of replaying it, a relaunch added no child and no duplicate events, and a stale running status with a dead pid reads as over"
+}
+
+/// T6-C — a run bound to a child `adoptObservedChild` will NEVER mint does not
+/// start tailing.
+///
+/// `adoptObservedChild` refuses a 5th `delegate_agent` child past the per-parent
+/// cap (`maxChildrenPerParent`). Before this fix, `bindObservedRun` bound and
+/// began tailing that run's directory anyway — its events had nowhere to go but
+/// `pendingSubagentEvents[childID]`, which no child would ever exist to drain.
+/// No external symptom of that beyond `observedRunBindingCount` never coming
+/// back down, so that diagnostic (added for this witness, no production caller)
+/// is what this asserts.
+///
+/// The cap is filled through the real `handleSpawnRequest` entry point — the
+/// same one a `tool_execution_start` line drives — so the refusal being tested
+/// is the actual production refusal, not a stand-in for it. The refused call's
+/// `tool_execution_end` (the half that reports the run) is then driven through
+/// the real `ObservedRunReporting` wiring via a `FixtureStreamRunner`, not by
+/// calling `bindObservedRun` directly.
+@MainActor
+private func checkObservedRunCapRefusalDoesNotBufferForever(
+    fail: (String) -> Error
+) async throws -> String {
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-observed-cap-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    // Reports ONE `tool_execution_end` for the tool call that will be refused —
+    // the run report a real extension sends once the child's process resolves a
+    // runId, independent of whether Array chose to adopt a child for it.
+    let overflowRunner = FixtureStreamRunner(lines: [
+        #"{"type":"tool_execution_end","toolCallId":"cap-overflow","toolName":"delegate_agent","result":{"details":{"runId":"cap-overflow-run-000"}}}"#
+    ])
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { launch -> AgentRunning in
+            launch.record.parentAgentID == nil
+                ? overflowRunner
+                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        },
+        warn: { _ in })
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    for i in 0..<AgentSupervisor.maxChildrenPerParent {
+        guard supervisor.handleSpawnRequest(
+            SpawnRequest(role: nil, prompt: "cap filler \(i)", isolated: false,
+                         sourceItemID: "cap-fill-\(i)", observedOnly: true),
+            from: parentId) != nil
+        else {
+            throw fail("T6-C: filling the per-parent cap with observed children was itself refused at \(i)")
+        }
+    }
+    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
+        throw fail("T6-C: expected \(AgentSupervisor.maxChildrenPerParent) children after filling the cap, got \(supervisor.children(of: parentId).count)")
+    }
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "cap overflow", isolated: false,
+                     sourceItemID: "cap-overflow", observedOnly: true),
+        from: parentId) == nil
+    else {
+        throw fail("T6-C: a 5th observed child was adopted past the cap of \(AgentSupervisor.maxChildrenPerParent) — the refusal fixture is not exercising the cap")
+    }
+    guard supervisor.observedRunBindingCount == 0 else {
+        throw fail("T6-C: \(supervisor.observedRunBindingCount) run binding(s) already exist before the refused call's tool_execution_end even arrived")
+    }
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T6-C: the parent's subscriber never registered")
+    }
+    supervisor.send("delegate one more, past the cap", to: parentId)
+
+    // Give the async report every chance to land and be (mis)processed before
+    // asserting it did not start tailing anything.
+    try? await Task.sleep(nanoseconds: 1_500_000_000)
+    guard supervisor.observedRunBindingCount == 0 else {
+        throw fail("T6-C: a run for a REFUSED child was bound and is being tailed (\(supervisor.observedRunBindingCount) binding(s)) — its events have nowhere to go and will buffer forever")
+    }
+    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
+        throw fail("T6-C: the refused call's run report minted a child anyway, past the cap")
+    }
+
+    return "a delegate_agent call refused past the per-parent cap never starts tailing its run, even once the refused call's own tool_execution_end arrives"
+}
+
+/// T6-D — a parent's watcher is scoped to that parent's own bindings, and a
+/// binding survives the window before its child is adopted.
+///
+/// `tool_execution_end` (which reports the run and drives `bindObservedRun`)
+/// can arrive before the main-actor hop that adopts the child from
+/// `tool_execution_start` has run — the exact scenario `bindObservedRun`'s own
+/// comment names. Before this fix, `refreshObservedRunWatchers`' "mine" filter
+/// asked `records[binding.childID]?.parentAgentID == parent`, which read nil
+/// (child not adopted yet) as "not mine" and tore the parent's only watcher
+/// down out from under a binding that was very much still open — so once the
+/// child WAS finally adopted, nothing was left running to tail its run.
+///
+/// Reproduced by binding the run through ONLY a `tool_execution_end` line —
+/// leaving the child permanently un-adopted for now — then letting the
+/// watcher run at least one full debounce+refresh cycle (so
+/// `refreshObservedRunWatchers` actually evaluates "mine" while the child
+/// genuinely does not exist), and only THEN adopting the child, via the same
+/// `handleSpawnRequest` entry point `tool_execution_start` would have driven.
+/// A version gated on the two lines' ORDER in one synchronous fixture stream
+/// is not enough: both translator lines process microseconds apart, long
+/// before the watcher's 0.5s debounce ever fires a refresh, so the race
+/// window that actually matters is against the watcher's cadence, not against
+/// `tool_execution_start`.
+@MainActor
+private func checkObservedRunBindingSurvivesAdoptionRace(
+    fail: (String) -> Error
+) async throws -> String {
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-observed-race-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let runId = "race-run-000"
+    let toolUseID = "call_race_1"
+    let runDir = cwd.appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let eventsURL = runDir.appendingPathComponent("events.jsonl", isDirectory: false)
+    let runJSONURL = runDir.appendingPathComponent("run.json", isDirectory: false)
+    // The trailing "\n" matters: a real pi run only ever has a trailing newline
+    // missing on a line still being WRITTEN, and the byte-cursor tail reader
+    // deliberately withholds an unterminated trailing line rather than risk
+    // reading a half-written one (see `RunArtifactsReader.tailEventsJSONL`). A
+    // line with no newline at all reads as "still being written" — correct for
+    // production, but it means this fixture must not omit it.
+    try (#"{"ts":"1","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first line on disk before either half of the tool call is processed"}]}}"# + "\n")
+        .write(to: eventsURL, atomically: true, encoding: .utf8)
+    let livePid = ProcessInfo.processInfo.processIdentifier
+    try #"{"id":"\#(runId)","role":"code-scout","status":"running","pid":\#(livePid)}"#
+        .write(to: runJSONURL, atomically: true, encoding: .utf8)
+
+    // ONLY `tool_execution_end` — reports the run and calls `bindObservedRun`.
+    // Nothing in this stream ever adopts the child; that is done by hand,
+    // later, once the watcher has had a full cycle to run with no child to find.
+    let raceRunner = FixtureStreamRunner(lines: [
+        #"{"type":"tool_execution_end","toolCallId":"\#(toolUseID)","toolName":"delegate_agent","result":{"details":{"runId":"\#(runId)"}}}"#
+    ])
+    let store = AgentStore(applicationSupportDirectory: root)
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { launch -> AgentRunning in
+            launch.record.parentAgentID == nil
+                ? raceRunner
+                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        },
+        warn: { _ in })
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T6-D: the parent's subscriber never registered")
+    }
+    supervisor.send("delegate with a not-yet-adopted child", to: parentId)
+
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.observedRunBindingCount == 1
+    }) else {
+        throw fail("T6-D: the run was never bound at all")
+    }
+    guard !supervisor.records.values.contains(where: { $0.parentAgentID == parentId }) else {
+        throw fail("T6-D: the child was adopted before this test could create the race window — nothing in the fixture stream should have adopted it yet")
+    }
+
+    // Let the watcher run at least one full debounce (default 0.5s) + refresh
+    // cycle with the child genuinely absent — this is the window
+    // `refreshObservedRunWatchers` used to mis-evaluate as "not mine".
+    try? await Task.sleep(nanoseconds: 1_200_000_000)
+    guard supervisor.observedRunBindingCount == 1 else {
+        throw fail("T6-D: the binding did not survive the window before adoption — \(supervisor.observedRunBindingCount) binding(s) remain instead of 1, so the parent's watcher was torn down while the child did not exist yet")
+    }
+
+    // NOW adopt the child — the real entry point `tool_execution_start` drives.
+    guard let child = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "code-scout", prompt: "race test", isolated: false,
+                     sourceItemID: toolUseID, observedOnly: true),
+        from: parentId).map({ id in supervisor.records[id] }) ?? nil
+    else {
+        throw fail("T6-D: adopting the child (after the race window) was refused")
+    }
+    guard supervisor.observedRunBindingCount == 1 else {
+        throw fail("T6-D: the binding did not survive adoption itself — \(supervisor.observedRunBindingCount) binding(s) remain instead of 1")
+    }
+
+    // The proof that matters: the watcher must still be ALIVE to tail an
+    // append that happens after the child is adopted, not merely that the
+    // binding dictionary entry survived.
+    let childInbox = EventInbox()
+    let childStream = supervisor.events(for: child.id)
+    let childTask = Task { @MainActor in for await e in childStream { childInbox.append(e) } }
+    defer { childTask.cancel() }
+    func appendToEvents(_ text: String) throws {
+        let handle = try FileHandle(forWritingTo: eventsURL)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.1, {
+        childInbox.events.map { "\($0)" }.joined().contains("first line on disk")
+    }) else {
+        throw fail("T6-D: the content already on disk before the race even began never reached the child, so the watcher this test depends on is not tailing at all")
+    }
+    try appendToEvents(#"{"ts":"2","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"appended after the child was finally adopted"}]}}"# + "\n")
+    guard await waitUntil(timeout: 10, pollInterval: 0.05, {
+        childInbox.events.map { "\($0)" }.joined().contains("appended after the child was finally adopted")
+    }) else {
+        throw fail("T6-D: an append made AFTER the child was adopted never reached it — the watcher was torn down during the race and nothing was left running to notice the append")
+    }
+
+    return "a run bound before its child was adopted (tool_execution_end arriving ahead of tool_execution_start) keeps its binding and its parent's watcher alive across that window, and an append made once the child exists still reaches it"
+}
+
+/// T6-B — a run whose directory goes quiet forever still reaches a terminal
+/// state, via the pid rather than the directory.
+///
+/// `RunArtifactsWatcher` only notices a run ending when its directory's
+/// signature CHANGES. If the child process is `kill -9`'d, or the extension
+/// dies before writing a terminal `run.json`, the directory stops changing —
+/// no further watcher update ever arrives, so `ingestObservedRunUpdate`'s
+/// `isFinished()` check (the only place a binding used to close on its own)
+/// never runs again, and a 0.25s timer would poll a dead run for the rest of
+/// the app's life while the child tile sat stuck mid-turn forever.
+///
+/// The run directory here is written ONCE and never touched again after that.
+/// `run.json` names a REAL, briefly-live process's pid — alive at the moment of
+/// that one write, dead moments later with nothing ever rewriting the file. A
+/// pid that is already dead at the FIRST read does not exercise this: the
+/// pre-existing `isFinished()` check inside `ingestObservedRunUpdate` already
+/// catches that on the one read that happens to occur. Reaching a terminal
+/// state here has to come from `sweepObservedRunLiveness`'s periodic pid
+/// probe, since nothing else will ever prompt it.
+@MainActor
+private func checkObservedRunLivenessSweepClosesQuietDeadRun(
+    fail: (String) -> Error
+) async throws -> String {
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-observed-liveness-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let runId = "quiet-run-000"
+    let toolUseID = "call_quiet_1"
+    let runDir = cwd.appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let eventsURL = runDir.appendingPathComponent("events.jsonl", isDirectory: false)
+    let runJSONURL = runDir.appendingPathComponent("run.json", isDirectory: false)
+    try (#"{"ts":"1","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"the only thing this run ever writes"}]}}"# + "\n")
+        .write(to: eventsURL, atomically: true, encoding: .utf8)
+    // A REAL process, alive when `run.json` is written and dead moments later
+    // with NOTHING ever rewriting the directory again — exactly a `kill -9`'d
+    // child (or an extension that died before writing `status: "done"`), and
+    // exactly the case a dead-pid-at-first-read would NOT exercise: that case
+    // is already caught by the pre-existing `isFinished()` check inside
+    // `ingestObservedRunUpdate` on the very first (and only) read, so it says
+    // nothing about whether anything checks again once the directory goes
+    // quiet.
+    let shortLivedProcess = Process()
+    shortLivedProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    shortLivedProcess.arguments = ["1"]
+    try shortLivedProcess.run()
+    let shortLivedPid = shortLivedProcess.processIdentifier
+    // Reaped once it exits, off the main actor — an un-reaped child is a
+    // zombie, and `kill(pid, 0)` on a zombie still succeeds (the pid is still
+    // allocated until something calls wait on it), which would make this
+    // "dead" pid read as alive forever and the test vacuous.
+    Task.detached { shortLivedProcess.waitUntilExit() }
+    try #"{"id":"\#(runId)","role":"code-scout","status":"running","pid":\#(shortLivedPid)}"#
+        .write(to: runJSONURL, atomically: true, encoding: .utf8)
+
+    let quietRunner = FixtureStreamRunner(lines: [
+        #"{"type":"tool_execution_start","toolCallId":"\#(toolUseID)","toolName":"delegate_agent","args":{"agent":"code-scout","task":"quiet test","worktree":false}}"#,
+        #"{"type":"tool_execution_end","toolCallId":"\#(toolUseID)","toolName":"delegate_agent","result":{"details":{"runId":"\#(runId)"}}}"#
+    ])
+    let store = AgentStore(applicationSupportDirectory: root)
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { launch -> AgentRunning in
+            launch.record.parentAgentID == nil
+                ? quietRunner
+                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        },
+        warn: { _ in })
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: parentId) == 1
+    }) else {
+        throw fail("T6-B: the parent's subscriber never registered")
+    }
+    supervisor.send("delegate to a run that will go quiet", to: parentId)
+
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.records.values.contains { $0.parentAgentID == parentId }
+    }) else {
+        throw fail("T6-B: the delegate call produced no child at all")
+    }
+    let children = supervisor.records.values.filter { $0.parentAgentID == parentId }
+    guard children.count == 1, let child = children.first else {
+        throw fail("T6-B: expected one delegated child, got \(children.count)")
+    }
+
+    let childInbox = EventInbox()
+    let childStream = supervisor.events(for: child.id)
+    let childTask = Task { @MainActor in for await e in childStream { childInbox.append(e) } }
+    defer { childTask.cancel() }
+    func childText() -> String { childInbox.events.map { "\($0)" }.joined(separator: "\n") }
+    guard await waitUntil(timeout: 10, pollInterval: 0.05, {
+        childText().contains("the only thing this run ever writes")
+    }) else {
+        throw fail("T6-B: the run's one write never reached the child — the watcher this test depends on is not tailing at all")
+    }
+    guard supervisor.observedRunBindingCount == 1 else {
+        throw fail("T6-B: expected exactly one open binding after the first (and only) tail, got \(supervisor.observedRunBindingCount)")
+    }
+
+    // The directory is untouched from here on. Nothing but the pid probe can
+    // ever move this binding to a terminal state.
+    guard await waitUntil(timeout: 15, pollInterval: 0.1, {
+        childText().contains("no longer running")
+    }) else {
+        throw fail("T6-B: a run with a dead pid and an untouched directory never reached a terminal state — the child tile would be stuck mid-turn until the app relaunches. child events: \(childInbox.events.map { "\($0)" })")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.1, {
+        supervisor.observedRunBindingCount == 0
+    }) else {
+        throw fail("T6-B: the child was told its run ended, but the binding (and the watcher polling for it) was never actually released — \(supervisor.observedRunBindingCount) remain")
+    }
+    guard !parentInbox.events.contains(where: { "\($0)".contains("no longer running") }) else {
+        throw fail("T6-B: the liveness sweep's synthetic completion leaked onto the PARENT's stream instead of the child's")
+    }
+
+    return "a run whose directory goes quiet forever (dead pid, `status` stuck at \"running\") still closes — via a periodic pid probe independent of the directory — telling the child its run ended and releasing the binding, rather than polling a dead run for the rest of the app's life"
 }
 
 /// P2D.2 — an observed `spawn_agent` call becomes a real child agent.
@@ -9982,7 +12686,7 @@ private func checkSpawnFromToolCall(
     let parentRunner = FixtureStreamRunner(lines: lines)
     let projectId = UUID()
     var factory: SpawnedRunnerFactory!
-    let supervisor = AgentSupervisor(store: store, makeRunner: { factory.make($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { factory.make($0.record) })
     factory = SpawnedRunnerFactory()
     // The parent is spawned WITHOUT a prompt so its id exists before its runner is
     // needed; the factory then hands it the fixture runner.
@@ -10038,9 +12742,23 @@ private func checkSpawnFromToolCall(
     // …and the role's tool list is what the provider process would actually be
     // launched with. Red when `runnerConfig(for:)` drops `extraArgs`: `the child's
     // runner would not pass its role's tools: []`.
-    let childRunnerArgs = AgentSupervisor.runnerConfig(for: child).extraArgs
-    guard childRunnerArgs == ["--tools", scoutTools] else {
-        throw fail("the child's runner would not pass its role's tools: \(childRunnerArgs)")
+    //
+    // T5 (2026-08-25): the child sits BELOW the spawn cap, so its list must also
+    // carry pi's delegation verbs — `.pi/agents/*.md` roles declare none of them,
+    // and `--tools` is a hard allowlist that covers extension tools, so a roled
+    // agent that is not given them cannot delegate at all. This is the assertion
+    // that the depth actually reaches the runner: `runnerConfig` alone would go
+    // green on a supervisor that never threaded it, because the check would be
+    // choosing the depth itself. Here the depth comes from the supervisor's own
+    // record tree.
+    let childDepth = supervisor.depth(of: child.id)
+    guard childDepth < AgentSupervisor.maxSpawnDepth else {
+        throw fail("the child's depth is \(childDepth), which is not below the cap — this act no longer tests what it says")
+    }
+    let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
+    let expectedChildTools = "\(scoutTools), " + RoleRegistry.spawnToolNames(for: .pi).joined(separator: ", ")
+    guard childRunnerArgs == ["--tools", expectedChildTools] else {
+        throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }
     guard let storedChild = try store.load(id: childId), storedChild.parentAgentID == parentId else {
         throw fail("the parent link did not reach the store: \(String(describing: try store.load(id: childId)?.parentAgentID))")
@@ -10127,6 +12845,16 @@ private func checkSpawnFromToolCall(
     guard supervisor.depth(of: grandchildId) == AgentSupervisor.maxSpawnDepth else {
         throw fail("the grandchild's depth is \(supervisor.depth(of: grandchildId)), expected \(AgentSupervisor.maxSpawnDepth)")
     }
+    // T5 — AT the cap the spawn verbs are WITHHELD, so the model is never offered
+    // a tool Array would have to refuse. The other half of the child assertion
+    // above, and the half that catches an off-by-one in the comparison.
+    let grandchildArgs = AgentSupervisor.runnerConfig(
+        for: grandchild, spawnDepth: supervisor.depth(of: grandchildId)).extraArgs
+    for spawnTool in RoleRegistry.spawnToolNames(for: .pi) {
+        guard !grandchildArgs.joined(separator: " ").contains(spawnTool) else {
+            throw fail("the grandchild is AT the depth cap but was still offered \(spawnTool): \(grandchildArgs)")
+        }
+    }
 
     let grandchildInbox = EventInbox()
     let grandchildStream = supervisor.events(for: grandchildId)
@@ -10204,8 +12932,8 @@ private func checkSpawnFromToolCall(
         guard worker.model == piConfig.model, worker.thinking == piConfig.thinking else {
             throw fail("\(worker.role ?? "?") did not inherit the parent's provider settings: model \(worker.model), thinking \(worker.thinking)")
         }
-        guard AgentSupervisor.runnerConfig(for: worker).extraArgs.isEmpty else {
-            throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker).extraArgs)")
+        guard AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs.isEmpty else {
+            throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs)")
         }
     }
     let atCap = supervisor.children(of: parentId).count
@@ -10273,8 +13001,366 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a role refusal echoes the requested role id or a host path: \(roleRefusalTitles)")
     }
 
+    // MARK: 8 · C12 — a codex parent is refused honestly about OBSERVABILITY
+
+    // `codex exec --json` (measured, `.plans/46`) has no wire representation for
+    // subagent activity at all, so Array cannot say a codex parent spawned
+    // anything even where codex itself may be delegating. The refusal must not
+    // claim codex cannot spawn — that would be false — only that this transport
+    // cannot see it.
+    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let codexParentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: repo,
+        harness: .codex, model: codexConfig.model, thinking: codexConfig.thinking,
+        projectId: projectId)
+    let codexInbox = EventInbox()
+    let codexStream = supervisor.events(for: codexParentId)
+    let codexTask = Task { @MainActor in for await event in codexStream { codexInbox.append(event) } }
+    defer { codexTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: codexParentId) == 1 }) else {
+        throw fail("the codex parent's subscriber never registered")
+    }
+    let beforeCodexRefusal = supervisor.records.count
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false),
+        from: codexParentId
+    ) == nil else {
+        throw fail("a codex parent was allowed to spawn — Array has no transport evidence of what would happen to the child")
+    }
+    guard supervisor.records.count == beforeCodexRefusal else {
+        throw fail("the refused codex spawn still created a record: \(supervisor.records.count), expected \(beforeCodexRefusal)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        codexInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.codexSubagentsUnobservable.reason)
+            }
+            return false
+        }
+    }) else {
+        throw fail("a codex parent's spawn was refused silently — nothing on its transcript: \(codexInbox.events)")
+    }
+    let codexRefusalTitles = codexInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard codexRefusalTitles.allSatisfy({ !$0.contains("delegate this to a subagent") && !$0.contains(root.path) }) else {
+        throw fail("I5: a codex refusal echoes the requested prompt or a host path: \(codexRefusalTitles)")
+    }
+    guard !codexRefusalTitles.contains(where: { $0.localizedCaseInsensitiveContains("cannot spawn") }) else {
+        throw fail("the codex refusal claims codex cannot spawn, which is false — it says Array cannot observe it: \(codexRefusalTitles)")
+    }
+    supervisor.stop(codexParentId)
+
+    // MARK: 9 · C12 — a mirrored (observedReadOnly) parent has no runner to spawn through
+
+    // This is a claude `Agent` subagent Array only mirrors — read-only transcript,
+    // not locally managed. Persist it through the real store/restore path (the
+    // same one a relaunch uses) rather than reaching into `records` directly, so
+    // this witness exercises production adoption too.
+    let observedId = AgentID(rawValue: UUID())
+    let now = Date()
+    let observedRecord = AgentRecord(
+        id: observedId,
+        displayName: "Mirrored subagent",
+        role: nil,
+        harness: .claudeCode,
+        model: piConfig.model,
+        thinking: piConfig.thinking,
+        cwd: repo.path,
+        projectId: projectId,
+        capabilities: .observedReadOnly,
+        createdAt: now,
+        lastActivityAt: now
+    )
+    try store.upsert(observedRecord)
+    supervisor.restore()
+    guard supervisor.records[observedId]?.capabilities == .observedReadOnly else {
+        throw fail("the mirrored record did not restore with observedReadOnly capabilities")
+    }
+    let observedInbox = EventInbox()
+    let observedStream = supervisor.events(for: observedId)
+    let observedTask = Task { @MainActor in for await event in observedStream { observedInbox.append(event) } }
+    defer { observedTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: observedId) == 1 }) else {
+        throw fail("the mirrored agent's subscriber never registered")
+    }
+    let beforeObservedRefusal = supervisor.records.count
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "spawn a helper", isolated: false),
+        from: observedId
+    ) == nil else {
+        throw fail("a mirrored (observedReadOnly) agent was allowed to spawn a child through a runner it does not own")
+    }
+    guard supervisor.records.count == beforeObservedRefusal else {
+        throw fail("the refused mirrored-parent spawn still created a record: \(supervisor.records.count), expected \(beforeObservedRefusal)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        observedInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.observedParentCannotSpawn.reason)
+            }
+            return false
+        }
+    }) else {
+        throw fail("a mirrored parent's spawn was refused silently — nothing on its transcript: \(observedInbox.events)")
+    }
+    let observedRefusalTitles = observedInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard observedRefusalTitles.allSatisfy({ !$0.contains("spawn a helper") && !$0.contains(root.path) }) else {
+        throw fail("I5: a mirrored-parent refusal echoes the requested prompt or a host path: \(observedRefusalTitles)")
+    }
+
+    // MARK: 10 · C7 — an OBSERVED claude subagent is adopted, not spawned
+    //
+    // An `Agent` (formerly `Task`) call is claude reporting a child it has already
+    // started inside itself. Array mints a read-only record so the child's own
+    // frames have somewhere to land and the parent gets a chip — and must never
+    // start a process for it.
+    let observedParent = supervisor.spawn(
+        role: nil, prompt: nil, cwd: repo, harness: .claudeCode,
+        model: piConfig.model, thinking: piConfig.thinking, projectId: projectId)
+    let observedParentInbox = EventInbox()
+    let observedParentStream = supervisor.events(for: observedParent)
+    let observedParentTask = Task { @MainActor in
+        for await event in observedParentStream { observedParentInbox.append(event) }
+    }
+    defer { observedParentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.subscriberCount(for: observedParent) == 1
+    }) else {
+        throw fail("the observed parent's subscriber never registered")
+    }
+
+    let toolUseID = "toolu_0164hvbb7oKHD8HqnBRJVh8E"
+    let announcement = SpawnRequest(
+        role: "general-purpose",
+        prompt: "read notes.txt and report its contents",
+        isolated: false,
+        sourceItemID: toolUseID,
+        observedOnly: true)
+    guard let adopted = supervisor.handleSpawnRequest(announcement, from: observedParent) else {
+        throw fail("a claude Agent announcement produced no child record, so its frames would have nowhere to land")
+    }
+    guard let adoptedRecord = supervisor.records[adopted] else {
+        throw fail("the adopted child is not in the supervisor's records")
+    }
+    guard adoptedRecord.capabilities == .observedReadOnly else {
+        throw fail("the adopted child has capabilities \(adoptedRecord.capabilities) — a child Array only mirrors must not advertise a composer or a working Stop")
+    }
+    guard adoptedRecord.parentAgentID == observedParent else {
+        throw fail("the adopted child is not parented, so the inbox cannot nest it and the lineage overlay cannot draw it")
+    }
+    // No process. `handleSpawnRequest` returning a child that is RUNNING would
+    // mean Array had started a second conversation claude already owns.
+    guard !supervisor.isRunning(adopted) else {
+        throw fail("Array started a runner for a child claude is already running")
+    }
+
+    // Deterministic identity: the same announcement is replayed on every restore
+    // and re-observation, and a random id would mint a duplicate agent each time.
+    let beforeReadopt = supervisor.records.count
+    guard supervisor.handleSpawnRequest(announcement, from: observedParent) == adopted else {
+        throw fail("re-observing the same Agent call minted a different child — a restore would duplicate every subagent")
+    }
+    guard supervisor.records.count == beforeReadopt else {
+        throw fail("re-observing the same Agent call added a record: \(supervisor.records.count), expected \(beforeReadopt)")
+    }
+    guard adopted.rawValue == AgentRecord.observedChildID(
+        parentAgentID: observedParent.rawValue, toolUseID: toolUseID) else {
+        throw fail("the adopted child's id is not derived from (parent, tool_use_id), so it cannot be re-derived on restore")
+    }
+
+    // The parent gets exactly one chip, and it names the announcing call.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        observedParentInbox.events.contains { event in
+            if case let .childAgentSpawned(_, childAgentID, _, _, sourceItemID, _, _) = event {
+                return childAgentID == adopted.rawValue && sourceItemID == toolUseID
+            }
+            return false
+        }
+    }) else {
+        throw fail("the observed child produced no chip on the parent's transcript: \(observedParentInbox.events)")
+    }
+    let chipCount = observedParentInbox.events.filter {
+        if case .childAgentSpawned = $0 { return true }
+        return false
+    }.count
+    guard chipCount == 1 else {
+        throw fail("the parent saw \(chipCount) chips for one child — re-observation must converge, not accumulate")
+    }
+    // I5: the model-authored prompt must not reach the parent's published stream.
+    let observedTitles = observedParentInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event { return title }
+        if case let .childAgentSpawned(_, _, _, displayName, _, _, _) = event { return displayName }
+        return nil
+    }
+    guard observedTitles.allSatisfy({ !$0.contains("read notes.txt") && !$0.contains(root.path) }) else {
+        throw fail("I5: an observed-child event echoes the model-authored prompt or a host path: \(observedTitles)")
+    }
+
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
-    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, and an undefined role was refused without echoing its id"
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request; and a claude Agent announcement was ADOPTED as one observedReadOnly, parented, process-less child at a (parent, tool_use_id)-derived id that re-observation converges on, with exactly one chip on the parent and no prompt in it"
+}
+
+/// The `spawn_agent` result-file channel — what makes delegation COLLECTABLE.
+///
+/// Witnessed live 2026-08-22: `spawn_agent` is fire-and-forget, so a parent's
+/// model spawned two children, had no way to read their results, slept in a
+/// loop, gave up and redid the work itself; and a REFUSED spawn still read
+/// "spawned" to the model, because `refuseSpawn` synthesizes transcript items
+/// the model never receives. The channel is
+/// `<parent cwd>/.array/spawn-results/<toolCallId>.json`, written by the
+/// production functions this check drives (`handleSpawnRequest`,
+/// `refuseSpawn`, `deliver`'s `.turnCompleted`), and read by the extension's
+/// `wait_agents` tool.
+///
+/// Three lifecycles, all in an isolated temp cwd:
+///   1. a REFUSED spawn writes `refused` with the refusal's own reason
+///      (red at HEAD: no file existed at all),
+///   2. a successful spawn writes `spawned` synchronously, and the child's
+///      `.turnCompleted(.completed)` rewrites it to `completed` carrying the
+///      child's final assistant text (red at HEAD),
+///   3. an interrupted child's file ends `interrupted`; archiving that child
+///      removes its file.
+@MainActor
+private func checkSpawnResultFileChannel(
+    fail: (String) -> Error
+) async throws -> String {
+    let piConfig = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-spawn-result-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Deliberately NO .pi/agents directory, so a NAMED role is the refusal.
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+
+    let childAnswer = "The final answer from the spawned child: 42."
+    let completedScript: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "child-thread", turnId: "turn-1"),
+        .itemStarted(threadId: "child-thread", itemId: "msg-1", kind: .assistantMessage, title: nil),
+        .contentDelta(threadId: "child-thread", turnId: "turn-1", streamKind: .assistant, delta: childAnswer),
+        .itemCompleted(threadId: "child-thread", itemId: "msg-1", kind: .assistantMessage, status: .completed),
+        .turnCompleted(threadId: "child-thread", turnId: "turn-1", outcome: .completed, errorMessage: nil),
+        .sessionStateChanged(.ready),
+    ]
+    let interruptedScript: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "child-thread", turnId: "turn-1"),
+        .turnCompleted(threadId: "child-thread", turnId: "turn-1", outcome: .interrupted, errorMessage: nil),
+        .sessionStateChanged(.ready),
+    ]
+    // The parent never runs a turn here; each CHILD gets the next script in
+    // order, so the two spawns below exercise two different terminal outcomes.
+    var childScripts = [completedScript, interruptedScript]
+    // A transcript store is required: `finalText` is read from the transcript
+    // projection, which `ingestTranscriptEvent` only feeds when one is injected
+    // — exactly production's shape.
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("transcripts", isDirectory: true))
+    let supervisor = AgentSupervisor(store: store, makeRunner: { launch in
+        if launch.record.parentAgentID == nil {
+            return ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        }
+        return ScriptedAgentRunner(script: childScripts.isEmpty ? [.sessionStateChanged(.ready)] : childScripts.removeFirst())
+    }, warn: { _ in }, transcriptStore: transcriptStore)
+    let parentId = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: piConfig.model, thinking: piConfig.thinking)
+
+    func resultFile(_ handle: String) -> SpawnResultFile? {
+        guard let data = try? Data(contentsOf: SpawnResultFile.url(parentCwd: cwd.path, handle: handle)) else {
+            return nil
+        }
+        return try? JSONCodec.makeDecoder().decode(SpawnResultFile.self, from: data)
+    }
+
+    // MARK: 1 · a refusal reaches the MODEL's channel, with the reason
+
+    let refusedHandle = "call_refused_no_roles"
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "look it up", isolated: false, sourceItemID: refusedHandle),
+        from: parentId
+    ) == nil else {
+        throw fail("a named role in a project with no roles was not refused")
+    }
+    guard let refused = resultFile(refusedHandle) else {
+        throw fail("a refused spawn wrote no result file — the refusal is still UI-only and the model still believes it spawned")
+    }
+    guard refused.status == .refused, refused.toolCallId == refusedHandle else {
+        throw fail("the refused result file says \(refused.status.rawValue) for \(refused.toolCallId), expected refused/\(refusedHandle)")
+    }
+    guard refused.reason == AgentSupervisor.SpawnRefusal
+        .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: .pi)).reason else {
+        throw fail("the refused result file's reason is \(String(describing: refused.reason)), not the refusal's own")
+    }
+
+    // MARK: 2 · spawned synchronously, then rewritten to completed with the child's final text
+
+    let okHandle = "call_ok_completed"
+    guard let childId = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "find the answer", isolated: false, sourceItemID: okHandle),
+        from: parentId
+    ) else {
+        throw fail("a roleless spawn inside every cap was refused")
+    }
+    // Synchronous read on the same actor turn: the child's runner has not run
+    // yet, so this MUST already say `spawned` — the write is part of the spawn.
+    guard let spawned = resultFile(okHandle), spawned.status == .spawned else {
+        throw fail("a successful spawn did not synchronously write a spawned result file, got \(String(describing: resultFile(okHandle)?.status))")
+    }
+    guard spawned.agentId == childId.rawValue else {
+        throw fail("the spawned result file names agent \(String(describing: spawned.agentId)), not the child \(childId.rawValue)")
+    }
+    guard supervisor.records[childId]?.spawnResultHandle == okHandle else {
+        throw fail("the child record does not remember its spawn handle: \(String(describing: supervisor.records[childId]?.spawnResultHandle))")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { resultFile(okHandle)?.status == .completed }) else {
+        throw fail("the child's turnCompleted never rewrote the result file to completed; last status \(String(describing: resultFile(okHandle)?.status))")
+    }
+    guard let completed = resultFile(okHandle), completed.finalText == childAnswer else {
+        throw fail("the completed result file does not carry the child's final assistant text: \(String(describing: resultFile(okHandle)?.finalText))")
+    }
+    guard completed.agentId == childId.rawValue, completed.endedAt != nil else {
+        throw fail("the completed result file lost the child's identity or endedAt")
+    }
+
+    // MARK: 3 · an interrupted child says so, and archiving it removes the file
+
+    let interruptedHandle = "call_interrupted"
+    guard let interruptedChildId = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "work that will be stopped", isolated: false, sourceItemID: interruptedHandle),
+        from: parentId
+    ) else {
+        throw fail("the second spawn inside every cap was refused")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { resultFile(interruptedHandle)?.status == .interrupted }) else {
+        throw fail("an interrupted child's result file never reached interrupted; last status \(String(describing: resultFile(interruptedHandle)?.status))")
+    }
+    _ = supervisor.archive(interruptedChildId)
+    guard resultFile(interruptedHandle) == nil else {
+        throw fail("archiving a spawned child left its result file behind")
+    }
+
+    // A handle that cannot be a filename writes nothing, anywhere.
+    let beforeTraversal = (try? FileManager.default.contentsOfDirectory(
+        atPath: SpawnResultFile.directory(parentCwd: cwd.path).path)) ?? []
+    _ = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "researcher", prompt: "x", isolated: false, sourceItemID: "../escape"),
+        from: parentId)
+    let afterTraversal = (try? FileManager.default.contentsOfDirectory(
+        atPath: SpawnResultFile.directory(parentCwd: cwd.path).path)) ?? []
+    guard beforeTraversal.sorted() == afterTraversal.sorted(),
+          !FileManager.default.fileExists(atPath: cwd.deletingLastPathComponent()
+              .appendingPathComponent("escape.json").path) else {
+        throw fail("a path-shaped toolCallId reached the filesystem")
+    }
+
+    supervisor.stop(childId)
+    supervisor.stop(parentId)
+    return "spawn results: a refusal wrote refused with its reason to the model's file channel, a launch wrote spawned synchronously and the child's turnCompleted rewrote it to completed with the final assistant text, an interrupted child ended interrupted and its archive removed the file, and a path-shaped handle wrote nothing"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.
@@ -10327,7 +13413,7 @@ private func checkIsolatedSpawn(
 
     let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
     let recorder = SpawningCwdRecorder(runner)
-    let supervisor = AgentSupervisor(store: store, makeRunner: { recorder.make($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { recorder.make($0.record) })
     let isolatedId = try supervisor.spawn(
         role: "implementer",
         prompt: "fix auth",
@@ -10385,7 +13471,7 @@ private func checkIsolatedSpawn(
     // The PRODUCTION factory, not the recorder: an injected runner cannot witness
     // what `PiAgentRunner.Config.cwd` would be, so a regression in `piRunner(for:)`
     // would pass everything above (from the cross-review).
-    guard let production = AgentSupervisor.piRunner(for: isolated) as? PiAgentRunner else {
+    guard let production = AgentSupervisor.piRunner(for: AgentRunnerLaunch(record: isolated, spawnDepth: 0)) as? PiAgentRunner else {
         throw fail("the default runner factory does not produce a PiAgentRunner for an isolated agent")
     }
     guard production.config.cwd.path == isolated.cwd else {
@@ -10503,6 +13589,130 @@ private func checkIsolatedSpawn(
 /// assertion below. One mutation that is deliberately NOT red is recorded at MARK 2:
 /// deleting the branch without the `isMerged` guard is caught by `git branch -d`
 /// instead, and the destructive form of it (`-D`) is red in `runWorktreeMergedBranchCheck`.
+/// C4 — persistence must not require a tile, and archiving quarantines rather
+/// than deletes the transcript directory.
+///
+/// The sole production `saveSnapshot` call site used to live inside the TILE's
+/// own event hook (`ContinuumApp.wireManagedAgentTile`'s `onSemanticTranscriptUpdated`),
+/// so a child spawned without a tile — fan-out's common case at up to 16
+/// concurrent children — persisted nothing at all. This agent is spawned with a
+/// prompt and NEVER attached to a view.
+@MainActor
+private func checkTranscriptPersistenceWithoutTile(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-transcript-persist-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let transcriptRoot = root.appendingPathComponent("agent-transcripts", isDirectory: true)
+    let transcriptStore = AgentTranscriptStore(root: transcriptRoot)
+
+    let scripted = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: "provider-thread", turnId: "turn-1"),
+        .contentDelta(threadId: "provider-thread", turnId: "turn-1", streamKind: .assistant, delta: "assistant-reply-text"),
+        .turnCompleted(threadId: "provider-thread", turnId: "turn-1", outcome: .completed, errorMessage: nil)
+    ])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in scripted }, transcriptStore: transcriptStore)
+
+    let promptText = "the-users-own-prompt-text-\(UUID().uuidString)"
+    let id = supervisor.spawn(
+        role: nil,
+        prompt: promptText,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard supervisor.records[id]?.tileId == nil else {
+        throw fail("transcript-persistence check: the spawned agent unexpectedly has a tile binding")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { !supervisor.isRunning(id) }) else {
+        throw fail("transcript-persistence check: the scripted run never completed")
+    }
+
+    let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+    func containsParagraphText(_ document: AgentDocument, matching predicate: (String) -> Bool) -> Bool {
+        document.entries.contains { entry in
+            entry.blocks.contains { block in
+                if case let .paragraph(inlines) = block.payload {
+                    return inlines.contains { if case let .text(text) = $0 { return predicate(text) }; return false }
+                }
+                return false
+            }
+        }
+    }
+    func containsPrompt(_ document: AgentDocument) -> Bool {
+        containsParagraphText(document) { $0 == promptText }
+    }
+    // Proves `ingestTranscriptEvent` (the provider-event half, distinct from
+    // the prompt echo) actually ran without a tile — a witness that only
+    // checked the prompt would stay green even if provider events were still
+    // gated behind a tile, because the prompt echo is a separate code path.
+    func containsAssistantReply(_ document: AgentDocument) -> Bool {
+        containsParagraphText(document) { $0.contains("assistant-reply-text") }
+    }
+
+    // Debounced, not immediate — poll rather than assert on the first read.
+    var loaded: AgentDocument?
+    let deadline = Date().addingTimeInterval(3)
+    while loaded == nil || !containsPrompt(loaded!) || !containsAssistantReply(loaded!) {
+        loaded = try await transcriptStore.load(agentID: id, sessionID: sessionID)
+        if let loaded, containsPrompt(loaded), containsAssistantReply(loaded) { break }
+        if Date() >= deadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard let document = loaded else {
+        throw fail("a tile-less agent persisted NOTHING under its canonical session id — the only saveSnapshot call site lived inside the tile")
+    }
+    guard containsPrompt(document) else {
+        throw fail("the tile-less agent's persisted transcript does not contain its own prompt \(promptText.debugDescription)")
+    }
+    guard containsAssistantReply(document) else {
+        throw fail("the tile-less agent's persisted transcript does not contain the assistant's streamed reply — provider events are not reaching the supervisor's own persistence path without a tile")
+    }
+    guard !document.entries.isEmpty else {
+        throw fail("the tile-less agent's persisted transcript has no entries at all")
+    }
+
+    // MARK: archiving quarantines the directory, never `rm`s it
+
+    let agentDirectory = transcriptRoot.appendingPathComponent(id.rawValue.uuidString, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: agentDirectory.path) else {
+        throw fail("the transcript directory does not exist before archive: \(agentDirectory.path)")
+    }
+    supervisor.archive(id)
+    // The archive-time quarantine move races the debounce timer only in theory
+    // (the timer is cancelled synchronously inside `archive`); still poll, since
+    // the move itself happens on a detached task.
+    let quarantineDirectory = transcriptRoot.appendingPathComponent(
+        "quarantine-\(id.rawValue.uuidString)", isDirectory: true)
+    var quarantined = false
+    let quarantineDeadline = Date().addingTimeInterval(3)
+    while !quarantined {
+        quarantined = FileManager.default.fileExists(atPath: quarantineDirectory.path)
+        if quarantined { break }
+        if Date() >= quarantineDeadline { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    guard quarantined else {
+        throw fail("archiving an agent did not quarantine its transcript directory to \(quarantineDirectory.path) — a transcript is the user's own record of their work and must not be silently rm'd")
+    }
+    guard !FileManager.default.fileExists(atPath: agentDirectory.path) else {
+        throw fail("archiving an agent left its transcript directory at the ORIGINAL path as well as the quarantined one: \(agentDirectory.path)")
+    }
+    // `moveItem` renames the whole subtree, so the session directory (and the
+    // snapshot inside it) rode along; a directory that exists but is EMPTY
+    // would mean something silently emptied it first.
+    let quarantinedContents = (try? FileManager.default.contentsOfDirectory(atPath: quarantineDirectory.path)) ?? []
+    guard !quarantinedContents.isEmpty else {
+        throw fail("the quarantined transcript directory is empty — content was lost, not just moved")
+    }
+
+    return "tile-less agent persisted its own prompt without a tile, and archive quarantined (not deleted) its transcript directory"
+}
+
 @MainActor
 private func checkArchiveCleanup(
     config: AgentModelConfig.Resolution,
@@ -10523,7 +13733,7 @@ private func checkArchiveCleanup(
     // runner exiting rather than as a dictionary entry disappearing.
     let holding = ScriptedAgentRunner(script: [.sessionStateChanged(.running)], holdUntilStopped: true)
     let queue = ScriptedRunnerQueue([holding])
-    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0.record) })
 
     func spawnIsolated(_ prompt: String?, role: String) throws -> (id: AgentID, record: AgentRecord) {
         let id = try supervisor.spawn(
@@ -10697,7 +13907,7 @@ private func checkArchiveCleanup(
         lastActivityAt: now,
         tileId: nil
     ))
-    let adopting = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let adopting = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     _ = adopting.restore()
     guard adopting.records[mislabelledId] != nil else {
         throw fail("the mislabelled record was not adopted, so the guard is untested")
@@ -10726,7 +13936,7 @@ private func checkArchiveCleanup(
 
     // MARK: 6 · orphans, and what is NOT one
 
-    let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     func spawnOn(
         _ supervisor: AgentSupervisor,
         role: String,
@@ -10755,7 +13965,7 @@ private func checkArchiveCleanup(
     try store.delete(id: orphanAgent.id)
 
     // A supervisor that never held either record — it only knows what the store says.
-    let afterRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let afterRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     _ = afterRelaunch.restore()
     let orphans = try afterRelaunch.orphanWorktrees(repo: repo)
     // Negative test observed red with the final code: with `knownAgentDirectories`
@@ -10797,7 +14007,7 @@ private func checkArchiveCleanup(
     // records alone would prune the one thing that could bring that agent back.
     let staleAgent = try spawnOn(afterRelaunch, role: "stale")
     try FileManager.default.removeItem(at: URL(fileURLWithPath: staleAgent.cwd))
-    let afterSecondRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let afterSecondRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0.record) })
     let restored = afterSecondRelaunch.restore()
     guard restored.stale.contains(staleAgent.id) else {
         throw fail("the stale agent was not marked stale, so this case is untested")
@@ -11173,7 +14383,7 @@ private func checkReadState(
     var persistedWriteCount = 0
     let supervisor = AgentSupervisor(
         store: store,
-        makeRunner: { queue.next($0) },
+        makeRunner: { queue.next($0.record) },
         // Count the actual production store writes, not an in-memory helper. The
         // closure still delegates to AgentStore.upsert, so every count is a real
         // AtomicWriter persistence that the readback below can observe.
@@ -12031,7 +15241,7 @@ private func checkPerAgentProviderSettings(
 
     // MARK: 2 · the NEXT turn's flags, from the reloaded record
 
-    let config = AgentSupervisor.runnerConfig(for: stored)
+    let config = AgentSupervisor.runnerConfig(for: stored, spawnDepth: 0)
     guard config.model == pickedModel, config.thinking == pickedThinking else {
         throw fail("provider-settings: the runner would be built with \(config.model) / \(config.thinking) — the record is not what decides the next turn")
     }
@@ -12082,7 +15292,7 @@ private func checkPerAgentProviderSettings(
     }
     guard supervisor.providerSettings(for: agentId)?.model == pickedModel,
           try store.load(id: agentId)?.model == pickedModel,
-          AgentSupervisor.runnerConfig(for: stored).model == pickedModel else {
+          AgentSupervisor.runnerConfig(for: stored, spawnDepth: 0).model == pickedModel else {
         throw fail("provider-settings: moving the global Settings default moved an agent that already existed — the record is the truth, and \"per-agent\" means the default is only a seed")
     }
 
@@ -12160,7 +15370,7 @@ private func checkPerAgentProviderSettings(
           try store.load(id: agentId)?.thinking == "low" else {
         throw fail("provider-settings: picking in the tile left the record at \(String(describing: supervisor.providerSettings(for: agentId))) / the store at \(String(describing: try store.load(id: agentId).map { "\($0.model) / \($0.thinking)" }))")
     }
-    guard AgentSupervisor.runnerConfig(for: try store.load(id: agentId)!).model == secondModel else {
+    guard AgentSupervisor.runnerConfig(for: try store.load(id: agentId)!, spawnDepth: 0).model == secondModel else {
         throw fail("provider-settings: the tile's pick does not reach the next turn's runner config")
     }
 
@@ -12574,8 +15784,8 @@ func runAgentFanOutChecks() async throws {
         .sessionStateChanged(.ready)
     ]
     let runners = FanOutRunnerLog()
-    let supervisor = AgentSupervisor(store: store, makeRunner: { record in
-        runners.make(sourceItemId: record.sourceItemId, script: record.sourceItemId == "CON-2" ? completing : [.sessionStateChanged(.running)])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { launch in
+        runners.make(sourceItemId: launch.record.sourceItemId, script: launch.record.sourceItemId == "CON-2" ? completing : [.sessionStateChanged(.running)])
     })
 
     var fannedOut: [[LinearTicketQueueRow]] = []
@@ -12837,8 +16047,75 @@ func runAgentFanOutChecks() async throws {
         throw fail("a tile installed after a completion would not show it — the install branch never replays completedFanOutItems:\n\(installBranch)")
     }
 
+    // MARK: 8 · C2 — a fan-out child takes the asked-for harness, and shows up
+    //
+    // Two bugs that shipped together and hid each other. `harness:` was a
+    // parameter of `fanOut` that was never forwarded to `spawn`, so every child
+    // silently ran `AgentHarnessConfig.resolved()`; and `fanOut` never emitted
+    // `.childAgentSpawned`, so children got durable parentage in the record and
+    // no chip in the parent's transcript. `handleSpawnRequest` had always emitted
+    // it — the two spawn paths simply disagreed.
+    //
+    // The harness asked for here is deliberately NOT the settings default, so a
+    // regression that drops the parameter again reads as a real difference rather
+    // than an accidental match.
+    let chipParent = supervisor.spawn(
+        role: "chip-orchestrator", prompt: nil, cwd: repo,
+        model: config.model, thinking: config.thinking)
+    let askedHarness: AgentHarness = AgentHarnessConfig.resolved() == .pi ? .claudeCode : .pi
+    // A model the ASKED harness owns. A cross-harness model would have the
+    // supervisor refuse the send for an unrelated reason and mask what this
+    // section is actually about.
+    guard let askedModel = AgentModelConfig.modelOptions(for: askedHarness).first else {
+        throw fail("no catalogue model for \(askedHarness.rawValue)")
+    }
+    var parentEvents: [AgentRuntimeEvent] = []
+    let parentStream = supervisor.events(for: chipParent)
+    let collector = Task { @MainActor in
+        for await event in parentStream { parentEvents.append(event) }
+    }
+    let chipItems = (1 ... 2).map {
+        AgentSupervisor.FanOutItem(id: "CHIP-\($0)", prompt: "chip item \($0)")
+    }
+    let chipReport = supervisor.fanOut(
+        items: chipItems, role: nil, cwd: repo, harness: askedHarness,
+        model: askedModel, thinking: config.thinking,
+        parentAgentID: chipParent, isolated: false)
+    try requireAccounted(chipReport, chipItems, "the chip fan-out")
+    guard chipReport.launched.count == 2 else {
+        throw fail("the chip fan-out launched \(chipReport.launched.count) of 2 (\(chipReport.summary))")
+    }
+    // Let the multicast drain before reading what the parent saw.
+    for _ in 0 ..< 50 where parentEvents.count < chipReport.launched.count {
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    collector.cancel()
+
+    for (itemId, childID) in chipReport.launched {
+        guard let childHarness = supervisor.records[childID]?.harness else {
+            throw fail("the fan-out child for \(itemId) persisted no harness at all")
+        }
+        guard childHarness == askedHarness else {
+            throw fail("the fan-out child for \(itemId) runs \(childHarness.rawValue), but the batch asked for \(askedHarness.rawValue) — `harness:` was accepted and never forwarded to spawn")
+        }
+    }
+
+    let spawnChips = parentEvents.compactMap { event -> (UUID, String)? in
+        guard case let .childAgentSpawned(_, childAgentID, _, _, sourceItemID, provider, _) = event
+        else { return nil }
+        return (childAgentID, "\(sourceItemID ?? "-")|\(provider)")
+    }
+    guard spawnChips.count == chipReport.launched.count else {
+        throw fail("the parent's stream carried \(spawnChips.count) childAgentSpawned events for \(chipReport.launched.count) launched children — a fan-out child with no chip is invisible to the orchestrator that started it")
+    }
+    for (itemId, childID) in chipReport.launched {
+        guard spawnChips.contains(where: { $0.0 == childID.rawValue && $0.1 == "\(itemId)|\(askedHarness.rawValue)" }) else {
+            throw fail("no childAgentSpawned named child \(childID.rawValue.uuidString) for item \(itemId) at harness \(askedHarness.rawValue); saw \(spawnChips.map(\.1))")
+        }
+    }
+
     supervisor.stopAll()
-    print("AgentSupervisor fan-out: 3 rows → 3 agents on 3 worktrees with 3 prompts, completing one checked off exactly that row, \(capReport.summary) at the cap, a repeat refused, the mapping survived a relaunch, and a parented batch fell to cap \(childReport.cap)")
+    print("AgentSupervisor fan-out: 3 rows → 3 agents on 3 worktrees with 3 prompts, completing one checked off exactly that row, \(capReport.summary) at the cap, a repeat refused, the mapping survived a relaunch, a parented batch fell to cap \(childReport.cap), and \(chipReport.launched.count) fan-out children took the asked-for \(askedHarness.rawValue) harness with one chip each on the parent's stream")
 }
 
 /// The scripted runners a fan-out produced, keyed by the item their agent was

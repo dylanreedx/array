@@ -235,6 +235,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let authoritativeReasoningDuration: (AgentEntry) -> TimeInterval?
     private var dataSource: NSCollectionViewDiffableDataSource<Int, AgentNodeID>!
     private var rows: [Row] = []
+
+    /// Hash of the row→entry boundary sequence, maintained at apply time.
+    ///
+    /// `layout()` needs to know whether a turn rule could have MOVED, and used to
+    /// answer by hashing every row's `entryID` — an O(all rows) walk **per display
+    /// cycle**, which is `performance.md`'s central sin committed by the very code
+    /// whose comment invokes it. It cannot be a plain revision counter: a
+    /// content-only delta replaces `rows` without moving a single boundary, and
+    /// counting it would rebuild the chrome on every streamed token.
+    ///
+    /// So it is recomputed only on a FULL walk, which is already O(rows) and is
+    /// the only apply that can change the sequence: `incrementallyIndexed`
+    /// refuses anything with an insert, a removal, a move, a differing entry
+    /// count, or a changed role/lifecycle/block-count, so an incremental apply
+    /// provably leaves every boundary where it was.
+    private var rowEntryBoundarySignature = 0
     private var rowsByID: [AgentNodeID: Row] = [:]
     /// `.plans/45` T3. Turn chrome, drawn as LAYERS rather than views.
     ///
@@ -246,10 +262,56 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let turnSeparatorLayer = CAShapeLayer()
     private let hoverTimeLayer = CATextLayer()
     private var turnStartRowsByEntry: [(row: Int, entryID: AgentNodeID, date: Date?)] = []
+    /// Position of each entry within `turnStartRowsByEntry`.
+    ///
+    /// The three lookups below were `first(where:)` over that array, and one of
+    /// them runs on every `mouseMoved` — a linear scan of the conversation per
+    /// pointer sample, on the main thread, purely to answer a question a
+    /// dictionary answers in constant time.
+    private var turnStartIndexByEntry: [AgentNodeID: Int] = [:]
+
+    /// Memoised cluster header summaries.
+    ///
+    /// `refreshVisibleClusterHeaders` runs on EVERY apply — i.e. per streamed
+    /// token — and recomputes the string for every visible header. Since T3 that
+    /// walk is O(members + turn length) rather than O(members). But `foldTurns`
+    /// only emits a turn header for turns BEFORE the last, which are settled by
+    /// construction, so every execution after the first produces a byte-identical
+    /// string. The two inputs that can legitimately change it are the display
+    /// projection and the tool-detail records, and both clear this.
+    private var clusterSummaryCache: [AgentNodeID: String] = [:]
+
+    /// Digest of the display sequence, maintained where the sequence is built.
+    ///
+    /// `AgentTranscriptLayout.prepare()` consults this to decide whether its own
+    /// fast path is safe, and `prepare()` runs on every display cycle — so
+    /// computing it by walking `displayItems` made the layout's fast path cost
+    /// exactly what it was there to avoid. The sequence changes only where it is
+    /// planned, and an incremental apply cannot move a boundary, so the digest
+    /// belongs next to the plan.
+    private var displayBoundarySignature = 0
     /// `.plans/45` S4.3 — the display projection between `rows` and the
     /// diffable snapshot. `rows == flatten(document)` is untouched; these are
     /// rebuilt O(rows) once per visual apply.
     private var displayItems: [AgentTranscriptClusterPlanner.Item] = []
+    /// The planner inputs the last plan was built from, kept so a content-only
+    /// delta can patch the two slots it touched instead of walking the history.
+    private var cachedRowFacts: [AgentTranscriptClusterPlanner.RowFact] = []
+    /// Block IDs a later `agentReference` chip already speaks for — the `Agent`
+    /// tool call that started the child. Recomputed on a full rebuild and patched
+    /// alongside the row dictionary, so it costs the changed set on a delta.
+    /// Chips are rare, so this stays a handful of entries even at fan-out scale.
+    private var supersededRowIDs: Set<AgentNodeID> = []
+    /// Provider item id → the top-level row id its entry renders as. This is how
+    /// a chip's `sourceItemID` (a raw provider tool_use id) resolves to the tool
+    /// ROW it supersedes — row node ids are derived from the provider id, never
+    /// equal to it. Built by the full walk; entry provenance is immutable and
+    /// every structural change re-runs the walk, so the incremental paths read
+    /// it as-is.
+    private var rowIDBySourceItemID: [String: AgentNodeID] = [:]
+    /// The tail-streaming flag the cached plan was built under. A flip is a
+    /// projection input, so a patch that finds it changed must replan.
+    private var lastPlannedTailStreaming: Bool?
     private var displayIDs: [AgentNodeID] = []
     private var displayIndexByID: [AgentNodeID: Int] = [:]
     private var clusterHeadersByID: [AgentNodeID: AgentTranscriptClusterPlanner.Header] = [:]
@@ -264,6 +326,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var lastPresentedToolDetailRevisions: [AgentNodeID: Date] = [:]
     private var lastRefreshedToolIdentities: Set<AgentToolDetailKey> = []
     private var lastAppliedDisplayIDs: [AgentNodeID]?
+    /// The tail indicator's presence when `lastAppliedDisplayIDs` was applied. It
+    /// is part of the snapshot's item list, so it is part of the identity — kept
+    /// beside the list instead of concatenated into it.
+    private var lastAppliedTailVisible = false
     /// Display IDs the reader has already been shown. New content fades in; the
     /// history a tile opens with does not — a restored transcript that dissolved
     /// into view on every open would be a worse jump than the one this fixes.
@@ -273,6 +339,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private var arrivedDisplayIDs: Set<AgentNodeID> = []
     private var didSeedArrivedDisplayIDs = false
     private var entryDatesByID: [AgentNodeID: Date?] = [:]
+    /// `AgentEntry.finishedAt`, the other endpoint of a turn. Kept beside
+    /// `entryDatesByID` and rebuilt with it so the two can never disagree.
+    private var entryEndDatesByID: [AgentNodeID: Date?] = [:]
     private var nextEntryDateByEntryID: [AgentNodeID: Date] = [:]
     private var hoveredTurnEntryID: AgentNodeID?
     private var transcriptTrackingArea: NSTrackingArea?
@@ -459,19 +528,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // guard only compares width bucket and count. The signature hashes
             // the DISPLAY sequence including cluster ids and member counts: a
             // fold changes geometry without changing the row count (S4.3).
-            var hasher = Hasher()
-            for item in displayItems {
-                switch item {
-                case let .row(index):
-                    hasher.combine(rows[index].entryID)
-                case let .header(header):
-                    hasher.combine(header.id)
-                    hasher.combine(header.memberIndexes.count)
-                    hasher.combine(header.isExpanded)
-                    hasher.combine(header.isLive)
-                }
-            }
-            return hasher.finalize()
+            return displayBoundarySignature
         }
         transcriptLayout.measuredHeight = { [weak self] index, width in
             guard let self else { return 1 }
@@ -593,6 +650,19 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard patch.fromVersion == expected else {
             throw UpdateError.versionMismatch(expected: expected, actual: patch.fromVersion)
         }
+        // Union this step into the coalesced description before scheduling. A
+        // patch that names nothing, or one that changes structure, poisons the
+        // fast path for the whole coalesced window — deliberately, because a
+        // partially-known changed set is worse than an unknown one.
+        if coalescedFromVersion == nil { coalescedFromVersion = patch.fromVersion }
+        let structural = !patch.inserted.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty
+        if structural || patch.updated.isEmpty {
+            coalescedTouchedIDs = nil
+        } else if coalescedTouchedIDs != nil {
+            coalescedTouchedIDs?.formUnion(patch.updated)
+        } else if coalescedFromVersion == patch.fromVersion {
+            coalescedTouchedIDs = Set(patch.updated)
+        }
         latestEnqueuedVersion = patch.toVersion
         updateScheduler.schedule({ [weak self] in
             guard let self else { return }
@@ -621,10 +691,54 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private(set) var qaFlattenedRowCount = 0
     private(set) var qaFullFlattenCount = 0
 
+    /// QA: how many times ONE apply walked the whole history.
+    ///
+    /// The row index made the *index* incremental and the wall clock did not
+    /// move, because the presentation half of `applyUnscrolled` kept rebuilding
+    /// every per-row structure from scratch — the row dictionary, the cluster
+    /// projection's facts, its id list and its index map. Bisected 2026-08-24:
+    /// the redo took the 10,000-row delta from 36.4ms to 54.0ms, +9.5ms of it in
+    /// the projection alone, while every existing count budget stayed green.
+    ///
+    /// That is why this counter exists and why it is a COUNT. A millisecond
+    /// threshold on shared hardware manufactures flakes; "a content-only delta
+    /// walks the history zero times" cannot be satisfied by a fast machine.
+    /// The rows the incremental index rebuilt, or nil when the apply was
+    /// structural (a full walk). `applyUnscrolled` consumes and clears it: with a
+    /// known, small changed set, every per-row structure below can be PATCHED
+    /// instead of rebuilt. Nil is always the safe answer — it means "rebuild
+    /// everything" — so a new decline path costs correctness nothing.
+    private var pendingIncrementalRowIDs: Set<AgentNodeID>?
+
+    /// The union of everything the enqueued-but-unpresented patches touched.
+    ///
+    /// The 30Hz scheduler presents only the LAST enqueued snapshot, so a
+    /// per-enqueue patch cannot describe the step that is actually applied. That
+    /// is why this path used to take an empty patch and rediscover the changed
+    /// set by walking the whole document — O(history) per streaming chunk, 93ms
+    /// per delta at 10,000 rows. Unioning the patches as they arrive describes
+    /// the coalesced step exactly, at the cost of a set insert per chunk.
+    ///
+    /// `nil` means "no usable locality": either nothing has been enqueued, or one
+    /// of the coalesced steps was structural, or a caller passed a patch that
+    /// named nothing. All three fall back to the full walk, which is always
+    /// correct.
+    private var coalescedTouchedIDs: Set<AgentNodeID>?
+    private var coalescedFromVersion: UInt64?
+
+    private(set) var qaHistoryScanCount = 0
+
+    /// One walk of the whole applied history, named so a failure says which.
+    private func recordHistoryScan(_ reason: StaticString) {
+        qaHistoryScanCount += 1
+        _ = reason
+    }
+
     func qaResetFlattenStats() {
         qaFlattenNodeVisits = 0
         qaFlattenedRowCount = 0
         qaFullFlattenCount = 0
+        qaHistoryScanCount = 0
     }
 
     /// QA: is the live index indistinguishable from a FROM-SCRATCH walk of the
@@ -815,10 +929,31 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
     private func applyCoalesced(document: AgentDocument) throws {
+        let touched = coalescedTouchedIDs
+        let from = coalescedFromVersion
+        coalescedTouchedIDs = nil
+        coalescedFromVersion = nil
+
+        // The content-only fast path. `touched` is the union of the reducer's own
+        // patches across everything the scheduler coalesced, so it describes the
+        // step being applied exactly — no walk required to discover it, and the
+        // per-row structures below can be patched rather than rebuilt.
+        if let touched, !touched.isEmpty, let from, from == appliedVersion,
+           let patch = try? AgentDocumentPatch(
+               fromVersion: from, toVersion: document.version, updated: Array(touched)),
+           let flattened = try incrementallyIndexed(document: document, patch: patch) {
+            prepareToolDetailLifecycle(for: document, updatedNodeIDs: Array(touched))
+            captureTurnTimes(from: document, updatedNodeIDs: Array(touched))
+            try applyWithScroll(
+                document: document, flattened: flattened, changedNodeIDs: touched)
+            return
+        }
+
+        // The fallback, and it must stay correct rather than fast: with no usable
+        // locality the changed set can only be found by comparing against the
+        // cached rows, which needs the full walk.
         prepareToolDetailLifecycle(for: document)
         captureTurnTimes(from: document)
-        // No patch here: this path derives its own changed set by comparing against
-        // the cached rows, so the full walk is the only correct option.
         let flattened = try flatten(document)
         let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
@@ -839,8 +974,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if let appliedVersion, patch.fromVersion != appliedVersion {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
-        prepareToolDetailLifecycle(for: document)
-        captureTurnTimes(from: document)
+        // A content-only patch cannot add, remove or reorder an entry, so the
+        // lifecycle pass only has to look at the entries the patch names.
+        let contentOnly = patch.inserted.isEmpty && patch.removed.isEmpty && patch.moved.isEmpty
+        prepareToolDetailLifecycle(for: document, updatedNodeIDs: contentOnly ? patch.updated : nil)
+        captureTurnTimes(from: document, updatedNodeIDs: contentOnly ? patch.updated : nil)
         // The patch already names the nodes that changed, so a local delta rebuilds
         // only those rows. The full walk is the FALLBACK, not the default: it runs
         // whenever `incrementallyIndexed` declines, which it does for anything
@@ -881,40 +1019,92 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         flattened: RowIndex,
         changedNodeIDs: Set<AgentNodeID>
     ) throws {
-        let oldIDs = rows.map(\.id)
-        let oldRowsByID = rowsByID
-        let oldReasoningEntries = Dictionary(
-            uniqueKeysWithValues: rows.compactMap { row in
-                row.entry.map { ($0.id, $0) }
+        // The rows the incremental index rebuilt, or nil when the index took the
+        // full walk. Consumed here and cleared: with a known, small changed set
+        // every per-row structure below is PATCHED rather than rebuilt, which is
+        // what takes a content-only delta from six walks of the whole history to
+        // none. Nil always means "rebuild everything", so a new decline path in
+        // `incrementallyIndexed` stays correct here without being taught about.
+        let incrementalRowIDs = pendingIncrementalRowIDs
+        pendingIncrementalRowIDs = nil
+        // Every promised slot is verified BEFORE anything is mutated, so the
+        // fallback starts from an untouched cache instead of a half-patched one.
+        var incrementalSlots: [(id: AgentNodeID, slot: Int)]?
+        if let incrementalRowIDs {
+            var pairs: [(id: AgentNodeID, slot: Int)] = []
+            pairs.reserveCapacity(incrementalRowIDs.count)
+            var verified = true
+            for id in incrementalRowIDs {
+                guard let slot = flattened.positions[id]?.slot,
+                      flattened.rows.indices.contains(slot),
+                      flattened.rows[slot].id == id
+                else { verified = false; break }
+                pairs.append((id, slot))
             }
-        )
-        let newReasoningIDs = Set(flattened.rows.compactMap(\.entry).map(\.id))
-        let removedReasoningIDs = Set(oldReasoningEntries.keys).subtracting(newReasoningIDs)
-        if flattened.rows.isEmpty, !rows.isEmpty {
-            // resetProjection presents an empty document before replaying the
-            // next session. Clear the complete owner scope as well as the
-            // individual removals so a reused entry ID cannot inherit the old
-            // session's preference.
-            disclosureStateStore.removeAll(for: disclosureOwnerID)
+            if verified { incrementalSlots = pairs }
+        }
+        // Capturing the WHOLE row dictionary is free only when it is about to be
+        // REPLACED. The patched path mutates it in place, and a copy-on-write of
+        // a 10,000-key dictionary is itself a walk of the history, so capture
+        // only the rows that can differ.
+        var oldRowsByID: [AgentNodeID: Row] = [:]
+        if let incrementalSlots {
+            oldRowsByID.reserveCapacity(incrementalSlots.count)
+            for pair in incrementalSlots { oldRowsByID[pair.id] = rowsByID[pair.id] }
         } else {
-            for id in removedReasoningIDs {
-                guard let entry = oldReasoningEntries[id] else { continue }
-                var descendantIDs: Set<AgentNodeID> = []
-                func collect(_ block: AgentBlock) {
-                    descendantIDs.insert(block.id)
-                    block.children.forEach(collect)
+            oldRowsByID = rowsByID
+        }
+        if incrementalRowIDs == nil {
+            // Only REMOVED reasoning entries need their disclosure state purged.
+            // The incremental index refuses every structural patch, so on that
+            // path the row identities are unchanged by construction, the removed
+            // set is empty, and this whole diff is provably a no-op.
+            recordHistoryScan("reasoning-entry diff")
+            let oldReasoningEntries = Dictionary(
+                uniqueKeysWithValues: rows.compactMap { row in
+                    row.entry.map { ($0.id, $0) }
                 }
-                entry.blocks.forEach(collect)
-                disclosureStateStore.removeSubtree(
-                    for: disclosureOwnerID,
-                    rootID: id,
-                    descendantIDs: descendantIDs
-                )
+            )
+            let newReasoningIDs = Set(flattened.rows.compactMap(\.entry).map(\.id))
+            let removedReasoningIDs = Set(oldReasoningEntries.keys).subtracting(newReasoningIDs)
+            if flattened.rows.isEmpty, !rows.isEmpty {
+                // resetProjection presents an empty document before replaying the
+                // next session. Clear the complete owner scope as well as the
+                // individual removals so a reused entry ID cannot inherit the old
+                // session's preference.
+                disclosureStateStore.removeAll(for: disclosureOwnerID)
+            } else {
+                for id in removedReasoningIDs {
+                    guard let entry = oldReasoningEntries[id] else { continue }
+                    var descendantIDs: Set<AgentNodeID> = []
+                    func collect(_ block: AgentBlock) {
+                        descendantIDs.insert(block.id)
+                        block.children.forEach(collect)
+                    }
+                    entry.blocks.forEach(collect)
+                    disclosureStateStore.removeSubtree(
+                        for: disclosureOwnerID,
+                        rootID: id,
+                        descendantIDs: descendantIDs
+                    )
+                }
             }
         }
         rows = flattened.rows
-        rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
-        rebuildDisplayProjection()
+        if incrementalSlots == nil {
+            recordHistoryScan("turn chrome boundary hash")
+            var boundaries = Hasher()
+            for row in rows { boundaries.combine(row.entryID) }
+            rowEntryBoundarySignature = boundaries.finalize()
+        }
+        if let incrementalSlots {
+            for pair in incrementalSlots { rowsByID[pair.id] = flattened.rows[pair.slot] }
+            patchDisplayProjection(changedRowIDs: Set(incrementalSlots.map(\.id)))
+        } else {
+            recordHistoryScan("rowsByID rebuild")
+            rowsByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+            rebuildDisplayProjection()
+        }
         topLevelIDsByNodeID = flattened.topLevelIDsByNodeID
         toolDetailIDByBlockID = flattened.toolDetailIDByBlockID
         // One commit point for the caches AND the document they describe, so a
@@ -947,24 +1137,29 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
 
-        let newIDs = rows.map(\.id)
-        var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
-        snapshot.appendSections([0])
-        // Snapshot identity is the DISPLAY sequence: folded member IDs are
-        // absent; the guard below keeps content-only paragraph streams at zero
-        // snapshot re-applies (S4.3).
-        snapshot.appendItems(displayIDs, toSection: 0)
-        if tailThinkingIndicatorIsVisible { snapshot.appendItems([tailThinkingIndicatorID], toSection: 0) }
-
         var changedTopLevelIDs = Set(changedNodeIDs.flatMap { topLevelIDsByNodeID[$0] ?? [] })
         // Entry revisions also advance when one child changes. Do not fan that
         // bookkeeping update out to every sibling; only a role change affects all
         // renderer families in the entry.
-        changedTopLevelIDs.formUnion(rows.compactMap { row in
-            guard let old = oldRowsByID[row.id], old.role != row.role else { return nil }
-            return row.id
-        })
-        let survivingChanged = changedTopLevelIDs.intersection(newIDs)
+        if let incrementalSlots {
+            // Only a rebuilt row can carry a new role: every other row is the
+            // same value it was, by identity.
+            for pair in incrementalSlots {
+                guard let row = rowsByID[pair.id], let old = oldRowsByID[pair.id],
+                      old.role != row.role else { continue }
+                changedTopLevelIDs.insert(pair.id)
+            }
+        } else {
+            recordHistoryScan("role-change scan")
+            changedTopLevelIDs.formUnion(rows.compactMap { row in
+                guard let old = oldRowsByID[row.id], old.role != row.role else { return nil }
+                return row.id
+            })
+        }
+        // `rowsByID` is keyed by exactly the applied row IDs, so membership in it
+        // is the same test as membership in `rows.map(\.id)` and costs a walk of
+        // the CHANGED set instead of the whole history.
+        let survivingChanged = changedTopLevelIDs.filter { rowsByID[$0] != nil }
         lastInvalidatedTopLevelCount = survivingChanged.count
         var changedHeight = false
         if !survivingChanged.isEmpty {
@@ -982,17 +1177,29 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         }
 
-        _ = newIDs
-        _ = oldIDs
-        let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
         if !didSeedArrivedDisplayIDs {
             didSeedArrivedDisplayIDs = true
-            arrivedDisplayIDs = Set(identity)
+            arrivedDisplayIDs = Set(displayIDs)
+            if tailThinkingIndicatorIsVisible { arrivedDisplayIDs.insert(tailThinkingIndicatorID) }
         }
-        let displayChanged = lastAppliedDisplayIDs != identity
+        // The identity used to be a CONCATENATED array, so comparing it allocated
+        // and walked the whole display sequence on every delta and the snapshot
+        // itself was built whether or not it was applied. Comparing the display
+        // list directly hits Array's shared-buffer fast path when the projection
+        // was skipped, which is the common case for a content-only delta.
+        let displayChanged = displayIdentityChanged()
         if displayChanged || appliedVersion == nil {
+            // Snapshot identity is the DISPLAY sequence: folded member IDs are
+            // absent; the guard above keeps content-only paragraph streams at
+            // zero snapshot re-applies (S4.3).
+            var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
+            snapshot.appendSections([0])
+            snapshot.appendItems(displayIDs, toSection: 0)
+            if tailThinkingIndicatorIsVisible {
+                snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
+            }
             dataSource.apply(snapshot, animatingDifferences: false)
-            lastAppliedDisplayIDs = identity
+            recordAppliedDisplayIdentity()
         }
         // AppKit's snapshot reloadItems replaces NSCollectionViewItem instances.
         // For a content-only patch the snapshot is unchanged and is not re-applied;
@@ -1147,16 +1354,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 // is part of the identity here, since its presence changes the
                 // item list). Re-applying an unchanged snapshot on every
                 // indicator flip was a full re-prepare and a visible cut.
-                let identity = displayIDs + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
-                guard lastAppliedDisplayIDs != identity else {
+                guard displayIdentityChanged() else {
                     layoutSubtreeIfNeeded()
                     return
                 }
                 var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
                 snapshot.appendSections([0])
-                snapshot.appendItems(identity, toSection: 0)
+                snapshot.appendItems(displayIDs, toSection: 0)
+                if tailThinkingIndicatorIsVisible {
+                    snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
+                }
                 dataSource.apply(snapshot, animatingDifferences: false)
-                lastAppliedDisplayIDs = identity
+                recordAppliedDisplayIdentity()
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
@@ -1310,7 +1519,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // positioned from PREPARED attributes, and reading them before the
         // prepare pass returns nothing, so the path came out empty.
         var hasher = Hasher()
-        for row in rows { hasher.combine(row.entryID) }
+        hasher.combine(rowEntryBoundarySignature)
         hasher.combine(Int(collectionView.bounds.width.rounded()))
         let signature = hasher.finalize()
         if signature != preparedTurnChromeSignature {
@@ -1345,7 +1554,88 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         return existing == identity
     }
 
-    private func prepareToolDetailLifecycle(for document: AgentDocument) {
+    /// The restricted lifecycle pass: examine only the entries a content-only
+    /// patch could have touched, and patch the cache instead of rebuilding it.
+    ///
+    /// Returns false when anything cannot be verified against the cached indexes,
+    /// in which case the caller pays the full pass. Every guard here is allowed to
+    /// be conservative: declining costs one walk and nothing else.
+    private func prepareToolDetailLifecycleIncrementally(
+        document: AgentDocument,
+        updatedNodeIDs: [AgentNodeID]
+    ) -> Bool {
+        // The indexes read here describe the APPLIED document, which is the right
+        // frame: the ids being mapped are the ones the patch names in it.
+        var candidateEntryIDs: Set<AgentNodeID> = []
+        for id in updatedNodeIDs {
+            if toolDetailEntryLifecycleByID[id] != nil {
+                candidateEntryIDs.insert(id)
+                continue
+            }
+            guard let owningRowIDs = topLevelIDsByNodeID[id], !owningRowIDs.isEmpty else {
+                return false
+            }
+            for rowID in owningRowIDs {
+                guard let entryID = rowPositions[rowID]?.entryID else { return false }
+                candidateEntryIDs.insert(entryID)
+            }
+        }
+        var invalidatedEntryIDs: Set<AgentNodeID> = []
+        var removedBlockIDsByEntry: [AgentNodeID: Set<AgentNodeID>] = [:]
+        var replacements: [AgentNodeID: AgentEntry] = [:]
+        for entryID in candidateEntryIDs {
+            guard let oldEntry = toolDetailEntryLifecycleByID[entryID],
+                  let entryIndex = entryIndexByID[entryID],
+                  document.entries.indices.contains(entryIndex)
+            else { return false }
+            let newEntry = document.entries[entryIndex]
+            guard newEntry.id == entryID else { return false }
+            replacements[entryID] = newEntry
+            guard oldEntry.role == newEntry.role,
+                  oldEntry.provenance == newEntry.provenance else {
+                invalidatedEntryIDs.insert(entryID)
+                continue
+            }
+            let oldBlockIDs = toolDetailBlockIDs(in: oldEntry)
+            let newBlockIDs = toolDetailBlockIDs(in: newEntry)
+            let removedBlockIDs = oldBlockIDs.subtracting(newBlockIDs)
+            guard !removedBlockIDs.isEmpty else { continue }
+            let removedToolBlockIDs = toolBlockIDs(in: oldEntry).subtracting(toolBlockIDs(in: newEntry))
+            if !removedToolBlockIDs.isEmpty || oldBlockIDs.isDisjoint(with: newBlockIDs) {
+                invalidatedEntryIDs.insert(entryID)
+            } else {
+                removedBlockIDsByEntry[entryID] = removedBlockIDs
+            }
+        }
+        if !invalidatedEntryIDs.isEmpty {
+            purgeToolDetailState(for: invalidatedEntryIDs)
+        }
+        for (entryID, blockIDs) in removedBlockIDsByEntry where !invalidatedEntryIDs.contains(entryID) {
+            purgeToolDetailBlockState(for: blockIDs)
+        }
+        for (entryID, entry) in replacements {
+            toolDetailEntryLifecycleByID[entryID] = entry
+        }
+        return true
+    }
+
+    /// `updatedNodeIDs` is the patch's changed set when the patch is
+    /// content-only, and nil otherwise. Nil is the full O(entries) pass and is
+    /// always correct; the restricted path below refuses anything it cannot
+    /// verify and falls back to it.
+    private func prepareToolDetailLifecycle(
+        for document: AgentDocument,
+        updatedNodeIDs: [AgentNodeID]? = nil
+    ) {
+        if let updatedNodeIDs,
+           !toolDetailEntryLifecycleByID.isEmpty,
+           !document.entries.isEmpty,
+           toolDetailEntryLifecycleByID.count == document.entries.count,
+           prepareToolDetailLifecycleIncrementally(
+               document: document, updatedNodeIDs: updatedNodeIDs) {
+            return
+        }
+        recordHistoryScan("tool-detail lifecycle")
         let incoming = Dictionary(uniqueKeysWithValues: document.entries.map { ($0.id, $0) })
         var invalidatedEntryIDs = Set(toolDetailEntryLifecycleByID.keys).subtracting(incoming.keys)
         var removedBlockIDsByEntry: [AgentNodeID: Set<AgentNodeID>] = [:]
@@ -1511,9 +1801,37 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// — `AgentSupervisor.replayCap` bounds a rebuilt tile to the last 500 events
     /// and every transcript persisted before T1 has none, so inventing one would
     /// put a false timestamp on real history.
-    private func captureTurnTimes(from document: AgentDocument) {
+    private func captureTurnTimes(
+        from document: AgentDocument,
+        updatedNodeIDs: [AgentNodeID]? = nil
+    ) {
+        // A content-only patch cannot add, remove or reorder an entry, so the only
+        // way these maps can go stale is an updated entry whose `createdAt` moved.
+        // Checking that costs the changed set; rebuilding both maps cost the whole
+        // history on every delta.
+        if let updatedNodeIDs,
+           !document.entries.isEmpty,
+           entryDatesByID.count == document.entries.count {
+            var stale = false
+            for id in updatedNodeIDs {
+                guard entryDatesByID.index(forKey: id) != nil else { continue }
+                guard let index = entryIndexByID[id],
+                      document.entries.indices.contains(index),
+                      document.entries[index].id == id,
+                      document.entries[index].createdAt == (entryDatesByID[id] ?? nil),
+                      // `finishedAt` is stamped by `finishEntry`, which reports the
+                      // entry in the changed set — so this is exactly where a turn
+                      // gaining its end must invalidate the cache. Omitting it
+                      // leaves every turn reading time-to-first-token forever.
+                      document.entries[index].finishedAt == (entryEndDatesByID[id] ?? nil)
+                else { stale = true; break }
+            }
+            if !stale { return }
+        }
         entryDatesByID = Dictionary(
             uniqueKeysWithValues: document.entries.map { ($0.id, $0.createdAt) })
+        entryEndDatesByID = Dictionary(
+            uniqueKeysWithValues: document.entries.map { ($0.id, $0.finishedAt) })
         // `.plans/45` S6 — a reasoning span ends when the NEXT entry begins.
         // Derived from the document alone; an entry with no dated successor
         // gets nil, never a fabricated duration.
@@ -1571,6 +1889,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         turnStartRowsByEntry = starts.map {
             ($0.row, $0.entryID, entryDatesByID[$0.entryID] ?? nil)
         }
+        turnStartIndexByEntry = Dictionary(
+            turnStartRowsByEntry.enumerated().map { ($0.element.entryID, $0.offset) },
+            uniquingKeysWith: { first, _ in first })
 
         let path = CGMutablePath()
         let inset = transcriptLayout.contentInsets.left
@@ -1594,7 +1915,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     private func updateHoverTimeLayer() {
         guard let hoveredTurnEntryID,
-              let turn = turnStartRowsByEntry.first(where: { $0.entryID == hoveredTurnEntryID }),
+              let turnIndex = turnStartIndexByEntry[hoveredTurnEntryID],
+              turnStartRowsByEntry.indices.contains(turnIndex),
+              case let turn = turnStartRowsByEntry[turnIndex],
               let date = turn.date,
               let frame = transcriptLayout.layoutAttributesForItem(
                   at: IndexPath(item: turn.row, section: 0))?.frame
@@ -1714,19 +2037,25 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// given turn's start row, or nil when that entry starts no turn — so a
     /// witness can drive the REAL hit-test without inventing geometry.
     func qaTurnStartPointForChecks(entryID: AgentNodeID) -> NSPoint? {
-        guard let turn = turnStartRowsByEntry.first(where: { $0.entryID == entryID }),
+        guard let turnIndex = turnStartIndexByEntry[entryID],
+              turnStartRowsByEntry.indices.contains(turnIndex),
+              case let turn = turnStartRowsByEntry[turnIndex],
               let frame = transcriptLayout.layoutAttributesForItem(
                   at: IndexPath(item: turn.row, section: 0))?.frame else { return nil }
         return convert(NSPoint(x: frame.midX, y: frame.midY), from: collectionView)
     }
 
     private func flatten(_ document: AgentDocument) throws -> RowIndex {
+        // A full walk is by definition not incremental: clear any set an earlier
+        // decline left behind, so `applyUnscrolled` cannot patch against it.
+        pendingIncrementalRowIDs = nil
         var rows: [Row] = []
         var owners: [AgentNodeID: Set<AgentNodeID>] = [:]
         var toolDetailIDs: [AgentNodeID: AgentToolDetailKey] = [:]
         var topLevelIDs: Set<AgentNodeID> = []
         var positions: [AgentNodeID: RowPosition] = [:]
         var entryIndexes: [AgentNodeID: Int] = [:]
+        var sourceRowIDs: [String: AgentNodeID] = [:]
         qaFullFlattenCount += 1
         var nodeVisits = 0
         defer {
@@ -1755,6 +2084,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(entry.id)
                 }
                 positions[entry.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: nil, slot: rows.count)
+                if case let .providerItem(_, itemID?) = entry.provenance, sourceRowIDs[itemID] == nil {
+                    sourceRowIDs[itemID] = entry.id
+                }
                 rows.append(Row(content: .completedReasoning(entry), role: .reasoning, entryID: entry.id))
                 owners[entry.id] = [entry.id]
                 for block in entry.blocks {
@@ -1768,11 +2100,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     throw UpdateError.duplicateTopLevelBlock(block.id)
                 }
                 positions[block.id] = RowPosition(entryID: entry.id, entryIndex: entryIndex, blockIndex: blockIndex, slot: rows.count)
+                if case let .providerItem(_, itemID?) = entry.provenance, sourceRowIDs[itemID] == nil {
+                    sourceRowIDs[itemID] = block.id
+                }
                 rows.append(Row(content: .block(block), role: entry.role, entryID: entry.id))
                 index(block, owner: block.id, detailID: detailID)
             }
             owners[entry.id] = []
         }
+        rowIDBySourceItemID = sourceRowIDs
         return (rows, owners, toolDetailIDs, positions, entryIndexes)
     }
 
@@ -1818,6 +2154,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         guard !rowIDsToRebuild.isEmpty else {
             // A bookkeeping-only revision: nothing presented changed.
+            pendingIncrementalRowIDs = []
             return (rows, owners, toolDetails, rowPositions, entryIndexByID)
         }
 
@@ -1867,6 +2204,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         qaFlattenNodeVisits += nodeVisits
         qaFlattenedRowCount += rowIDsToRebuild.count
+        pendingIncrementalRowIDs = rowIDsToRebuild
         return (newRows, owners, toolDetails, rowPositions, entryIndexByID)
     }
 
@@ -1984,47 +2322,156 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // `AgentToolDetailStore` owns the sanitizer. Keeping its records
             // intact here is what preserves approved affected-file observations.
             self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
+            self.clusterSummaryCache.removeAll(keepingCapacity: true)
             self.refreshVisibleToolDetails()
         }
     }
 
     // MARK: - Cluster projection (`.plans/45` S4.3)
 
-    /// Rebuilds the display projection from the CURRENT semantic rows. O(rows),
-    /// called once per visual apply / tail flip / fold toggle — the scheduler
-    /// already coalesces deltas, so there is no per-delta pass.
-    private func rebuildDisplayProjection() {
-        let facts = rows.enumerated().map { index, row -> AgentTranscriptClusterPlanner.RowFact in
-            var isToolRow = false
-            var isFailure = false
-            var isLive = false
-            if let block = row.block {
-                switch block.payload {
-                case let .toolCall(payload):
-                    isToolRow = true
-                    isFailure = payload.status == .failed || payload.status == .interrupted
-                        || payload.status == .cancelled
-                    isLive = payload.status == .pending || payload.status == .inProgress
-                case let .commandOutput(payload):
-                    isToolRow = true
-                    isFailure = payload.status == .failed || payload.status == .interrupted
-                        || payload.status == .cancelled
-                    isLive = payload.status == .pending || payload.status == .inProgress
-                default:
-                    break
-                }
+    /// The planner's view of one row. Pure in `rows[index]` and `rows[index - 1]`,
+    /// which is exactly why a content-only delta can patch two slots instead of
+    /// rebuilding the array.
+    /// Has the applied snapshot's item list moved since it was last applied?
+    private func displayIdentityChanged() -> Bool {
+        lastAppliedTailVisible != tailThinkingIndicatorIsVisible
+            || lastAppliedDisplayIDs != displayIDs
+    }
+
+    private func recordAppliedDisplayIdentity() {
+        lastAppliedDisplayIDs = displayIDs
+        lastAppliedTailVisible = tailThinkingIndicatorIsVisible
+    }
+
+    private func rowFact(at index: Int) -> AgentTranscriptClusterPlanner.RowFact {
+        let row = rows[index]
+        var isToolRow = false
+        var isFailure = false
+        var isLive = false
+        if let block = row.block {
+            switch block.payload {
+            case let .toolCall(payload):
+                isToolRow = true
+                isFailure = payload.status == .failed || payload.status == .interrupted
+                    || payload.status == .cancelled
+                isLive = payload.status == .pending || payload.status == .inProgress
+            case let .commandOutput(payload):
+                isToolRow = true
+                isFailure = payload.status == .failed || payload.status == .interrupted
+                    || payload.status == .cancelled
+                isLive = payload.status == .pending || payload.status == .inProgress
+            default:
+                break
             }
-            return AgentTranscriptClusterPlanner.RowFact(
-                isToolRow: isToolRow,
-                isFailure: isFailure,
-                isLive: isLive,
-                startsTurn: Self.startsTurn(rows, at: index),
-                id: row.id
-            )
         }
-        displayItems = AgentTranscriptClusterPlanner.plan(
+        return AgentTranscriptClusterPlanner.RowFact(
+            isToolRow: isToolRow,
+            isFailure: isFailure,
+            isLive: isLive,
+            startsTurn: Self.startsTurn(rows, at: index),
+            id: row.id,
+            isSuperseded: supersededRowIDs.contains(row.id)
+        )
+    }
+
+    /// The tool call a chip supersedes, if this row is a chip naming one.
+    ///
+    /// A chip's `sourceItemID` is the PROVIDER's tool_use id, verbatim. The tool
+    /// row it names carries a node id derived from that (`item:<b64>/child-key:…`),
+    /// never the raw id itself — so the two only meet through the provenance map
+    /// `flatten` builds. Comparing the raw id against row ids matched nothing,
+    /// ever, and the fold shipped dead: one delegation rendered as two rows
+    /// (witnessed by `checkADelegationTurnPresentsInteractiveSubagentChips`).
+    private func supersededID(of row: Row) -> AgentNodeID? {
+        guard let block = row.block, case let .agentReference(payload) = block.payload,
+              let source = payload.sourceItemID, !source.isEmpty
+        else { return nil }
+        // The chip's own entry carries the same provider item id in its
+        // provenance; with no tool row in the document the map resolves to the
+        // chip itself, and a chip must never supersede itself out of view.
+        guard let mapped = rowIDBySourceItemID[source], mapped != row.id else { return nil }
+        return mapped
+    }
+
+    /// Patches the projection for a content-only delta instead of rebuilding it.
+    ///
+    /// S4.3 justified an O(rows) rebuild per visual apply on the grounds that the
+    /// 30Hz scheduler coalesces deltas. That is true of a BURST and false of slow
+    /// streaming: twenty deltas arriving a second apart are twenty applies, and
+    /// each paid the full walk. Bisected 2026-08-24 at +9.5ms of the 10,000-row
+    /// delta.
+    ///
+    /// Only the changed slots and their successors can move — `startsTurn` reads
+    /// `rows[index - 1]`. A tool row's STATUS is a projection input and a
+    /// content-only delta changes it, so the facts are recomputed and COMPARED,
+    /// never assumed stable; when nothing the planner reads has moved, the plan
+    /// and every map derived from it are already correct.
+    private func patchDisplayProjection(changedRowIDs: Set<AgentNodeID>) {
+        guard cachedRowFacts.count == rows.count,
+              lastPlannedTailStreaming == turnIsInFlight
+        else {
+            rebuildDisplayProjection()
+            return
+        }
+        var slots: Set<Int> = []
+        for id in changedRowIDs {
+            guard let slot = rowPositions[id]?.slot, rows.indices.contains(slot) else {
+                rebuildDisplayProjection()
+                return
+            }
+            slots.insert(slot)
+            if rows.indices.contains(slot + 1) { slots.insert(slot + 1) }
+        }
+        // A rebuilt row can BECOME a chip, which supersedes an earlier row that
+        // is not itself in the changed set — so the affected slot has to join it.
+        for id in changedRowIDs {
+            guard let row = rowsByID[id], let superseded = supersededID(of: row),
+                  supersededRowIDs.insert(superseded).inserted,
+                  let slot = rowPositions[superseded]?.slot, rows.indices.contains(slot)
+            else { continue }
+            slots.insert(slot)
+        }
+        var factsChanged = false
+        for slot in slots {
+            let fact = rowFact(at: slot)
+            guard fact != cachedRowFacts[slot] else { continue }
+            cachedRowFacts[slot] = fact
+            factsChanged = true
+        }
+        guard factsChanged else { return }
+        replanDisplayProjection()
+    }
+
+    /// Rebuilds the display projection from the CURRENT semantic rows. O(rows),
+    /// and after 2026-08-24 no longer on the per-delta path: `applyUnscrolled`
+    /// patches instead, and this stays the answer for a structural apply, a tail
+    /// flip and a fold toggle.
+    private func rebuildDisplayProjection() {
+        recordHistoryScan("cluster projection")
+        supersededRowIDs = Set(rows.compactMap(supersededID))
+        cachedRowFacts = rows.indices.map { rowFact(at: $0) }
+        replanDisplayProjection()
+    }
+
+    private func replanDisplayProjection() {
+        lastPlannedTailStreaming = turnIsInFlight
+        let facts = cachedRowFacts
+        let clusteredItems = AgentTranscriptClusterPlanner.plan(
             facts: facts,
             tailStreaming: turnIsInFlight,
+            isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
+                disclosureStateStore.explicitState(
+                    for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
+            }
+        )
+        // A4.2 — a second pass, at TURN granularity, over the same [Item] list:
+        // folds an entire completed turn under one "Worked for …" header,
+        // preserving its terminal answer row. Never touches `rows`.
+        defer { recomputeDisplayBoundarySignature() }
+        displayItems = AgentTranscriptClusterPlanner.foldTurns(
+            items: clusteredItems,
+            facts: facts,
+            turnRanges: AgentTranscriptClusterPlanner.turnRanges(facts: facts),
             isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
                 disclosureStateStore.explicitState(
                     for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
@@ -2041,6 +2488,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             uniquingKeysWith: { first, _ in first }
         )
         clusterHeadersByID = [:]
+        clusterSummaryCache.removeAll(keepingCapacity: true)
         headerIDByFoldedMemberID = [:]
         clusterMemberIDs = []
         for item in displayItems {
@@ -2070,6 +2518,29 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         return presented
     }
 
+    /// Recomputed with the plan, never from `prepare()`. Hashes the DISPLAY
+    /// sequence — cluster ids, member counts, expansion and liveness included —
+    /// because a fold changes geometry without changing the row count (S4.3), and
+    /// a row whose ENTRY changed without the COUNT changing would otherwise keep
+    /// stale geometry through the layout's guard.
+    private func recomputeDisplayBoundarySignature() {
+        recordHistoryScan("display boundary signature")
+        var hasher = Hasher()
+        for item in displayItems {
+            switch item {
+            case let .row(index):
+                guard rows.indices.contains(index) else { continue }
+                hasher.combine(rows[index].entryID)
+            case let .header(header):
+                hasher.combine(header.id)
+                hasher.combine(header.memberIndexes.count)
+                hasher.combine(header.isExpanded)
+                hasher.combine(header.isLive)
+            }
+        }
+        displayBoundarySignature = hasher.finalize()
+    }
+
     private func displayStartsTurn(at index: Int) -> Bool {
         guard displayItems.indices.contains(index) else { return false }
         guard case let .row(semanticIndex) = displayItems[index] else { return false }
@@ -2088,8 +2559,30 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     /// The one line a folded run reads as. Counts bucket by tool kind, the
-    /// duration sums only what the detail store actually knows (honestly
-    /// omitted otherwise), and ✓ appears only when every member completed.
+    /// duration is the SPAN the run occupied (honestly omitted when unknown),
+    /// and ✓ appears only when every member completed.
+    ///
+    /// T3 (2026-08-25). This used to `+=` each member's own
+    /// `endedAt - startedAt`, which excluded every gap between tools — all the
+    /// model's thinking time. Three 30 ms `Bash` calls read "0.1s" no matter how
+    /// long the run actually took, and the turn-scope header's "Worked for …"
+    /// used the same sum, so the one figure claiming to describe a whole turn was
+    /// the least accurate number on screen. Dylan: "the working time isn't
+    /// cumulative, it restarts often?"
+    ///
+    /// A span needs endpoints, and the two scopes have different ones:
+    ///
+    /// - A tool cluster spans its members' detail records, earliest `startedAt`
+    ///   to latest `endedAt`. Still host-local, still expires with the record.
+    /// - A TURN spans its entries' `createdAt`, which is document state and so
+    ///   survives what the 1 h detail TTL does not. It is also the same quantity
+    ///   the settled tail already reports as "Worked for Ns" from
+    ///   `submittedAt → turnCompleted`, so the two agree instead of contradicting
+    ///   each other a few rows apart.
+    ///
+    /// `createdAt` is optional — nil for transcripts persisted before it existed
+    /// and beyond `AgentSupervisor.replayCap` — so the clause is omitted rather
+    /// than faked. A missing number is honest; a wrong one is what this removes.
     private func clusterSummaryText(_ header: AgentTranscriptClusterPlanner.Header) -> String {
         if header.isLive {
             let count = header.memberIndexes.count
@@ -2097,11 +2590,19 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         var nounOrder: [String] = []
         var nounCounts: [String: Int] = [:]
-        var totalDuration: TimeInterval = 0
-        var knowsAnyDuration = false
+        var earliestStart: Date?
+        var latestEnd: Date?
+        var earliestEntryDate: Date?
+        var latestEntryDate: Date?
         var allCompleted = true
         for index in header.memberIndexes {
             guard rows.indices.contains(index), let block = rows[index].block else { continue }
+            // Member entry dates are the tool cluster's last-resort endpoints
+            // once the detail records have expired.
+            if let entryDate = entryDatesByID[rows[index].entryID] ?? nil {
+                if earliestEntryDate == nil || entryDate < earliestEntryDate! { earliestEntryDate = entryDate }
+                if latestEntryDate == nil || entryDate > latestEntryDate! { latestEntryDate = entryDate }
+            }
             var name: String?
             switch block.payload {
             case let .toolCall(payload):
@@ -2117,11 +2618,57 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             if nounCounts[noun] == nil { nounOrder.append(noun) }
             nounCounts[noun, default: 0] += 1
             if let detailID = toolDetailIDByBlockID[block.id],
-               let duration = toolDetailsByID[detailID]?.duration {
-                totalDuration += duration
-                knowsAnyDuration = true
+               let detail = toolDetailsByID[detailID] {
+                if let started = detail.startedAt,
+                   earliestStart == nil || started < earliestStart! { earliestStart = started }
+                if let ended = detail.endedAt,
+                   latestEnd == nil || ended > latestEnd! { latestEnd = ended }
             }
         }
+        // A turn's span comes from the document, so it is not lost to the detail
+        // TTL and it matches what the settled tail already says. Measured over the
+        // turn's whole range, not its folded members: the members are usually all
+        // in ONE assistant entry, and the endpoints that carry the duration — the
+        // user prompt that opened the turn, and the reply that closed it — are the
+        // two rows a turn header deliberately leaves outside itself.
+        let turnSpan: TimeInterval? = {
+            guard let range = header.turnRange else { return nil }
+            var first: Date?
+            var last: Date?
+            for index in range where rows.indices.contains(index) {
+                let entryID = rows[index].entryID
+                if let date = entryDatesByID[entryID] ?? nil {
+                    if first == nil || date < first! { first = date }
+                    if last == nil || date > last! { last = date }
+                }
+                // A turn ends when its last entry FINISHES, not when that entry
+                // began. `createdAt` on an assistant entry is the moment of its
+                // first token, so a span that ignores this reports time-to-first-
+                // token and contradicts the settled tail a few rows below.
+                if let end = entryEndDatesByID[entryID] ?? nil {
+                    if last == nil || end > last! { last = end }
+                }
+            }
+            guard let first, let last else { return nil }
+            let span = last.timeIntervalSince(first)
+            return span > 0 ? span : nil
+        }()
+        // A tool cluster's span is the wall-clock the run occupied, gaps included.
+        let clusterSpan: TimeInterval? = {
+            guard let start = earliestStart, let end = latestEnd else { return nil }
+            let span = end.timeIntervalSince(start)
+            return span > 0 ? span : nil
+        }()
+        if header.scope == .turn {
+            let toolCount = nounCounts.values.reduce(0, +)
+            var summary = "Worked"
+            if let span = turnSpan ?? clusterSpan {
+                summary += " for \(Self.formatWorkedDuration(span))"
+            }
+            if toolCount > 0 { summary += " · \(toolCount) tool\(toolCount == 1 ? "" : "s")" }
+            return summary
+        }
+
         let count = header.memberIndexes.count
         var parts = ["\(count) step\(count == 1 ? "" : "s")"]
         let buckets = nounOrder.map { noun -> String in
@@ -2131,15 +2678,33 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if !buckets.isEmpty, buckets != ["\(count) step\(count == 1 ? "" : "s")"] {
             parts.append(buckets.joined(separator: ", "))
         }
-        if knowsAnyDuration {
-            let formatted = totalDuration < 10
-                ? String(format: "%.1fs", totalDuration)
-                : "\(Int(totalDuration.rounded()))s"
+        // Falls back to the entry span when the detail records have expired: a
+        // fold of a restored transcript still has honest document timestamps.
+        let memberEntrySpan: TimeInterval? = {
+            guard let first = earliestEntryDate, let last = latestEntryDate else { return nil }
+            let span = last.timeIntervalSince(first)
+            return span > 0 ? span : nil
+        }()
+        if let span = clusterSpan ?? memberEntrySpan {
+            let formatted = span < 10
+                ? String(format: "%.1fs", span)
+                : "\(Int(span.rounded()))s"
             parts.append(formatted)
         }
         var summary = parts.joined(separator: " · ")
         if allCompleted { summary += " ✓" }
         return summary
+    }
+
+    /// "1m 12s" past a minute, "12s" under one — the turn-fold header's
+    /// duration clause. Distinct from the tool-cluster clause above, which
+    /// stays sub-minute-oriented ("12.4s") because a single fold rarely
+    /// crosses a minute; a whole turn often does.
+    static func formatWorkedDuration(_ duration: TimeInterval) -> String {
+        let totalSeconds = Int(duration.rounded())
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
     }
 
     static func clusterNoun(forToolNamed name: String?) -> String {
@@ -2173,8 +2738,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
                 dataSource.apply(snapshot, animatingDifferences: false)
-                lastAppliedDisplayIDs = displayIDs
-                    + (tailThinkingIndicatorIsVisible ? [tailThinkingIndicatorID] : [])
+                recordAppliedDisplayIdentity()
                 transcriptLayout.invalidateForStructureChange()
                 layoutSubtreeIfNeeded()
             }
@@ -2190,7 +2754,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             guard let view = item.headerView,
                   let clusterID = view.clusterID,
                   let header = clusterHeadersByID[clusterID] else { continue }
-            view.setSummaryText(clusterSummaryText(header))
+            let summary: String
+            if let cached = clusterSummaryCache[clusterID] {
+                summary = cached
+            } else {
+                summary = clusterSummaryText(header)
+                // A LIVE header is the one that still moves — it counts the steps
+                // of the turn in flight — so it is recomputed rather than cached.
+                if !header.isLive { clusterSummaryCache[clusterID] = summary }
+            }
+            view.setSummaryText(summary)
         }
     }
 
@@ -2223,6 +2796,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     var qaClusterHeaderIDsForChecks: [AgentNodeID] { displayItems.compactMap {
         if case let .header(header) = $0 { return header.id } else { return nil }
     } }
+    /// The row ids the reader actually sees, in display order — after the
+    /// superseded fold and clustering, before the tail indicator.
+    var qaDisplayedRowIDsForChecks: [AgentNodeID] { displayItems.compactMap {
+        if case let .row(index) = $0 { return rows[index].id } else { return nil }
+    } }
+    var qaSupersededRowIDsForChecks: Set<AgentNodeID> { supersededRowIDs }
     /// Mirrors `qaIndexEquivalenceMismatch`: nil when the projection, the
     /// snapshot and the semantic rows agree; otherwise a description.
     func qaClusterProjectionMismatch() -> String? {
@@ -2272,6 +2851,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// equivalent.
     func seedStoreSanitizedToolDetails(_ records: [AgentToolDetailKey: AgentToolDetailRecord]) {
         toolDetailsByID = records
+        clusterSummaryCache.removeAll(keepingCapacity: true)
         refreshVisibleToolDetails()
     }
 
@@ -2493,6 +3073,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         switch kind {
         case .commandExecution, .fileChange, .mcpToolCall, .webSearch: return true
         case .assistantMessage, .reasoning, .plan, .error: return false
+        // A subagent row's detail is the CHILD's transcript, not a host-local
+        // tool record, and an unknown kind has no whitelist to publish through.
+        case .subagent, .compaction, .unknown: return false
         }
     }
 

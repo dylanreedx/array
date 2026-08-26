@@ -19,6 +19,7 @@ func runCodexAgentBackendChecks() {
     runCodexRunnerArgvChecks()
     runCodexBackendPolicyChecks()
     runCodexCatalogUnionChecks()
+    runCodexLoginProbeStderrChecks()
 }
 
 private let codexTID = "019fe980-21f0-7df1-b2a0-49d7839c7937"
@@ -354,8 +355,9 @@ private func runCodexTranslatorGateChecks() {
 }
 
 private func runCodexRunnerArgvChecks() {
-    // The exact argv, both session modes. Approval and sandbox are inherited
-    // from the user's effective Codex configuration; `-C` is exec-only.
+    // The exact argv, both session modes. Sandbox + approval ride as `-c`
+    // overrides (they work on resume too, unlike -s); `-C` is exec-only; the
+    // prompt is one trailing positional.
     let fresh = CodexCLIBackend.processArguments(
         model: "gpt-5.6-sol",
         effort: "high",
@@ -367,6 +369,8 @@ private func runCodexRunnerArgvChecks() {
     expect(fresh == [
         "exec",
         "--json", "--skip-git-repo-check",
+        "-c", "approval_policy=never",
+        "-c", "sandbox_mode=workspace-write",
         "-m", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=high",
         "-C", "/tmp/work",
@@ -386,10 +390,15 @@ private func runCodexRunnerArgvChecks() {
     expect(resume == [
         "exec", "resume", codexTID,
         "--json", "--skip-git-repo-check",
+        "-c", "approval_policy=never",
+        "-c", "sandbox_mode=workspace-write",
         "-m", "gpt-5.6-sol",
         "--extra",
         "recall",
     ], "CodexCLIBackend argv (resume) drifted: \(resume)")
+
+    expect(CodexCLIBackend.sandboxMode == "workspace-write",
+           "CodexCLIBackend: the pinned sandbox posture must be workspace-write")
 
     #if os(macOS)
     // Executable resolution mirrors pi's/claude's GUI-thin-PATH strategy.
@@ -418,6 +427,12 @@ private func runCodexRunnerArgvChecks() {
 }
 
 private func runCodexBackendPolicyChecks() {
+    expect(CodexCLIBackend.transportOverride(environment: [:]) == .appServer,
+           "Codex app-server must be the default transport so structured subagents surface")
+    expect(CodexCLIBackend.transportOverride(environment: ["CONTINUUM_CODEX_TRANSPORT": "exec"]) == .exec,
+           "CONTINUUM_CODEX_TRANSPORT=exec must remain the emergency escape hatch")
+    expect(CodexCLIBackend.transportOverride(environment: ["CONTINUUM_CODEX_TRANSPORT": "app-server"]) == .appServer,
+           "the former explicit app-server spelling must remain app-server")
     // Strict harness identity is independent of installed neighbours.
     expect(AgentHarness.allCases == [.claudeCode, .codex, .pi], "harness order")
     expect(AgentHarnessConfig.defaultHarness == .claudeCode, "Claude Code is the default")
@@ -502,4 +517,65 @@ private func runCodexCatalogUnionChecks() {
            "AgentModelCatalog: resetForQA must clear codex entries too, got \(catalog.options(fallback: ["frozen/id"]))")
 
     print("AgentModelCatalog codex-union checks passed: append/clear semantics, pi name precedence, independence from the claude store, QA reset pinned")
+}
+
+/// codex prints its login state to STDERR with an EMPTY stdout — verified live
+/// on the installed CLI, 2026-08-26:
+///
+///     codex login status → stdout: (empty), exit 0
+///                          stderr: "Logged in using ChatGPT"
+///
+/// The probe used to read stdout only (stderr went into an unread, discarded
+/// pipe), so the "Logged in" text check was structurally unsatisfiable and a
+/// signed-in codex ALWAYS read as logged out. These checks drive the REAL
+/// pipeline — `probeCodexBackend(command:)` → `boundedProbeOutput` (actual
+/// Process + pipes) → `isLoggedIn` → `apply(codexBackendAvailable:)` — with
+/// fixture executables reproducing the exact stream shapes. An injected
+/// `probeExecutor` would bypass the pipe handling under test, which is the
+/// known witness trap (re-deriving what production derives).
+private func runCodexLoginProbeStderrChecks() {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-login-probe-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    func fixtureCLI(_ name: String, _ body: String) -> PiAgentRunner.ResolvedCommand {
+        let url = dir.appendingPathComponent(name)
+        try? ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return PiAgentRunner.ResolvedCommand(executable: url.path, prefixArgs: [])
+    }
+
+    // NO probeExecutor: the point is the real bounded subprocess path.
+    let catalog = AgentModelCatalog()
+    catalog.resetForQA(options: ["frozen/id"])
+
+    // The real captured shape: stderr-only "Logged in", empty stdout, exit 0.
+    catalog.probeCodexBackend(
+        command: fixtureCLI("codex-stderr", "echo 'Logged in using ChatGPT' 1>&2\nexit 0"),
+        timeout: 5)
+    expect(catalog.snapshot(for: .codex).readiness == .ready,
+           "codex login probe: the REAL stream shape (stderr-only 'Logged in using ChatGPT', empty stdout, exit 0) must read as logged in, got \(catalog.snapshot(for: .codex).readiness)")
+    expect(catalog.options().contains("openai-codex/gpt-5.6-terra"),
+           "codex login probe: a logged-in probe must union the curated codex models, got \(catalog.options())")
+
+    // Negative: silence on both streams, exit 0 → logged out.
+    catalog.probeCodexBackend(command: fixtureCLI("codex-silent", "exit 0"), timeout: 5)
+    expect(catalog.snapshot(for: .codex).readiness == .loggedOut,
+           "codex login probe: silence on both streams must read as logged out, got \(catalog.snapshot(for: .codex).readiness)")
+
+    // stdout keeps counting (combined output is a superset of the old read).
+    catalog.probeCodexBackend(
+        command: fixtureCLI("codex-stdout", "echo 'Logged in using ChatGPT'\nexit 0"),
+        timeout: 5)
+    expect(catalog.snapshot(for: .codex).readiness == .ready,
+           "codex login probe: a stdout 'Logged in' must still read as logged in, got \(catalog.snapshot(for: .codex).readiness)")
+
+    // A nonzero exit stays logged out even when the text is present.
+    catalog.probeCodexBackend(
+        command: fixtureCLI("codex-fail", "echo 'Logged in using ChatGPT' 1>&2\nexit 1"),
+        timeout: 5)
+    expect(catalog.snapshot(for: .codex).readiness == .loggedOut,
+           "codex login probe: a nonzero exit must read as logged out regardless of text, got \(catalog.snapshot(for: .codex).readiness)")
+
+    print("AgentModelCatalog codex login-probe checks passed: the real subprocess path reads stderr-only 'Logged in' as signed in, silence and nonzero exits as signed out, stdout still honored")
 }

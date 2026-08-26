@@ -7,7 +7,7 @@ import ContinuumRevivedAgentUI
 /// owner directly.
 enum AgentRenderAction {
     case copy(blockID: AgentNodeID)
-    case activateLink(blockID: AgentNodeID, url: URL)
+    case activateLink(blockID: AgentNodeID, url: URL, target: AgentLinkOpenTarget)
     /// A destination shaped like a file in the responding agent's checkout. The
     /// raw authored string is carried through unchanged — relative paths and
     /// `path:line:column` forms keep their information — because only the host,
@@ -21,6 +21,14 @@ enum AgentRenderAction {
     case saveImageAs(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case revealImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case revealAgent(blockID: AgentNodeID, agentID: UUID, parentAgentID: UUID)
+}
+
+enum AgentLinkOpenTarget: Equatable, Sendable {
+    /// Open inside Array. For web URLs the app creates a browser tile beside the
+    /// agent that authored the link; app-owned schemes stay app-owned.
+    case array
+    /// Explicit user intent to leave Array (Command-click or context menu).
+    case systemBrowser
 }
 
 struct AgentRenderActions {
@@ -300,6 +308,9 @@ struct AgentRenderContext {
     var tokens: AgentRenderTokens
     var appearance: TokenTheme
     var imageResources: AgentImageResourceProvider = .unavailable
+    /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
+    /// outside the semantic document (see `AgentReferenceStatusSource`).
+    var agentStatus: AgentReferenceStatusSource = .unavailable
 }
 
 /// One AppKit renderer for one semantic block family. `update` and

@@ -21,6 +21,15 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// resume the same thread later. Not a location fact: the projector ignores
     /// it.
     case threadId(String)
+    /// B7.1 — the session id claude itself echoed back on `system/init`,
+    /// captured so a later turn can adopt it instead of Array's own guess
+    /// (`AgentSupervisor.claudeSessionId(for:)`). Same host-local side channel
+    /// and same reason as `threadId`, but a DISTINCT case rather than reusing
+    /// it: `threadId` already means "persist to `AgentRecord.codexThreadId`"
+    /// everywhere it is handled, and this needs its own field
+    /// (`AgentRecord.providerSessionId`). Not a location fact: the projector
+    /// ignores it.
+    case providerSessionId(String)
     /// Bounded tool detail for `AgentToolDetailStore`, riding the same
     /// host-local side channel as `threadId` and for the same reason: it must
     /// never enter `AgentRuntimeEvent` (the I5 sync boundary), and the store —
@@ -135,6 +144,11 @@ public struct AgentLocationProjector: Sendable {
             // A provider session id is host-local persistence state, not a Home
             // / Where / What fact. The supervisor persists it; the projector has
             // nothing to fold in.
+            break
+
+        case .providerSessionId:
+            // Same reasoning as `.threadId`: host-local persistence state, not
+            // a Home / Where / What fact.
             break
 
         case .toolDetail:
@@ -299,6 +313,17 @@ public struct AgentLocationProjector: Sendable {
             return .failed
         case .commandExecution, .mcpToolCall:
             return .inspecting
+        case .compaction:
+            // A boundary is bookkeeping, not a place the agent is working.
+            return .thinking
+        case .subagent:
+            // A parent delegating is still working; the CHILD's own location is
+            // projected from the child's stream, not inferred from this row.
+            return .thinking
+        case .unknown:
+            // A kind a newer build wrote. "Working" is the only honest answer
+            // here; guessing a specific location would be a fabrication.
+            return .thinking
         }
     }
 }

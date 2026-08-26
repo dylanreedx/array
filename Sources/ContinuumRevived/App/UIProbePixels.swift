@@ -445,6 +445,7 @@ enum UIProbePixels {
 
         try runCoordinateLandingCheck()
         try runNegativeWitnesses()
+        try checkAuthorshipRuleIsDistinguishable()
 
         let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
@@ -539,46 +540,41 @@ enum UIProbePixels {
         ))
     }
 
-    // MARK: - P6.0 · Prose is not a card
+    // MARK: - A1 · The turn is a rule, not a card
 
-    /// Minimum |user prose − assistant prose| luminance over the fill band, in the
-    /// rendered bitmap.
+    /// The user/assistant distinguishability gate used to be
+    /// `fillBandLuminance`, a bitmap heuristic over the (now-deleted) fill: it
+    /// had zero callers by the time A1 landed — the class of surface it gated
+    /// (a filled card) no longer exists — and its doc block's claim to be "the
+    /// live gate proving a user turn is distinct" was already false before
+    /// this edit, since nothing called it.
     ///
-    /// **Derived from measurement**, like the two thresholds at the head of this
-    /// file. Measured on this fixture with the shipped tokens: **0.054** in light
-    /// (`cardUserMessage` #E5EEFB over `tileBody` #FAFBFC) and **0.095** in dark
-    /// (#26303F over #14171C), so light is the case that binds; both are printed
-    /// every run. A user turn routed to the assistant's path measures **0.000**
-    /// (observed). 0.02 sits 2.7x under the tighter real case — enough headroom that
-    /// a token tweak inside the palette is not red, tight enough that a dropped fill
-    /// is.
-
-    private static func fillBandLuminance(
-        of view: NSView, probe: UIProbe.Probed, label: String
-    ) throws -> Double {
-        let rect = try bitmapRect(of: view, rect: view.bounds, in: probe)
-        let scale = Double(probe.hostRep.pixelsWide) / probe.host.bounds.width
-        // One pixel in from each edge: the boundary row blends with whatever is
-        // behind the view. `Radius.card + 2` clears the rounded corner of a filled
-        // turn, so no sample can land outside the fill it is measuring.
-        let top = rect.y + 1
-        let bottom = rect.y + rect.height - 1
-        let left = rect.x + Int(((Radius.card + 2) * scale).rounded())
-        let right = rect.x + Int(((Inset.card.left - 2) * scale).rounded())
-        guard bottom > top, right > left else {
-            throw fail("\(label): \(rect.width)x\(rect.height)px leaves no fill band to sample (rows \(top)..<\(bottom), columns \(left)..<\(right))")
-        }
-        var sum = 0.0
-        var count = 0
-        for y in top..<bottom {
-            for x in left..<right {
-                guard let value = luminance(probe.hostRep, x: x, y: y) else { continue }
-                sum += value
-                count += 1
+    /// Replaced with two EXACT assertions rather than another bitmap
+    /// heuristic:
+    ///  1. `AgentLineRole.authorship`'s contrast against `tileBody` clears the
+    ///     3.0 line floor — free, since `border` (the role's colour) is
+    ///     already swept by `DesignTokenChecks`.
+    ///  2. The rule's GEOMETRIC presence — one full-height, `LineWidth.rule`
+    ///     -wide subview at `bounds.minX` — is `TranscriptRhythmChecks
+    ///     .checkUserTurnIsRuledNotFilled` (`--transcript-rhythm-check`,
+    ///     which gates, unlike `--component-lab-check` and
+    ///     `--ui-baseline-check`). Not duplicated here.
+    ///
+    /// `--ui-pixel-check` itself is NOT `MATRIX_KNOWN_RED`, so this clause
+    /// gates too.
+    private static func checkAuthorshipRuleIsDistinguishable() throws {
+        for theme in [TokenTheme.light, .dark] {
+            let ratio = WCAGContrast.ratio(
+                AgentLineRole.authorship.color.resolved(for: theme),
+                SurfaceToken.tileBody.color.resolved(for: theme)
+            )
+            guard let floor = AgentLineRole.authorship.contrastFloor, ratio >= floor else {
+                throw fail(
+                    "authorship rule: \(theme.rawValue) contrast against tileBody is \(ratio):1, "
+                    + "under AgentLineRole.authorship's own \(String(describing: AgentLineRole.authorship.contrastFloor)):1 floor"
+                )
             }
         }
-        guard count > 0 else { throw fail("\(label): fill band sampled no pixels") }
-        return sum / Double(count)
     }
 
     private static func firstTextField(in root: NSView) -> NSTextField? {

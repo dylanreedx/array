@@ -392,9 +392,13 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     /// The codex CLI backend's catalogue contribution: entries appear when the
     /// CLI is INSTALLED (an absolute path resolved) and LOGGED IN (`codex login
-    /// status` → exit 0 + "Logged in"). `boundedProbeOutput` returns stdout only
-    /// on a clean exit, so a non-nil output already implies exit 0 — the
-    /// `isLoggedIn` text check then confirms the sign-in. Independent of pi.
+    /// status` → exit 0 + "Logged in"). codex prints the sign-in line to STDERR
+    /// with an EMPTY stdout (verified live 2026-08-26; the shape was captured
+    /// live before too, but in a terminal, where the two streams interleave —
+    /// the probe itself only ever saw stdout, so a signed-in codex could never
+    /// read as logged in). The probe therefore feeds the COMBINED stdout+stderr
+    /// text into the `isLoggedIn` check; a non-nil output still implies exit 0.
+    /// Independent of pi.
     private func probeCodexBackend(timeout: TimeInterval) {
         let command = CodexAgentRunner.liveResolvedCommand()
         guard command.prefixArgs.isEmpty || probeExecutor != nil else {
@@ -402,19 +406,34 @@ public final class AgentModelCatalog: @unchecked Sendable {
             apply(readiness: .missing, for: .codex)
             return
         }
+        probeCodexBackend(command: command, timeout: timeout)
+    }
+
+    /// The production probe body, split from the installed-CLI guard so checks
+    /// can drive the REAL `boundedProbeOutput` pipe handling with a fixture
+    /// executable reproducing codex's stderr-only "Logged in" stream — an
+    /// injected `probeExecutor` bypasses the pipes this exists to pin.
+    public func probeCodexBackend(command: PiAgentRunner.ResolvedCommand, timeout: TimeInterval) {
         let output = boundedProbeOutput(
-            command: command, arguments: ["login", "status"], timeout: timeout)
+            command: command, arguments: ["login", "status"], includeStderr: true,
+            timeout: timeout)
         let loggedIn = output.map { CodexCLIBackend.isLoggedIn(statusOutput: $0, exitCode: 0) } ?? false
         apply(codexBackendAvailable: loggedIn)
     }
 
-    /// One bounded subprocess: stdout on success, nil on launch failure,
+    /// One bounded subprocess: output on success, nil on launch failure,
     /// nonzero exit, or timeout. Silent on every failure — the fallback (or
-    /// the previous probe's result) still stands.
+    /// the previous probe's result) still stands. `includeStderr` appends the
+    /// stderr text to the returned output — codex reports login state there —
+    /// and stays false for pi/claude, whose parsers (a table, JSON) must not
+    /// see stderr noise like update nags. Both pipes are drained concurrently
+    /// either way, so a chatty stream can never wedge the child against a full
+    /// pipe buffer; the timeout terminator bounds both reads via EOF.
     private func boundedProbeOutput(
 
         command: PiAgentRunner.ResolvedCommand,
         arguments: [String],
+        includeStderr: Bool = false,
         timeout: TimeInterval
     ) -> String? {
         let injected = lock.withLock { () -> ProbeExecutor? in
@@ -430,18 +449,32 @@ public final class AgentModelCatalog: @unchecked Sendable {
             basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
         process.environment = environment
         let stdout = Pipe()
+        let stderr = Pipe()
         process.standardOutput = stdout
-        process.standardError = Pipe()
+        process.standardError = stderr
         do { try process.run() } catch { return nil }
         let killer = DispatchWorkItem {
             if process.isRunning { process.terminate() }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+        // Drain stderr off-thread while stdout reads here: two blocking reads on
+        // one thread (or an unread stderr pipe filling its buffer) can deadlock
+        // the child. The semaphore also publishes the box's bytes to this thread.
+        final class StderrBox: @unchecked Sendable { var data = Data() }
+        let stderrBox = StderrBox()
+        let stderrDrained = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            stderrBox.data = stderr.fileHandleForReading.readDataToEndOfFile()
+            stderrDrained.signal()
+        }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        stderrDrained.wait()
         process.waitUntilExit()
         killer.cancel()
         guard process.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+        let stdoutText = String(data: data, encoding: .utf8)
+        guard includeStderr else { return stdoutText }
+        return (stdoutText ?? "") + (String(data: stderrBox.data, encoding: .utf8) ?? "")
     }
     #else
     private func startProbe(timeout: TimeInterval = 5.0) { finishRefresh() }

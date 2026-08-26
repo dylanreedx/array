@@ -50,7 +50,10 @@ func runAgentPromptImageContractChecks() {
     let sendTurn = AgentSendTurnInput(threadId: "thread", prompt: imageOnly)
     expect(sendTurn.text.isEmpty && sendTurn.prompt.imageAttachments.count == 1,
            "image-only AgentPrompt must be accepted by the provider-neutral adapter contract")
-    let imageOnlyArgs = Runner.processArguments(model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: imageOnly)
+    // extensionPaths: [] isolates the prompt/attachment argv shape being
+    // tested here from C8's default `-e` injection (covered separately by
+    // StrictAgentHarnessChecks and PiExtensionInstallerChecks).
+    let imageOnlyArgs = Runner.processArguments(model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: imageOnly, extensionPaths: [])
     expect(Array(imageOnlyArgs.suffix(2)) == ["--no-session", "@/tmp/one image.png"],
            "image-only AgentPrompt must be accepted at the Pi adapter boundary as an @path argv token, got \(imageOnlyArgs)")
 
@@ -64,7 +67,7 @@ func runAgentPromptImageContractChecks() {
 
     let hostilePath = "/tmp/space and $(touch SHOULD_NOT_RUN); `rm -rf nope`.png"
     let hostile = AgentPrompt(text: "look", imageAttachments: [localAttachment(7, path: hostilePath)])
-    let hostileArgs = Runner.processArguments(model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: hostile)
+    let hostileArgs = Runner.processArguments(model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: hostile, extensionPaths: [])
     expect(Array(hostileArgs.suffix(2)) == ["look", "@\(hostilePath)"],
            "Pi adapter must preserve a metacharacter path as literal argv elements without shell interpolation, got \(hostileArgs)")
     expect(!hostileArgs.contains("bash") && !hostileArgs.contains("-lc") && hostileArgs.contains("@\(hostilePath)"),

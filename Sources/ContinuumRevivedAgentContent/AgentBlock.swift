@@ -67,6 +67,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let error = Self(rawValue: "error")!
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
+    public static let compaction = Self(rawValue: "compaction")!
 }
 
 public struct AgentListPayload: Codable, Equatable, Sendable {
@@ -291,6 +292,58 @@ public struct AgentNoticePayload: Codable, Equatable, Sendable {
     }
 }
 
+/// B6.2/B6.3 — a compaction boundary reached the transcript, from either
+/// harness. Rendered collapsed and attributed to the harness, never to the
+/// user or assistant. Fields are exactly what each provider's own frame
+/// carries — never a fabricated field the real frame does not send. claude's
+/// `compact_boundary` gives all three (`pre_tokens` only absent on a resumed
+/// session); pi's persisted `compaction` session entry gives only
+/// `tokensBefore` — no post-compaction size (the runtime estimates one in
+/// memory but never persists it) and no manual/automatic distinction (its
+/// `fromHook` flag means "an extension supplied the summary", not "triggered
+/// automatically") — so `postTokens` and `automaticCompaction` are optional
+/// here rather than guessed.
+public struct AgentCompactionPayload: Codable, Equatable, Sendable {
+    public var preTokens: Int?
+    public var postTokens: Int?
+    public var automaticCompaction: Bool?
+
+    public init(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) {
+        self.preTokens = preTokens
+        self.postTokens = postTokens
+        self.automaticCompaction = automaticCompaction
+    }
+}
+
+extension AgentCompactionPayload {
+    /// Wire format for `AgentRuntimeEvent.itemStarted`'s `title` — the only
+    /// per-item channel a provider translator has into `AgentTranscriptProjection`
+    /// (I5 forbids widening the event itself with dedicated fields). Never
+    /// displayed raw; `AgentTranscriptProjection` decodes it back into this
+    /// typed payload immediately.
+    public static func encodeTitle(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) -> String {
+        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "")"
+    }
+
+    public init?(decodingTitle title: String?) {
+        guard let title, title.hasPrefix("compaction:") else { return nil }
+        var pre: Int?
+        var post: Int?
+        var auto: Bool?
+        for pair in title.dropFirst("compaction:".count).split(separator: ";") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            switch parts[0] {
+            case "pre": pre = Int(parts[1])
+            case "post": post = Int(parts[1])
+            case "auto": auto = Bool(String(parts[1]))
+            default: break
+            }
+        }
+        self.init(preTokens: pre, postTokens: post, automaticCompaction: auto)
+    }
+}
+
 /// A durable, portable reference to an agent that participated in this
 /// conversation. Runtime status and controls are deliberately resolved by the
 /// host from `agentID`; keeping them out of the document prevents every status
@@ -392,6 +445,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case agentReference(AgentReferencePayload)
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
+    case compaction(AgentCompactionPayload)
     case opaque(AgentOpaquePayload)
 }
 

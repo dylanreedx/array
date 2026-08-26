@@ -150,6 +150,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// footer owns their presentation and emits partial writes; this tile remains
     /// the production composition root and the supervisor remains state owner.
     private let providerFooter = AgentComposerFooterView()
+    /// The provider/model/effort controls and the primary action, kept so C5 can
+    /// take them off screen for an agent Array only mirrors.
+    private weak var v2FooterRow: NSStackView?
     private var v2ComposeColumn: NSStackView?
     /// What the two custom controls are currently showing. Seeded from the global default
     /// (`AgentModelConfig`) for a tile with no agent, and replaced by the RECORD's
@@ -194,6 +197,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The last settled turn's "Worked for Ns", measured submit -> completion
     /// (the user-message anchor; entry timestamps alone undercount).
     private var settledTurnStatusText: String?
+    /// See `TurnLiveness`. Written only from the event switch, so it moves with
+    /// the same stream that produces the transcript's rows.
+    private(set) var turnLiveness: TurnLiveness = .unknown
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -208,13 +214,13 @@ final class ManagedAgentTileNSView: TileNSView {
     /// binds it with this tile's id and agent id so resolution happens against the
     /// responding agent's own checkout.
     var onOpenLocalFile: ((String) -> Void)?
+    /// App-owned destination for an authorized transcript URL. The tile carries
+    /// the user's Array-vs-system intent but never chooses placement itself.
+    var onOpenWebLink: ((URL, AgentLinkOpenTarget) -> Void)?
     /// Resolves a durable transcript agent reference through the app-owned reveal
     /// path. A tile never creates another agent; it asks the app to reveal or
     /// attach the existing identity.
     var onRevealAgent: ((_ agentID: AgentID, _ parentAgentID: AgentID) -> Void)?
-    /// App-owned durable semantic transcript sink. The view supplies only the
-    /// provider-neutral document and stable identities; storage stays out of UI.
-    var onSemanticTranscriptUpdated: ((_ agentID: AgentID, _ sessionID: String, _ document: AgentDocument, _ final: Bool) -> Void)?
     /// Fired after this tile ingests an event, so the app can mirror the stream
     /// onto the syncable activity timeline (88.4c) without owning the subscription.
     var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
@@ -506,6 +512,18 @@ final class ManagedAgentTileNSView: TileNSView {
                 }
                 return true
             }
+            // B4: direct manipulation of Array's own queue. Neither touches the
+            // turn in flight — the primary composer control keeps one meaning.
+            composer.onCancelQueuedMessage = { [weak supervisor] messageID in
+                supervisor?.cancelQueuedMessage(messageID, for: agentID)
+            }
+            composer.onClearQueuedMessages = { [weak supervisor] in
+                supervisor?.clearQueuedMessages(for: agentID)
+            }
+            composer.updateQueuedMessages(
+                supervisor.queuedMessages(for: agentID),
+                paused: supervisor.isQueuePaused(for: agentID)
+            )
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
@@ -986,6 +1004,17 @@ final class ManagedAgentTileNSView: TileNSView {
         synchronizeV2Transcript(final: true)
     }
 
+    /// The same notice seam, for a tile ACTION that failed — a chip click that
+    /// opened nothing must not read as an unsent message.
+    func showActionFailedNotice(_ text: String) {
+        model.appendNotice(
+            id: "notice-action-failed-\(text.hashValue)",
+            title: "not opened",
+            text: text
+        )
+        synchronizeV2Transcript(final: true)
+    }
+
     func showPreviousSessionNotice() {
         model.appendNotice(
             id: "notice-previous-session",
@@ -1245,7 +1274,14 @@ final class ManagedAgentTileNSView: TileNSView {
             if state == .ready || state == .stopped || state == .error {
                 compactStatusInteraction = nil
             }
+            // A session that stopped or errored ended whatever it was doing. This
+            // is the second way out of `.inFlight`, and it exists because a runner
+            // that dies mid-turn never sends `.turnCompleted`.
+            if state == .stopped || state == .error {
+                turnLiveness = .completed
+            }
         case .turnStarted:
+            turnLiveness = .inFlight
             settledTurnStatusText = nil
             transcriptCollectionFixture?.setTurnInFlight(true)
             compactStatusSession = .init(state: .running, startedAt: nil)
@@ -1264,6 +1300,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // `.plans/45` S6 — "Worked for Ns" / "You stopped after Ns" (t3's
             // wording for interruptions). Anchored at submit when known —
             // provider events alone undercount the duration.
+            turnLiveness = .completed
             liveToolVerb = nil
             transcriptCollectionFixture?.setTurnInFlight(false)
             let anchor = v2TurnSnapshot?.submittedAt ?? v2TurnSnapshot?.turnStartedAt
@@ -1288,6 +1325,10 @@ final class ManagedAgentTileNSView: TileNSView {
         case .requestResolved, .userInputResolved:
             compactStatusInteraction = .clear
         case .runtimeError:
+            // The third way out of `.inFlight`: a runner that throws mid-turn
+            // delivers this, and without it the gyro spins forever over the
+            // error row (D2, 2026-08-26).
+            turnLiveness = .completed
             transcriptCollectionFixture?.setTurnInFlight(false)
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
@@ -1603,6 +1644,15 @@ final class ManagedAgentTileNSView: TileNSView {
            let snapshot = agentSource?.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
             v2Composer?.updateTurnSnapshot(snapshot)
+            // B4: the queue mutates on the same seam (enqueue, drain, cancel,
+            // clear all route through `notifyTurnCapabilitiesChanged`), so the
+            // chips stay in lockstep with the primary control's own repaint.
+            if let supervisor = agentSource {
+                v2Composer?.updateQueuedMessages(
+                    supervisor.queuedMessages(for: agentID),
+                    paused: supervisor.isQueuePaused(for: agentID)
+                )
+            }
         }
         let status: AgentStatus
         if let snapshot = v2TurnSnapshot {
@@ -1695,6 +1745,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // feared zero-width labels at the 320 pt floor) and was never what the
         // owner reviewed (P5.5 defect 4).
         let footerRow = NSStackView(views: [providerFooter, actionButton])
+        v2FooterRow = footerRow
         footerRow.orientation = .horizontal
         footerRow.alignment = .centerY
         footerRow.spacing = CGFloat(Space.m)
@@ -1763,6 +1814,64 @@ final class ManagedAgentTileNSView: TileNSView {
         return root
     }
 
+    /// Whether the transcript tail carries the gyro and its words.
+    ///
+    /// The tail does NOT yield to streaming text. It used to: this returned
+    /// `statusIsActive && !latestStreamIsVisible`, where `latestStreamIsVisible`
+    /// meant "the last entry is an OPEN assistant or reasoning entry" — which is
+    /// the entire duration of the answer. So the gyro, the ONLY animated element
+    /// in the transcript, switched off on the first delta and nothing replaced
+    /// it: the compact row is deliberately silent for exactly the live phases
+    /// (`presentationWithoutThinkingIndicator`, `footerRetainsPhase`) BECAUSE the
+    /// gyro was supposed to carry them, so both surfaces went quiet for the
+    /// longest and most-watched part of a turn. Dylan: "the response looks
+    /// dead... there is no indicator that the response is streaming in."
+    ///
+    /// Growing glyphs are not a liveness signal — a partial paragraph is
+    /// pixel-identical to a finished one, and a pause between sentences is
+    /// indistinguishable from a stall. So a tool call running MID-answer keeps
+    /// the tail up, where the old predicate suppressed it whether or not work was
+    /// happening, because it keyed on the open entry rather than on the work.
+    ///
+    /// But the status is NOT the whole authority, and briefly making it so was a
+    /// regression. The removed term had been an accidental safety net: a turn that
+    /// ended without `descriptor.status` flipping still had an open assistant
+    /// entry, so the tail went quiet. Without it the same stall spins forever.
+    /// `TurnLiveness` is the deliberate replacement — an authority that moves with
+    /// the event stream the rows themselves come from, and that has two ways out
+    /// of "running" rather than none.
+    ///
+    /// `document` is taken, and deliberately unread, so that the witness for this
+    /// rule can hand it a real streaming document and so that reintroducing the
+    /// old term has somewhere to go wrong. Extracted from the body only because
+    /// `statusIsActive` needs a live supervisor and this rule does not: a witness
+    /// can drive the real decision without standing one up.
+    /// Where a turn actually stands, according to the event stream that carries
+    /// the content — as opposed to `descriptor.status`, which is republished
+    /// asynchronously by the supervisor and can still say `.working` well after a
+    /// turn has ended (and, on a stalled runner, forever).
+    enum TurnLiveness {
+        /// No turn boundary has been seen on this attachment yet — a tile that
+        /// attached mid-turn, or one replaying restored history. The status is the
+        /// only authority available, so it is deferred to.
+        case unknown
+        case inFlight
+        case completed
+    }
+
+    static func showsWorkingTail(
+        statusIsActive: Bool, document: AgentDocument, turnLiveness: TurnLiveness
+    ) -> Bool {
+        _ = document
+        guard statusIsActive else { return false }
+        // A completed turn takes the tail down even while the status still says
+        // otherwise. `descriptor.status` is republished asynchronously and lags a
+        // turn's own completion event; on a runner that stalls it never flips at
+        // all. Deferring to it alone is what let the gyro spin after the agent was
+        // done — "the agent is done but i still see it".
+        return turnLiveness != .completed
+    }
+
     private func refreshTranscriptThinkingIndicator() {
         guard let transcriptCollectionFixture else { return }
         // `.plans/45` S6 (C4) — the optimistic window. `beginOptimisticSubmission`
@@ -1784,14 +1893,9 @@ final class ManagedAgentTileNSView: TileNSView {
         } else {
             statusIsActive = false
         }
-        let latestStreamIsVisible = model.document.entries.last.map { entry in
-            guard entry.role == .assistant || entry.role == .reasoning else { return false }
-            if case .open = entry.lifecycle { return true }
-            return false
-        } ?? false
-        // A working/configuring status is the only lifecycle authority used here;
-        // an open assistant/reasoning entry yields immediately on its first delta.
-        let showsWorkingTail = statusIsActive && !latestStreamIsVisible
+        let showsWorkingTail = Self.showsWorkingTail(
+            statusIsActive: statusIsActive, document: model.document,
+            turnLiveness: turnLiveness)
         if !statusIsActive, let settledTurnStatusText {
             transcriptCollectionFixture.setSettledTailStatus(settledTurnStatusText)
             return
@@ -2030,7 +2134,37 @@ final class ManagedAgentTileNSView: TileNSView {
             },
             tokens: .transcript,
             appearance: effectiveTokenTheme,
-            imageResources: managedImageResourceProvider
+            imageResources: managedImageResourceProvider,
+            agentStatus: agentReferenceStatusSource
+        )
+    }
+
+    /// C10: built from `agentSource` (the supervisor), never from anything the
+    /// document carries. `turnSnapshot(for:)` and `addTurnCapabilitiesObserver`
+    /// are both already tile-independent production seams — the same ones a
+    /// headless/cross-project agent's row already resolves through — so a chip
+    /// referencing a tile-less child works exactly like one referencing a
+    /// tiled one.
+    private var agentReferenceStatusSource: AgentReferenceStatusSource {
+        guard let supervisor = agentSource else { return .unavailable }
+        return AgentReferenceStatusSource(
+            current: { [weak supervisor] rawAgentID in
+                guard let supervisor else { return nil }
+                let agentID = AgentID(rawValue: rawAgentID)
+                guard let snapshot = supervisor.turnSnapshot(for: agentID) else { return nil }
+                return InboxState.state(forSnapshot: snapshot)
+            },
+            subscribe: { [weak supervisor] rawAgentID, callback in
+                guard let supervisor else { return nil }
+                let agentID = AgentID(rawValue: rawAgentID)
+                return supervisor.addTurnCapabilitiesObserver { [weak supervisor] changedID in
+                    guard changedID == agentID, let supervisor else { return }
+                    callback(supervisor.turnSnapshot(for: agentID).map { InboxState.state(forSnapshot: $0) })
+                }
+            },
+            unsubscribe: { [weak supervisor] token in
+                supervisor?.removeTurnCapabilitiesObserver(token)
+            }
         )
     }
 
@@ -2098,23 +2232,35 @@ final class ManagedAgentTileNSView: TileNSView {
         lastForwardedDocumentVersion = document.version
         let next = AgentDocument(version: v2RenderedDocument.version &+ 1, entries: document.entries)
         do {
-            // `enqueue` gates presentation at 30Hz and recomputes the touched rows
-            // from the document at flush time, so the enqueued patch only has to be
-            // one valid version step. Deriving node-level sets here re-scanned the
-            // whole document per chunk to build a diff the list then recomputed
-            // anyway, and calling `apply` directly bypassed the visual-update gate
-            // entirely — the one-apply-per-token shape P3.11's negative witness
-            // exists to fail.
-            try transcript.enqueue(
-                document: next,
-                patch: AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version),
-                final: final
-            )
+            // The patch carries the REDUCER'S OWN changed set, drained from the
+            // model. `enqueue` gates presentation at 30Hz and unions these across
+            // everything it coalesces, so the list is told exactly which nodes
+            // moved rather than rediscovering it.
+            //
+            // The empty patch this replaces was not a small thing. It left
+            // `applyCoalesced` with no locality at all, so every streaming chunk
+            // took the full walk: flatten the whole document, build an O(rows)
+            // index, diff every row's content, rebuild every per-row structure.
+            // Measured at 93ms per delta over 10,000 rows — and invisible, because
+            // the gate drove `apply(document:patch:)`, which has no production
+            // callers at all.
+            //
+            // Deriving the set HERE by diffing documents would be the old mistake
+            // in a new place: this asks the reducer, which already computed it,
+            // and costs a set union per chunk.
+            let touched = model.drainTouchedNodes()
+            let patch: AgentDocumentPatch
+            if touched.isStructural || touched.ids.isEmpty {
+                patch = try AgentDocumentPatch.empty(fromVersion: v2RenderedDocument.version)
+            } else {
+                patch = try AgentDocumentPatch(
+                    fromVersion: v2RenderedDocument.version,
+                    toVersion: next.version,
+                    updated: Array(touched.ids))
+            }
+            try transcript.enqueue(document: next, patch: patch, final: final)
             v2RenderedDocument = next
             v2RenderError = nil
-            if let attachedAgentID {
-                onSemanticTranscriptUpdated?(attachedAgentID, threadId, next, final)
-            }
             if case .needsAction = v2TurnSnapshot?.state {
                 // A pending request is an interaction boundary, not a streaming
                 // frame: present it before scrolling so the anchor resolves
@@ -2153,6 +2299,9 @@ final class ManagedAgentTileNSView: TileNSView {
             // app owns resolution: only it knows this tile's agent, and only that
             // agent's live cwd may resolve a relative path.
             onOpenLocalFile?(destination)
+            return
+        case let .activateLink(_, url, target):
+            onOpenWebLink?(url, target)
             return
         case let .revealAgent(_, agentID, parentAgentID):
             onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))
@@ -2215,6 +2364,21 @@ final class ManagedAgentTileNSView: TileNSView {
             snapshot = live
         } else {
             snapshot = v2TurnSnapshot
+        }
+        // C5 — an agent Array MIRRORS has no runner behind it, so the composer and
+        // the Stop are not "unavailable right now", they are not applicable at
+        // all. A disabled control says try later; there is no later. The
+        // transcript and the status row stay: watching is the whole point.
+        let mirrored = snapshot?.isMirrored ?? false
+        v2Composer?.isHidden = mirrored
+        v2FooterRow?.isHidden = mirrored
+        if mirrored {
+            button.presentation = .resolve(
+                state: .ready,
+                capabilities: .init(canSend: false, canStop: false, canSteer: false, canQueue: false),
+                hasDraft: false)
+            providerFooter.controlsEnabled = false
+            return
         }
         let capabilities = snapshot?.capabilities ?? .init()
         // With a snapshot, its execution state alone decides; the legacy
@@ -2386,6 +2550,7 @@ final class ManagedAgentTileNSView: TileNSView {
         refreshTranscriptThinkingIndicator()
     }
     var qaTranscriptForChecks: AgentTranscriptListView? { transcriptCollectionFixture }
+    var qaDocumentForChecks: AgentDocument { model.document }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }
     var qaCompactStatusContextState: AgentRadialContextMeterState { compactStatusRow.qaContextState }
@@ -2445,6 +2610,18 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.qaPressReplyOptionChip(titled: title) ?? false
     }
     var qaV2CanSend: Bool { v2TurnSnapshot?.capabilities.canSend == true }
+    /// C5's witness surface: what a mirrored agent's tile actually offers.
+    /// Drives the SAME presentation update production drives, from a snapshot of
+    /// the shape `AgentSupervisor.turnSnapshot(for:)` produces. A check that set
+    /// the hidden flags itself would pass while the tile still painted them.
+    func qaApplyTurnSnapshotForChecks(_ snapshot: AgentTileTurnSnapshot) {
+        v2TurnSnapshot = snapshot
+        v2Composer?.updateTurnSnapshot(snapshot)
+        updateV2ComposerPresentation()
+    }
+
+    var qaComposerIsOffered: Bool { !(v2Composer?.isHidden ?? true) }
+    var qaProviderControlsAreOffered: Bool { !(v2FooterRow?.isHidden ?? true) }
     var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult
@@ -2573,6 +2750,17 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaRefreshLocation(at now: Date) { refreshLocationStatus(at: now) }
     func qaPrepareStreamingMarkupForTeardown() { prepareStreamingMarkupForTeardown(final: true) }
     func qaFireStreamingMarkupTimer(generation: UInt64) { streamingMarkupParseTimerFired(generation: generation) }
+
+    /// Presents whatever streamed markup is pending, through the production
+    /// boundary path.
+    ///
+    /// The timer seam above is wall-clock gated (`flushPendingStreamingMarkupIfDue`),
+    /// so in a fixture it is never due and a check that fires it measures an empty
+    /// queue while believing it measured a cheap one. This is the same boundary a
+    /// real turn crosses, just invoked deterministically.
+    func qaFlushStreamingMarkupForChecks(final: Bool = false) {
+        flushPendingStreamingMarkupForBoundary(final: final)
+    }
     var qaBranchChipIsWarning: Bool {
         agentHeader.qaBranchIsWarning
     }

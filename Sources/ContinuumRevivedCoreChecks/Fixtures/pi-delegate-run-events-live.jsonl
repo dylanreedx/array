@@ -1,0 +1,18 @@
+{"ts":"2026-08-25T14:17:59.601Z","type":"started","argv":["pi","-p","--mode","json","--no-session","--system-prompt","/private/tmp/fixture-repo/.pi/agent-runs/code-scout-20260825T141759Z-a23808/system-prompt.resolved.md","Task: Survey the recipe column helpers and report what they share."]}
+{"ts":"2026-08-25T14:18:00.102Z","type":"session","sessionId":"fixture-child-session","cwd":"/private/tmp/fixture-repo"}
+{"ts":"2026-08-25T14:18:00.140Z","type":"agent_start","agentId":"fixture-child"}
+{"ts":"2026-08-25T14:18:00.180Z","type":"turn_start","turnId":"c1"}
+{"ts":"2026-08-25T14:18:00.190Z","type":"message_start","message":{"role":"user"}}
+{"ts":"2026-08-25T14:18:00.191Z","type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Task: Survey the recipe column helpers and report what they share."}]}}
+{"ts":"2026-08-25T14:18:01.010Z","type":"message_start","message":{"role":"assistant"}}
+{"ts":"2026-08-25T14:18:01.400Z","type":"tool_execution_start","toolCallId":"child_call_1","toolName":"read","args":{"file":"/private/tmp/fixture-repo/src/recipeColumns.js"}}
+{"ts":"2026-08-25T14:18:01.760Z","type":"tool_execution_end","toolCallId":"child_call_1","toolName":"read","result":{"content":[{"type":"text","text":"export const recipeColumns = []"}]},"isError":false}
+{"ts":"2026-08-25T14:18:03.220Z","type":"tool_execution_start","toolCallId":"child_call_2","toolName":"grep","args":{"pattern":"recipeColumns"}}
+{"ts":"2026-08-25T14:18:03.470Z","type":"tool_execution_end","toolCallId":"child_call_2","toolName":"grep","result":{"content":[{"type":"text","text":"2 matches"}]},"isError":false}
+{"ts":"2026-08-25T14:18:04.100Z","type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Both helpers build their column list "}}
+{"ts":"2026-08-25T14:18:04.160Z","type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"from the same shared descriptor, then diverge "}}
+{"ts":"2026-08-25T14:18:04.220Z","type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"only in how they format the blend column."}}
+{"ts":"2026-08-25T14:18:04.247Z","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Both helpers build their column list from the same shared descriptor, then diverge only in how they format the blend column."}],"usage":{"input":1409,"output":142},"stopReason":"stop"}}
+{"ts":"2026-08-25T14:18:04.300Z","type":"turn_end","turnId":"c1"}
+{"ts":"2026-08-25T14:18:04.310Z","type":"agent_end"}
+{"ts":"2026-08-25T14:18:04.320Z","type":"agent_settled"}

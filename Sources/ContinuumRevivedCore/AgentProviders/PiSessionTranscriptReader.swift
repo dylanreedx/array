@@ -16,8 +16,21 @@ import Foundation
 //       {"type":"toolCall","id":..,"name":..,"arguments":{..}}]}}
 //   {"type":"message","message":{"role":"toolResult","toolCallId":..,"toolName":..,
 //       "isError":Bool,"content":[{"type":"text","text":..},{"type":"image",..}]}}
-// The `session`/`model_change`/`thinking_level_change`/`custom_message`/
-// `compaction` lines carry no replayable transcript content and are skipped.
+// The `session`/`model_change`/`thinking_level_change`/`custom_message` lines
+// carry no replayable transcript content and are skipped.
+//
+// B6.3 — `compaction` lines are NOT skipped: pi never rewrites or truncates
+// the session file at compaction (`dist/core/session-manager.js`'s
+// `appendCompaction`/`_appendEntry` are strictly append-only — verified
+// against the installed `@earendil-works/pi-coding-agent` package), so every
+// `message` line before and after a compaction survives regardless of what
+// this reader does with the `compaction` line itself. What used to be lost
+// was only the BOUNDARY marker; it now surfaces as the same compaction item
+// kind `ClaudeEventTranslator` gives claude's `compact_boundary`, carrying
+// the one real field pi's persisted entry has (`tokensBefore`) — never the
+// `summary` prose (a model-authored recap, out of scope for I5's tool-detail
+// whitelisting), and never a fabricated post-compaction size or
+// manual/automatic flag: pi's entry has neither.
 public enum PiSessionTranscriptReader {
     /// Pure: normalized pi session lines → the bounded, replayable transcript.
     public static func parse(
@@ -34,7 +47,27 @@ public enum PiSessionTranscriptReader {
         var out: [NormalizedTranscriptMessage] = []
         for line in lines {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
-                  (object["type"] as? String) == "message",
+                  let type = object["type"] as? String else { continue }
+
+            // B6.3 — pi never rewrites or truncates the session file at
+            // compaction (verified against `dist/core/session-manager.js`'s
+            // `appendCompaction`/`_appendEntry`: strictly append-only). The
+            // pre-compaction `message` lines that follow in this same loop are
+            // therefore never lost; this just surfaces the boundary itself,
+            // from the one real field the persisted entry carries.
+            // `tokensBefore` is what `appendCompaction` writes; there is no
+            // persisted post-compaction size (the runtime estimates one only
+            // in memory) and no manual/automatic flag (`fromHook` means "an
+            // extension supplied the summary", not "triggered automatically").
+            if type == "compaction" {
+                out.append(NormalizedTranscriptMessage(
+                    role: .compaction,
+                    countsAsMessage: false,
+                    compactionTokensBefore: intValue(object["tokensBefore"])))
+                continue
+            }
+
+            guard type == "message",
                   let message = object["message"] as? [String: Any],
                   let role = message["role"] as? String else { continue }
 
@@ -94,6 +127,19 @@ public enum PiSessionTranscriptReader {
             if (part["type"] as? String) == "text", let value = part["text"] as? String {
                 accumulator += value
             }
+        }
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        case let value as Double where value.isFinite:
+            return Int(value)
+        default:
+            return nil
         }
     }
 

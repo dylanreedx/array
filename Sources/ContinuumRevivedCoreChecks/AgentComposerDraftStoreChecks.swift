@@ -841,4 +841,48 @@ private func runAgentComposerAttachmentStoreChecks(
     let sentURLAfterCleanup = try await attachmentStore.fileURL(for: pasted.manifest.id)
     expect(sentURLAfterCleanup != nil,
            "cleanup must never remove sent attachments referenced by transcript metadata")
+
+    // B4 — Array's own follow-up queue. Durable, FIFO, and direct manipulation
+    // (cancel one chip, clear all) never calls into anything harness-owned:
+    // there is no RPC in this store at all, which is the whole point — neither
+    // claude nor pi exposes a cancel-the-queue verb, so Array holds the text
+    // itself rather than writing ahead into the harness's own queue.
+    let queueRoot = root.appendingPathComponent("queue", isDirectory: true)
+    let queueStore = AgentComposerDraftStore(applicationSupportDirectory: queueRoot)
+    let queueAgent = AgentID(rawValue: UUID(uuidString: "A0000000-0000-4000-8000-000000009443")!)
+    let freshQueue = await queueStore.queuedMessages(for: queueAgent)
+    expect(freshQueue.isEmpty, "a fresh agent has no queued messages")
+    _ = await queueStore.enqueueMessage(text: "first follow-up", for: queueAgent)
+    let second = await queueStore.enqueueMessage(text: "second follow-up", for: queueAgent)
+    let orderedTexts = await queueStore.queuedMessages(for: queueAgent).map(\.text)
+    expect(orderedTexts == ["first follow-up", "second follow-up"],
+           "queued messages are read back in submission order")
+    // A fresh store instance over the same directory proves the queue is
+    // durable storage, not an in-memory convenience the supervisor could lose
+    // on a relaunch mid-turn.
+    let reloadedQueueStore = AgentComposerDraftStore(applicationSupportDirectory: queueRoot)
+    let reloadedTexts = await reloadedQueueStore.queuedMessages(for: queueAgent).map(\.text)
+    expect(reloadedTexts == ["first follow-up", "second follow-up"],
+           "the queue survives a fresh store instance over the same directory")
+    let removed = await reloadedQueueStore.removeQueuedMessage(id: second.id, for: queueAgent)
+    expect(removed, "removing an existing queued message must report success")
+    let afterCancel = await reloadedQueueStore.queuedMessages(for: queueAgent).map(\.text)
+    expect(afterCancel == ["first follow-up"],
+           "cancelling one chip must not disturb the others — direct manipulation of Array's own queue")
+    let dequeued = await reloadedQueueStore.dequeueNextQueuedMessage(for: queueAgent)
+    expect(dequeued?.text == "first follow-up", "dequeue returns the oldest queued message first")
+    let afterDequeue = await reloadedQueueStore.queuedMessages(for: queueAgent)
+    expect(afterDequeue.isEmpty, "dequeue removes the message from durable storage immediately")
+    if let dequeued {
+        await reloadedQueueStore.requeueMessageAtFront(dequeued, for: queueAgent)
+    }
+    let afterRequeue = await reloadedQueueStore.queuedMessages(for: queueAgent).map(\.text)
+    expect(afterRequeue == ["first follow-up"],
+           "a message dequeued but never actually sent (the runner became busy again in the same beat) must be restored, not lost")
+    _ = await reloadedQueueStore.enqueueMessage(text: "clear me too", for: queueAgent)
+    await reloadedQueueStore.clearQueue(for: queueAgent)
+    let afterClear = await reloadedQueueStore.queuedMessages(for: queueAgent)
+    expect(afterClear.isEmpty,
+           "\"Clear queued\" removes every chip at once, still without touching a turn in flight")
+    print("AgentComposerDraftStore queue checks passed: durable FIFO enqueue/dequeue surviving a fresh store instance, ordered reads, single-chip cancel, requeue-at-front on a failed send, and clear-all")
 }

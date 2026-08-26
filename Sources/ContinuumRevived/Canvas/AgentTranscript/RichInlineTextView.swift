@@ -248,7 +248,11 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
     /// a path against a working directory, and never launders a file into a URL
     /// the host would treat as externally authorized.
     @discardableResult
-    func activateLink(at index: Int, context: AgentRenderContext? = nil) -> Bool {
+    func activateLink(
+        at index: Int,
+        context: AgentRenderContext? = nil,
+        target requestedTarget: AgentLinkOpenTarget? = nil
+    ) -> Bool {
         guard let blockID,
               let link = linkRanges.first(where: { NSLocationInRange(index, $0.range) })
         else { return false }
@@ -262,7 +266,17 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         guard currentDisposition == .openExternally || currentDisposition == .openInternally,
               let url = URL(string: link.destination)
         else { return false }
-        (context ?? renderContext).actions.perform(.activateLink(blockID: blockID, url: url))
+        let target: AgentLinkOpenTarget
+        if let requestedTarget {
+            target = requestedTarget
+        } else if currentDisposition == .openExternally,
+                  NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+            target = .systemBrowser
+        } else {
+            target = .array
+        }
+        (context ?? renderContext).actions.perform(
+            .activateLink(blockID: blockID, url: url, target: target))
         return true
     }
 
@@ -285,11 +299,28 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         let disposition = AgentLinkPolicy.disposition(for: link.destination)
         switch disposition {
         case .openExternally, .openInternally, .openLocalFile:
-            let title = disposition == .openLocalFile ? "Open File" : "Open Link"
+            let title: String
+            if disposition == .openLocalFile {
+                title = "Open File"
+            } else if disposition == .openExternally {
+                title = "Open in Array"
+            } else {
+                title = "Open Link"
+            }
             let open = NSMenuItem(title: title, action: #selector(openLink(_:)), keyEquivalent: "")
             open.representedObject = index
             open.target = self
             menu.addItem(open)
+            if disposition == .openExternally {
+                let external = NSMenuItem(
+                    title: "Open in Default Browser",
+                    action: #selector(openLinkInSystemBrowser(_:)),
+                    keyEquivalent: ""
+                )
+                external.representedObject = index
+                external.target = self
+                menu.addItem(external)
+            }
         case .displayOnly, .reject:
             break
         }
@@ -305,6 +336,11 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
     @objc private func openLink(_ sender: NSMenuItem) {
         guard let index = sender.representedObject as? Int else { return }
         _ = activateLink(at: index)
+    }
+
+    @objc private func openLinkInSystemBrowser(_ sender: NSMenuItem) {
+        guard let index = sender.representedObject as? Int else { return }
+        _ = activateLink(at: index, target: .systemBrowser)
     }
 
     private func characterIndex(for event: NSEvent) -> Int? {

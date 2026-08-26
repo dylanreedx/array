@@ -128,6 +128,10 @@ enum PerfScenarios {
             // the filter is prefix-matched, so `--scenario canvas.zoom` would
             // otherwise sweep this in too.
             Scenario(name: "canvas.magnify-slope", run: { try canvasZoomSlope() }),
+            // The document-relationship overlay's own per-step cost, which
+            // magnify-slope's cheap descriptor tiles never exercise (it never sets
+            // up any document links). `.plans/44` item 1.
+            Scenario(name: "canvas.document-relationship-zoom-cost", run: { try canvasDocumentRelationshipZoomCost() }),
             // The TRANSITION between gestures, which every scenario above is
             // blind to: they each drive one pure gesture, and the complaint
             // that reframed the zoom program lived exactly at the seam ("it
@@ -538,6 +542,167 @@ enum PerfScenarios {
         return PerfScenarioResult(name: "canvas.magnify-slope", detail: detail, measurements: measurements)
     }
 
+    // MARK: - Scenario: document-relationship overlay cost during a zoom sweep
+
+    /// Does a zoom step touch the document-relationship overlay at all?
+    ///
+    /// `CanvasNSView.updateDocumentRelationshipOverlay` used to run from
+    /// `syncWorldPlaneToCamera` on every camera step: a full re-walk of every
+    /// installed tile (`tileIndexVisits`) and every document link
+    /// (`linkEvaluations`), plus an unconditional viewport-sized frame write
+    /// (`frameWrites`) — all of it on a canvas with ZERO document links, since
+    /// there was no early-out. `.plans/44` item 1.
+    ///
+    /// Two arms over the SAME fixture shape (installed tiles held fixed, only
+    /// the presence of document links differs), each swept through 40 zoom
+    /// steps:
+    ///
+    /// 1. No document links at all — the common case. The overlay must not be
+    ///    touched.
+    /// 2. Several real links between installed tiles — the overlay is now a
+    ///    world-space sibling (frame sized to content, not the viewport), so a
+    ///    camera step still must not touch it: the connectors track the
+    ///    camera for free via the normal view hierarchy, the same way tiles do.
+    ///
+    /// The teeth: `segmentCountAfterZoom` proves arm 2 actually drew something
+    /// (an early-out that fired unconditionally would zero this too), and
+    /// `cameraMutations` proves the sweep really moved the camera.
+    static func canvasDocumentRelationshipZoomCost() throws -> PerfScenarioResult {
+        let installed = 24
+        let linkedPairCount = 6
+        let steps = 40
+
+        struct Arm {
+            let label: String
+            let updateCalls: Int
+            let tileIndexVisits: Int
+            let linkEvaluations: Int
+            let frameWrites: Int
+            let segmentCountAfterZoom: Int
+            let cameraMutations: Int
+        }
+
+        func runArm(withLinks: Bool) throws -> Arm {
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                         tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: false
+            )
+            canvas.frame = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+                                  backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontOffscreenForChecks()
+
+            var tiles: [Tile] = []
+            for index in 0..<installed {
+                let frame = TileFrame(x: Double(index % 6) * 260 + 40, y: Double(index / 6) * 260 + 60,
+                                      width: 220, height: 180)
+                let tile = Tile(id: UUID(), kind: .note, title: "doc-rel-\(index)",
+                                frame: frame, zPosition: .fromLegacyRank(index + 1),
+                                runtimeRef: nil, metadata: TileMetadata())
+                tiles.append(tile)
+                canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            }
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+            canvas.layoutSubtreeIfNeeded()
+
+            if withLinks {
+                var links: [DocumentAgentLink] = []
+                var agentTileIds: [AgentID: UUID] = [:]
+                let now = Date(timeIntervalSince1970: 1_900_000_000)
+                for pairIndex in 0..<linkedPairCount {
+                    let agentId = AgentID(rawValue: UUID())
+                    agentTileIds[agentId] = tiles[pairIndex * 2].id
+                    links.append(DocumentAgentLink(agentId: agentId, documentTileId: tiles[pairIndex * 2 + 1].id,
+                                                   createdAt: now, updatedAt: now))
+                }
+                canvas.setDocumentRelationships(links, agentTileIds: agentTileIds)
+                canvas.layoutSubtreeIfNeeded()
+            }
+
+            canvas.qaResetDocumentRelationshipStats()
+            canvas.qaResetCameraLayoutStats()
+            for step in 0..<steps {
+                let zoom = 0.4 + 0.6 * (1 + sin(Double(step) / 6.0)) / 2
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+            }
+            let stats = canvas.qaDocumentRelationshipStats
+            let arm = Arm(
+                label: withLinks ? "with \(linkedPairCount) links" : "no links",
+                updateCalls: stats.updateCalls,
+                tileIndexVisits: stats.tileIndexVisits,
+                linkEvaluations: stats.linkEvaluations,
+                frameWrites: stats.frameWrites,
+                segmentCountAfterZoom: canvas.qaDocumentRelationshipSegmentCount,
+                cameraMutations: canvas.qaCameraLayoutStats.cameraMutations
+            )
+            window.orderOut(nil)
+            window.contentView = nil
+            return arm
+        }
+
+        let noLinks = try runArm(withLinks: false)
+        let withLinks = try runArm(withLinks: true)
+
+        var measurements: [PerfMeasurement] = []
+
+        for arm in [noLinks, withLinks] {
+            let prefix = "document-relationship-zoom-cost.\(arm.label == "no links" ? "empty" : "linked")"
+            measurements.append(PerfBudget(
+                metric: "\(prefix).updateCalls",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "a camera step must not invoke updateDocumentRelationshipOverlay at all — "
+                    + "it is a world-space sibling now, camera-invariant by construction"
+            ).evaluate(Double(arm.updateCalls)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).tileIndexVisits",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "no camera step may re-walk installed tiles for this overlay"
+            ).evaluate(Double(arm.tileIndexVisits)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).linkEvaluations",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "no camera step may re-evaluate document links"
+            ).evaluate(Double(arm.linkEvaluations)))
+
+            measurements.append(PerfBudget(
+                metric: "\(prefix).frameWrites",
+                limit: .exactly(0),
+                unit: .count,
+                rationale: "the overlay's frame tracks content, not the viewport — a camera step must "
+                    + "never rewrite it"
+            ).evaluate(Double(arm.frameWrites)))
+        }
+
+        measurements.append(PerfBudget(
+            metric: "document-relationship-zoom-cost.segmentCountAfterZoom",
+            limit: .atLeast(Double(linkedPairCount)),
+            unit: .count,
+            rationale: "teeth: the linked arm must still have every connector drawn after the sweep — "
+                + "zero updates must not mean zero output"
+        ).evaluate(Double(withLinks.segmentCountAfterZoom)))
+
+        measurements.append(PerfBudget(
+            metric: "document-relationship-zoom-cost.cameraMutations",
+            limit: .atLeast(1),
+            unit: .count,
+            rationale: "teeth: the sweep must have actually moved the camera in both arms"
+        ).evaluate(Double(min(noLinks.cameraMutations, withLinks.cameraMutations))))
+
+        let detail = "\(steps) zoom steps, \(installed) installed tiles; "
+            + "no links: \(noLinks.updateCalls) update calls / \(noLinks.tileIndexVisits) tile visits; "
+            + "\(linkedPairCount) links: \(withLinks.updateCalls) update calls / "
+            + "\(withLinks.tileIndexVisits) tile visits / \(withLinks.segmentCountAfterZoom) segments after sweep"
+        return PerfScenarioResult(name: "canvas.document-relationship-zoom-cost", detail: detail, measurements: measurements)
+    }
+
     // MARK: - Scenario: the zoom→pan transition
 
     /// Does a pan step cost more because a zoom preceded it?
@@ -900,12 +1065,25 @@ enum PerfScenarios {
     ///
     /// This is the streaming axis of the contract in
     /// [scalability-tdd.md](../../../docs/internals/scalability-tdd.md): a delta
-    /// must cost `O(changed + visible rows)` and never `O(history)`. Today
-    /// `AgentTranscriptListView.apply(document:patch:)` takes a real
-    /// `AgentDocumentPatch` and then ignores its locality entirely, calling
-    /// `flatten(document)` — which walks every entry, every top-level block, and
-    /// recursively every child. So one revised token at the tail re-indexes the
-    /// whole conversation.
+    /// must cost `O(changed + visible rows)` and never `O(history)`.
+    ///
+    /// **This scenario drives the seam production actually uses, and for most of
+    /// its life it did not.** It called `apply(document:patch:)` with a real,
+    /// node-level `AgentDocumentPatch` — a method with ZERO production callers.
+    /// A streaming tile goes through `enqueue(document:patch:final:)` with
+    /// `AgentDocumentPatch.empty(...)`, because the 30Hz scheduler coalesces
+    /// several reducer results into one presentation and a caller's patch cannot
+    /// describe the coalesced step. So the budgets below were measured on an
+    /// incremental path nothing reached, while production full-flattened on every
+    /// chunk — the same failure shape CLAUDE.md hazard 9 records for
+    /// `WorkspaceRuntime.install(into:)`, and the reason a headline
+    /// 50.2ms → 5.7ms win was banked on a seam nothing calls.
+    ///
+    /// The fixture also alternates user and assistant entries. It used to be
+    /// uniformly `.assistant`, so `startsTurn` was never true, `turnRanges`
+    /// returned a single range, `foldTurns` early-returned, and turn headers,
+    /// `clusterSummaryText` and every tool-detail path were unreachable BY
+    /// CONSTRUCTION — invisible to the gate no matter how expensive they became.
     ///
     /// The fixture sweeps history length and reports the SLOPE for the same reason
     /// `canvas.camera-slope` does: a single-size fixture can sit green while the
@@ -919,6 +1097,12 @@ enum PerfScenarios {
         let deltas = 20
 
         func nodeID(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func promptBlock(_ index: Int) -> AgentBlock {
+            AgentBlock(
+                id: nodeID("delta-block-\(index)"), revision: 1, kind: .paragraph,
+                payload: .paragraph([.text("prompt \(index)")])
+            )
+        }
         func fixtureBlock(_ index: Int, revision: UInt64 = 1) -> AgentBlock {
             AgentBlock(
                 id: nodeID("delta-block-\(index)"), revision: revision,
@@ -929,6 +1113,7 @@ enum PerfScenarios {
 
         struct Sample {
             let history: Int
+            let historyScansPerDelta: Double
             let visitsPerDelta: Double
             let rowsPerDelta: Double
             let fullFlattens: Int
@@ -947,11 +1132,20 @@ enum PerfScenarios {
             // `prepareToolDetailLifecycle` builds a dictionary over every entry on
             // every delta. Measuring the realistic shape catches both.
             var entries = (0..<history).map { index in
-                AgentEntry(
-                    id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
-                    provenance: .localNotice(reason: "transcript delta fixture"),
-                    blocks: [fixtureBlock(index)]
-                )
+                // Alternating roles, so the document has REAL turns. A user entry
+                // is what makes `startsTurn` true, and without one the whole
+                // folding projection is dead code as far as this gate is
+                // concerned.
+                index.isMultiple(of: 2)
+                    ? AgentEntry(
+                        id: nodeID("delta-entry-\(index)"), revision: 1, role: .user,
+                        provenance: .localPrompt(promptID: "delta-\(index)"),
+                        lifecycle: .finished,
+                        blocks: [promptBlock(index)])
+                    : AgentEntry(
+                        id: nodeID("delta-entry-\(index)"), revision: 1, role: .assistant,
+                        provenance: .localNotice(reason: "transcript delta fixture"),
+                        blocks: [fixtureBlock(index)])
             }
             let list = AgentTranscriptListView()
             list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
@@ -969,6 +1163,7 @@ enum PerfScenarios {
                     inserted: entries.flatMap { $0.blocks.map(\.id) }
                 )
             )
+            list.flushPendingVisualUpdate()
             host.layoutSubtreeIfNeeded()
             list.collectionView.layoutSubtreeIfNeeded()
 
@@ -976,6 +1171,8 @@ enum PerfScenarios {
                 throw Failure(message: "transcript-delta harness must hold \(history) rows; got \(list.qaSemanticRowCount)")
             }
 
+            // Every sweep size is even, so the last entry is the ASSISTANT half of
+            // the final turn — which is what a streaming answer actually revises.
             let tailIndex = history - 1
             let tailEntryID = entries[tailIndex].id
             let tailID = entries[tailIndex].blocks[0].id
@@ -992,16 +1189,24 @@ enum PerfScenarios {
                     provenance: .localNotice(reason: "transcript delta fixture"),
                     blocks: [fixtureBlock(tailIndex, revision: version)]
                 )
-                try list.apply(
+                // EXACTLY what `ManagedAgentTileNSView` does per chunk: one
+                // version step carrying the reducer's own changed set, through the
+                // coalescing scheduler. The two things that make this faithful and
+                // that it previously got wrong are (1) `enqueue`, not the
+                // `apply(document:patch:)` seam which has no production callers,
+                // and (2) a patch naming only what a content delta touches — the
+                // tile drains it from the model rather than diffing documents.
+                try list.enqueue(
                     document: AgentDocument(version: version, entries: entries),
                     patch: try AgentDocumentPatch(
                         fromVersion: version - 1, toVersion: version,
-                        updated: [tailID, tailEntryID]
-                    )
+                        updated: [tailID, tailEntryID])
                 )
-                // `apply(document:patch:)` is the SYNCHRONOUS seam — the 30 Hz
-                // visual scheduler sits on the enqueue path, not this one — so the
-                // invalidation count below is already final for this delta.
+                // The scheduler gates presentation at 30Hz; a gate that let it
+                // coalesce would measure a fraction of the deltas and call the
+                // rest free. Flushing every step measures the per-delta cost the
+                // budget names, which is also what a slow chunk rate produces.
+                list.flushPendingVisualUpdate()
                 let invalidated = list.qaLastInvalidatedTopLevelCount
                 if invalidated == 0 { deltasWithoutInvalidation += 1 }
                 worstInvalidated = max(worstInvalidated, invalidated)
@@ -1010,6 +1215,7 @@ enum PerfScenarios {
 
             samples.append(Sample(
                 history: history,
+                historyScansPerDelta: Double(list.qaHistoryScanCount) / Double(deltas),
                 visitsPerDelta: Double(list.qaFlattenNodeVisits) / Double(deltas),
                 rowsPerDelta: Double(list.qaFlattenedRowCount) / Double(deltas),
                 fullFlattens: list.qaFullFlattenCount,
@@ -1025,6 +1231,7 @@ enum PerfScenarios {
               let largest = samples.first(where: { $0.history == historyCounts.last })
         else { throw Failure(message: "transcript-delta is missing a sweep endpoint") }
 
+        let worstHistoryScans = samples.map(\.historyScansPerDelta).max() ?? 0
         let visitSlope = largest.visitsPerDelta - smallest.visitsPerDelta
         let worstVisits = samples.map(\.visitsPerDelta).max() ?? 0
         let totalFullFlattens = samples.reduce(0) { $0 + $1.fullFlattens }
@@ -1039,6 +1246,13 @@ enum PerfScenarios {
         let localityBound = 64.0
 
         var measurements: [PerfMeasurement] = []
+
+        measurements.append(PerfBudget(
+            metric: "transcript-delta.worstHistoryScansPerDelta",
+            limit: .exactly(0),
+            unit: .count,
+            rationale: "a content-only delta must not walk the whole applied history; the row index made the INDEX incremental while the presentation half kept rebuilding every per-row structure, which is why the wall clock never moved"
+        ).evaluate(worstHistoryScans))
 
         measurements.append(PerfBudget(
             metric: "transcript-delta.visitSlope",

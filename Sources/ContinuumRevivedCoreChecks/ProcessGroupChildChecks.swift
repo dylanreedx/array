@@ -200,9 +200,52 @@ enum ProcessGroupChildChecks {
                    "session: the file must be COMPLETE, not truncated mid-write; got "
                    + "\(written.debugDescription)")
 
+        // === 6. A post-exit drain is BOUNDED even while a descendant holds the pipe.
+        //
+        // The runner defect (D3, 2026-08-26): after the leader's `wait()`, all
+        // three managed-agent runners drained the remainder with
+        // `readDataToEndOfFile()`. A backgrounded descendant that inherited fd 1
+        // (a Task subagent, an MCP server, a shell) keeps the write end open, so
+        // EOF never comes and `run()` parks until that process exits — here,
+        // 30 seconds; in production, potentially forever. The fixture is exactly
+        // that shape: the leader echoes its last bytes and exits while its
+        // backgrounded `sleep 30` still owns the pipe. `drainRemainder` must
+        // return those bytes within its cap; the unbounded read sat out the
+        // whole 30s.
+        let holder = try ProcessGroupChild.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 30 & echo remainder-bytes"],
+            environment: environment,
+            currentDirectory: nil,
+            standardInput: .nullDevice)
+        let holderExit = holder.wait()
+        try expect(holderExit == 0,
+                   "held drain: precondition -- the leader must exit cleanly; got \(holderExit)")
+        try expect(ProcessGroupChild.groupExists(holder.processGroupId),
+                   "held drain: precondition -- the backgrounded grandchild must still hold the "
+                   + "group (and the pipe), or this case proves nothing")
+        let drainStarted = Date()
+        let drained = ProcessGroupChild.drainRemainder(of: holder.standardOutput, cap: 1.0)
+        let drainElapsed = Date().timeIntervalSince(drainStarted)
+        // Generous against a loaded host, but far under the grandchild's 30s:
+        // passing here can only mean the drain bounded itself, never that the
+        // holder went away on its own.
+        try expect(drainElapsed < 5.0,
+                   "held drain: the drain blocked \(drainElapsed)s on a pipe a descendant still "
+                   + "holds -- this is the unbounded readDataToEndOfFile() parking run() forever")
+        try expect(String(decoding: drained, as: UTF8.self) == "remainder-bytes\n",
+                   "held drain: the leader's final bytes must still be collected; got "
+                   + "\(String(decoding: drained, as: UTF8.self).debugDescription)")
+        // The runners' order is terminate-then-drain; the group cleanup is what
+        // closes the pipes and reaps the straggler.
+        holder.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        try expect(!ProcessGroupChild.groupExists(holder.processGroupId),
+                   "held drain: the lingering descendant must be cleaned up with the group")
+
         return "ProcessGroupChildChecks passed: stdio, cwd, argv0, whole-group kill (grandchild reaped), "
-            + "SIGKILL escalation past an ignored SIGTERM, and a SIGTERM handler still flushed a "
-            + "complete session file inside the interactive grace"
+            + "SIGKILL escalation past an ignored SIGTERM, a SIGTERM handler still flushed a "
+            + "complete session file inside the interactive grace, and a post-exit drain returned the "
+            + "leader's remainder bounded while a descendant still held the pipe"
     }
 }
 

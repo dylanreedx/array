@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentUI
+import CryptoKit
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md
@@ -264,6 +265,15 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// that finishes after the app restarts has nothing to check off. An
     /// identifier the source surface already shows, so it is not new exposure.
     public var sourceItemId: String?
+    /// The `toolCallId` of the `spawn_agent` call that created this child, when
+    /// the parent's extension can collect the result (`wait_agents`). Distinct
+    /// from `sourceItemId` on purpose: that field feeds fan-out completion and
+    /// the naming ladder, and a pi tool-call id must reach neither. Written by
+    /// `handleSpawnRequest`, read at the child's terminal `turnCompleted` to
+    /// address `<parent cwd>/.array/spawn-results/<handle>.json`. Optional and
+    /// decode-tolerant — the `snoozedAt`/`sourceItemId` convention, no schema
+    /// bump.
+    public var spawnResultHandle: String? = nil
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -311,6 +321,29 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// has to branch on it, so the version marker (which is for a change a reader
     /// MUST branch on) stays put.
     public var codexThreadId: String?
+
+    /// B7.1 — the session id claude itself reported (`system/init`'s
+    /// `session_id`), when it differs from Array's own guess. `sessionId(for:)`/
+    /// `claudeSessionId(for:)` on `AgentSupervisor` derive a seed from the agent
+    /// id and that seed is what a fresh agent still uses (nothing here to
+    /// adopt yet); this field is what a later turn resumes once claude has
+    /// minted an id Array could not predict — `--fork-session` (B7.2) is the
+    /// case that forces this, but any resumed session's own echoed id adopts
+    /// here just as validly. `nil` ⇒ still on the derived seed. Provider-
+    /// neutral name/shape (mirrors `codexThreadId`) since a future harness
+    /// could need the same adoption. Host-bound like everything here; the
+    /// sync boundary never sees an `AgentRecord`.
+    public var providerSessionId: String?
+
+    /// B7.2 — set by `/clear` for a claude-backed agent: the session id to
+    /// resume-and-fork FROM on the agent's next launch (`claude --resume
+    /// <this> --fork-session`), rather than the normal resume/start choice.
+    /// `/clear` spends no turn (same as every other Array-owned command), so
+    /// this defers the actual rotation to whenever the conversation next
+    /// continues; `AgentSupervisor.ingestRuntimeObservation` clears it back
+    /// to `nil` the moment the forked id is captured and adopted into
+    /// `providerSessionId`. `nil` ⇒ no rotation pending.
+    public var pendingSessionForkFrom: String?
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
     //
@@ -483,6 +516,31 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// ladder: explicit name, first prompt, source item, then parent-relative
     /// ordinal. Identifier-shaped automatic candidates are skipped rather than
     /// promoted into the subject line; model, role, and UUID remain metadata.
+    /// The identity of a child Array OBSERVES rather than runs.
+    ///
+    /// C7: a claude `Agent` subagent has no process of Array's and no id of its
+    /// own, so its `AgentID` is DERIVED from the parent and the `tool_use` id that
+    /// announced it. That has to be deterministic, because the same child is
+    /// announced again on every restore and re-observation — a random id would
+    /// mint a duplicate agent each time, which is exactly the duplicate-per-tile
+    /// failure the shared `.array/` directory already taught this project once.
+    ///
+    /// SHA-256 over a domain-separated string, truncated to 16 bytes and stamped
+    /// as a v4-shaped UUID so nothing downstream has to learn a second id format.
+    /// The domain tag keeps this from colliding with any other derived id.
+    public static func observedChildID(parentAgentID: UUID, toolUseID: String) -> UUID {
+        let seed = "array.observed-child.v1|\(parentAgentID.uuidString)|\(toolUseID)"
+        var digest = Array(SHA256.hash(data: Data(seed.utf8)).prefix(16))
+        digest[6] = (digest[6] & 0x0F) | 0x40
+        digest[8] = (digest[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            digest[0], digest[1], digest[2], digest[3],
+            digest[4], digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11],
+            digest[12], digest[13], digest[14], digest[15]
+        ))
+    }
+
     public static func resolveDerivedDisplayName(
         explicitName: String? = nil,
         firstPrompt: String? = nil,
@@ -550,6 +608,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         tileId: UUID? = nil,
         lastContextWindow: AgentContextWindowSnapshot? = nil,
         codexThreadId: String? = nil,
+        providerSessionId: String? = nil,
+        pendingSessionForkFrom: String? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
@@ -590,6 +650,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.tileId = tileId
         self.lastContextWindow = lastContextWindow
         self.codexThreadId = codexThreadId
+        self.providerSessionId = providerSessionId
+        self.pendingSessionForkFrom = pendingSessionForkFrom
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
@@ -690,6 +752,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
+        case spawnResultHandle
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -699,6 +762,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case tileId
         case lastContextWindow
         case codexThreadId
+        case providerSessionId
+        case pendingSessionForkFrom
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
         // history.
@@ -751,6 +816,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         capabilities = (try? container.decodeIfPresent(
             AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
+        spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
@@ -790,6 +856,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // Optional, tolerant, no schema bump — the snoozedAt/sourceItemId
         // precedent. A record from before this plan decodes it as absent.
         codexThreadId = try container.decodeIfPresent(String.self, forKey: .codexThreadId)
+        // B7.1. Same optional, tolerant, no-schema-bump convention: a record
+        // from before this ticket decodes it as absent (still on the derived
+        // seed).
+        providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
+        pendingSessionForkFrom = try container.decodeIfPresent(String.self, forKey: .pendingSessionForkFrom)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
         // case this one has never heard of must read as `.neutral`, not throw
@@ -831,6 +902,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             try container.encode(capabilities, forKey: .capabilities)
         }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
+        try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)
@@ -854,6 +926,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(tileId, forKey: .tileId)
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
+        try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
+        try container.encodeIfPresent(pendingSessionForkFrom, forKey: .pendingSessionForkFrom)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and
         // a stored word saying so is noise that also makes every pre-P4.1

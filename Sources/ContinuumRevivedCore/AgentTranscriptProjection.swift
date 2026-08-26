@@ -151,9 +151,11 @@ public struct AgentTranscriptProjection: Sendable {
             // Match the compatibility model's activity semantics: every
             // structured item except an error is active until completion.
             if kind != .error { activeItemIDs.insert(itemID) }
-            // Diff/error payloads do not carry lifecycle state in AgentContent;
-            // every other mapped payload does and receives completeBlock.
-            if kind != .fileChange && kind != .error { statusableItems.insert(itemID) }
+            // Diff/error/compaction payloads do not carry lifecycle state in
+            // AgentContent; every other mapped payload does and receives
+            // completeBlock. A compaction is already resolved the instant it
+            // is reported, so it never needs a status transition.
+            if kind != .fileChange && kind != .error && !Self.isCompactionKind(kind) { statusableItems.insert(itemID) }
             result += [
                 .beginEntry(id: entryID, role: role(for: kind), provenance: .providerItem(provider: "runtime", itemID: itemID)),
                 .upsertStructured(entryID: entryID, block: block)
@@ -307,6 +309,45 @@ public struct AgentTranscriptProjection: Sendable {
         requestEntries[requestID]
     }
 
+    /// What the reducer has touched since a consumer last drained it.
+    ///
+    /// A renderer coalescing many mutations into one presentation needs to know
+    /// which nodes moved, and it has exactly two ways to find out: ask the
+    /// reducer, which computed it, or walk the whole document and diff it. The
+    /// transcript did the second — `applyCoalesced` full-flattened on every
+    /// streaming chunk, which is O(history) per token and measured 93ms per delta
+    /// at 10,000 rows. This is the first.
+    public struct TouchedNodes: Equatable, Sendable {
+        public var ids: Set<AgentNodeID> = []
+        /// Anything that inserted, removed or reordered a node.
+        ///
+        /// A structural step cannot be summarised as "these ids changed" — the
+        /// row index has to be rebuilt — so a consumer must take the full walk.
+        /// Defaulting this to TRUE on any doubt is what keeps the fast path
+        /// honest: the expensive answer is always correct, the cheap one is not.
+        public var isStructural: Bool = false
+
+        mutating func formUnion(_ patch: AgentDocumentPatch) {
+            ids.formUnion(patch.updated)
+            ids.formUnion(patch.inserted)
+            ids.formUnion(patch.moved)
+            ids.formUnion(patch.removed)
+            if !patch.inserted.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty {
+                isStructural = true
+            }
+        }
+    }
+
+    private var touched = TouchedNodes()
+
+    /// Hands over everything touched since the last call and starts a new
+    /// accumulation. Draining is destructive on purpose: two consumers cannot
+    /// both be told "you have not seen this yet".
+    public mutating func drainTouchedNodes() -> TouchedNodes {
+        defer { touched = TouchedNodes() }
+        return touched
+    }
+
     public mutating func ingest(_ event: AgentRuntimeEvent) {
         events.append(event)
         if events.count > Self.eventWindow { events.removeFirst(events.count - Self.eventWindow) }
@@ -314,7 +355,7 @@ public struct AgentTranscriptProjection: Sendable {
             signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
         )
         for mutation in mutations(for: event) {
-            do { try reducer.apply(mutation) }
+            do { record(try reducer.apply(mutation)) }
             catch { rejectedMutationCount += 1 }
         }
     }
@@ -534,6 +575,22 @@ public struct AgentTranscriptProjection: Sendable {
 
     private func structuredBlock(id: AgentNodeID, kind: ItemKind, title: String?) -> AgentBlock {
         let label = title ?? kind.rawValue
+        // B6.2 — a compaction boundary, carried by `ItemKind.compaction`.
+        //
+        // It shipped as `.unknown("compaction")` for a day, because an
+        // exhaustive switch sat in a file that ticket could not edit. The wire
+        // spelling was identical either way, so the named case is a pure
+        // clarification — but the old shape made a real kind claim to be one
+        // this build had never heard of, which is the opposite of what the
+        // lenient decoder exists for.
+        //
+        // `isCompactionKind` stays because a transcript persisted during that
+        // day decodes as `.unknown("compaction")` and must still be recognized.
+        if Self.isCompactionKind(kind) {
+            let payload = AgentCompactionPayload(decodingTitle: title)
+                ?? AgentCompactionPayload(preTokens: nil, postTokens: nil, automaticCompaction: nil)
+            return AgentBlock(id: id, kind: .compaction, payload: .compaction(payload))
+        }
         switch kind {
         case .plan:
             return AgentBlock(id: id, kind: .plan, payload: .plan(.init(title: title, status: .inProgress)))
@@ -553,6 +610,15 @@ public struct AgentTranscriptProjection: Sendable {
                 name: label, summary: nil, arguments: nil, status: .inProgress
             )))
         }
+    }
+
+    fileprivate static func isCompactionKind(_ kind: ItemKind) -> Bool {
+        if kind == .compaction { return true }
+        // The spelling B6.2 shipped for one day, before `.compaction` became a
+        // named case. A transcript persisted in that window decodes to this, and
+        // dropping it would render those boundaries as an unknown item instead.
+        if case .unknown("compaction") = kind { return true }
+        return false
     }
 
     private func role(for kind: ItemKind) -> AgentEntryRole {
@@ -610,7 +676,7 @@ public struct AgentTranscriptProjection: Sendable {
 
     private mutating func apply(_ mutations: [AgentDocumentMutation]) {
         for mutation in mutations {
-            do { try reducer.apply(mutation) }
+            do { record(try reducer.apply(mutation)) }
             catch { rejectedMutationCount += 1 }
         }
     }
@@ -620,9 +686,20 @@ public struct AgentTranscriptProjection: Sendable {
     ) throws -> [AgentDocumentPatch] {
         var patches: [AgentDocumentPatch] = []
         for mutation in mutations {
-            patches.append(try reducer.apply(mutation))
+            patches.append(record(try reducer.apply(mutation)))
         }
         return patches
+    }
+
+    /// Accumulates one reducer patch into the touched set.
+    ///
+    /// The reducer already knows exactly which nodes each mutation moved; every
+    /// consumer of this projection used to throw that away and rediscover it by
+    /// walking the whole document. See `TouchedNodes`.
+    @discardableResult
+    private mutating func record(_ patch: AgentDocumentPatch) -> AgentDocumentPatch {
+        touched.formUnion(patch)
+        return patch
     }
 }
 

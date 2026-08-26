@@ -344,11 +344,17 @@ The prior pass over-applied WCAG's 3:1 non-text floor to decorative container ed
 splits meaning from decoration:
 
 - **soft hairline** for decorative containment and section separation;
-- **strong semantic line** only for selection, keyboard focus, approval, error, or warning;
+- **strong semantic line** for selection, keyboard focus, approval, error, warning, or authorship
+  (A1: which turn this is — see below);
 - tile radius approximately 12 pt, composer 10–12 pt, structured artifact 8–10 pt;
 - fewer nested fills; canvas → tile → artifact/composer is the main surface ladder;
 - assistant prose sits directly on the tile body with a readable measure;
-- user prompts use a quiet fill without becoming right-aligned chat bubbles;
+- user prompts carry no fill (A1) — a ~2 pt authorship rule down the left edge is the only visual
+  signal, and it is admitted into the strong-semantic-line set above on purpose: with the fill gone,
+  the rule is the ONLY thing telling a user turn from an assistant turn, which makes it meaning-bearing
+  by construction. It cannot be the soft hairline instead — that value is defined as decorative and
+  measurably fails 3:1 on every tile surface, and this program's exemption rule for it (§ above) is
+  exactly "no state-bearing role may resolve to this value";
 - tool activity is compact and collapsible; completed routine work recedes;
 - pending decisions remain near the composer because they are actions, not history;
 - motion is short and purposeful, and disabled by Reduce Motion;

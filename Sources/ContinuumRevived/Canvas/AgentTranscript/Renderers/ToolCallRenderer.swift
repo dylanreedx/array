@@ -63,7 +63,7 @@ final class ToolCallView: NSView {
     /// `.plans/45` S4.2 — the expanded pane's output, reusing the command
     /// output machinery (exact selection, dual-format copy) fed raw text from
     /// the host-local store — never a `.commandOutput` block (I5).
-    private(set) var outputScrollView = NSScrollView(frame: .zero)
+    private(set) var outputScrollView = CodeBlockScrollView(frame: .zero)
     private(set) var outputTextView = CommandOutputTextView(frame: .zero)
     private(set) var outputCopyButton = CommandOutputCopyButton(frame: .zero)
     private(set) var outputNoteLabel = NSTextField(labelWithString: "")
@@ -91,7 +91,7 @@ final class ToolCallView: NSView {
 
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
-        iconView.image = CanvasSymbolImage.image(named: Self.symbolName(forToolNamed: nil))
+        iconView.image = Self.symbolImage(forToolNamed: nil)
         iconView.imageScaling = .scaleProportionallyDown
 
         titleLabel.font = NSFont.token(.label)
@@ -108,8 +108,19 @@ final class ToolCallView: NSView {
         outputScrollView.layer?.masksToBounds = true
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
-        outputScrollView.hasVerticalScroller = true
         outputScrollView.hasHorizontalScroller = true
+        // Same treatment `CodeBlockRenderer` got in `b5ff292f`, which this pane
+        // never inherited. The pane's height is content-derived with ZERO slack —
+        // one line is 17pt of glyphs inside an 8pt inset, i.e. exactly 33pt — so a
+        // LEGACY scroller (the system default when "always show scroll bars" is
+        // on) takes ~15pt out of 33 and clips the top half of the only line there
+        // is. Worse, it feeds back: the horizontal bar shrinks the viewport, which
+        // makes the 33pt document genuinely taller than the viewport, which brings
+        // in the vertical bar, which eats the width. Overlay scrollers cost 0pt of
+        // viewport, and the vertical one is now decided per layout from the
+        // measured text rather than asserted once at construction.
+        outputScrollView.scrollerStyle = .overlay
+        outputScrollView.hasVerticalScroller = false
         outputScrollView.autohidesScrollers = true
         outputScrollView.documentView = outputTextView
         outputCopyButton.target = self
@@ -153,8 +164,7 @@ final class ToolCallView: NSView {
         // `.plans/45` S4 — the title is the action sentence; the tool NAME
         // lives in the icon, the tooltip and the AX label.
         let toolName = payload.presentedToolNameText ?? payload.name
-        iconView.image = CanvasSymbolImage.image(
-            named: Self.symbolName(forToolNamed: toolName))
+        iconView.image = Self.symbolImage(forToolNamed: toolName)
         toolTip = payload.presentedToolNameText.map { Self.safeSingleLine($0, fallback: "Tool") }
         let presentation = payload.status.agentToolStatusPresentation
         // `.plans/45` S3/S4 — the trailing column reads "2.1s ✓" when the
@@ -184,7 +194,14 @@ final class ToolCallView: NSView {
         var lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
         // `.plans/45` S3 — when the title already IS the action sentence, the
         // disclosure's first line repeats it; show the additional facts only.
-        if lines.first == titleLabel.stringValue {
+        // Case-INSENSITIVE, matching the idiom three lines above. It was exact,
+        // and the two strings it compares are composed in different places with
+        // different fallbacks — `capitalizedPhrase(toolName)` for the title,
+        // bare `safeToolName` for the body — so "Bash" over "bash" slipped
+        // through every time a tool produced no action sentence. The presenter
+        // no longer emits that line at all; this is the second wall, and it is
+        // what makes a render-level witness for the doubling possible.
+        if lines.first?.caseInsensitiveCompare(titleLabel.stringValue) == .orderedSame {
             lines.removeFirst()
             disclosureText = lines.joined(separator: "\n")
         }
@@ -303,6 +320,13 @@ final class ToolCallView: NSView {
                 width: max(1, bounds.width - paneX - inset),
                 height: max(0, bounds.height - y - Self.detailBottomInset)
             ))
+            outputScrollView.layoutSubtreeIfNeeded()
+            let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string)
+            let needsVerticalScroll = measuredOutput.height > outputScrollView.contentSize.height + 0.5
+            if outputScrollView.hasVerticalScroller != needsVerticalScroll {
+                outputScrollView.hasVerticalScroller = needsVerticalScroll
+                outputScrollView.layoutSubtreeIfNeeded()
+            }
             outputTextView.sizeDocument(toFit: outputScrollView.contentSize)
         }
     }
@@ -356,16 +380,72 @@ final class ToolCallView: NSView {
     ///
     /// The mapping lives here as one static function rather than in `apply` so a
     /// witness can exercise it without building a view.
+    /// The mapping's doc comment promises it "degrades to today's behaviour
+    /// rather than to a blank column", but `CanvasSymbolImage.image(named:)`
+    /// returns nil for any symbol this OS does not have and the result went
+    /// straight into `iconView.image` — so an unavailable symbol WAS a blank
+    /// column. Fall back to the generic tool glyph, and only then to nothing.
+    static func symbolImage(forToolNamed name: String?) -> NSImage? {
+        if let image = CanvasSymbolImage.image(named: symbolName(forToolNamed: name)) {
+            return image
+        }
+        return CanvasSymbolImage.image(named: fallbackSymbolName)
+    }
+
+    static let fallbackSymbolName = "wrench.and.screwdriver"
+
     static func symbolName(forToolNamed name: String?) -> String {
-        let fallback = "wrench.and.screwdriver"
+        let fallback = fallbackSymbolName
         guard let name = name?.lowercased(), !name.isEmpty else { return fallback }
-        func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
-        if any(["bash", "shell", "terminal", "command", "run ", "exec"]) { return "terminal" }
+        // Word-boundary matching, not raw substring: `name.contains("cat")` also
+        // matched inside "locate"/"relocate". A "word" here is a run of
+        // letters/digits/underscore — underscore counts as a word character (as
+        // it does for regex `\b`), so this alone is not enough for the
+        // delegation category below: "task"/"agent" are common SUFFIX words in
+        // namespaced tool names ("mcp__linear__create_task" is one underscore
+        // away from a `\b` match) and are handled separately.
+        func containsWord(_ name: String, _ needle: String) -> Bool {
+            guard !needle.isEmpty else { return false }
+            func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+            var searchStart = name.startIndex
+            while let range = name.range(of: needle, range: searchStart..<name.endIndex) {
+                let leftBoundary = range.lowerBound == name.startIndex || !isWordChar(name[name.index(before: range.lowerBound)])
+                let rightBoundary = range.upperBound == name.endIndex || !isWordChar(name[range.upperBound])
+                if leftBoundary && rightBoundary { return true }
+                searchStart = range.upperBound
+            }
+            return false
+        }
+        func any(_ needles: [String]) -> Bool { needles.contains { containsWord(name, $0) } }
+        // Delegation FIRST, and not a bubble. `bubble.left` is what
+        // `CompletedReasoningDisclosureView` paints for reasoning, so a
+        // `delegate_agent` row rendered as a thought — Dylan saw exactly that.
+        // This rhymes with the chip the row becomes instead
+        // (`AgentReferenceRenderer` paints `person.crop.circle.badge.arrow.forward`).
+        // It is tested before "read"/"search" because a delegation tool name can
+        // contain either.
+        //
+        // "task" and "agent" are the delegation NOUN, not a verb, and they are
+        // common suffix words on unrelated namespaced tools (an MCP tool named
+        // `mcp__linear__create_task` is not a subagent). They only count when
+        // they are the tool's WHOLE name — the bare "Task"/"Agent" identifiers
+        // claude/pi actually send — never as a fragment of a longer name.
+        // "subagent"/"delegate_agent"/"spawn_agent" are themselves the known,
+        // unambiguous compound identifiers, so plain containment is fine there
+        // (word-boundary matching would reject them too: the "_" joining
+        // "delegate"/"spawn" to "agent" is itself a word character, so neither
+        // half alone is `\b`-bounded inside the compound).
+        let delegationCompounds = ["subagent", "delegate_agent", "spawn_agent"]
+        if delegationCompounds.contains(where: { name.contains($0) }) || name == "task" || name == "agent" {
+            return "person.2"
+        }
+        // "run"/"cat" without the trailing space they used to carry: `"run "` and
+        // `"cat "` could not match a bare tool name, only a sentence.
+        if any(["bash", "shell", "terminal", "command", "run", "exec"]) { return "terminal" }
         if any(["edit", "write", "patch", "apply_patch", "create", "replace"]) { return "square.and.pencil" }
-        if any(["read", "view", "cat ", "open"]) { return "eye" }
+        if any(["read", "view", "cat", "open"]) { return "eye" }
         if any(["search", "grep", "glob", "find"]) { return "magnifyingglass" }
         if any(["fetch", "web", "http", "url", "browse"]) { return "globe" }
-        if any(["task", "agent", "spawn", "delegate"]) { return "bubble.left" }
         if any(["todo", "plan"]) { return "checklist" }
         return fallback
     }

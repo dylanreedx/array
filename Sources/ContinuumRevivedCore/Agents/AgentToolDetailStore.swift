@@ -925,9 +925,36 @@ public enum AgentToolDetailPresenter {
     /// locations are abbreviated to their final two components so the operator
     /// can distinguish targets without printing a home directory or machine path.
     public static func observableDisclosureText(_ detail: AgentToolDetailRecord) -> String {
-        var lines = [observableSummary(detail)]
+        // T2 (2026-08-25) — Dylan: "there is a lot of doubling." A row's TITLE is
+        // `collapsed(_:).actionLine`; every line here that merely restates it is
+        // the same fact shouted twice, and it cost a body line on most rows.
+        //
+        // `echo` is what the title will already be saying. When there IS an
+        // action sentence the first line repeats it verbatim and the renderer
+        // strips it by exact match. When there is NOT, the title falls back to
+        // `capitalizedPhrase(toolName)` while this line used to fall back to the
+        // *un*-capitalized `safeToolName` — "Bash" over "bash",
+        // "Delegate_agent" over "delegate_agent" — which no exact-match dedupe
+        // could ever catch. A line that is only the tool name adds nothing over a
+        // title that is only the tool name, so emit none.
+        let actionLine = pureSummary(for: detail).map { shortLine($0) }
+        let echo = actionLine ?? shortLine(capitalizedPhrase(safeToolName(detail.toolName)))
+        var lines: [String] = []
+        if let actionLine { lines.append(actionLine) }
         let fileLabel = observableFileAction(detail.toolName)
-        for fileName in observableAffectedFileNames(detail) {
+        let affectedFileNames = observableAffectedFileNames(detail)
+        // Suppression is only sound when there is exactly ONE affected file: the
+        // title names at most one basename ("Edited foo.js"), so with two or
+        // more files ("index.ts" from two different directories is a common
+        // real-world collision) dropping every line that happens to share that
+        // basename would hide files the title never actually distinguished.
+        // Multi-file rows always keep their file lines.
+        for fileName in affectedFileNames {
+            // "Read foo.js" over "Read: …/dir/foo.js" — the title already names
+            // the basename, and the directory it came from is still there
+            // expanded. The argument loop below has had this suppression since
+            // `.plans/45`; the file line never did.
+            guard !(affectedFileNames.count == 1 && echoNamesFile(echo, fileName, fileLabel: fileLabel)) else { continue }
             lines.append("\(fileLabel): \(fileName)")
         }
         for argument in detail.arguments.prefix(4)
@@ -939,7 +966,10 @@ public enum AgentToolDetailPresenter {
             // ("Searched for “recent sports headline”"); repeating it as
             // "query: recent sports headline" underneath is noise, and it was
             // visible on every row of the real replayed turn.
-            guard !lines[0].contains(value) else { continue }
+            // Reads `echo` rather than `lines[0]`, which is no longer guaranteed
+            // to exist — and which was the wrong string anyway whenever the title
+            // was the tool-name fallback.
+            guard !echo.contains(value) else { continue }
             lines.append("\(shortLine(argument.key, maxBytes: 48)): \(value)")
         }
         if let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }
@@ -947,6 +977,24 @@ public enum AgentToolDetailPresenter {
         // reads "4.0s ✓"; a second copy underneath is the same echo the query
         // line was, and it cost a full body line on every settled row.
         return lines.prefix(12).joined(separator: "\n")
+    }
+
+    /// Whether the title already names this file, so a "Read: …/dir/foo.js" line
+    /// underneath a "Read foo.js" title would be doubling. Compares the basename,
+    /// because the line carries an abbreviated path and the title carries the
+    /// bare name.
+    ///
+    /// Restricted to `fileLabel`s that `pureSummary` actually builds AROUND a
+    /// basename ("Read"/"Changed" — the "Edited <basename>" / "Read <basename>"
+    /// sentences). For any other label the title's words are unrelated
+    /// narration (a bash command, a search description), and a substring hit
+    /// there is a coincidence, not doubling — e.g. an affected file literally
+    /// named "test" must not be swallowed by the title "Ran npm test".
+    private static func echoNamesFile(_ echo: String, _ fileName: String, fileLabel: String) -> Bool {
+        guard fileLabel == "Read" || fileLabel == "Changed" else { return false }
+        let basename = fileName.split(separator: "/").last.map(String.init) ?? fileName
+        guard !basename.isEmpty else { return false }
+        return echo.contains(basename)
     }
 
     /// Display-only host-local file names for transcript composition. These are

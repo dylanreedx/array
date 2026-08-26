@@ -101,12 +101,55 @@ public struct AgentComposerDraftStoreLayout: Sendable {
         draftsDirectory.appendingPathComponent("submission-recovery", isDirectory: true)
     }
 
+    /// B4: Array-owned follow-up queue for a turn already in flight. Kept
+    /// alongside submission recovery rather than inside it — a queued message
+    /// has not been submitted at all, it is waiting for `turnCompleted`.
+    public var queuedMessagesDirectory: URL {
+        draftsDirectory.appendingPathComponent("queued-messages", isDirectory: true)
+    }
+
     public func draftFile(for agentID: AgentID) -> URL {
         draftsDirectory.appendingPathComponent("\(agentID.rawValue.uuidString).json", isDirectory: false)
     }
 
     public func submissionRecoveryFile(for agentID: AgentID) -> URL {
         submissionRecoveryDirectory.appendingPathComponent("\(agentID.rawValue.uuidString).json", isDirectory: false)
+    }
+
+    public func queuedMessagesFile(for agentID: AgentID) -> URL {
+        queuedMessagesDirectory.appendingPathComponent("\(agentID.rawValue.uuidString).json", isDirectory: false)
+    }
+}
+
+/// One message held by Array while a turn is in flight, waiting for
+/// `turnCompleted` rather than being written into the harness's own queue.
+///
+/// B4: neither claude nor pi exposes a cancel-the-queue verb — claude reports
+/// `still_queued` with no cancel, and pi's rpc surface has `abort`,
+/// `abort_bash`, `abort_retry` and no `cancel_follow_up`. Write-ahead into the
+/// CLI's own queue would make "cancel what I queued" unimplementable on every
+/// harness Array ships, so the harness never holds more than one pending
+/// message; Array holds the rest here, and cancelling one is an ordinary
+/// delete of a record Array itself owns.
+public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var text: String
+    public var imageAttachments: [AgentComposerDraftImageAttachment]
+    public var fileReferences: [AgentComposerDraftFileReference]
+    public var queuedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        text: String,
+        imageAttachments: [AgentComposerDraftImageAttachment] = [],
+        fileReferences: [AgentComposerDraftFileReference] = [],
+        queuedAt: Date
+    ) {
+        self.id = id
+        self.text = text
+        self.imageAttachments = imageAttachments
+        self.fileReferences = fileReferences
+        self.queuedAt = queuedAt
     }
 }
 
@@ -237,6 +280,10 @@ public actor AgentComposerDraftStore {
     /// restores or confirms it. This closes the gap between relinquish and the
     /// follow-up recovery call: an unowned subscriber cannot consume the journal.
     private var relinquishedSubmissionOwnership: [AgentID: UUID] = [:]
+    /// B4: in-memory cache of each agent's durable follow-up queue, loaded
+    /// lazily from `queuedMessagesFile`. Absent for an agent that has never
+    /// queued anything.
+    private var queues: [AgentID: [AgentComposerQueuedMessage]] = [:]
 
     public init(
         applicationSupportDirectory: URL? = nil,
@@ -600,6 +647,118 @@ public actor AgentComposerDraftStore {
             _ = try await confirmSubmissionStarted(for: agentID, ownership: lease, sentAt: sentAt)
         } catch {
             warn("AgentComposerDraftStore.resolveSendIntent: preserving recoverable submission for agent \(agentID.rawValue)")
+        }
+    }
+
+    // MARK: - B4 follow-up queue
+
+    /// Appends a message to the agent's durable queue. The caller (the
+    /// supervisor) is the one that decides `canQueue`; this store only holds
+    /// what it is given and never inspects turn state.
+    @discardableResult
+    public func enqueueMessage(
+        text: String,
+        imageAttachments: [AgentComposerDraftImageAttachment] = [],
+        fileReferences: [AgentComposerDraftFileReference] = [],
+        for agentID: AgentID,
+        queuedAt: Date? = nil
+    ) -> AgentComposerQueuedMessage {
+        let message = AgentComposerQueuedMessage(
+            text: text,
+            imageAttachments: imageAttachments,
+            fileReferences: fileReferences,
+            queuedAt: queuedAt ?? clock.now()
+        )
+        var current = loadQueue(for: agentID)
+        current.append(message)
+        persistQueue(current, for: agentID)
+        return message
+    }
+
+    /// Read-only, in submission order. Never mutates the queue.
+    public func queuedMessages(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
+        loadQueue(for: agentID)
+    }
+
+    /// Pops the oldest queued message so the caller can hand it to a runner.
+    /// The message is removed from durable storage immediately — if the send
+    /// then fails, the caller must explicitly `requeueMessageAtFront`.
+    @discardableResult
+    public func dequeueNextQueuedMessage(for agentID: AgentID) -> AgentComposerQueuedMessage? {
+        var current = loadQueue(for: agentID)
+        guard !current.isEmpty else { return nil }
+        let next = current.removeFirst()
+        persistQueue(current, for: agentID)
+        return next
+    }
+
+    /// Restores a message dequeued but never actually sent (e.g. the agent
+    /// became busy again in the same beat) so it is not silently dropped.
+    public func requeueMessageAtFront(_ message: AgentComposerQueuedMessage, for agentID: AgentID) {
+        var current = loadQueue(for: agentID)
+        current.insert(message, at: 0)
+        persistQueue(current, for: agentID)
+    }
+
+    /// Direct manipulation of one visible chip — deleting a single queued
+    /// message never touches the turn in flight.
+    @discardableResult
+    public func removeQueuedMessage(id: UUID, for agentID: AgentID) -> Bool {
+        var current = loadQueue(for: agentID)
+        let before = current.count
+        current.removeAll { $0.id == id }
+        guard current.count != before else { return false }
+        persistQueue(current, for: agentID)
+        return true
+    }
+
+    /// "Clear queued" — every chip at once, still without touching the turn
+    /// in flight.
+    public func clearQueue(for agentID: AgentID) {
+        persistQueue([], for: agentID)
+    }
+
+    private func loadQueue(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
+        if let cached = queues[agentID] { return cached }
+        let file = layout.queuedMessagesFile(for: agentID)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            queues[agentID] = []
+            return []
+        }
+        do {
+            let loaded: [AgentComposerQueuedMessage] = try writer.read(at: file)
+            queues[agentID] = loaded
+            return loaded
+        } catch {
+            warn("AgentComposerDraftStore.loadQueue: unreadable queue for agent \(agentID.rawValue)")
+            queues[agentID] = []
+            return []
+        }
+    }
+
+    private func persistQueue(_ messages: [AgentComposerQueuedMessage], for agentID: AgentID) {
+        queues[agentID] = messages
+        let file = layout.queuedMessagesFile(for: agentID)
+        do {
+            if messages.isEmpty {
+                if FileManager.default.fileExists(atPath: file.path) {
+                    try removeItem(file)
+                }
+                return
+            }
+            try FileManager.default.createDirectory(
+                at: layout.queuedMessagesDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: layout.queuedMessagesDirectory.path
+            )
+            try writer.write(messages, to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } catch {
+            warn("AgentComposerDraftStore.persistQueue: could not persist queue for agent \(agentID.rawValue)")
         }
     }
 

@@ -35,12 +35,37 @@ enum CompletedReasoningDisclosurePresenter {
         let title = title(authoritativeDuration: authoritativeDuration)
         return CompletedReasoningDisclosurePresentation(
             entryID: entry.id,
-            bodyBlocks: entry.blocks,
+            bodyBlocks: entry.blocks.map(deemphasised),
             title: title,
             accessibilityLabel: title,
             accessibilityValue: expanded ? "Expanded" : "Collapsed",
             isExpanded: expanded
         )
+    }
+
+    /// Strips a provider's whole-paragraph bold from a reasoning body.
+    ///
+    /// Reasoning renders through the same prose path as an assistant answer, with
+    /// no de-emphasis anywhere — and providers emit a reasoning item's own section
+    /// heading as `**Planning sports updates**`, which
+    /// `AgentTranscriptProjection` deliberately splits into its own block. The
+    /// result is a paragraph whose ENTIRE inline content is strong, rendered as
+    /// 13pt bold body text. Dylan: "the 'thought' expanded details look like
+    /// shit, it's bolded".
+    ///
+    /// Only the whole-paragraph case is touched, and only for reasoning. A bolded
+    /// PHRASE inside a sentence is the model emphasising something and is left
+    /// exactly as written; this row already draws its own "Thought" title, so a
+    /// second heading rendered as bold prose is duplication, not emphasis.
+    private static func deemphasised(_ block: AgentBlock) -> AgentBlock {
+        guard case let .paragraph(inlines) = block.payload,
+              inlines.count == 1,
+              case let .strong(children) = inlines[0],
+              !children.isEmpty
+        else { return block }
+        var flattened = block
+        flattened.payload = .paragraph(children)
+        return flattened
     }
 
     static func title(authoritativeDuration: TimeInterval?) -> String {

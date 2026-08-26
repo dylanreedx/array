@@ -866,7 +866,12 @@ final class TileSpawner {
     /// browser URL (`about:blank` unless overridden) if `url` is nil. Persists a BrowserTile entry into BrowserState alongside
     /// the canvas state. Returns the runtime so the caller can track it for
     /// shutdown.
-    func spawnBrowser(url: String? = nil, at worldPoint: CGPoint? = nil) -> BrowserOutcome {
+    func spawnBrowser(
+        url: String? = nil,
+        at worldPoint: CGPoint? = nil,
+        beside anchorTileId: UUID? = nil,
+        targetZoneId explicitTargetZoneId: UUID? = nil
+    ) -> BrowserOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let urlString = url ?? Self.defaultBrowserURL
         guard URL(string: urlString) != nil else {
@@ -881,13 +886,27 @@ final class TileSpawner {
 
         // T4 (`.plans/47`): like the note path, a browser ignored the creation
         // scope's zone and landed in whatever zone was armed.
-        let targetZoneId = creationScopeProvider?()?.zoneId
-        let frame = makeProjectTilePlacement(
-            worldPoint: worldPoint,
-            size: CanvasEngine.defaultFrame(for: .browser),
-            in: canvasView,
-            targetZoneId: targetZoneId
-        )
+        let worldSiblings = canvasView.allTilesInWorldFrames()
+        let anchor = worldPoint == nil
+            ? anchorTileId.flatMap { id in worldSiblings.first(where: { $0.id == id }) }
+            : nil
+        let targetZoneId = explicitTargetZoneId ?? anchor?.zoneId ?? creationScopeProvider?()?.zoneId
+        let size = CanvasEngine.defaultFrame(for: .browser)
+        let frame: TileFrame
+        if let anchor {
+            let world = Self.anchoredFrame(size: size, anchor: anchor.frame, siblings: worldSiblings)
+            frame = targetZoneId
+                .flatMap { canvasView.installedZonePlacement(for: $0) }
+                .map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) }
+                ?? world
+        } else {
+            frame = makeProjectTilePlacement(
+                worldPoint: worldPoint,
+                size: size,
+                in: canvasView,
+                targetZoneId: targetZoneId
+            )
+        }
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         var tile = Tile(
             id: UUID(),
@@ -895,6 +914,7 @@ final class TileSpawner {
             title: "Browser",
             frame: frame,
             zPosition: nextZ,
+            zoneId: targetZoneId,
             runtimeRef: nil,
             metadata: TileMetadata(url: urlString, browserProfileId: browserProfile(for: nil).id)
         )
@@ -1483,7 +1503,8 @@ final class TileSpawner {
         agentKind: AgentKind = .managed,
         at worldPoint: CGPoint? = nil,
         launchSelection: AgentLaunchSelection? = nil,
-        providerSettings: AgentModelConfig.Resolution? = nil
+        providerSettings: AgentModelConfig.Resolution? = nil,
+        mirrored: Bool = false
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let creationScope = creationScopeProvider?()
@@ -1539,7 +1560,14 @@ final class TileSpawner {
             providerSettings: resolvedProviderSettings
         )
         view.ingest(.sessionStateChanged(.ready))
-        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
+        // C5: an agent Array only MIRRORS cannot be prompted, so inviting a
+        // prompt is the tile's first lie. Its own frames replace this line as
+        // soon as they arrive; until then it says what the tile is for.
+        view.ingest(.contentDelta(
+            threadId: threadId, turnId: "bootstrap", streamKind: .assistant,
+            delta: mirrored
+                ? "Watching this subagent. It runs inside its parent, so it takes no prompts here."
+                : "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
         do {
@@ -1666,7 +1694,9 @@ final class TileSpawner {
         _ agentID: AgentID,
         supervisor: AgentSupervisor
     ) -> ManagedAgentOutcome {
-        spawnManagedAgent(launchSelection: supervisor.launchSelection(for: agentID))
+        spawnManagedAgent(
+            launchSelection: supervisor.launchSelection(for: agentID),
+            mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false)
     }
 
     /// Deterministic witness for ⌘K's explicit-model spawn contract.

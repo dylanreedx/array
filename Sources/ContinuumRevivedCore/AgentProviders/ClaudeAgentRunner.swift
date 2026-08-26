@@ -24,6 +24,12 @@ import Foundation
 public enum ClaudeSessionMode: Sendable, Equatable {
     case resume
     case start
+    /// B7.2 — `/clear`'s session rotation: resume the OLD session id one last
+    /// time with `--fork-session`, so claude mints a NEW id Array could not
+    /// have predicted. Never part of the resume/start retry pair — a fork
+    /// either succeeds outright or the rotation failed outright; retrying it
+    /// as an ordinary resume or start would silently abandon the rotation.
+    case fork
 }
 
 public enum ClaudeCLIBackend {
@@ -111,6 +117,12 @@ public enum ClaudeCLIBackend {
         switch mode {
         case .resume: return isUnknownSessionFailure(stderr: stderr)
         case .start: return isSessionInUseFailure(stderr: stderr)
+        case .fork:
+            // Unreachable in production: `ClaudeAgentRunner.run` never routes a
+            // `.fork` attempt through this predicate (B7.2's rotation is a
+            // single non-retryable attempt). False, never true, so a future
+            // caller cannot accidentally wire a retry for it.
+            return false
         }
     }
 
@@ -145,6 +157,11 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         ///
         /// Defaults to true, which is the historical resume-first behavior.
         public var conversationMayExist: Bool
+        /// B7.2 — when true, `sessionId` is the OLD session to resume-and-fork
+        /// FROM (`/clear`'s rotation), not the session to resume/start. Bypasses
+        /// the resume/start ordering entirely: `run` makes exactly one
+        /// `--fork-session` attempt with no retry.
+        public var forkSession: Bool
 
         public init(
             model: String,
@@ -152,7 +169,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             cwd: URL,
             sessionId: String,
             extraArgs: [String] = [],
-            conversationMayExist: Bool = true
+            conversationMayExist: Bool = true,
+            forkSession: Bool = false
         ) {
             self.model = model
             self.effort = effort
@@ -160,6 +178,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             self.sessionId = sessionId
             self.extraArgs = extraArgs
             self.conversationMayExist = conversationMayExist
+            self.forkSession = forkSession
         }
     }
 
@@ -185,8 +204,18 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         switch sessionMode {
         case .resume: sessionArgs = ["--resume", sessionId]
         case .start: sessionArgs = ["--session-id", sessionId]
+        case .fork: sessionArgs = ["--resume", sessionId, "--fork-session"]
         }
-        return ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--include-hook-events"]
+        // C7: `--forward-subagent-text` is what makes a child's PROSE arrive.
+        // Without it the stream carries a subagent's tool_use/tool_result blocks
+        // and nothing it said, so a child transcript would be tool calls with no
+        // answer in them. Documented for 2.1.211+ with the env twin
+        // CLAUDE_CODE_FORWARD_SUBAGENT_TEXT; verified present in `claude --help`
+        // on the installed 2.1.241, where it also states it only works with
+        // --print and --output-format=stream-json, which is exactly this argv.
+        return ["-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages", "--include-hook-events",
+                "--forward-subagent-text"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
             + sessionArgs
@@ -282,6 +311,19 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// waited for it to fail, and only then spawned the real one — a guaranteed
     /// wasted CLI launch in front of the user's very first prompt.
     public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        // B7.2 — `/clear`'s rotation is a single, non-retryable attempt: it
+        // either forks (and the new id is adopted from `system/init` over the
+        // runtime-observation channel) or it fails outright. Falling back to
+        // an ordinary resume/start on failure would silently abandon the
+        // rotation and keep talking to the OLD, un-cleared session.
+        if config.forkSession {
+            let result = try runOnce(mode: .fork, prompt: prompt, onEvent: onEvent)
+            if result.exitCode != 0 {
+                try throwStoppedIfRequested(stderr: result.stderr)
+                throw RunError.claudeFailed(exitCode: result.exitCode, stderr: result.stderr)
+            }
+            return
+        }
         let order = ClaudeCLIBackend.sessionModeOrder(
             conversationMayExist: config.conversationMayExist)
         let first = try runOnce(mode: order.first, prompt: prompt, onEvent: onEvent)
@@ -326,7 +368,22 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// Claude has no `spawn_agent` — its Task tool spawns claude-internal
     /// sub-agents that surface as ordinary tool items. The handler is
     /// accepted for seam parity and never fires.
-    public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    /// C7 — this was a no-op, so every claude subagent announcement was dropped
+    /// before it could reach the supervisor. It is the same seam pi uses; what
+    /// arrives through it is an OBSERVED child (`observedOnly`), not a request to
+    /// launch one.
+    public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
+        queue.sync { translator.onSpawnRequest = handler }
+    }
+
+    /// C7 — one observed child's own events, keyed by the spawning `Agent`
+    /// call's `tool_use` id. Only `ClaudeAgentRunner` has these; pi and codex
+    /// children are processes Array owns and stream on their own runners.
+    public func observeSubagentEvents(
+        _ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void
+    ) {
+        queue.sync { translator.onSubagentEvent = handler }
+    }
 
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
@@ -389,8 +446,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         spawned.standardOutput.readabilityHandler = nil
         spawned.standardError.readabilityHandler = nil
 
-        let remainder = spawned.standardOutput.readDataToEndOfFile()
-        let stderrRemainder = spawned.standardError.readDataToEndOfFile()
+        // The LEADER exited, but a descendant that inherited fd 1/2 (a Task
+        // subagent, an MCP server, a backgrounded shell) keeps the pipe's write
+        // end open, and `readDataToEndOfFile()` then blocks until THAT process
+        // exits — potentially forever, parking this run() and its runner slot.
+        // Kill whatever is left of the group so the pipes close (a clean exit
+        // leaves nothing, making this a no-op), then drain with a bound.
+        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
         let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
@@ -426,5 +490,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         }
     }
 }
+
+/// The method already existed verbatim; this only names the capability so the
+/// supervisor can ask for it instead of downcasting to this class.
+extension ClaudeAgentRunner: SubagentEventObserving {}
 
 #endif  // os(macOS)
