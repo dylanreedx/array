@@ -65,6 +65,7 @@ enum TranscriptRhythmChecks {
         try checkARowSaysEachThingOnce()
         try checkAFoldedTurnReportsASpanNotASum()
         try checkADisplayCycleCostsNothingPerRow()
+        try checkAThoughtIsNotShoutedAtTheReader()
         try checkGlyphsDistinguishRowKinds()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
@@ -2034,6 +2035,112 @@ extension TranscriptRhythmChecks {
             throw fail(
                 "display cycle: 30 display cycles rebuilt the row index "
                 + "\(list.qaFullFlattenCount) times with nothing changed"
+            )
+        }
+    }
+
+    /// `.plans/49` 5.2 — Dylan: *"the 'thought' expanded details look like shit,
+    /// it's bolded and has weird padding/margins."*
+    ///
+    /// Both halves of that were real and neither was a taste call.
+    ///
+    /// The bold is the PROVIDER's: reasoning renders through the same prose path
+    /// as an assistant answer with no de-emphasis anywhere, and providers emit a
+    /// reasoning item's own section heading as `**Planning sports updates**`,
+    /// which the projection splits into its own block — a paragraph whose entire
+    /// inline content is strong, drawn as 13pt bold body. The row already draws
+    /// its own "Thought" title, so that is a duplicate heading, not emphasis.
+    ///
+    /// The geometry is OURS: the body began 36pt left of the title introducing
+    /// it, and the gap above the prose was four times tighter than the gap
+    /// between its paragraphs.
+    private static func checkAThoughtIsNotShoutedAtTheReader() throws {
+        func id(_ suffix: String) -> AgentNodeID { AgentNodeID(rawValue: "thought-\(suffix)")! }
+        let wholeBold = AgentBlock(
+            id: id("heading"), revision: 1, kind: .paragraph,
+            payload: .paragraph([.strong([.text("Planning sports updates")])]))
+        let mixed = AgentBlock(
+            id: id("prose"), revision: 1, kind: .paragraph,
+            payload: .paragraph([
+                .text("The scores come from "),
+                .strong([.text("two")]),
+                .text(" different feeds."),
+            ]))
+        let entry = AgentEntry(
+            id: id("entry"), revision: 1, role: .reasoning,
+            provenance: .providerItem(provider: "fixture", itemID: "r1"),
+            lifecycle: .finished, blocks: [wholeBold, mixed])
+        var expanded: Set<AgentNodeID> = [id("entry")]
+        let actions = AgentRenderActions(
+            perform: { _ in },
+            disclosureState: { nodeID, _ in expanded.contains(nodeID) },
+            setDisclosureState: { nodeID, isOn in
+                if isOn { expanded.insert(nodeID) } else { expanded.remove(nodeID) }
+            },
+            presentationRevision: { _ in 0 },
+            invalidatePresentation: { _ in }
+        )
+        guard let presentation = CompletedReasoningDisclosurePresenter.presentation(
+            for: entry, authoritativeDuration: 3, actions: actions) else {
+            throw fail("thought: the reasoning entry produced no presentation")
+        }
+        guard presentation.isExpanded, presentation.bodyBlocks.count == 2 else {
+            throw fail(
+                "thought: expected an expanded presentation with two body blocks, got "
+                + "expanded=\(presentation.isExpanded) blocks=\(presentation.bodyBlocks.count)"
+            )
+        }
+
+        // 1. The provider's whole-paragraph heading loses its bold.
+        guard case let .paragraph(headingInlines) = presentation.bodyBlocks[0].payload else {
+            throw fail("thought: the first body block is no longer a paragraph")
+        }
+        if case .strong = headingInlines.first {
+            throw fail(
+                "thought: a reasoning paragraph whose ENTIRE content is the provider's own "
+                + "section heading still renders as bold body prose, directly under the "
+                + "row's own 'Thought' title — two headings for one thought"
+            )
+        }
+        guard case let .text(headingText) = headingInlines.first,
+              headingText == "Planning sports updates" else {
+            throw fail("thought: de-emphasis lost the heading's words: \(headingInlines)")
+        }
+
+        // 2. …and a bolded PHRASE inside a sentence is left exactly as written.
+        //    Without this the fix would be "reasoning can never be bold", which
+        //    throws away the model's actual emphasis.
+        guard case let .paragraph(proseInlines) = presentation.bodyBlocks[1].payload,
+              proseInlines.count == 3,
+              case .strong = proseInlines[1] else {
+            throw fail(
+                "thought: de-emphasis flattened a bolded phrase inside a sentence — only the "
+                + "whole-paragraph case is a duplicate heading"
+            )
+        }
+
+        // 3. The body's text column starts where the title's does.
+        let view = CompletedReasoningDisclosureView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+        let context = AgentRenderContext(actions: actions, tokens: .transcript, appearance: .dark)
+        view.apply(entry: entry, authoritativeDuration: 3, context: context)
+        view.layoutSubtreeIfNeeded()
+        guard abs(view.bodyContainer.frame.minX - view.titleLabel.frame.minX) < 0.5 else {
+            throw fail(
+                "thought: the body starts at x=\(view.bodyContainer.frame.minX) while the title "
+                + "that introduces it starts at x=\(view.titleLabel.frame.minX) — a heading and "
+                + "its prose disagreeing about the margin"
+            )
+        }
+
+        // 4. The gap above the prose is not tighter than the gap within it. The
+        //    24pt controls overhang the 18pt header by 3pt, so a 2pt gap was
+        //    negative in practice.
+        guard CompletedReasoningDisclosureView.bodyTopSpacing
+            >= CompletedReasoningDisclosureView.bodyBlockSpacing else {
+            throw fail(
+                "thought: \(CompletedReasoningDisclosureView.bodyTopSpacing)pt above the first "
+                + "paragraph against \(CompletedReasoningDisclosureView.bodyBlockSpacing)pt "
+                + "between paragraphs — the body reads as glued to its own title"
             )
         }
     }

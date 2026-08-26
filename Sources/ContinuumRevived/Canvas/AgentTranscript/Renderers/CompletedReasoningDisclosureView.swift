@@ -15,7 +15,22 @@ final class CompletedReasoningDisclosureView: NSView {
     static let headerHeight = CGFloat(Space.xl + Space.xs)
     static let horizontalInset = CGFloat(Space.l)
     static let titleSpacing = CGFloat(Space.s)
-    static let bodyTopSpacing = CGFloat(Space.xs)
+    /// Gap between the header and the first body block.
+    ///
+    /// Was `xs` (2pt) while the gap BETWEEN body blocks is `m` (8pt) — four times
+    /// tighter above the prose than within it, so the body read as glued to its
+    /// own title. The 24pt disclosure and icon controls also overhang the 18pt
+    /// header by 3pt top and bottom, i.e. straight through a 2pt gap.
+    static let bodyTopSpacing = CGFloat(Space.m)
+    /// Where the body's text column starts, which is where the TITLE's does.
+    ///
+    /// The body used to begin at `horizontalInset`, 36pt left of the title that
+    /// introduces it — a heading and its prose disagreeing about the margin. A
+    /// tool row's detail line deliberately hangs at exactly its title's x, and
+    /// this now matches it. Kept as a derived constant rather than read off the
+    /// laid-out title, because `measuredHeight` is static and must agree with
+    /// `layout()` exactly or every reasoning row measures at the wrong width.
+    static let bodyLeadingInset = CGFloat(Space.l + Space.xxl + Space.s + Space.xxl + Space.m)
     static let bodyBottomInset = CGFloat(Space.m)
     static let bodyBlockSpacing = CGFloat(Space.m)
 
@@ -141,10 +156,10 @@ final class CompletedReasoningDisclosureView: NSView {
         )
 
         let bodyY = Self.headerHeight + Self.bodyTopSpacing
-        let bodyWidth = max(1, bounds.width - inset * 2)
+        let bodyWidth = max(1, bounds.width - Self.bodyLeadingInset - inset)
         qaLastBodyWidth = bodyWidth
         bodyContainer.frame = NSRect(
-            x: inset,
+            x: Self.bodyLeadingInset,
             y: bodyY,
             width: bodyWidth,
             height: max(0, bounds.height - bodyY - Self.bodyBottomInset)
@@ -220,7 +235,7 @@ final class CompletedReasoningDisclosureView: NSView {
             actions: context.actions
         ) else { return 0 }
         guard presentation.isExpanded else { return headerHeight }
-        let bodyWidth = max(1, width - horizontalInset * 2)
+        let bodyWidth = max(1, width - bodyLeadingInset - horizontalInset)
         let measurementHost = AgentBlockHostView(registry: registry)
         let bodyHeight = presentation.bodyBlocks.enumerated().reduce(CGFloat.zero) { total, pair in
             total
