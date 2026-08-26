@@ -23,6 +23,7 @@ The homepage now contains only the primary hero and workspace, one closing downl
 - Added bounded camera geometry so the complete workspace cannot be lost offscreen.
 - Added screen-constant tile resize affordances and animated deterministic layout settlement.
 - Added Command Center, scripted agent lifecycle, local browser history, safe shell commands, editable notes, and mirrored approval state.
+- Rebuilt Command Center against the native AppKit source: 660px upper-aligned frosted geometry, unboxed search, 46px rows, real category sections, attention-first results, provider-grouped model selection, native density, compact shortcuts, and nested Escape and Backspace navigation.
 - Added a central interaction contract and automated no-dead-control audit.
 
 ### Companion
