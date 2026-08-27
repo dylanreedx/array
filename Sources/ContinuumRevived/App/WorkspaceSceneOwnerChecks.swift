@@ -53,6 +53,7 @@ enum WorkspaceSceneOwnerChecks {
         let projectPa = UUID(uuidString: "00000000-0000-0000-0000-00000000A103")!
         let projectPb = UUID(uuidString: "00000000-0000-0000-0000-00000000A104")!
         let projectForeign = UUID(uuidString: "00000000-0000-0000-0000-00000000A105")!
+        let projectPc = UUID(uuidString: "00000000-0000-0000-0000-00000000A10D")!
         let zoneA = UUID(uuidString: "00000000-0000-0000-0000-00000000A106")!
         let zoneForeign = UUID(uuidString: "00000000-0000-0000-0000-00000000A107")!
         let zoneB = UUID(uuidString: "00000000-0000-0000-0000-00000000A108")!
@@ -62,13 +63,16 @@ enum WorkspaceSceneOwnerChecks {
         let noteForeign = UUID(uuidString: "00000000-0000-0000-0000-00000000A10A")!
         let noteUnstamped = UUID(uuidString: "00000000-0000-0000-0000-00000000A10B")!
         let noteB = UUID(uuidString: "00000000-0000-0000-0000-00000000A10C")!
+        let zoneC = UUID(uuidString: "00000000-0000-0000-0000-00000000A10E")!
+        let noteC = UUID(uuidString: "00000000-0000-0000-0000-00000000A10F")!
 
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-scene-owner-\(UUID().uuidString)", isDirectory: true)
         let paRoot = tempRoot.appendingPathComponent("Pa", isDirectory: true)
         let pbRoot = tempRoot.appendingPathComponent("Pb", isDirectory: true)
+        let pcRoot = tempRoot.appendingPathComponent("Pc", isDirectory: true)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
-        for dir in [paRoot, pbRoot, appSupport] {
+        for dir in [paRoot, pbRoot, pcRoot, appSupport] {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         defer { try? fileManager.removeItem(at: tempRoot) }
@@ -97,8 +101,10 @@ enum WorkspaceSceneOwnerChecks {
 
         let projectPaObj = makeProject(id: projectPa, name: "Pa", root: paRoot)
         let projectPbObj = makeProject(id: projectPb, name: "Pb", root: pbRoot)
+        let projectPcObj = makeProject(id: projectPc, name: "Pc", root: pcRoot)
         let storePa = ProjectStore(projectRoot: paRoot)
         let storePb = ProjectStore(projectRoot: pbRoot)
+        let storePc = ProjectStore(projectRoot: pcRoot)
 
         // WORLD frames, which is what every canvas.json in the field holds, and
         // inside zoneA's world rect so the rescue is unambiguous.
@@ -115,6 +121,10 @@ enum WorkspaceSceneOwnerChecks {
         try storePb.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [note(noteB, zone: zoneB, x: 40, y: 40)], groups: [], lastActiveTileId: noteB))
+        try storePc.saveProject(projectPcObj)
+        try storePc.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [note(noteC, zone: zoneC, x: 1440, y: 240)], groups: [], lastActiveTileId: noteC))
 
         // zoneA sits at a NON-ZERO origin on purpose: world-vs-zone-local is the
         // hazard that would teleport every tile the first time layers went live.
@@ -128,8 +138,9 @@ enum WorkspaceSceneOwnerChecks {
         let docA = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             zones: [placement(zoneA, project: projectPa, x: 600, y: 200, color: "blue"),
-                    placement(zoneForeign, project: projectForeign, x: 2000, y: 200, color: "green")],
-            zoneZOrder: [zoneA, zoneForeign],
+                    placement(zoneForeign, project: projectForeign, x: 2000, y: 200, color: "green"),
+                    placement(zoneC, project: projectPc, x: 1400, y: 200, color: "purple")],
+            zoneZOrder: [zoneA, zoneForeign, zoneC],
             lastActiveZoneId: zoneA
         )
         let docB = WorkspaceDocument(
@@ -144,13 +155,15 @@ enum WorkspaceSceneOwnerChecks {
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
         appRegistry.workspaces = [
-            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectPc], createdAt: now, updatedAt: now),
             WorkspaceEntry(id: workspaceWB, name: "B", projectIds: [projectPb, projectForeign], createdAt: now, updatedAt: now)
         ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWB,
+                         lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectPc, name: "Pc", rootPath: pcRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectForeign, name: "Foreign", rootPath: pbRoot.path, workspaceId: workspaceWB,
                          lastOpenedAt: now, pinned: false, missing: true)
@@ -167,6 +180,9 @@ enum WorkspaceSceneOwnerChecks {
             }
             if projectId == projectPb {
                 return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storePb, project: projectPbObj)
+            }
+            if projectId == projectPc {
+                return ZoneRuntimeController(projectRoot: pcRoot, projectStore: storePc, project: projectPcObj)
             }
             throw Failure(message: "unexpected projectId in factory: \(projectId)")
         })
@@ -234,16 +250,22 @@ enum WorkspaceSceneOwnerChecks {
                    + "switching workspaces changes the document and the header and leaves the "
                    + "previous workspace's tiles on screen.")
 
-        // 2. Boot itself is unchanged: still the flat compatibility scene, still
-        //    the boot project's tiles at their persisted WORLD frames.
-        try expect(canvas.isFlatCompatibilitySceneActive,
-                   "boot must still be the flat scene — this milestone deliberately does not move "
-                   + "the launch path into layers")
+        // 2. Cold launch uses the same workspace-layer scene as switching. The
+        //    input canvas contains only Pa, so Pc appearing here proves boot did
+        //    not merely walk the remembered project's flat tile list.
+        try expect(!canvas.isFlatCompatibilitySceneActive,
+                   "cold launch must retire the remembered-project flat scene")
         for tile in paTiles {
             let view = canvas.tileView(for: tile.id)
             try expect(view is NoteTileNSView,
                        "boot: \(tile.id) must be a live note tile; got \(describe(view))")
         }
+        try expect(canvas.tileView(for: noteC) is NoteTileNSView,
+                   "cold launch must hydrate another project in the selected workspace immediately")
+        try expect(Set(canvas.qaLiveZoneIds) == Set([zoneA, zoneC]),
+                   "cold launch must mount the selected workspace's owned zones and filter the legacy foreign zone; got \(canvas.qaLiveZoneIds)")
+        try expect(canvas.qaZoneChromeViewCount == 2,
+                   "cold launch must draw exactly the two owned zones, not the legacy foreign placement")
 
         // 2b. T10 (`.plans/48`): the membership repair runs on the BOOT path too.
         //
@@ -320,6 +342,8 @@ enum WorkspaceSceneOwnerChecks {
                        "switch: the departed workspace's tile \(tile.id) must not still resolve; got "
                        + "\(describe(canvas.tileView(for: tile.id)))")
         }
+        try expect(canvas.tileView(for: noteC) == nil,
+                   "switch: the second departed project tile must also leave the scene")
         // M1.2 is live: the arriving tile is a real view, not a placeholder.
         let arriving = canvas.tileView(for: noteB)
         try expect(arriving is NoteTileNSView,
@@ -358,6 +382,8 @@ enum WorkspaceSceneOwnerChecks {
                        "return: tile \(original.id) must be live again; got "
                        + "\(describe(canvas.tileView(for: original.id)))")
         }
+        try expect(canvas.tileView(for: noteC) is NoteTileNSView,
+                   "return: the second project must hydrate again without another relaunch")
         // The repair landed, and it landed on the project's OWN zone.
         for id in [noteForeign, noteUnstamped] {
             try expect(canvas.qaZoneMembership(of: id) == zoneA,

@@ -14392,6 +14392,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasState: CanvasState,
         installsGlobalEventMonitors: Bool = true
     ) throws {
+        var persistedWorkspaceRegistry: Registry?
+        if let runtime = workspaceRuntime, let registryStore {
+            let loaded = try registryStore.loadOrEmpty()
+            if loaded.workspaces.contains(where: { $0.id == runtime.workspaceId }) {
+                persistedWorkspaceRegistry = loaded
+            }
+        }
         if let workspaceId = self.workspaceRuntime?.workspaceId {
             canvasView.activateUndoWorkspace(workspaceId)
         }
@@ -14408,35 +14415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         configureCreationAndRuntimeRoutes(on: spawner)
         configureWorkspaceRuntimeHooks()
         installSettingsChangeObserver()
-        workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
-            self?.wireContentProcessTerminationHandler(runtime)
-            self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
-            self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
-        }
-        // The observer writer persists one changed tile at a time; the
-        // canvas consumes the resulting full active snapshot so plain
-        // tiles are cleared and zone rollups stay derived from one source.
-        workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
-            guard let self else { return }
-            // P2B.4: no status map is passed here any more — the rebuild reads
-            // every project's persisted descriptors itself, which is exactly what
-            // the map this used to compute contained.
-            self.refreshAgentSurfaces()
-            self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
-        }
-        // Ticket 86: canvas mutations publish too — the relay delivers
-        // in ~1s, but only if the desktop sends. The controller's
-        // debounced autosave is the funnel every canvas change passes
-        // through, so the phone tracks moves/adds/deletes live.
-        workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
-            self?.scheduleCompanionSyncPublish(reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
-        }
-        workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.applyObserverStatuses(statuses)
-            }
-        }
+        configureActiveControllerRuntimeCallbacks()
         // M1.10 (`.plans/46`): THE turn-on. Until this line, nothing in production
         // ever handed the runtime a canvas, so every canvas call in
         // `switchWorkspace` optional-chained through nil — the document, the
@@ -14444,17 +14423,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tiles stayed on screen, and the whole M1 hydration/persistence/detach
         // programme was unreachable code.
         //
-        // It also repairs the invariant that a live project owns at least one zone,
-        // before anything renders: a project can be registered into a workspace and
-        // have no zone in its document, and with layers live it would render
-        // nothing at all.
+        // Synthetic compatibility state still receives its legacy boot zone. A
+        // persisted workspace does not: its document is the complete scene, and a
+        // missing zone may be the result of an intentional delete.
         if let runtime = workspaceRuntime {
             runtime.adoptCanvas(canvasView)
-            if let controller = runtime.activeController {
+            if persistedWorkspaceRegistry == nil, let controller = runtime.activeController {
                 runtime.ensureZoneForActiveProject(controller: controller)
             }
         }
-        workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+        if persistedWorkspaceRegistry == nil {
+            workspaceRuntime?.activeController?.attachUI(
+                canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+        }
         installAcceptedTileFocusHook()
 
         // Global NSEvent monitors: process-wide, and meaningless without a key
@@ -14475,6 +14456,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let agentRestore = agentSupervisor.restore()
         if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
             fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
+        }
+
+        // Persisted workspaces use one installer on both cold launch and switching.
+        // The old launch-only flat scene loaded just the remembered project's
+        // canvas, so a multi-project workspace drew zone chrome with no tiles until
+        // the user switched away and back. It also kept project-world frames in a
+        // different model than the switch path's zone-local frames.
+        if let runtime = workspaceRuntime, let appRegistry = persistedWorkspaceRegistry {
+            canvasView.retireFlatCompatibilityScene()
+            try runtime.install(into: canvasView, appRegistry: appRegistry)
+            configureActiveControllerRuntimeCallbacks()
+            runtime.refreshDocumentRelationships()
+            return
         }
 
         // Walk every tile in the canvas, spawn a runtime for each terminal
@@ -14532,6 +14526,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.refreshDocumentRelationships()
 
         try projectStore.saveCanvas(canvasView.canvasState)
+    }
+
+    private func configureActiveControllerRuntimeCallbacks() {
+        workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
+            self?.wireContentProcessTerminationHandler(runtime)
+            self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
+        }
+        workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
+            guard let self else { return }
+            self.refreshAgentSurfaces()
+            self.scheduleCompanionSyncPublish(
+                reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
+        }
+        workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
+            self?.scheduleCompanionSyncPublish(
+                reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
+        }
+        workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyObserverStatuses(statuses)
+            }
+        }
     }
 
     /// Every app-owned hook the `WorkspaceRuntime` needs, in one place.

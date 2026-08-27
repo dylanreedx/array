@@ -407,83 +407,9 @@ enum ZoneArmingChecks {
         try expect(found?.projectRoot == pbRoot.path,
                    "and it must carry Pb's root, which is what becomes the agent's cwd")
 
-        // ==================================================================
-        // 5d. A spawn into an armed zone with NO installed layer must land where
-        //     the camera is, in WORLD coordinates.
-        //
-        //     `installProjectTile` uses a layer when one exists and falls back to
-        //     the flat model when it does not — and the flat model holds WORLD
-        //     frames while a layer holds ZONE-LOCAL. Framing resolved the target
-        //     through `zonePlacement(for:)`, which falls back to zones with no
-        //     layer, so it produced a ZONE-LOCAL frame that the flat install then
-        //     read as WORLD. Every tile was displaced by its zone's origin, which
-        //     is what "the spawn location is random" looks like from the outside.
-        //     Za is the boot zone: armed, in the document, and never a layer.
-        // ==================================================================
-        delegate.qaActivateZoneByClick(zoneA)
-        try expect(canvas.installedZonePlacement(for: zoneA) == nil,
-                   "Za must have no installed layer, or this case proves nothing")
-        let zoneARect = CanvasEngine.zoneWorldFrame(
-            docA.zones.first(where: { $0.zoneId == zoneA })!)
-        // The camera sits on Za's BOTTOM-RIGHT CORNER, not its centre. Two things
-        // depend on that: the tile straddles the zone edge, so T7's growth has
-        // something to do (centred, it landed inside already and the flat-growth
-        // assertion below had no teeth), and the camera point is far from the
-        // world origin, so a zone-local frame read as world is unmistakable.
-        let cameraPoint = CGPoint(x: zoneARect.x + zoneARect.width,
-                                  y: zoneARect.y + zoneARect.height)
-        panCameraTo(cameraPoint)
-        let beforeFlat = Set(canvas.allWorkspaceTiles().map(\.id))
-        _ = delegate.qaPerformPaletteAction(.newNote)
-        canvas.layoutSubtreeIfNeeded()
-        guard let flatNoteId = Set(canvas.allWorkspaceTiles().map(\.id))
-            .subtracting(beforeFlat).first,
-              let flatNote = canvas.tileRecord(for: flatNoteId) else {
-            throw Failure(message: "no-layer spawn: expected one new tile")
-        }
-        // The flat model holds WORLD frames, so the tile must land AT THE CAMERA.
-        // A zone-local frame read as world lands at cameraPoint - zoneOrigin, i.e.
-        // (600, 200) away here — an order of magnitude past this tolerance.
-        let flatCentre = CGPoint(x: flatNote.frame.x + flatNote.frame.width / 2,
-                                 y: flatNote.frame.y + flatNote.frame.height / 2)
-        let offBy = abs(flatCentre.x - cameraPoint.x) + abs(flatCentre.y - cameraPoint.y)
-        try expect(offBy < 400,
-                   "no-layer spawn: the tile must land in WORLD coordinates where the camera "
-                   + "is (\(cameraPoint.x), \(cameraPoint.y)). Framing against a zone that has "
-                   + "no layer produces a zone-local frame the flat install reads as world, "
-                   + "displacing it by the zone origin (\(zoneARect.x), \(zoneARect.y)). Tile "
-                   + "centre (\(flatCentre.x), \(flatCentre.y)) is \(offBy) away.")
-
-        // ==================================================================
-        // 5e. T7: a zone grows the moment a tile lands in it — in BOTH models,
-        //     and whether or not auto-layout is on.
-        //
-        //     Only the layer branch grew, and only through
-        //     `arrangeAutoLayoutAfterSpawn`, which is gated on auto-layout. The
-        //     flat model — which is what the boot project uses — never grew at
-        //     all, so a spawned tile sat outside its zone until it was dragged.
-        //
-        //     Growth may move the ORIGIN, and a layer holds zone-local frames, so
-        //     the existing tiles must not move when it does.
-        // ==================================================================
-        // Flat: the boot zone Za, with the note spawned in 5d above. It straddles
-        // Za's bottom-right corner, so Za must have grown to swallow it.
-        try expect(flatNote.frame.x + flatNote.frame.width > zoneARect.x + zoneARect.width
-                   || flatNote.frame.y + flatNote.frame.height > zoneARect.y + zoneARect.height,
-                   "fixture: the spawned tile must extend past Za's ORIGINAL bounds, or the "
-                   + "growth assertion below proves nothing")
-        let zaAfter = canvas.zonePlacement(for: zoneA)
-        try expect(zaAfter != nil, "Za must still have a placement")
-        let zaRect = CanvasEngine.zoneWorldFrame(zaAfter!)
-        try expect(flatNote.frame.x >= zaRect.x && flatNote.frame.y >= zaRect.y
-                   && flatNote.frame.x + flatNote.frame.width <= zaRect.x + zaRect.width
-                   && flatNote.frame.y + flatNote.frame.height <= zaRect.y + zaRect.height,
-                   "grow (flat): the zone must contain the tile that just landed in it. "
-                   + "Tile (\(flatNote.frame.x), \(flatNote.frame.y)) "
-                   + "\(flatNote.frame.width)x\(flatNote.frame.height) vs zone "
-                   + "(\(zaRect.x), \(zaRect.y)) \(zaRect.width)x\(zaRect.height)")
-
-        // Layer: growth that moves the origin must not move the tiles already there.
+        // Persisted cold launch now uses the same layer model as switching, so the
+        // old launch-only flat-spawn coordinate branch no longer exists. Keep the
+        // layer growth invariant: moving a zone origin must not move its tiles.
         canvas.upsertZoneLayer(CanvasNSView.ZoneLayer(
             placement: zoneBPlacement,
             renderModel: CanvasNSView.ZoneRenderModel(placement: zoneBPlacement, displayName: "Pb"),

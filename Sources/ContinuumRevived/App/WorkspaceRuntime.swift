@@ -535,13 +535,17 @@ final class WorkspaceRuntime {
     /// via `ZoneHydrationOrchestrator.plan`; only zones whose planned tier is `.live`
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
-        try Self.validateProjectOwnership(in: document, workspaceId: workspaceId, registry: appRegistry)
+        // Cold launch and an in-process switch must mount the same semantic scene.
+        // Preserve legacy foreign placements in the document, but never draw them
+        // in a workspace that does not own their project.
+        let mountableZones = try Self.mountableZones(
+            in: document, workspaceId: workspaceId, registry: appRegistry)
         self.canvasView = canvasView
         canvasView.activateUndoWorkspace(workspaceId)
 
         // Plan hydration tiers using the configurable budget.
         let plan = ZoneHydrationOrchestrator.plan(
-            zones: document.zones,
+            zones: mountableZones,
             viewport: document.viewport,
             visibleSize: CGSize(width: canvasView.bounds.width > 0 ? canvasView.bounds.width : 1280,
                                 height: canvasView.bounds.height > 0 ? canvasView.bounds.height : 720),
@@ -550,11 +554,12 @@ final class WorkspaceRuntime {
         )
 
         var layers: [CanvasNSView.ZoneLayer] = []
+        let previouslyAcquired = Set(acquiredProjectIds)
         var newlyAcquired: [UUID] = []
         // One repaired membership answer per project, reused across its zones.
         var membershipCache: [UUID: [UUID: [Tile]]] = [:]
 
-        for zone in document.zones {
+        for zone in mountableZones {
             guard let projectId = zone.projectId else {
                 // Ambient (group) zone: no project, no controller. Its tiles live on
                 // the workspace document itself and membership is each tile's
@@ -566,12 +571,13 @@ final class WorkspaceRuntime {
             guard plan.tier(for: zone.zoneId) == .live else { continue }
 
             let controller: ZoneRuntimeController
-            if newlyAcquired.contains(projectId), let existing = registry.controller(for: projectId) {
+            if (newlyAcquired.contains(projectId) || previouslyAcquired.contains(projectId)),
+               let existing = registry.controller(for: projectId) {
                 controller = existing
             } else {
                 controller = try registry.acquire(projectId: projectId)
-                newlyAcquired.append(projectId)
             }
+            if !newlyAcquired.contains(projectId) { newlyAcquired.append(projectId) }
 
             // M1.0/M1.10 (`.plans/46`): membership comes from one repaired answer
             // per project, not from an inline filter per zone. The filter this
@@ -632,13 +638,18 @@ final class WorkspaceRuntime {
             layers.append(layer)
         }
 
+        for projectId in previouslyAcquired.subtracting(Set(newlyAcquired)) {
+            registry.release(projectId: projectId)
+        }
         acquiredProjectIds = newlyAcquired
 
         // Wire the broker before setZones so _installLayer can register adapters.
         canvasView.focusBroker = focusBroker
 
         hydrateZoneLayerTiles?(canvasView, layers, .beforeInstall)
-        canvasView.setZones(layers, documentZones: Self.zoneRenderModels(for: document, layers: layers))
+        canvasView.setZones(
+            layers,
+            documentZones: Self.zoneRenderModels(for: mountableZones, layers: layers))
         installedLayers = layers
 
         // Declare the spawn target BEFORE anything can spawn into it.
