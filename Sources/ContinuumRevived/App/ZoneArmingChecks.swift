@@ -115,6 +115,9 @@ enum ZoneArmingChecks {
 
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectPb], createdAt: now, updatedAt: now)
+        ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),

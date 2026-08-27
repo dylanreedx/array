@@ -143,11 +143,17 @@ enum WorkspaceSceneOwnerChecks {
 
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "B", projectIds: [projectPb, projectForeign], createdAt: now, updatedAt: now)
+        ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWB,
-                         lastOpenedAt: now, pinned: false, missing: false)
+                         lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectForeign, name: "Foreign", rootPath: pbRoot.path, workspaceId: workspaceWB,
+                         lastOpenedAt: now, pinned: false, missing: true)
         ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)

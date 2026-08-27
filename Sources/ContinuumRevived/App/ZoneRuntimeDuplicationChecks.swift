@@ -213,25 +213,18 @@ enum ZoneRuntimeDuplicationChecks {
         let bytesBBefore = try Data(contentsOf: WorkspaceStore(
             workspaceId: workspaceWB, applicationSupportDirectory: appSupport).layout.canvasFile)
 
-        // A project is now exclusively workspace-owned. The legacy shared-project
-        // shape must stop before scene teardown, controller duplication, or file
-        // repair; an explicit project move is the only transfer operation.
-        do {
-            try runtime.switchWorkspace(to: workspaceWB)
-            throw Failure(message: "a project-owned-by-A document was silently mounted as workspace B")
-        } catch is ProjectWorkspaceOwnershipError {
-            // expected
-        }
-        try expect(runtime.workspaceId == workspaceWA,
-                   "ownership rejection changed the runtime's mounted workspace")
-        try expect(canvas.installedZoneLayerIds == [zoneZ1],
-                   "ownership rejection tore down or replaced the A scene")
-        try expect(runtime.controller(for: projectPs) === controller,
-                   "ownership rejection replaced the live project controller")
-        try expect(terminalRuntimeCount(terminalT1) == 1 && browserRuntimeCount(browserB1) == 1,
-                   "ownership rejection duplicated or removed a live runtime")
+        // A project is now exclusively workspace-owned. A legacy foreign zone in
+        // another workspace is ignored: switching canvases must not mount it,
+        // transfer ownership, repair either file, or leave its runtime visible.
+        try runtime.switchWorkspace(to: workspaceWB)
+        try expect(runtime.workspaceId == workspaceWB,
+                   "the empty target workspace did not mount")
+        try expect(canvas.installedZoneLayerIds.isEmpty,
+                   "the project-owned-by-A zone was mounted in workspace B")
+        try expect(runtime.controller(for: projectPs) == nil,
+                   "workspace B retained A's project controller")
         try expect(browserEngine.webViewCreationCountForQA == webViewsBeforeRejectedSwitch,
-                   "ownership rejection created a replacement browser runtime")
+                   "the foreign zone created a replacement browser runtime")
         let bytesAAfter = try Data(contentsOf: WorkspaceStore(
             workspaceId: workspaceWA, applicationSupportDirectory: appSupport).layout.canvasFile)
         let bytesBAfter = try Data(contentsOf: WorkspaceStore(
@@ -239,8 +232,8 @@ enum ZoneRuntimeDuplicationChecks {
         try expect(bytesAAfter == bytesABefore && bytesBAfter == bytesBBefore,
                    "ownership rejection modified a workspace document")
 
-        print("ZoneRuntimeDuplicationChecks: legacy shared-project membership was rejected before "
-              + "scene teardown, file writes, or runtime duplication")
+        print("ZoneRuntimeDuplicationChecks: legacy foreign membership stayed hidden without "
+              + "file writes, ownership transfer, or runtime duplication")
     }
 
     /// Counts controller constructions so the leg can prove its own premise: if

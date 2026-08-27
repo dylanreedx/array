@@ -727,14 +727,13 @@ class TileNSView: NSView, TokenThemed {
         // Claim the entire post-resize grab strip before `super.hitTest` so terminal
         // content cannot swallow title-bar drags. Route through TitleBarView first
         // so close/accessory controls still win; otherwise return self for move.
-        // Normal canvas delivery reaches this override with a world-plane point,
-        // while direct host embedding can supply a tile-local point. Resolve an
-        // accessory against both candidates before claiming the draggable strip.
+        // AppKit supplies this point in the receiver's superview coordinates.
+        // Resolve controls from the normalized local point only: treating the raw
+        // superview point as local can manufacture a close-button hit at extreme
+        // zoom and steal the otherwise valid grab strip.
         if let titleBar {
-            for titleCandidate in [local, point] {
-                let titlePoint = convert(titleCandidate, to: titleBar)
-                if let hit = titleBar.hitTest(titlePoint), hit !== titleBar { return hit }
-            }
+            let titlePoint = convert(local, to: titleBar)
+            if let hit = titleBar.hitTest(titlePoint), hit !== titleBar { return hit }
         }
         if bounds.contains(local), local.y < grabHeightInLocalCoordinates {
             return self
