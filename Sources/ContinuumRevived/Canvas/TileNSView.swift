@@ -895,7 +895,7 @@ class TileNSView: NSView, TokenThemed {
         // smooth instead of blinking out and waiting again.
         if dragSnapTarget != nil {
             dragSnapTarget = candidate
-            canvas.showDragGhost(at: candidate)
+            canvas.showDragGhost(atTileFrame: candidate, tileId: tile.id)
             return
         }
         // Counting down → keep the same timer running; arm to wherever the drag is
@@ -922,7 +922,7 @@ class TileNSView: NSView, TokenThemed {
         pendingGhostTarget = nil
         pendingGhostWorkItem = nil
         dragSnapTarget = target
-        canvas.showDragGhost(at: target)
+        canvas.showDragGhost(atTileFrame: target, tileId: tile.id)
     }
 
     private func cancelDragGhost(on canvas: CanvasNSView) {

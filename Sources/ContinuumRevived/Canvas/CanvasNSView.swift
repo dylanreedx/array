@@ -2257,12 +2257,15 @@ final class CanvasNSView: NSView, TokenThemed {
         guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else { return nil }
         let zoom = viewport.zoom
         guard zoom.isFinite, zoom > 0 else { return nil }
-        let others = canvasState.tiles.filter { $0.id != id }.map(\.frame)
+        let freeWorldFrame = worldFrame(forTileFrame: freeFrame, tileId: id)
+        let others = navigationTileSnapshots()
+            .filter { $0.tileId != id }
+            .map(\.worldFrame)
         guard !others.isEmpty else { return nil }
         let gap = TileGapResolver.resolvedGap()
         let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
-        let result = TileArrangement.cornerSnap(freeFrame, others: others, gap: gap, threshold: threshold)
-        return result.guides.isEmpty ? nil : result.frame
+        let result = TileArrangement.cornerSnap(freeWorldFrame, others: others, gap: gap, threshold: threshold)
+        return result.guides.isEmpty ? nil : tileFrame(fromWorldFrame: result.frame, tileId: id)
     }
 
     /// The snapped world frame a live resize would commit to, snapping the dragged
@@ -2274,13 +2277,34 @@ final class CanvasNSView: NSView, TokenThemed {
         guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else { return nil }
         let zoom = viewport.zoom
         guard zoom.isFinite, zoom > 0 else { return nil }
-        let others = canvasState.tiles.filter { $0.id != id }.map(\.frame)
+        let resizedWorldFrame = worldFrame(forTileFrame: resizedFrame, tileId: id)
+        let others = navigationTileSnapshots()
+            .filter { $0.tileId != id }
+            .map(\.worldFrame)
         guard !others.isEmpty else { return nil }
         let gap = TileGapResolver.resolvedGap()
         let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
         let minimum = CanvasEngine.minimumFrame(for: kind)
-        let result = TileArrangement.resizeEdgeSnap(resizedFrame, edge: edge, others: others, gap: gap, threshold: threshold, minimum: minimum)
-        return result.guides.isEmpty ? nil : result.frame
+        let result = TileArrangement.resizeEdgeSnap(resizedWorldFrame, edge: edge, others: others, gap: gap, threshold: threshold, minimum: minimum)
+        return result.guides.isEmpty ? nil : tileFrame(fromWorldFrame: result.frame, tileId: id)
+    }
+
+    /// Snapping math is workspace-wide and therefore runs in world space. A
+    /// ZoneLayer owns zone-local frames, while the compatibility canvas owns
+    /// world frames directly; these two conversions keep the gesture's stored
+    /// frame in its owner's coordinate system without hiding layered neighbors.
+    private func worldFrame(forTileFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+        guard let placement = zoneLayers.first(where: { layer in
+            layer.tiles.contains(where: { $0.id == tileId })
+        })?.placement else { return frame }
+        return CanvasEngine.zoneLocalToWorld(frame, zoneOrigin: placement.origin)
+    }
+
+    private func tileFrame(fromWorldFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+        guard let placement = zoneLayers.first(where: { layer in
+            layer.tiles.contains(where: { $0.id == tileId })
+        })?.placement else { return frame }
+        return CanvasEngine.worldToZoneLocal(frame, zoneOrigin: placement.origin)
     }
 
     /// Show the translucent drag-snap ghost at `worldFrame`'s screen rect, keeping
@@ -2294,6 +2318,10 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         overlay.removeFromSuperview()
         addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    func showDragGhost(atTileFrame frame: TileFrame, tileId: UUID) {
+        showDragGhost(at: worldFrame(forTileFrame: frame, tileId: tileId))
     }
 
     func hideDragGhost() {
@@ -7611,6 +7639,54 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(broker.requestFocus(.tile(tAId), reason: .userClick), "assertion 10: tA adapter should be registered after setZones")
         try expect(broker.requestFocus(.tile(tBId), reason: .userClick), "assertion 10: tB adapter should be registered after setZones")
         try expect(broker.requestFocus(.tile(tGId), reason: .userClick), "assertion 10: tG adapter should be registered after setZones")
+
+        // Regression: workspace tiles are zone-local inside ZoneLayer, while snap
+        // geometry and the ghost overlay are world-space. The legacy drag check
+        // populated canvasState.tiles and therefore stayed green when production
+        // workspace snapping saw zero neighbors. Exercise the installed layer
+        // model with a non-zero neighbor origin and assert both the stored target
+        // and the pixels shown to the user.
+        let gap = TileGapResolver.resolvedGap()
+        let layeredFreeFrame = TileFrame(x: 595, y: 52, width: tA.frame.width, height: tA.frame.height)
+        let expectedLayeredWorldTarget = TileFrame(
+            x: placementB.origin.x + tB.frame.x - gap - tA.frame.width,
+            // Bottom alignment is 8pt from the free frame versus 12pt for top
+            // alignment, so the nearest-guide rule chooses it.
+            y: placementB.origin.y + tB.frame.y + tB.frame.height - tA.frame.height,
+            width: tA.frame.width,
+            height: tA.frame.height
+        )
+        let expectedLayeredLocalTarget = CanvasEngine.worldToZoneLocal(
+            expectedLayeredWorldTarget,
+            zoneOrigin: placementA.origin
+        )
+        guard let layeredTarget = layerCanvas.snapTarget(for: layeredFreeFrame, excludingTileId: tAId) else {
+            throw CheckError.failed("layered snapping found no neighbor after setZones")
+        }
+        try expect(layeredTarget == expectedLayeredLocalTarget,
+                   "layered snap target must be returned in the dragged tile's local space; expected \(expectedLayeredLocalTarget), got \(layeredTarget)")
+        layerCanvas.showDragGhost(atTileFrame: layeredTarget, tileId: tAId)
+        let expectedLayeredGhost = CanvasEngine.tileScreenFrame(expectedLayeredWorldTarget, viewport: layerViewport)
+        try expect(layerCanvas.qaDragGhostFrame == expectedLayeredGhost,
+                   "layered snap guide must draw at the world destination; expected \(expectedLayeredGhost), got \(String(describing: layerCanvas.qaDragGhostFrame))")
+        layerCanvas.hideDragGhost()
+
+        // Start above the neighbor so matching its bottom stays above the note
+        // tile's minimum height; otherwise the minimum-size clamp intentionally
+        // wins over the guide.
+        let layeredResizeFree = TileFrame(x: layeredTarget.x, y: 0, width: layeredTarget.width, height: 175)
+        guard let layeredResizeTarget = layerCanvas.resizeSnapTarget(
+            for: layeredResizeFree,
+            edge: .bottom,
+            kind: tA.kind,
+            excludingTileId: tAId
+        ) else {
+            throw CheckError.failed("layered resize snapping found no neighbor after setZones")
+        }
+        let layeredResizeWorld = CanvasEngine.zoneLocalToWorld(layeredResizeTarget, zoneOrigin: placementA.origin)
+        let neighborBottom = placementB.origin.y + tB.frame.y + tB.frame.height
+        try expect(layeredResizeWorld.y + layeredResizeWorld.height == neighborBottom,
+                   "layered resize snap must match the neighbor's world-space bottom edge; expected \(neighborBottom), got \(layeredResizeWorld.y + layeredResizeWorld.height)")
 
         // Assertion 11: overlap → topmost LAYER wins
         // layerOver: origin (0,0) size 200x200, tile tOver (10,10,150,150), frontmost via its zPosition register
