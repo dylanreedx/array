@@ -91,11 +91,19 @@ public enum PairingURL: Sendable {
     /// A Camera-compatible LAN URL. iOS Camera reliably recognizes http(s) QR
     /// payloads, while it may label custom-scheme QR payloads as "No Usable
     /// Data" even when Continuum is installed. The Mac serves this URL as a
-    /// tiny local landing page that opens the embedded `continuum://pair` link.
+    /// tiny local landing page that opens an embedded `continuum://pair` link.
+    /// Keep the legacy scheme here for one migration release so TestFlight
+    /// builds shipped before Array registered `array://` can still pair.
     public static func cameraBootstrapURL(pairingURL: URL, endpoint: URL) -> URL {
+        var compatiblePairingURL = pairingURL
+        if pairingURL.scheme?.lowercased() == scheme,
+           var pairingComponents = URLComponents(url: pairingURL, resolvingAgainstBaseURL: false) {
+            pairingComponents.scheme = legacyScheme
+            compatiblePairingURL = pairingComponents.url ?? pairingURL
+        }
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) ?? URLComponents()
         components.path = "/open-continuum-pairing"
-        components.queryItems = [URLQueryItem(name: "link", value: pairingURL.absoluteString)]
+        components.queryItems = [URLQueryItem(name: "link", value: compatiblePairingURL.absoluteString)]
         components.fragment = nil
         return components.url!
     }

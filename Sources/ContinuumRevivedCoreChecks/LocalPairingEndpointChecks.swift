@@ -50,8 +50,10 @@ private func runPairingURLPayloadCheck() throws {
 
     let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: endpoint)
     let cameraComponents = URLComponents(url: cameraURL, resolvingAgainstBaseURL: false)
+    let embeddedCameraURL = PairingURL.embeddedPairingURL(in: cameraURL)
     expect(cameraURL.scheme == "http" && cameraComponents?.path == "/open-continuum-pairing", "Ticket81 PairingURL: camera bootstrap URL is HTTP and uses landing path")
-    expect(PairingURL.embeddedPairingURL(in: cameraURL) == url, "Ticket81 PairingURL: camera bootstrap embeds exact continuum URL")
+    expect(embeddedCameraURL?.scheme == PairingURL.legacyScheme, "Ticket81 PairingURL: camera bootstrap uses the TestFlight-compatible legacy scheme")
+    expect(embeddedCameraURL.flatMap(PairingURL.parsePayload) == payload, "Ticket81 PairingURL: camera bootstrap preserves the pairing payload")
     expect(PairingURL.parse(cameraURL) == credential, "Ticket81 PairingURL: camera bootstrap token is parseable")
     expect(PairingURL.parsePayload(cameraURL) == payload, "Ticket81 PairingURL: camera bootstrap payload round-trips")
 
