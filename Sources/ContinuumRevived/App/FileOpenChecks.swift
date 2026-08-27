@@ -1538,6 +1538,36 @@ enum FileOpenChecks {
         swiftTile.refreshFromDisk()
         try expect(swiftTile.textView.string == agentEdit && swiftTile.qaSyntaxForegroundCount >= 2,
                    "a clean source tile must live-refresh an external agent edit with syntax styling")
+
+        // Real editors and agents commonly replace a file atomically. Timestamp-only
+        // polling can miss a same-size replacement when the timestamp is preserved
+        // or collides with the previous write, even though the inode changed.
+        let priorDate = (try FileManager.default.attributesOfItem(atPath: swiftURL.path)[.modificationDate]) as? Date
+        let sameSizeEdit = "let agentChangedThit = true\n"
+        try expect(sameSizeEdit.utf8.count == agentEdit.utf8.count,
+                   "fixture: replacement must preserve byte count")
+        try sameSizeEdit.write(to: swiftURL, atomically: true, encoding: .utf8)
+        if let priorDate {
+            try FileManager.default.setAttributes([.modificationDate: priorDate], ofItemAtPath: swiftURL.path)
+        }
+        swiftTile.refreshFromDisk()
+        try expect(swiftTile.textView.string == sameSizeEdit,
+                   "a same-size atomic replacement with a preserved timestamp must still refresh")
+
+        // Drive the mounted production timer instead of calling refresh directly.
+        try expect(swiftTile.qaExternalChangeMonitoringActive,
+                   "a mounted file tile must actively monitor external edits")
+        let timerEdit = "let agentChangedThix = true\n"
+        try timerEdit.write(to: swiftURL, atomically: true, encoding: .utf8)
+        if let priorDate {
+            try FileManager.default.setAttributes([.modificationDate: priorDate], ofItemAtPath: swiftURL.path)
+        }
+        let timerDeadline = Date().addingTimeInterval(2.5)
+        while swiftTile.textView.string != timerEdit, Date() < timerDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(swiftTile.textView.string == timerEdit,
+                   "the mounted tile's production monitor must display an atomic agent edit without manual reload")
         try longSource.write(to: swiftURL, atomically: true, encoding: .utf8)
 
         let decoyTile = makeTile(path: decoyURL.path)

@@ -17,6 +17,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         var updatedAt: Date
     }
 
+    private struct FileSignature: Equatable {
+        var modificationDate: Date?
+        var byteCount: UInt64?
+        var fileNumber: UInt64?
+    }
+
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     private let filePath: String?
@@ -37,7 +43,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private(set) var isDirty = false
     private(set) var hasExternalConflict = false
     private var savedText: String?
-    private var loadedModificationDate: Date?
+    private var loadedFileSignature: FileSignature?
     private var externalChangeTimer: Timer?
     private var recoverySaveTimer: Timer?
     var onSaveFailure: ((String) -> Void)?
@@ -209,7 +215,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             self.savedText = textView.string
             loadedText = textView.string
             markdownSurface?.replaceDraft(textView.string)
-            loadedModificationDate = Self.modificationDate(for: filePath)
+            loadedFileSignature = Self.fileSignature(for: filePath)
             hasExternalConflict = false
             setDirty(false)
             discardRecoveryDraft()
@@ -225,11 +231,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     /// draft is never overwritten; it is marked conflicted for the next save.
     func refreshFromDisk(force: Bool = false) {
         guard let filePath else { return }
-        let modificationDate = Self.modificationDate(for: filePath)
-        guard force || modificationDate != loadedModificationDate else { return }
+        let signature = Self.fileSignature(for: filePath)
+        guard force || signature != loadedFileSignature else { return }
         guard case let .text(diskText) = FilePreview.load(path: filePath) else { return }
         guard diskText != savedText else {
-            loadedModificationDate = modificationDate
+            loadedFileSignature = signature
             return
         }
         if presentation == .markdown, isDirty {
@@ -239,7 +245,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         } else {
             savedText = diskText
             loadedText = diskText
-            loadedModificationDate = modificationDate
+            loadedFileSignature = signature
             textView.string = diskText
             markdownSurface?.replaceDraft(diskText)
             showBody()
@@ -472,6 +478,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     var qaModeControl: NSSegmentedControl? { modeControl }
     var qaSourceLanguage: FilePreview.SourceLanguage { sourceLanguage }
     var qaHasLineNumbers: Bool { scrollView.rulersVisible && scrollView.verticalRulerView === lineNumberRuler }
+    var qaExternalChangeMonitoringActive: Bool { externalChangeTimer?.isValid == true }
     var qaRecoveryURL: URL? { recoveryURL }
     func qaFlushRecoveryDraft() { flushRecoveryDraft() }
     var qaSyntaxForegroundCount: Int {
@@ -643,7 +650,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             let initialText = recovery?.draftText ?? content
             loadedText = initialText
             savedText = content
-            loadedModificationDate = filePath.flatMap { Self.modificationDate(for: $0) }
+            loadedFileSignature = filePath.flatMap { Self.fileSignature(for: $0) }
             presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
             if presentation == .markdown {
                 configureMarkdownEditor()
@@ -847,7 +854,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         return false
     }
 
-    nonisolated private static func modificationDate(for path: String) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+    nonisolated private static func fileSignature(for path: String) -> FileSignature? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        return FileSignature(
+            modificationDate: attributes[.modificationDate] as? Date,
+            byteCount: (attributes[.size] as? NSNumber)?.uint64Value,
+            fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+        )
     }
 }
