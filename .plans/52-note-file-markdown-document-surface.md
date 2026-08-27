@@ -1,7 +1,7 @@
 # Note and File Tile Markdown Document Surface
 
 **Date:** 2026-08-26
-**Status:** Complete in the integration checkout; release/commit pending
+**Status:** Complete; released in Array 0.6.0 (build 46)
 **Scope:** Native AppKit note and file tiles in Array
 
 ## 2026-08-26 implementation update
@@ -12,9 +12,9 @@ share Preview, Split, and Edit presentation with a live draft preview. The works
 transcript, ownership, and hotfix release context is recorded in
 [53-session-handoff-2026-08-26-workspaces-transcripts-hotfixes.md](53-session-handoff-2026-08-26-workspaces-transcripts-hotfixes.md).
 
-The remaining durability, authoring, source-file, and file-tree work is now implemented
-in the primary integration checkout. It remains uncommitted so it can be reviewed and
-released as one coherent file/note tile slice without rewriting the earlier hotfix train.
+The remaining durability, authoring, source-file, and file-tree work shipped together
+in Array 0.6.0 after the full 188-leg release matrix, optimized production build,
+bundle audit, Developer ID signing, notarization, stapling, and Gatekeeper verification.
 
 ## 2026-08-26 completion record
 
