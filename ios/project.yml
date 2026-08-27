@@ -9,14 +9,18 @@ settings:
     DEVELOPMENT_TEAM: 46TTB6J9DZ
     SWIFT_VERSION: "5.10"
     CODE_SIGN_STYLE: Automatic
-    CURRENT_PROJECT_VERSION: 2026071602
+    CURRENT_PROJECT_VERSION: 2026082601
     MARKETING_VERSION: 0.1.0
 targets:
   Continuum:
     type: application
     platform: iOS
-    sources: [Continuum/Sources]
+    sources:
+      - Continuum/Sources
+      - SystemSurfaces
     dependencies:
+      - target: ArrayStatusWidgets
+        embed: true
       - package: continuum-revived
         product: ContinuumRevivedAgentContent
       - package: continuum-revived
@@ -24,22 +28,30 @@ targets:
       - package: continuum-revived
         product: ContinuumRevivedCore
       - package: continuum-revived
+        product: ContinuumRevivedRelayClient
+      - package: continuum-revived
+        product: ContinuumRevivedRelayProtocol
+      - package: continuum-revived
         product: ContinuumRevivedSync
     info:
       path: Continuum/Resources/Info.plist
       properties:
-        CFBundleDisplayName: Continuum
+        CFBundleDisplayName: Array
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleURLTypes:
           - CFBundleURLName: dev.dylanreedx.continuum.pairing
             CFBundleURLSchemes:
+              - array
               - continuum
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-        NSCameraUsageDescription: Continuum uses the camera to scan a Mac pairing QR code.
-        NSLocalNetworkUsageDescription: Continuum uses your local network to pair this iPhone with your Mac.
+        NSCameraUsageDescription: Array uses the camera to scan a Mac pairing QR code.
+        NSLocalNetworkUsageDescription: Array uses your local network for legacy Mac pairing.
+        NSSupportsLiveActivities: true
+        UIBackgroundModes:
+          - remote-notification
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
@@ -55,6 +67,41 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreedx.continuum
         CODE_SIGN_ENTITLEMENTS: Continuum/Resources/Continuum.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  ArrayStatusWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ArrayStatusWidgets/Sources
+      - SystemSurfaces
+    dependencies:
+      - package: continuum-revived
+        product: ContinuumRevivedAgentUI
+    info:
+      path: ArrayStatusWidgets/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Array Status
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreedx.continuum.widgets
+        CODE_SIGN_ENTITLEMENTS: ArrayStatusWidgets/Resources/ArrayStatusWidgets.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+  ContinuumTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [ContinuumTests]
+    dependencies:
+      - target: Continuum
+      - package: continuum-revived
+        product: ContinuumRevivedRelayProtocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreedx.continuum.tests
 packages:
   continuum-revived:
     path: ..

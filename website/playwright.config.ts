@@ -19,7 +19,7 @@ export default defineConfig({
     }
   ],
   webServer: {
-    command: 'pnpm build && pnpm preview --host 127.0.0.1',
+    command: 'PUBLIC_ARRAY_TESTFLIGHT_URL=https://testflight.apple.com/join/arrayalpha PUBLIC_ARRAY_APP_STORE_URL=https://apps.apple.com/ca/app/array/id123456789 pnpm build && pnpm preview --host 127.0.0.1',
     url: 'http://127.0.0.1:4321/',
     reuseExistingServer: true,
     timeout: 120_000

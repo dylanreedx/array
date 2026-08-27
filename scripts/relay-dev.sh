@@ -15,7 +15,7 @@ STDERR_LOG="$LOG_DIR/stderr.log"
 MODE_FILE="$APP_SUPPORT/mode"
 PLIST="${CONTINUUM_RELAY_DEV_PLIST:-$DEFAULT_PLIST}"
 PORT="${CONTINUUM_RELAY_DEV_PORT:-8787}"
-MAC_DOMAIN="com.continuum.revived"
+MAC_CHANNEL="${CONTINUUM_RELAY_MAC_CHANNEL:-dev}"
 IOS_DOMAIN="dev.dylanreedx.continuum"
 URL_KEY="continuum.relay.url"
 TOKEN_KEY="continuum.relay.operatorToken"
@@ -37,6 +37,11 @@ USAGE
 
 die() { printf 'relay-dev: %s\n' "$*" >&2; exit 2; }
 info() { printf 'relay-dev: %s\n' "$*"; }
+case "$MAC_CHANNEL" in
+  prod) MAC_DOMAIN="dev.arrayapp.macos" ;;
+  dev) MAC_DOMAIN="dev.arrayapp.macos.dev" ;;
+  *) die "CONTINUUM_RELAY_MAC_CHANNEL must be dev or prod" ;;
+esac
 assert_managed_paths() {
   [[ "$APP_SUPPORT" == "$DEFAULT_APP_SUPPORT" && "$PLIST" == "$DEFAULT_PLIST" ]] \
     || die "refusing lifecycle mutation outside the manager-owned DevRelay paths"
@@ -173,13 +178,13 @@ install_service() {
   other=$(unexpected_listener "$oldpid" || true)
   [[ -z "$other" ]] || die "port $PORT is already owned by unexpected PID $other; stop it before install"
 
-  info "building continuum-relay (release)"
-  (cd "$ROOT_DIR" && swift build -c release --product continuum-relay)
+  info "building continuum-relay-legacy development compatibility service (release)"
+  (cd "$ROOT_DIR" && swift build -c release --product continuum-relay-legacy)
   mkdir -p "$BIN_DIR" "$LOG_DIR" "$(dirname "$PLIST")"
   touch "$STDOUT_LOG" "$STDERR_LOG"
   chmod 600 "$STDOUT_LOG" "$STDERR_LOG"
   tmpbin="$BINARY.new.$$"
-  cp "$ROOT_DIR/.build/release/continuum-relay" "$tmpbin"
+  cp "$ROOT_DIR/.build/release/continuum-relay-legacy" "$tmpbin"
   chmod 700 "$tmpbin"
   bootout
   mv -f "$tmpbin" "$BINARY"
@@ -251,8 +256,8 @@ status_service() {
 smoke() {
   local candidate token dir out err pid="" port="" health=""
   candidate="$BINARY"
-  [[ -x "$candidate" ]] || candidate="$ROOT_DIR/.build/release/continuum-relay"
-  [[ -x "$candidate" ]] || die "no release binary; run '$0 install' or 'swift build -c release --product continuum-relay'"
+  [[ -x "$candidate" ]] || candidate="$ROOT_DIR/.build/release/continuum-relay-legacy"
+  [[ -x "$candidate" ]] || die "no release binary; run '$0 install' or 'swift build -c release --product continuum-relay-legacy'"
   token=$(openssl rand -hex 32)
   dir=$(mktemp -d "${TMPDIR:-/tmp}/continuum-relay-smoke.XXXXXX")
   out="$dir/stdout.log"; err="$dir/stderr.log"

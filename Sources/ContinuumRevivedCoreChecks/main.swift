@@ -7132,9 +7132,9 @@ do {
     expect(
         sections.map(\.title) == [
             "General", "Appearance", "Canvas & Zones", "Navigation", "Keybindings",
-            "Agents", "Terminal", "Browser", "Activity & Notifications", "Advanced",
+            "Agents", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
         ],
-        "settings exposes the ten product categories in stable order"
+        "settings exposes the eleven product sections in stable order"
     )
 
     // Structural invariants: non-empty ids/labels/titles, no duplicate keys.

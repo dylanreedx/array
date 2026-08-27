@@ -66,6 +66,11 @@ private func runPairingURLPayloadCheck() throws {
     expect(PairingURL.parsePayload(relayLink)?.relay == relay, "Ticket86 PairingURL: relay URL round-trips through the fragment")
     expect(payload?.relay == nil, "Ticket86 PairingURL: relay stays nil when not issued")
     expect(PairingURL.parsePayload(PairingURL.cameraBootstrapURL(pairingURL: relayLink, endpoint: endpoint))?.relay == relay, "Ticket86 PairingURL: relay survives the camera bootstrap embed")
+
+    let hosted = PairingURL.hostedIssue(credential: credential, relay: relay)
+    expect(hosted.absoluteString.hasPrefix("https://arrayapp.dev/pair#"), "Companion PairingURL: hosted journey uses the production /pair fragment")
+    expect(hosted.query == nil && PairingURL.parsePayload(hosted)?.token == credential, "Companion PairingURL: secret remains in the fragment and parses")
+    expect(PairingURL.parse(URL(string: "https://evil.example/pair#token=\(credential)")!) == nil, "Companion PairingURL: lookalike hosted origins are rejected")
 }
 
 private func runLocalPairingEndpointContractCheck() async throws {

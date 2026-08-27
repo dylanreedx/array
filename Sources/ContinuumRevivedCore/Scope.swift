@@ -20,6 +20,10 @@ public struct Scope: OptionSet, Codable, Hashable, Sendable {
 
     public static let observer: Scope = [.orchestrationRead]
     public static let `operator`: Scope = [.orchestrationRead, .orchestrationOperate, .terminalOperate]
+    /// The server-fixed friends-alpha profile used by paired phones. It can
+    /// inspect companion-safe state, answer approvals, and stop agents, but it
+    /// deliberately cannot operate a terminal or administer an instance.
+    public static let companionControl: Scope = [.orchestrationRead, .orchestrationOperate, .transcriptRead, .agentStop]
     public static let admin: Scope = [.operator, .accessRead, .accessWrite, .transcriptRead, .agentStop]
 
     public func isSubset(of ceiling: Scope) -> Bool {

@@ -6661,11 +6661,11 @@ func runAgentCompletionSemanticChecks() async throws {
             && state.observedNavigationPaths.last == "Sources"
             && composer.qaCompletionTitles == ["../", "Nested.swift"]
             && composer.qaCompletionDetails == ["Go to array-context-a", "Sources/"]
-            && composer.qaCompletionBreadcrumb == "Home  ›  Sources"
+            && composer.qaCompletionBreadcrumb == "array-context-a  ›  Sources"
     }) else {
         throw fail("directory acceptance mutated the draft with a path or failed to show scoped breadcrumbs: text=\(textView.string), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles), details=\(composer.qaCompletionDetails), breadcrumb=\(String(describing: composer.qaCompletionBreadcrumb))")
     }
-    guard composer.qaCompletionFooter == "↑↓ Navigate   →/Tab Open   ←/⌫ Up   ↵ Select   Esc Close" else {
+    guard composer.qaCompletionFooter == "Type to fuzzy find   ↑↓ Choose   Tab/→ Open folder   ↵ Add" else {
         throw fail("file completion lost its fixed keyboard footer")
     }
 
@@ -6679,7 +6679,7 @@ func runAgentCompletionSemanticChecks() async throws {
             && state.observedNavigationPaths.last! == nil
             && composer.qaCompletionIsPresented
             && composer.qaCompletionTitles == ["../", "Sources/"]
-            && composer.qaCompletionBreadcrumb == "Home"
+            && composer.qaCompletionBreadcrumb == "array-context-a"
     }) else {
         throw fail("typed @../ did not preview the parent scope: text=\(textView.string), queries=\(state.observedQueries), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles)")
     }
@@ -6703,7 +6703,7 @@ func runAgentCompletionSemanticChecks() async throws {
     replaceText("@")
     guard await waitUntil(timeout: 1, pollInterval: 0.01, {
         composer.qaCompletionTitles == ["../", "Nested.swift"]
-            && composer.qaCompletionBreadcrumb == "Home  ›  Sources"
+            && composer.qaCompletionBreadcrumb == "array-context-a  ›  Sources"
     }) else { throw fail("nested scope did not restore after typed traversal coverage") }
 
     // The synthetic parent row uses the same typed directory payload path as a
@@ -6714,7 +6714,7 @@ func runAgentCompletionSemanticChecks() async throws {
             && state.observedNavigationPaths.last! == nil
             && composer.qaCompletionIsPresented
             && composer.qaCompletionTitles == ["../", "Sources/"]
-            && composer.qaCompletionBreadcrumb == "Home"
+            && composer.qaCompletionBreadcrumb == "array-context-a"
     }) else {
         throw fail("selecting ../ did not keep the checkout-root list open without mutating the draft: text=\(textView.string), paths=\(state.observedNavigationPaths), titles=\(composer.qaCompletionTitles), presented=\(composer.qaCompletionIsPresented)")
     }
@@ -6725,7 +6725,7 @@ func runAgentCompletionSemanticChecks() async throws {
             && state.observedNavigationPaths.last == "/tmp"
             && composer.qaCompletionIsPresented
             && composer.qaCompletionTitles == ["../"]
-            && composer.qaCompletionBreadcrumb == "Home  ›  .."
+            && composer.qaCompletionBreadcrumb == "array-context-a  ›  .."
     }) else {
         throw fail("checkout-root ../ did not ascend into the external parent directory")
     }

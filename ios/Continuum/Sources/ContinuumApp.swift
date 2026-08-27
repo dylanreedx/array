@@ -1,8 +1,11 @@
 import AVFoundation
+import ActivityKit
 import CloudKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedRelayClient
+import ContinuumRevivedRelayProtocol
 import ContinuumRevivedSync
 import SwiftUI
 import UIKit
@@ -14,6 +17,7 @@ private let continuumCloudKitContainerIdentifier = CompanionSyncConfig.cloudKitC
 struct ContinuumApp: App {
     @UIApplicationDelegateAdaptor(PushNotificationAppDelegate.self) private var pushDelegate
     @StateObject private var model = AgentsBoardModel()
+    @State private var showsNotificationPrimer = false
 
     var body: some Scene {
         WindowGroup {
@@ -22,16 +26,69 @@ struct ContinuumApp: App {
                 .task {
                     pushDelegate.model = model
                     await model.start()
+                    if model.canUnpairThisPhone {
+                        showsNotificationPrimer = await pushDelegate.prepareNotificationsAfterPairing()
+                    }
+                }
+                .onChange(of: model.canUnpairThisPhone) { _, paired in
+                    guard paired else { return }
+                    Task { showsNotificationPrimer = await pushDelegate.prepareNotificationsAfterPairing() }
                 }
                 .onOpenURL { url in
                     Task { @MainActor in
-                        await model.pairFromURL(url)
+                        await model.handleIncomingURL(url)
+                    }
+                }
+                .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                    guard let url = activity.webpageURL else { return }
+                    Task { @MainActor in await model.handleIncomingURL(url) }
+                }
+                .sheet(isPresented: $showsNotificationPrimer) {
+                    NotificationPrimerView {
+                        Task {
+                            await pushDelegate.enableNotificationsAfterPairing()
+                            showsNotificationPrimer = false
+                        }
+                    } notNow: {
+                        showsNotificationPrimer = false
                     }
                 }
         }
     }
 }
 
+private struct NotificationPrimerView: View {
+    let enable: () -> Void
+    let notNow: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 22) {
+                Image(systemName: "bell.badge.fill")
+                    .font(.system(size: 54))
+                    .foregroundStyle(.orange)
+                VStack(spacing: 9) {
+                    Text("Know when Array needs you")
+                        .font(.title2.bold())
+                    Text("Get a banner when an agent needs approval, is waiting for input, finishes, or fails. Ordinary progress stays quiet in the widget and Live Activity.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                Button("Enable Notifications", action: enable)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                Button("Not Now", action: notNow)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(28)
+            .navigationTitle("Agent Updates")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+@MainActor
 private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var model: AgentsBoardModel?
 
@@ -39,22 +96,51 @@ private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.setNotificationCategories(Self.notificationCategories())
-        center.requestAuthorization(options: [.alert, .sound, .badge, .timeSensitive]) { granted, error in
-            if let error {
+        return true
+    }
+
+    func enableNotificationsAfterPairing() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            do {
+                guard try await center.requestAuthorization(options: [.alert, .sound, .badge]) else { return }
+                UIApplication.shared.registerForRemoteNotifications()
+            } catch {
                 print("notification authorization failed: \(error.localizedDescription)")
             }
-            guard granted else { return }
-            DispatchQueue.main.async {
-                UIApplication.shared.registerForRemoteNotifications()
-            }
+        case .authorized, .provisional, .ephemeral:
+            UIApplication.shared.registerForRemoteNotifications()
+        case .denied:
+            break
+        @unknown default:
+            break
         }
-        return true
+    }
+
+    func prepareNotificationsAfterPairing() async -> Bool {
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        switch status {
+        case .notDetermined:
+            return true
+        case .authorized, .provisional, .ephemeral:
+            UIApplication.shared.registerForRemoteNotifications()
+            return false
+        case .denied:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
         Task { @MainActor in
             model?.apnsDeviceToken = token
+            UserDefaults(suiteName: ArraySystemSurfaceConstants.appGroupIdentifier)?
+                .set(token, forKey: ArraySystemSurfaceConstants.apnsTokenDefaultsKey)
+            _ = await SystemSurfaceCoordinator.shared.registerPushToken(deviceToken, kind: .apns)
         }
     }
 
@@ -69,12 +155,33 @@ private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate
         guard let model else { return }
         let grantedScope = await MainActor.run { model.grantedScope }
         guard let intent = handlePushAction(actionId: response.actionIdentifier, userInfo: userInfo, grantedScope: grantedScope) else {
+            await MainActor.run { model.openPushDeepLink(userInfo) }
             return
         }
         do {
             _ = try await model.respondToApproval(agentId: intent.agentId, requestId: intent.requestId, decision: intent.decision)
         } catch {
             print("push approval response failed: \(error.localizedDescription)")
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound, .badge]
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard let model else { completionHandler(.noData); return }
+        Task { @MainActor in
+            await model.refreshNow()
+            model.openPushDeepLink(userInfo, navigate: false)
+            completionHandler(.newData)
         }
     }
 
@@ -132,6 +239,16 @@ private struct ContinuumRootView: View {
                 .tag(ContinuumTab.settings)
         }
         .tint(.orange)
+        .onChange(of: model.pendingDeepLink) { _, url in
+            guard let url else { return }
+            switch url.host?.lowercased() {
+            case "approval": selectedTab = .approvals
+            case "devices", "status": selectedTab = .settings
+            case "agent", "agents": selectedTab = .agents
+            default: break
+            }
+            model.pendingDeepLink = nil
+        }
     }
 }
 
@@ -163,6 +280,7 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var freshnessNow = Date()
     @Published var pairingStatusMessage: String?
     @Published var pairingInProgress = false
+    @Published var pendingDeepLink: URL?
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
@@ -206,7 +324,7 @@ private final class AgentsBoardModel: ObservableObject {
     private var transcriptControlTask: Task<Void, Never>?
     private var transcriptReceiver: TranscriptProjectionReceiver?
     private var transcriptTask: Task<Void, Never>?
-    private static let relayCursorDefaultsKey = "continuum.relay.cursor"
+    private nonisolated static let relayCursorDefaultsKey = "continuum.relay.cursor"
     private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
 
@@ -257,6 +375,18 @@ private final class AgentsBoardModel: ObservableObject {
         return true
     }
 
+    var pairedInstanceID: UUID? {
+        guard case .paired(let session) = pairedSessionState else { return nil }
+        return session.instanceId
+    }
+
+    func openPushDeepLink(_ userInfo: [AnyHashable: Any], navigate: Bool = true) {
+        guard navigate,
+              let raw = userInfo[ArraySystemSurfaceConstants.deepLinkUserInfoKey] as? String,
+              let url = URL(string: raw) else { return }
+        pendingDeepLink = url
+    }
+
     func start() async {
         guard task == nil else { return }
         state = .loading
@@ -292,7 +422,12 @@ private final class AgentsBoardModel: ObservableObject {
                 },
                 onDiagnostic: { line in
                     Self.appendFetchLog(line)
-                }
+                },
+                apiVersion: relayConfig.baseURL.scheme == "https" ? .hardenedV2 : .legacyV1
+            )
+            await SystemSurfaceCoordinator.shared.configureRelayPushRegistration(
+                baseURL: relayConfig.baseURL,
+                credential: pairedSession.token
             )
             relayTransport = relay
             relay.start()
@@ -386,7 +521,7 @@ private final class AgentsBoardModel: ObservableObject {
             await receiver.connect(cursor: nil)
             let stream = await receiver.subscribe()
             for await item in stream {
-                await self?.consume(item)
+                self?.consume(item)
             }
         }
 
@@ -396,7 +531,7 @@ private final class AgentsBoardModel: ObservableObject {
             await spatial.connect()
             let stream = await spatial.subscribe()
             for await materialized in stream {
-                await self?.consumeSpatial(materialized)
+                self?.consumeSpatial(materialized)
             }
         }
 
@@ -462,6 +597,11 @@ private final class AgentsBoardModel: ObservableObject {
     }
 
     func unpairThisPhone() async {
+        // Remove every server-side push registration while the phone
+        // credential is still available. Unpair remains local-successful even
+        // if the relay is temporarily unreachable; desktop revocation is the
+        // authoritative final backstop for that credential.
+        await SystemSurfaceCoordinator.shared.unregisterRelayPushTokens()
         do {
             try pairedSessionStore.clear()
         } catch {
@@ -485,6 +625,7 @@ private final class AgentsBoardModel: ObservableObject {
         canvasEditError = nil
         canvasFocusError = nil
         pairingStatusMessage = "Unpaired this phone. Pair again from your Mac to reconnect."
+        await SystemSurfaceCoordinator.shared.clear()
     }
 
     private func tearDownSyncReceivers() async {
@@ -604,6 +745,14 @@ private final class AgentsBoardModel: ObservableObject {
         await pairFromString(url.absoluteString)
     }
 
+    func handleIncomingURL(_ url: URL) async {
+        if PairingURL.parsePayload(url) != nil {
+            await pairFromURL(url)
+        } else {
+            pendingDeepLink = url
+        }
+    }
+
     func pairFromString(_ rawValue: String) async {
         guard !pairingInProgress else {
             Self.appendFetchLog("pairing: skipped — another pairing in progress")
@@ -617,35 +766,76 @@ private final class AgentsBoardModel: ObservableObject {
             Self.appendFetchLog("pairing: FAILED — link did not parse")
             return
         }
-        guard let endpoint = payload.endpoint else {
-            pairingStatusMessage = "Pairing link is missing the Mac endpoint. Generate a new QR code from the Mac."
-            Self.appendFetchLog("pairing: FAILED — no endpoint in link")
-            return
-        }
-        guard endpoint.scheme == "http", endpoint.path == "/pair" else {
+        let isHostedWebLink = url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == "arrayapp.dev"
+            && url.path == "/pair"
+        let isHostedCustomLink = [PairingURL.scheme, PairingURL.legacyScheme]
+            .contains(url.scheme?.lowercased() ?? "")
+            && url.host?.lowercased() == PairingURL.host
+            && payload.endpoint == nil
+        let hostedPairing = isHostedWebLink || isHostedCustomLink
+        if let endpoint = payload.endpoint,
+           !(endpoint.scheme == "http" && endpoint.path == "/pair") {
             pairingStatusMessage = "Pairing link endpoint is not supported. Generate a new QR code from the Mac."
             Self.appendFetchLog("pairing: FAILED — unsupported endpoint \(endpoint.absoluteString)")
+            return
+        }
+        guard payload.endpoint != nil || hostedPairing else {
+            pairingStatusMessage = "Pairing link is missing its exchange endpoint. Generate a new QR code from the Mac."
+            Self.appendFetchLog("pairing: FAILED — no exchange endpoint in link")
             return
         }
         pairingInProgress = true
         pairingStatusMessage = "Pairing with your Mac…"
         defer { pairingInProgress = false }
         do {
-            Self.appendFetchLog("pairing: exchanging with \(endpoint.absoluteString)")
-            let sessionResponse = try await exchangeLocalPairing(payload: payload, endpoint: endpoint)
+            let pairedSession: PairedCompanionSession
+            let relayHTTPOrigin: URL?
+            if hostedPairing {
+                let exchange = try await exchangeHostedPairing(payload: payload)
+                guard let companionScope = HostedPairingPolicy.companionScope(
+                    capabilities: exchange.capabilities,
+                    credential: exchange.credential
+                ) else {
+                    throw LocalPairingUIError.invalidHostedProvisioning
+                }
+                pairedSession = PairedCompanionSession(
+                    instanceId: exchange.instanceID,
+                    userId: exchange.instanceID,
+                    deviceId: exchange.deviceID,
+                    sessionId: exchange.deviceID,
+                    token: exchange.credential,
+                    scopes: companionScope,
+                    issuedAt: .now,
+                    expiresAt: .distantFuture
+                )
+                relayHTTPOrigin = HostedPairingPolicy.relayHTTPOrigin(
+                    advertisedURL: payload.relay,
+                    allowLoopback: Self.allowsHostedRelayLoopback
+                )
+            } else if let endpoint = payload.endpoint {
+                Self.appendFetchLog("pairing: exchanging with \(endpoint.absoluteString)")
+                let sessionResponse = try await exchangeLocalPairing(payload: payload, endpoint: endpoint)
+                pairedSession = sessionResponse.pairedSession
+                relayHTTPOrigin = payload.relay.flatMap(Self.relayHTTPOrigin(from:))
+            } else {
+                throw LocalPairingUIError.exchangeRejected("missing_endpoint")
+            }
             if let expectedInstanceId = payload.instanceId,
-               expectedInstanceId != sessionResponse.instanceId {
+               expectedInstanceId != pairedSession.instanceId {
                 throw LocalPairingUIError.instanceMismatch
             }
-            try pairedSessionStore.save(sessionResponse.pairedSession)
-            pairedSessionState = .paired(sessionResponse.pairedSession)
+            // The Keychain write is the first durable use of the one-time
+            // plaintext credential returned by the relay exchange.
+            try pairedSessionStore.save(pairedSession)
+            pairedSessionState = .paired(pairedSession)
             state = .loading
-            pairingStatusMessage = "Paired to your Continuum Mac. Starting sync…"
+            pairingStatusMessage = "Paired to your Array Mac. Starting sync…"
             // Ticket 86: pairing is the configuration handoff — adopt the
             // relay URL the Mac advertised, unless one is already set (the
             // sim keeps its loopback override).
-            if let relay = payload.relay,
-               UserDefaults.standard.string(forKey: RelayClientConfig.urlDefaultsKey) == nil {
+            if let relay = relayHTTPOrigin,
+               hostedPairing || UserDefaults.standard.string(forKey: RelayClientConfig.urlDefaultsKey) == nil {
                 UserDefaults.standard.set(relay.absoluteString, forKey: RelayClientConfig.urlDefaultsKey)
                 Self.appendFetchLog("pairing: adopted relay URL from link — \(relay.absoluteString)")
             }
@@ -658,6 +848,43 @@ private final class AgentsBoardModel: ObservableObject {
             pairingStatusMessage = Self.pairingMessage(for: error)
             Self.appendFetchLog("pairing: FAILED — \(String(describing: error))")
         }
+    }
+
+    private func exchangeHostedPairing(payload: PairingURL.Payload) async throws -> RelayCompanionProvisioning {
+        guard let origin = HostedPairingPolicy.relayHTTPOrigin(
+            advertisedURL: payload.relay,
+            allowLoopback: Self.allowsHostedRelayLoopback
+        ) else {
+            throw LocalPairingUIError.exchangeRejected("invalid_relay")
+        }
+        Self.appendFetchLog("pairing: exchanging with hosted Array Relay")
+        return try await HostedRelayAPI(baseURL: origin).exchangePairingGrant(
+            code: payload.token,
+            deviceLabel: UIDevice.current.name
+        )
+    }
+
+    private static var allowsHostedRelayLoopback: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
+    private static func relayHTTPOrigin(from socketURL: URL?) -> URL? {
+        guard let socketURL,
+              var components = URLComponents(url: socketURL, resolvingAgainstBaseURL: false) else { return nil }
+        switch components.scheme?.lowercased() {
+        case "wss": components.scheme = "https"
+        case "ws": components.scheme = "http"
+        case "https", "http": break
+        default: return nil
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
     }
 
     private func exchangeLocalPairing(payload: PairingURL.Payload, endpoint: URL) async throws -> LocalPairingSessionResponse {
@@ -736,6 +963,7 @@ private final class AgentsBoardModel: ObservableObject {
     private enum LocalPairingUIError: Error {
         case exchangeRejected(String)
         case instanceMismatch
+        case invalidHostedProvisioning
 
         var message: String {
             switch self {
@@ -745,10 +973,13 @@ private final class AgentsBoardModel: ObservableObject {
                 case "expired", "pairingWindowExpired", "pairingWindowStopped": return "That pairing code expired. Generate a fresh QR code from the Mac."
                 case "scopeNotGranted": return "The Mac rejected the requested pairing scope. Generate a fresh QR code."
                 case "invalidToken": return "The Mac rejected this pairing code. Generate a fresh QR code."
+                case "invalid_relay": return "This pairing link does not use Array’s trusted relay. Generate a fresh QR code from Array on your Mac."
                 default: return "The Mac rejected pairing (\(code)). Generate a fresh QR code and try again."
                 }
             case .instanceMismatch:
                 return "Pairing response came from a different Continuum instance. Generate a fresh QR code from this Mac."
+            case .invalidHostedProvisioning:
+                return "The relay returned an invalid companion profile. Generate a fresh QR code and try again."
             }
         }
     }
@@ -761,6 +992,13 @@ private final class AgentsBoardModel: ObservableObject {
             snapshot = AgentsBoardProjection.applyEvent(event, to: snapshot)
         }
         rows = AgentsBoardProjection.rows(from: snapshot)
+        Task {
+            await SystemSurfaceCoordinator.shared.publish(
+                rows: rows,
+                attentionCount: attentionCount,
+                instanceID: pairedInstanceID
+            )
+        }
         if let transcriptReceiver {
             let agentIDs = rows.map(\.agentId)
             Task { await transcriptReceiver.connect(agentIDs: agentIDs) }
@@ -1480,7 +1718,11 @@ private struct LoadingBoardView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            ProgressView()
+            DualPlaneGyroIndicator(isActive: true)
+                .scaleEffect(2.35)
+                .frame(width: 44, height: 44)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Array is connecting")
             Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -2318,7 +2560,10 @@ private struct PlaceholderScreen: View {
 
 private struct SettingsDiagnosticsView: View {
     @EnvironmentObject private var model: AgentsBoardModel
+    @Environment(\.openURL) private var openURL
     @State private var confirmingUnpair = false
+    @State private var notificationStatus = "Checking…"
+    @State private var relayPushStatus = "Checking…"
 
     var body: some View {
         NavigationStack {
@@ -2375,10 +2620,33 @@ private struct SettingsDiagnosticsView: View {
                     }
                     .padding(.vertical, 4)
                 }
+                Section("System Surfaces") {
+                    diagnosticRow("Notifications", notificationStatus)
+                    diagnosticRow(
+                        "Live Activities",
+                        ActivityAuthorizationInfo().areActivitiesEnabled ? "Allowed" : "Disabled in iOS Settings"
+                    )
+                    diagnosticRow("Relay push registration", relayPushStatus)
+                    let widgetSnapshot = ArrayWidgetSnapshotStore.read()
+                    diagnosticRow(
+                        "Home Screen widget",
+                        widgetSnapshot.generatedAt == .distantPast
+                            ? "Waiting for first synced agent snapshot"
+                            : "Updated \(widgetSnapshot.generatedAt.formatted(date: .abbreviated, time: .shortened))"
+                    )
+                    Button("Open iOS Notification Settings") {
+                        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+                        openURL(url)
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
             .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle("Settings")
+            .task {
+                notificationStatus = await Self.notificationAuthorizationSummary()
+                relayPushStatus = SystemSurfaceCoordinator.shared.registrationSummary
+            }
             .alert("Unpair this phone?", isPresented: $confirmingUnpair) {
                 Button("Unpair", role: .destructive) {
                     Task { @MainActor in
@@ -2389,6 +2657,17 @@ private struct SettingsDiagnosticsView: View {
             } message: {
                 Text("This clears the saved pairing token and stops Continuum sync on this phone. Pair again from the Mac to reconnect.")
             }
+        }
+    }
+
+    private static func notificationAuthorizationSummary() async -> String {
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .notDetermined: return "Not requested"
+        case .denied: return "Disabled in iOS Settings"
+        case .authorized: return "Allowed"
+        case .provisional: return "Provisional"
+        case .ephemeral: return "Ephemeral"
+        @unknown default: return "Unknown"
         }
     }
 

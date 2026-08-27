@@ -129,6 +129,23 @@ func runDualPlaneGyroChecks() {
     expect(DualPlaneGyroIndicatorModel.accessibilityLabel == "Agent thinking",
            "Dual-Plane Gyro: accessibility label must be concise and stable")
 
+    let presentationPhases = DualPlaneGyroPresentationPhase.allCases
+    expect(Set(presentationPhases.map(\.modelPhase)).count == presentationPhases.count,
+           "Dual-Plane Gyro system surfaces: every named state has a deterministic distinct pose")
+    expect(Set(presentationPhases.map(\.accessibilityLabel)).count == presentationPhases.count,
+           "Dual-Plane Gyro system surfaces: every named state has a distinct accessibility label")
+    for phase in presentationPhases {
+        expect(DualPlaneGyroIndicatorModel.nodeStates(in: bounds, phase: phase.modelPhase).count
+            == DualPlaneGyroIndicatorModel.accentTokens.count,
+            "Dual-Plane Gyro system surfaces: \(phase.rawValue) uses the shared geometry")
+    }
+    expect(DualPlaneGyroPresentationPhase.resolve(status: .working) == .working
+        && DualPlaneGyroPresentationPhase.resolve(status: .needsAttention) == .needsAttention
+        && DualPlaneGyroPresentationPhase.resolve(status: .done) == .completed
+        && DualPlaneGyroPresentationPhase.resolve(status: .stale) == .stale
+        && DualPlaneGyroPresentationPhase.resolve(status: .idle, failed: true) == .failed,
+        "Dual-Plane Gyro system surfaces: semantic states resolve outside WidgetKit")
+
     for status in AgentStatus.allCases {
         let expected = status == .working || status == .configuring
         expect(DualPlaneGyroIndicatorModel.isActive(status: status) == expected,

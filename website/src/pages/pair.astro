@@ -1,0 +1,118 @@
+---
+import Logo from '../components/Logo.astro';
+import ProductionLayout from '../layouts/ProductionLayout.astro';
+import { companionDownloadLinks } from '../lib/companion-downloads';
+
+const links = companionDownloadLinks(import.meta.env);
+---
+
+<ProductionLayout title="Pair Array Companion" description="Pair Array on iPhone with your Mac." canonicalPath="/pair">
+  <main class="pair-page">
+    <section class="pair-card" aria-labelledby="pair-title" data-pairing-page>
+      <Logo />
+      <div class="pair-glyph" aria-hidden="true">
+        <span class="pair-glyph__orbit pair-glyph__orbit--one"></span>
+        <span class="pair-glyph__orbit pair-glyph__orbit--two"></span>
+        <span class="pair-glyph__core"></span>
+      </div>
+
+      <p class="pair-eyebrow">Array Companion</p>
+      <h1 id="pair-title">Finish pairing on your iPhone.</h1>
+      <p class="pair-copy" data-pair-copy>
+        Open this invitation in Array. If you haven’t installed the companion yet, install the beta and return to this page.
+      </p>
+
+      <div class="pair-actions">
+        <button class="pair-button pair-button--primary" type="button" data-open-array disabled>Open Array to Pair</button>
+        {links.testFlightURL ? (
+          <a class="pair-button pair-button--secondary" href={links.testFlightURL} data-testflight-link>Get Array on TestFlight</a>
+        ) : links.appStoreURL ? (
+          <a class="pair-button pair-button--secondary" href={links.appStoreURL} data-app-store-link>Get Array on the App Store</a>
+        ) : (
+          <p class="pair-unavailable" role="status" data-download-unavailable>
+            The companion invitation isn’t available yet. Keep this page open and try again later.
+          </p>
+        )}
+        {links.testFlightURL && links.appStoreURL && (
+          <a class="pair-store-link" href={links.appStoreURL} data-app-store-link>View on the App Store</a>
+        )}
+      </div>
+
+      <p class="pair-note">The invitation stays on this device and is never sent to this website.</p>
+    </section>
+  </main>
+
+  <script>
+    import { pairingDeepLink } from '../lib/companion-downloads';
+
+    const button = document.querySelector<HTMLButtonElement>('[data-open-array]');
+    const copy = document.querySelector<HTMLElement>('[data-pair-copy]');
+    const currentLink = pairingDeepLink('array', window.location.hash);
+    const legacyLink = pairingDeepLink('continuum', window.location.hash);
+
+    if (button && currentLink && legacyLink) {
+      button.disabled = false;
+      button.addEventListener('click', () => {
+        let fallbackTimer: number | undefined;
+        const cancelFallback = () => {
+          if (document.hidden && fallbackTimer !== undefined) window.clearTimeout(fallbackTimer);
+        };
+        document.addEventListener('visibilitychange', cancelFallback, { once: true });
+        window.location.href = currentLink;
+        fallbackTimer = window.setTimeout(() => {
+          if (!document.hidden) window.location.href = legacyLink;
+        }, 900);
+      });
+    } else {
+      if (button) button.hidden = true;
+      if (copy) copy.textContent = 'This pairing invitation is missing or incomplete. Scan a new QR code from Array on your Mac.';
+    }
+  </script>
+</ProductionLayout>
+
+<style>
+  .pair-page {
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: 32px 20px;
+    background: radial-gradient(circle at 50% 28%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 34rem), var(--page);
+  }
+  .pair-card {
+    width: min(100%, 520px);
+    padding: clamp(28px, 7vw, 52px);
+    border: .5px solid var(--line);
+    border-radius: 30px;
+    text-align: center;
+    background: color-mix(in srgb, var(--page-raised) 94%, transparent);
+    box-shadow: 0 28px 80px rgb(0 0 0 / 12%);
+  }
+  .pair-card :global(.brand) { justify-content: center; }
+  .pair-glyph { position: relative; width: 116px; height: 116px; margin: 38px auto 28px; }
+  .pair-glyph__orbit { position: absolute; inset: 17px 5px; border: 3px solid var(--working); border-radius: 50%; }
+  .pair-glyph__orbit--one { transform: rotate(28deg); }
+  .pair-glyph__orbit--two { transform: rotate(-28deg); border-color: var(--input); }
+  .pair-glyph__core { position: absolute; top: 50%; left: 50%; width: 18px; height: 18px; border-radius: 50%; background: var(--attention); transform: translate(-50%, -50%); box-shadow: 0 0 24px color-mix(in srgb, var(--attention) 65%, transparent); }
+  .pair-eyebrow { margin: 0 0 12px; color: var(--ink-2); font-size: 12px; font-weight: 720; letter-spacing: .12em; text-transform: uppercase; }
+  h1 { margin: 0; font-size: clamp(38px, 9vw, 58px); line-height: .96; letter-spacing: -.055em; }
+  .pair-copy { margin: 22px auto 0; color: var(--ink-2); font-size: 16px; line-height: 1.55; }
+  .pair-actions { display: grid; gap: 11px; margin-top: 30px; }
+  .pair-button { min-height: 52px; display: grid; place-items: center; padding: 0 20px; border: 1px solid transparent; border-radius: 15px; font-weight: 680; }
+  .pair-button--primary { color: #f4f6f8; background: #12161d; }
+  .pair-button--primary:disabled { cursor: default; opacity: .45; }
+  .pair-button--secondary { border-color: var(--line); background: var(--page-raised); }
+  .pair-store-link { padding: 8px; color: var(--ink-2); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+  .pair-unavailable { margin: 0; padding: 14px; border: .5px solid var(--line); border-radius: 13px; color: var(--ink-2); font-size: 13px; line-height: 1.45; }
+  .pair-note { margin: 24px 0 0; color: var(--ink-2); font-size: 12px; line-height: 1.45; }
+  @media (max-width: 520px) {
+    .pair-page { padding: 12px; }
+    .pair-card { padding: 28px 22px; border-radius: 24px; }
+    .pair-glyph { margin-block: 28px 22px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .pair-glyph__orbit--one { animation: pair-orbit-one 3.2s ease-in-out infinite alternate; }
+    .pair-glyph__orbit--two { animation: pair-orbit-two 3.2s ease-in-out infinite alternate; }
+    @keyframes pair-orbit-one { to { transform: rotate(58deg); } }
+    @keyframes pair-orbit-two { to { transform: rotate(-58deg); } }
+  }
+</style>

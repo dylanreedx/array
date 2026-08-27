@@ -50,7 +50,9 @@ public enum PushCategory: String, CaseIterable, Codable, Sendable {
         switch self {
         case .approvalRequested, .agentWaitingForInput, .agentFinished, .agentFailed, .stillWorkingDigest:
             return true
-        case .desktopConnectionChanged, .deviceSecurityChanged, .sessionReapedOrRevived:
+        case .deviceSecurityChanged:
+            return true
+        case .desktopConnectionChanged, .sessionReapedOrRevived:
             return false
         }
     }
@@ -180,15 +182,15 @@ public struct PushPayloadBuilder: Sendable {
     }
 
     public static func approvalRequested(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .approvalRequested, title: "Approval requested", body: context.detail, deepLink: deepLink(.approvalCard, agentId: context.agentId, approvalRequestId: context.approvalRequestId), approvalRequestId: context.approvalRequestId, userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .approvalRequested, title: "Approval requested", body: "An agent needs approval.", deepLink: deepLink(.approvalCard, agentId: context.agentId, approvalRequestId: context.approvalRequestId), approvalRequestId: context.approvalRequestId, userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentWaitingForInput(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .agentWaitingForInput, title: "Agent waiting for input", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .agentWaitingForInput, title: "Agent waiting for input", body: "An agent is waiting for input.", deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentFinished(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .agentFinished, title: "Agent finished", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .agentFinished, title: "Agent finished", body: "An agent completed.", deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentFailed(_ context: AgentContext) -> PushPayload {
@@ -196,25 +198,26 @@ public struct PushPayloadBuilder: Sendable {
     }
 
     public static func stillWorkingDigest(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .stillWorkingDigest, title: "Still working", body: context.detail, deepLink: deepLink(.agentsBoard, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .stillWorkingDigest, title: "Still working", body: "Agents are still working.", deepLink: deepLink(.agentsBoard, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func desktopConnectionChanged(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .desktopConnectionChanged, title: "Desktop connection changed", body: context.detail, deepLink: deepLink(.statusFooter, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .desktopConnectionChanged, title: "Desktop connection changed", body: "Your Mac connection changed.", deepLink: deepLink(.statusFooter, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func deviceSecurityChanged(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .deviceSecurityChanged, title: "Device security changed", body: context.detail, deepLink: "\(PairingURL.scheme)://devices", userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .deviceSecurityChanged, title: "Device security changed", body: "A companion device was paired or revoked.", deepLink: "\(PairingURL.scheme)://devices", userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func sessionReapedOrRevived(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .sessionReapedOrRevived, title: "Session changed", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
+        PushPayload(category: .sessionReapedOrRevived, title: "Session changed", body: "An agent session changed.", deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func fixturePayload(for category: PushCategory, hostileRuntimeError: String = "") throws -> PushPayload {
         let agent = UUID(uuidString: "00000000-0000-4000-8000-000000000063")!
         let long = "This is a deliberately long notification body for the APNS payload builder table. It must truncate cleanly at one hundred sixty characters without leaking runtime data or transcript material."
-        let context = AgentContext(agentId: agent, title: category.rawValue, detail: category == .agentFailed ? hostileRuntimeError : long, approvalRequestId: "approval-fixture")
+        let detail = hostileRuntimeError.isEmpty ? long : hostileRuntimeError
+        let context = AgentContext(agentId: agent, title: category.rawValue, detail: detail, approvalRequestId: "approval-fixture")
         switch category {
         case .approvalRequested: return approvalRequested(context)
         case .agentWaitingForInput: return agentWaitingForInput(context)

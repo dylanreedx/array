@@ -63,6 +63,10 @@ private final class LockedValueResult<T>: @unchecked Sendable {
 private func runScopeAuthSuite(clock: FakeClock, signingKey: Data) async throws {
     expect(Scope.observer.contains(.orchestrationRead), "Auth Scope: observer can read orchestration")
     expect(!Scope.observer.contains(.orchestrationOperate), "Auth Scope: observer cannot operate orchestration")
+    expect(Scope.companionControl.contains(.orchestrationOperate), "Auth Scope: companion can answer orchestration requests")
+    expect(Scope.companionControl.contains(.agentStop), "Auth Scope: companion can stop an agent")
+    expect(!Scope.companionControl.contains(.terminalOperate), "Auth Scope: companion cannot operate a terminal")
+    expect(!Scope.companionControl.contains(.accessWrite), "Auth Scope: companion cannot administer access")
     expect(Scope.observer.isSubset(of: .admin), "Auth Scope: admin is a superset of observer")
 
     let encoded = try JSONEncoder().encode(Scope.admin)

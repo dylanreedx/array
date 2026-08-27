@@ -253,3 +253,48 @@ public enum DualPlaneGyroIndicatorModel {
         min(upper, max(lower, value))
     }
 }
+
+/// Stable, non-animated poses for WidgetKit, ActivityKit, snapshots, and other
+/// system-owned surfaces. Those surfaces are refreshed on a budget and must not
+/// imply that an in-process spinner is continuously running.
+public enum DualPlaneGyroPresentationPhase: String, Codable, CaseIterable, Hashable, Sendable {
+    case idle
+    case working
+    case needsAttention
+    case failed
+    case completed
+    case stale
+
+    public var modelPhase: CGFloat {
+        switch self {
+        case .idle: return 0.08
+        case .working: return 0.31
+        case .needsAttention: return 0.55
+        case .failed: return 0.72
+        case .completed: return 0.90
+        case .stale: return DualPlaneGyroIndicatorModel.reducedMotionPhase
+        }
+    }
+
+    public var accessibilityLabel: String {
+        switch self {
+        case .idle: return "Array idle"
+        case .working: return "Agent working"
+        case .needsAttention: return "Agent needs attention"
+        case .failed: return "Agent failed"
+        case .completed: return "Agent completed"
+        case .stale: return "Array status stale"
+        }
+    }
+
+    public static func resolve(status: AgentStatus, failed: Bool = false) -> Self {
+        if failed { return .failed }
+        switch status {
+        case .configuring, .working: return .working
+        case .needsAttention: return .needsAttention
+        case .done: return .completed
+        case .stale: return .stale
+        case .idle: return .idle
+        }
+    }
+}

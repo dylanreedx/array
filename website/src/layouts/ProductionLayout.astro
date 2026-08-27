@@ -1,7 +1,8 @@
 ---
 import '../styles/production.css';
-interface Props { title: string; description: string }
-const { title, description } = Astro.props;
+interface Props { title: string; description: string; canonicalPath?: string }
+const { title, description, canonicalPath = '/' } = Astro.props;
+const canonicalURL = new URL(canonicalPath, Astro.site ?? 'https://arrayapp.dev').toString();
 ---
 <!doctype html>
 <html lang="en">
@@ -13,9 +14,9 @@ const { title, description } = Astro.props;
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content="https://arrayapp.dev/" />
+    <meta property="og:url" content={canonicalURL} />
     <meta name="twitter:card" content="summary" />
-    <link rel="canonical" href="https://arrayapp.dev/" />
+    <link rel="canonical" href={canonicalURL} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>{title}</title>
     <script is:inline>

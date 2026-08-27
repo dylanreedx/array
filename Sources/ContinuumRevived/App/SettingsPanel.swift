@@ -23,6 +23,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     private let sections: [SettingsSection]
     private let defaults: UserDefaults
+    private let customSectionViews: [String: () -> NSView]
     /// The current keymap, used to display nav/leader chords and as the base for
     /// edits + collision classification. Persisted edits re-resolve into this.
     private var navKeymap: NavKeymap
@@ -35,10 +36,16 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var selectedSectionIndex = 0
     private weak var previousKeyWindow: NSWindow?
 
-    init(sections: [SettingsSection] = SettingsSchema.sections(), defaults: UserDefaults = .standard, navKeymap: NavKeymap = .resolve()) {
+    init(
+        sections: [SettingsSection] = SettingsSchema.sections(),
+        defaults: UserDefaults = .standard,
+        navKeymap: NavKeymap = .resolve(),
+        customSectionViews: [String: () -> NSView] = [:]
+    ) {
         self.sections = sections
         self.defaults = defaults
         self.navKeymap = navKeymap
+        self.customSectionViews = customSectionViews
     }
 
     var isVisible: Bool { panel?.isVisible ?? false }
@@ -216,6 +223,15 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         directoryPathLabels.removeAll()
         numberStepperTextFields.removeAll()
         numberTextFieldSteppers.removeAll()
+
+        if normalizedQuery.isEmpty, let customView = customSectionViews[section.id]?() {
+            resetSection.isHidden = true
+            customView.translatesAutoresizingMaskIntoConstraints = false
+            customView.widthAnchor.constraint(equalToConstant: 510).isActive = true
+            stack.addArrangedSubview(customView)
+            return
+        }
+
         for (owner, field) in displayedFields {
             if !normalizedQuery.isEmpty {
                 stack.addArrangedSubview(label(owner.title.uppercased(), size: 9.5, weight: .semibold, color: .tertiaryLabelColor))
@@ -1022,6 +1038,9 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         guard let stack = detailStack else { return false }
         // Arranged subviews: [header] + [one row per field], in field order.
         let rows = Array(stack.arrangedSubviews.dropFirst())
+        if customSectionViews[sections[selectedSectionIndex].id] != nil {
+            return rows.count == 1
+        }
         let fields = sections[selectedSectionIndex].fields.filter { $0.isVisible(in: defaults) }
         guard rows.count == fields.count else { return false }
         for (field, row) in zip(fields, rows) {
@@ -1079,6 +1098,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         case blankRender(colors: Int, width: Int, height: Int)
         case leakedPanel
         case missingTerminalTmuxFields
+        case missingCompanionCustomSection
 
         var description: String {
             switch self {
@@ -1096,6 +1116,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 return "settings panel window leaked after close"
             case .missingTerminalTmuxFields:
                 return "SettingsSchema missing Terminal section with tmux enabled/path fields"
+            case .missingCompanionCustomSection:
+                return "Companion custom settings section was not mounted"
             }
         }
     }
@@ -1120,7 +1142,16 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             throw SettingsPanelSelfCheckError.missingTerminalTmuxFields
         }
 
-        let panel = SettingsPanel(sections: sections, defaults: defaults)
+        var companionCustomSectionMounts = 0
+        let companionSentinel = NSView(frame: NSRect(x: 0, y: 0, width: 510, height: 80))
+        let panel = SettingsPanel(
+            sections: sections,
+            defaults: defaults,
+            customSectionViews: ["companion": {
+                companionCustomSectionMounts += 1
+                return companionSentinel
+            }]
+        )
         panel.show(near: nil)
 
         // 1. Sidebar mirrors the schema exactly.
@@ -1133,6 +1164,10 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             panel.selectSectionForQA(index)
             guard panel.selectedSectionFieldsAllRenderedForQA() else {
                 throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(section.title)
+            }
+            if section.id == "companion",
+               (companionCustomSectionMounts == 0 || companionSentinel.superview == nil) {
+                throw SettingsPanelSelfCheckError.missingCompanionCustomSection
             }
         }
 

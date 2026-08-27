@@ -24,6 +24,15 @@ pnpm dev
 
 The local site runs at `http://127.0.0.1:4321/`.
 
+### Companion download configuration
+
+The `/pair` page reads its public Apple destinations at build time:
+
+- `PUBLIC_ARRAY_TESTFLIGHT_URL` must be an HTTPS `testflight.apple.com` invitation.
+- `PUBLIC_ARRAY_APP_STORE_URL` must be an HTTPS `apps.apple.com` listing.
+
+Invalid or absent values are not rendered as links. The pairing invitation is read only from the URL fragment in the browser and is never included in server-rendered HTML or requests.
+
 ## Verification
 
 ```sh

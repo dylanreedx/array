@@ -1,5 +1,6 @@
 import Foundation
 import ContinuumRevivedCore
+import ContinuumRevivedRelayProtocol
 
 // Ticket: docs/38-tickets/86-relay-sync-transport.md (slice 2, milestone B)
 //
@@ -21,6 +22,7 @@ import ContinuumRevivedCore
 // `onCursorChange` (iOS wires it to UserDefaults), which keeps this file
 // platform-free and the checks hermetic.
 public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
+    public enum APIVersion: Sendable, Equatable { case legacyV1, hardenedV2 }
     // @unchecked: mutable state (loopTask/cursor/stopped) is confined behind
     // `lock`; everything else is immutable config or thread-safe (URLSession,
     // AsyncStream continuations).
@@ -44,6 +46,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
     /// diagnostics need the underlying error or reconnect loops are
     /// undebuggable (learned 2026-07-18, the hard way, twice).
     private let onDiagnostic: (@Sendable (String) -> Void)?
+    private let apiVersion: APIVersion
 
     /// When true, the first successful hello fast-forwards the cursor to the
     /// hub's `latestSeq` — a live-only feed. The Mac uses this: its inbound
@@ -68,7 +71,8 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         backoffNanoseconds: [UInt64] = [1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 15_000_000_000],
         session: URLSession = .shared,
         onCursorChange: (@Sendable (UInt64) -> Void)? = nil,
-        onDiagnostic: (@Sendable (String) -> Void)? = nil
+        onDiagnostic: (@Sendable (String) -> Void)? = nil,
+        apiVersion: APIVersion = .legacyV1
     ) {
         precondition(!backoffNanoseconds.isEmpty, "backoff schedule must not be empty")
         self.baseURL = baseURL
@@ -81,6 +85,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         self.session = session
         self.onCursorChange = onCursorChange
         self.onDiagnostic = onDiagnostic
+        self.apiVersion = apiVersion
 
         var inboundContinuation: AsyncStream<SyncMessage>.Continuation!
         self.inbound = AsyncStream { inboundContinuation = $0 }
@@ -132,14 +137,34 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         } catch {
             throw SyncTransportError.sendFailed(reason: "encode: \(String(describing: error))")
         }
+        let requestBody: Data
+        let path: String
+        let acceptedStatus: Int
+        switch apiVersion {
+        case .legacyV1:
+            requestBody = body
+            path = "/v1/publish"
+            acceptedStatus = 200
+        case .hardenedV2:
+            let request = RelayPublishRequest(
+                kind: "sync.message",
+                payload: body,
+                isSnapshot: Self.isSnapshot(message)
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            requestBody = try encoder.encode(request)
+            path = "/v2/events"
+            acceptedStatus = 201
+        }
         let reply: (Data, URLResponse)
         do {
-            reply = try await session.data(for: makeRequest("POST", path: "/v1/publish", body: body))
+            reply = try await session.data(for: makeRequest("POST", path: path, body: requestBody))
         } catch {
             throw SyncTransportError.notConnected
         }
         let status = (reply.1 as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else {
+        guard status == acceptedStatus else {
             let code = (try? JSONDecoder().decode(RelayErrorBody.self, from: reply.0))?.code ?? "http\(status)"
             throw SyncTransportError.sendFailed(reason: code)
         }
@@ -163,16 +188,19 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
                 // error (fast restart on the same port): hello never re-runs,
                 // so the stale-cursor detection must live here too — every
                 // poll response carries the hub's latestSeq.
-                if response.latestSeq < currentCursor {
-                    onDiagnostic?("relay poll: hub reset detected (latestSeq \(response.latestSeq) < cursor \(currentCursor)) — cursor reset to 0")
+                if response.latestCursor < currentCursor {
+                    onDiagnostic?("relay poll: hub reset detected (latestSeq \(response.latestCursor) < cursor \(currentCursor)) — cursor reset to 0")
                     advanceCursor(to: 0)
                     continue
                 }
-                for envelope in response.envelopes {
-                    inboundContinuation.yield(envelope.message)
+                for message in response.messages {
+                    inboundContinuation.yield(message)
                 }
-                if let last = response.envelopes.last?.seq {
-                    advanceCursor(to: last)
+                if response.latestDeliveredCursor > currentCursor {
+                    advanceCursor(to: response.latestDeliveredCursor)
+                }
+                if apiVersion == .hardenedV2, response.messages.isEmpty {
+                    try await Task.sleep(for: .milliseconds(750))
                 }
             } catch let error as RelayClientError where error == .cursorUnrecoverable {
                 // Self-heal: reset and wait for the publisher's next snapshot
@@ -201,6 +229,12 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
     }
 
     private func hello() async throws {
+        if apiVersion == .hardenedV2 {
+            // Authentication is exercised by the first event read. The v2
+            // store owns durable sequences, so there is no ephemeral hub
+            // identity to negotiate before polling.
+            return
+        }
         let body = try JSONEncoder().encode(RelayHelloRequestBody(deviceLabel: deviceLabel, cursor: currentCursor == 0 ? nil : currentCursor))
         let (data, response) = try await session.data(for: makeRequest("POST", path: "/v1/hello", body: body))
         try Self.checkStatus(data: data, response: response)
@@ -233,6 +267,12 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
     /// relay (the Mac calls this when a phone completes the pairing
     /// exchange, so the phone's existing bearer works against the relay).
     public func registerToken(_ token: String, scopes: Scope) async throws {
+        if apiVersion == .hardenedV2 {
+            // Hardened credentials are minted by the single-use pairing
+            // exchange; caller-selected token registration is intentionally
+            // unavailable in v2.
+            return
+        }
         let body: Data
         do {
             body = try JSONEncoder().encode(RelayRegisterTokenRequestBody(token: token, scopeRawValue: scopes.rawValue))
@@ -252,14 +292,53 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         }
     }
 
-    private func poll(after: UInt64) async throws -> RelayPollResponse {
+    private struct PollBatch {
+        var messages: [SyncMessage]
+        var latestCursor: UInt64
+        var latestDeliveredCursor: UInt64
+    }
+
+    private func poll(after: UInt64) async throws -> PollBatch {
+        if apiVersion == .hardenedV2 {
+            let path = "/v2/events?cursor=\(after)"
+            let (data, response) = try await session.data(for: makeRequest("GET", path: path, body: nil))
+            try Self.checkStatus(data: data, response: response)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard let page = try? decoder.decode(RelayEventPage.self, from: data) else {
+                throw RelayClientError.malformedResponse
+            }
+            if consumeCursorFastForwardFlag() {
+                let latest = UInt64(max(0, page.latestSequence))
+                return PollBatch(messages: [], latestCursor: latest, latestDeliveredCursor: latest)
+            }
+            let events = ([page.snapshot].compactMap { $0 } + page.events)
+                .filter { $0.sequence > Int64(after) }
+                .sorted { $0.sequence < $1.sequence }
+            let messages = events.compactMap { try? JSONDecoder().decode(SyncMessage.self, from: $0.payload) }
+            let delivered = events.last.map { UInt64(max(0, $0.sequence)) } ?? after
+            return PollBatch(
+                messages: messages,
+                latestCursor: UInt64(max(0, page.latestSequence)),
+                latestDeliveredCursor: delivered
+            )
+        }
         let path = "/v1/poll?after=\(after)&waitMs=\(pollWaitMs)"
         let (data, response) = try await session.data(for: makeRequest("GET", path: path, body: nil))
         try Self.checkStatus(data: data, response: response)
         guard let decoded = try? JSONDecoder().decode(RelayPollResponse.self, from: data) else {
             throw RelayClientError.malformedResponse
         }
-        return decoded
+        return PollBatch(
+            messages: decoded.envelopes.map(\.message),
+            latestCursor: decoded.latestSeq,
+            latestDeliveredCursor: decoded.envelopes.last?.seq ?? after
+        )
+    }
+
+    private static func isSnapshot(_ message: SyncMessage) -> Bool {
+        if case .snapshot = message { return true }
+        return false
     }
 
     private static func checkStatus(data: Data, response: URLResponse) throws {

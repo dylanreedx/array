@@ -736,8 +736,8 @@ func runProcess(_ executable: String, _ arguments: [String], environment: [Strin
 
 let projectRoot = FileManager.default.currentDirectoryPath
 let relayExecutable = ProcessInfo.processInfo.environment["CONTINUUM_RELAY_CHECK_BINARY"]
-    ?? URL(fileURLWithPath: projectRoot).appendingPathComponent(".build/debug/continuum-relay").path
-expect(FileManager.default.isExecutableFile(atPath: relayExecutable), "assertion 71: real continuum-relay executable missing at \(relayExecutable); run swift build first")
+    ?? URL(fileURLWithPath: projectRoot).appendingPathComponent(".build/debug/continuum-relay-legacy").path
+expect(FileManager.default.isExecutableFile(atPath: relayExecutable), "assertion 71: legacy compatibility relay executable missing at \(relayExecutable); run swift build first")
 
 // 26. Spawn the actual command-line executable with its credential only in
 //     the environment. Port zero makes the process choose a race-free ephemeral

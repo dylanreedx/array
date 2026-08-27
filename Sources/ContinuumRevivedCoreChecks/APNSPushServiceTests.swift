@@ -26,9 +26,16 @@ private func runPushPayloadBuilderTableChecks() throws {
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let aps = object?["aps"] as? [String: Any]
         let alert = aps?["alert"] as? [String: Any]
+        let body = alert?["body"] as? String ?? ""
         expect((aps?["category"] as? String) == spec.categoryId, "\(category.rawValue): category id encoded per literal spec")
         expect((aps?["interruption-level"] as? String) == spec.interruptionLevel, "\(category.rawValue): interruption encoded per literal spec")
-        expect((alert?["body"] as? String ?? "").count <= 160, "\(category.rawValue): body truncated to <=160")
+        expect(body.count <= 160, "\(category.rawValue): body truncated to <=160")
+        expect(Set([
+            "An agent needs approval.", "An agent is waiting for input.",
+            "An agent completed.", "The agent run failed.", "Agents are still working.",
+            "Your Mac connection changed.", "A companion device was paired or revoked.",
+            "An agent session changed."
+        ]).contains(body), "\(category.rawValue): system banner contains status only, never runtime detail")
         expect((object?["deepLink"] as? String) == spec.deepLink, "\(category.rawValue): deep link encoded per literal spec")
         expect((object?["target"] as? String) == spec.target, "\(category.rawValue): deep link target encoded per literal spec")
         let actionIds = object?["actionIds"] as? [String] ?? []
@@ -109,7 +116,7 @@ private func runPushTaxonomyInvariantChecks() throws {
     let ids = PushCategory.allCases.map(\.identifier)
     expect(Set(ids).count == PushCategory.allCases.count, "push category ids unique")
     expect(ids.allSatisfy { !$0.isEmpty }, "push category ids non-empty")
-    expect(PushCategory.allCases.filter(\.defaultEnabled) == [.approvalRequested, .agentWaitingForInput, .agentFinished, .agentFailed, .stillWorkingDigest], "push defaults N1-N5 on, N6/N8 off")
+    expect(PushCategory.allCases.filter(\.defaultEnabled) == [.approvalRequested, .agentWaitingForInput, .agentFinished, .agentFailed, .stillWorkingDigest, .deviceSecurityChanged], "push defaults N1-N5 and mandatory N7 on, N6/N8 off")
     expect(!PushCategory.deviceSecurityChanged.isMuteable, "N7 is unmuteable")
     let config = APNSConfig(keyPath: "/tmp/missing.p8", keyId: "KID", teamId: "TEAM", deviceToken: "token", environment: .sandbox)
     try runPersistedPushCategoryPreferenceChecks(config: config)

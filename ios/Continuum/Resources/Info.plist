@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Continuum</string>
+	<string>Array</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -25,6 +25,7 @@
 			<string>dev.dylanreedx.continuum.pairing</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>array</string>
 				<string>continuum</string>
 			</array>
 		</dict>
@@ -39,9 +40,15 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Continuum uses the camera to scan a Mac pairing QR code.</string>
+	<string>Array uses the camera to scan a Mac pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Continuum uses your local network to pair this iPhone with your Mac.</string>
+	<string>Array uses your local network for legacy Mac pairing.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchScreen</key>

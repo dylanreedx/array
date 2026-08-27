@@ -9,14 +9,23 @@ let package = Package(
     ],
     products: [
         .executable(name: "Array", targets: ["ContinuumRevived"]),
+        .executable(name: "continuum-relay", targets: ["continuum-relay"]),
+        .executable(name: "continuum-relay-legacy", targets: ["continuum-relay-legacy"]),
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
         .library(name: "ContinuumRevivedAgentContent", targets: ["ContinuumRevivedAgentContent"]),
         .library(name: "ContinuumRevivedAgentUI", targets: ["ContinuumRevivedAgentUI"]),
         .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"]),
-        .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"])
+        .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"]),
+        .library(name: "ContinuumRevivedRelayProtocol", targets: ["ContinuumRevivedRelayProtocol"]),
+        .library(name: "ContinuumRevivedRelayCore", targets: ["ContinuumRevivedRelayCore"]),
+        .library(name: "ContinuumRevivedRelayClient", targets: ["ContinuumRevivedRelayClient"])
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
+        // Reviewed upstream: Apache-2.0, Linux-compatible HTTP/WebSocket runtime.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
+        // Reviewed upstream: Apache-2.0, portable CryptoKit API for credential hashing/token sealing.
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.0"),
         // Reviewed source: https://github.com/swiftlang/swift-markdown/tree/0.8.0
         // Apache-2.0 with Runtime Library Exception: LICENSE.txt at that tag.
         .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0"),
@@ -72,9 +81,39 @@ let package = Package(
         // explicit link since it doesn't inherit the app target's link phase.
         .target(
             name: "ContinuumRevivedSync",
-            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCore"],
+            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCore", "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayClient"],
             linkerSettings: [
                 .linkedFramework("CloudKit")
+            ]
+        ),
+        .target(name: "ContinuumRevivedRelayProtocol"),
+        .target(
+            name: "ContinuumRevivedRelayCore",
+            dependencies: [
+                "ContinuumRevivedRelayProtocol",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Crypto", package: "swift-crypto")
+            ]
+        ),
+        .target(
+            name: "ContinuumRevivedRelayNIO",
+            dependencies: [
+                "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio")
+            ]
+        ),
+        .target(
+            name: "ContinuumRevivedRelayClient",
+            dependencies: [
+                "ContinuumRevivedRelayProtocol",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio")
             ]
         ),
         .target(
@@ -169,10 +208,17 @@ let package = Package(
         ),
         .executableTarget(
             name: "ContinuumRevivedRelayChecks",
-            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
+            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore", "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore"]
         ),
+        .executableTarget(name: "ContinuumRevivedRelayProtocolChecks", dependencies: ["ContinuumRevivedRelayProtocol"]),
+        .executableTarget(name: "ContinuumRevivedRelayCoreChecks", dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore"]),
+        .executableTarget(name: "ContinuumRevivedRelayIntegrationChecks", dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"]),
         .executableTarget(
             name: "continuum-relay",
+            dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO"]
+        ),
+        .executableTarget(
+            name: "continuum-relay-legacy",
             dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(

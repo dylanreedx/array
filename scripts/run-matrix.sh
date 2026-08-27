@@ -352,6 +352,11 @@ run_leg swift run ContinuumRevivedAgentContentChecks
 run_leg swift run ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run_leg swift run ContinuumRevivedRelayChecks
+# Friends-alpha relay: Foundation wire schema, durable per-instance core, and
+# real NIO public/admin listener startup plus graceful shutdown.
+run_leg swift run ContinuumRevivedRelayProtocolChecks
+run_leg swift run ContinuumRevivedRelayCoreChecks
+run_leg swift run ContinuumRevivedRelayIntegrationChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
 # — never set in this matrix; the real leg is device-gate-owed. Explicitly

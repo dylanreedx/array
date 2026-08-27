@@ -119,10 +119,23 @@ private func checkCompanionContainerConfigAgreement() throws {
         encoding: .utf8
     )
     let iosSource = try String(contentsOfFile: "ios/Continuum/Sources/ContinuumApp.swift", encoding: .utf8)
+    let systemSurfaceSource = try String(contentsOfFile: "ios/Continuum/Sources/SystemSurfaceCoordinator.swift", encoding: .utf8)
 
     expect(desktopEntitlements.contains("<string>\(expected)</string>"), "ticket75 config: desktop entitlements use shared CloudKit container \(expected)")
     expect(iosEntitlements.contains("<string>\(expected)</string>"), "ticket75 config: iOS entitlements use shared CloudKit container \(expected)")
     expect(iosSource.contains("CompanionSyncConfig.cloudKitContainerIdentifier"), "ticket75 config: iOS source reads shared CloudKit config, not a local identity/authority string")
+
+    guard let loaderStart = iosSource.range(of: "private struct LoadingBoardView"),
+          let loaderEnd = iosSource.range(of: "private struct PairingRequiredView", range: loaderStart.upperBound..<iosSource.endIndex) else {
+        throw NSError(domain: "CompanionIOSSourceChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "iOS loading board source boundary missing"])
+    }
+    let loaderSource = String(iosSource[loaderStart.lowerBound..<loaderEnd.lowerBound])
+    expect(loaderSource.contains("DualPlaneGyroIndicator(isActive: true)"), "iOS home loading board uses the branded continuously animated gyro")
+    expect(!loaderSource.contains("ProgressView("), "iOS home loading board does not regress to the generic progress spinner")
+    expect(loaderSource.contains(".accessibilityLabel(\"Array is connecting\")"), "iOS home gyro exposes an honest loading accessibility label")
+    expect(systemSurfaceSource.contains("if #available(iOS 17.2, *)"), "iOS guards ActivityKit push-to-start observation at its runtime availability")
+    expect(systemSurfaceSource.contains("Activity<ArrayAgentActivityAttributes>.pushToStartTokenUpdates"), "iOS observes the ActivityKit push-to-start token stream")
+    expect(systemSurfaceSource.contains("kind: .liveActivityStart"), "iOS registers push-to-start separately from per-activity update tokens")
 }
 
 private func checkDesktopActivitySnapshotIsSanitized() throws {

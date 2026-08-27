@@ -8,24 +8,73 @@
 
 /* Begin PBXBuildFile section */
 		0DAC41F5595764185ADF4BC3 /* ContinuumRevivedAgentUI in Frameworks */ = {isa = PBXBuildFile; productRef = 39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */; };
+		14E8AD3CB453578B473BE5C0 /* HostedPairingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC8F98A386A9FA593C2E8EE /* HostedPairingPolicy.swift */; };
+		2055078FE502E5D344DABB55 /* ContinuumRevivedAgentUI in Frameworks */ = {isa = PBXBuildFile; productRef = D5DDA10A1E12D3537EA4AD98 /* ContinuumRevivedAgentUI */; };
+		24688D364D1509BE47430FFD /* ContinuumRevivedRelayProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 795A14673D2836A246F3FB5D /* ContinuumRevivedRelayProtocol */; };
 		40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D151728376C3F6ABAC382B04 /* Assets.xcassets */; };
-		56C150B3E3349863D67D73C3 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
+		42B1CB4A4B80194359BD048F /* SystemSurfaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 121B88A37BE0C318561BDB2C /* SystemSurfaceModels.swift */; };
+		455FC070CF0FD21AE3714EE0 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
+		56C150B3E3349863D67D73C3 /* ContinuumRevivedRelayClient in Frameworks */ = {isa = PBXBuildFile; productRef = 7567A9DF194CE7511733043F /* ContinuumRevivedRelayClient */; };
+		61D978BAD2E2EBE212C7CE11 /* SystemSurfaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 121B88A37BE0C318561BDB2C /* SystemSurfaceModels.swift */; };
 		8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */; };
+		A3807D378F9C65B36423ADA1 /* HostedPairingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98CDD8B9D9C9530EB286C728 /* HostedPairingPolicyTests.swift */; };
+		AAF159FDBDE7FAA87AA9DF11 /* ArrayStatusWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 067FD7B831EB1F06CC5D6DD9 /* ArrayStatusWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentContent in Frameworks */ = {isa = PBXBuildFile; productRef = 21B218F5540163DD537CE985 /* ContinuumRevivedAgentContent */; };
 		BAAA599598815D94FBFFB1E0 /* DualPlaneGyroIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */; };
+		C34F707FD0663BA4B4A9ADAC /* ArrayStatusWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 174055EC32FE8CD1DA5EF728 /* ArrayStatusWidgets.swift */; };
+		CB9E6EE29A919CE0F592742F /* ContinuumRevivedRelayProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = C5543E5A6325992EFF3767F2 /* ContinuumRevivedRelayProtocol */; };
 		DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */; };
 		F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */; };
 		FE1AA906A27AD9F986780217 /* ContinuumRevivedCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */; };
+		FEA16ACEA24BBECFB15498C2 /* SystemSurfaceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0AEC0EC52CB38F6EDA68FC7 /* SystemSurfaceCoordinator.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		53233306C308EDD61E4C5E17 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B2A84B64C59BFE3C452D3251 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B45F8E35BF6701CA9362461E;
+			remoteInfo = Continuum;
+		};
+		EE0C3CB6AD9FEFFD06C5B42F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B2A84B64C59BFE3C452D3251 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DD360FF275E0BD7783280898;
+			remoteInfo = ArrayStatusWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B739A6A9B6FF8292DECC299C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AAF159FDBDE7FAA87AA9DF11 /* ArrayStatusWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		067FD7B831EB1F06CC5D6DD9 /* ArrayStatusWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ArrayStatusWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		0FC8F98A386A9FA593C2E8EE /* HostedPairingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedPairingPolicy.swift; sourceTree = "<group>"; };
+		121B88A37BE0C318561BDB2C /* SystemSurfaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSurfaceModels.swift; sourceTree = "<group>"; };
+		174055EC32FE8CD1DA5EF728 /* ArrayStatusWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArrayStatusWidgets.swift; sourceTree = "<group>"; };
+		376077A2A8857F4D1065C8CF /* ContinuumTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ContinuumTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusChipView.swift; sourceTree = "<group>"; };
 		47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualPlaneGyroIndicator.swift; sourceTree = "<group>"; };
 		7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuumApp.swift; sourceTree = "<group>"; };
+		982996DC3B24E78C70970F18 /* Array */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Array; path = ..; sourceTree = SOURCE_ROOT; };
+		98CDD8B9D9C9530EB286C728 /* HostedPairingPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedPairingPolicyTests.swift; sourceTree = "<group>"; };
 		C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DesignTokens+SwiftUI.swift"; sourceTree = "<group>"; };
 		D151728376C3F6ABAC382B04 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E0AEC0EC52CB38F6EDA68FC7 /* SystemSurfaceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSurfaceCoordinator.swift; sourceTree = "<group>"; };
 		E922ADD36D0C4CD487B3F803 /* Continuum.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Continuum.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		F1A22B74812E381A9B0052FE /* transcript-subagents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "transcript-subagents"; path = ..; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -36,7 +85,25 @@
 				B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentContent in Frameworks */,
 				0DAC41F5595764185ADF4BC3 /* ContinuumRevivedAgentUI in Frameworks */,
 				FE1AA906A27AD9F986780217 /* ContinuumRevivedCore in Frameworks */,
-				56C150B3E3349863D67D73C3 /* ContinuumRevivedSync in Frameworks */,
+				56C150B3E3349863D67D73C3 /* ContinuumRevivedRelayClient in Frameworks */,
+				CB9E6EE29A919CE0F592742F /* ContinuumRevivedRelayProtocol in Frameworks */,
+				455FC070CF0FD21AE3714EE0 /* ContinuumRevivedSync in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4CE3B7AD84548C7E33285514 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2055078FE502E5D344DABB55 /* ContinuumRevivedAgentUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		93D25DDE567B22195ED65967 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				24688D364D1509BE47430FFD /* ContinuumRevivedRelayProtocol in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -46,7 +113,7 @@
 		01F2627DCA383196218E4DC7 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				F1A22B74812E381A9B0052FE /* transcript-subagents */,
+				982996DC3B24E78C70970F18 /* Array */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -58,7 +125,9 @@
 				7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */,
 				C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */,
 				47F4CA1B0E1E73F4939BBE7C /* DualPlaneGyroIndicator.swift */,
+				0FC8F98A386A9FA593C2E8EE /* HostedPairingPolicy.swift */,
 				3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */,
+				E0AEC0EC52CB38F6EDA68FC7 /* SystemSurfaceCoordinator.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -66,10 +135,21 @@
 		261C9A98F502D274E34EF42E = {
 			isa = PBXGroup;
 			children = (
+				38EFE116401BDFC3518FA846 /* ArrayStatusWidgets */,
 				524529E075A65B912577E920 /* Continuum */,
+				70CBC08FACBCB4BFEFD4CB24 /* ContinuumTests */,
 				01F2627DCA383196218E4DC7 /* Packages */,
+				77355AFC88BA1D8FDE75C949 /* SystemSurfaces */,
 				85566B436464E5FFE996DEAE /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		38EFE116401BDFC3518FA846 /* ArrayStatusWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				AA9EEAEC89BC77AACEE441E6 /* Sources */,
+			);
+			path = ArrayStatusWidgets;
 			sourceTree = "<group>";
 		};
 		524529E075A65B912577E920 /* Continuum */ = {
@@ -80,12 +160,38 @@
 			path = Continuum;
 			sourceTree = "<group>";
 		};
+		70CBC08FACBCB4BFEFD4CB24 /* ContinuumTests */ = {
+			isa = PBXGroup;
+			children = (
+				98CDD8B9D9C9530EB286C728 /* HostedPairingPolicyTests.swift */,
+			);
+			path = ContinuumTests;
+			sourceTree = "<group>";
+		};
+		77355AFC88BA1D8FDE75C949 /* SystemSurfaces */ = {
+			isa = PBXGroup;
+			children = (
+				121B88A37BE0C318561BDB2C /* SystemSurfaceModels.swift */,
+			);
+			path = SystemSurfaces;
+			sourceTree = "<group>";
+		};
 		85566B436464E5FFE996DEAE /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				067FD7B831EB1F06CC5D6DD9 /* ArrayStatusWidgets.appex */,
 				E922ADD36D0C4CD487B3F803 /* Continuum.app */,
+				376077A2A8857F4D1065C8CF /* ContinuumTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		AA9EEAEC89BC77AACEE441E6 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				174055EC32FE8CD1DA5EF728 /* ArrayStatusWidgets.swift */,
+			);
+			path = Sources;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -98,21 +204,64 @@
 				A8B6EFD15BCC21A00BABC5DF /* Sources */,
 				B41EDE615A69554B742668A2 /* Resources */,
 				1480881812D80B20565BDBE9 /* Frameworks */,
+				B739A6A9B6FF8292DECC299C /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				2C0A75F30F3AE8655D5CE938 /* PBXTargetDependency */,
 			);
 			name = Continuum;
 			packageProductDependencies = (
 				21B218F5540163DD537CE985 /* ContinuumRevivedAgentContent */,
 				39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */,
 				9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */,
+				7567A9DF194CE7511733043F /* ContinuumRevivedRelayClient */,
+				C5543E5A6325992EFF3767F2 /* ContinuumRevivedRelayProtocol */,
 				1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */,
 			);
 			productName = Continuum;
 			productReference = E922ADD36D0C4CD487B3F803 /* Continuum.app */;
 			productType = "com.apple.product-type.application";
+		};
+		D1F90B6838A5353C75708B4A /* ContinuumTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 14A207F4039107F35DE3023B /* Build configuration list for PBXNativeTarget "ContinuumTests" */;
+			buildPhases = (
+				AA69558E85DE12DE81FE4DF3 /* Sources */,
+				93D25DDE567B22195ED65967 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9336D43831F57301C878720E /* PBXTargetDependency */,
+			);
+			name = ContinuumTests;
+			packageProductDependencies = (
+				795A14673D2836A246F3FB5D /* ContinuumRevivedRelayProtocol */,
+			);
+			productName = ContinuumTests;
+			productReference = 376077A2A8857F4D1065C8CF /* ContinuumTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		DD360FF275E0BD7783280898 /* ArrayStatusWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7BD06614FFABDB21ECAD0931 /* Build configuration list for PBXNativeTarget "ArrayStatusWidgets" */;
+			buildPhases = (
+				7E8C3E3FE4ACE2BDB798DD34 /* Sources */,
+				4CE3B7AD84548C7E33285514 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ArrayStatusWidgets;
+			packageProductDependencies = (
+				D5DDA10A1E12D3537EA4AD98 /* ContinuumRevivedAgentUI */,
+			);
+			productName = ArrayStatusWidgets;
+			productReference = 067FD7B831EB1F06CC5D6DD9 /* ArrayStatusWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -124,6 +273,14 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					B45F8E35BF6701CA9362461E = {
+						DevelopmentTeam = 46TTB6J9DZ;
+						ProvisioningStyle = Automatic;
+					};
+					D1F90B6838A5353C75708B4A = {
+						DevelopmentTeam = 46TTB6J9DZ;
+						ProvisioningStyle = Automatic;
+					};
+					DD360FF275E0BD7783280898 = {
 						DevelopmentTeam = 46TTB6J9DZ;
 						ProvisioningStyle = Automatic;
 					};
@@ -146,7 +303,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				DD360FF275E0BD7783280898 /* ArrayStatusWidgets */,
 				B45F8E35BF6701CA9362461E /* Continuum */,
+				D1F90B6838A5353C75708B4A /* ContinuumTests */,
 			);
 		};
 /* End PBXProject section */
@@ -163,6 +322,15 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		7E8C3E3FE4ACE2BDB798DD34 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C34F707FD0663BA4B4A9ADAC /* ArrayStatusWidgets.swift in Sources */,
+				61D978BAD2E2EBE212C7CE11 /* SystemSurfaceModels.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A8B6EFD15BCC21A00BABC5DF /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -170,13 +338,89 @@
 				F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */,
 				8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */,
 				BAAA599598815D94FBFFB1E0 /* DualPlaneGyroIndicator.swift in Sources */,
+				14E8AD3CB453578B473BE5C0 /* HostedPairingPolicy.swift in Sources */,
 				DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */,
+				FEA16ACEA24BBECFB15498C2 /* SystemSurfaceCoordinator.swift in Sources */,
+				42B1CB4A4B80194359BD048F /* SystemSurfaceModels.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA69558E85DE12DE81FE4DF3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A3807D378F9C65B36423ADA1 /* HostedPairingPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		2C0A75F30F3AE8655D5CE938 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DD360FF275E0BD7783280898 /* ArrayStatusWidgets */;
+			targetProxy = EE0C3CB6AD9FEFFD06C5B42F /* PBXContainerItemProxy */;
+		};
+		9336D43831F57301C878720E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B45F8E35BF6701CA9362461E /* Continuum */;
+			targetProxy = 53233306C308EDD61E4C5E17 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		0332489B28990336B4276158 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = ArrayStatusWidgets/Resources/ArrayStatusWidgets.entitlements;
+				INFOPLIST_FILE = ArrayStatusWidgets/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.dylanreedx.continuum.widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		56DCA2B5F501162BB84E3051 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = ArrayStatusWidgets/Resources/ArrayStatusWidgets.entitlements;
+				INFOPLIST_FILE = ArrayStatusWidgets/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.dylanreedx.continuum.widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7A61302DE899A42DA5AECD33 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.dylanreedx.continuum.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Continuum.app/Continuum";
+			};
+			name = Debug;
+		};
 		86AFA4299D9F59266F414467 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -212,7 +456,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026071602;
+				CURRENT_PROJECT_VERSION = 2026082601;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 46TTB6J9DZ;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -234,6 +478,22 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.10;
+			};
+			name = Release;
+		};
+		95F2BBACAD1574ACF1FAB5EB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.dylanreedx.continuum.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Continuum.app/Continuum";
 			};
 			name = Release;
 		};
@@ -272,7 +532,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026071602;
+				CURRENT_PROJECT_VERSION = 2026082601;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 46TTB6J9DZ;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -341,11 +601,29 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		14A207F4039107F35DE3023B /* Build configuration list for PBXNativeTarget "ContinuumTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A61302DE899A42DA5AECD33 /* Debug */,
+				95F2BBACAD1574ACF1FAB5EB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		6F6590764F2EE817C8D74043 /* Build configuration list for PBXNativeTarget "Continuum" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				E79BA9967254848D7B7B4411 /* Debug */,
 				E90806A477524A74A83F3FB2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		7BD06614FFABDB21ECAD0931 /* Build configuration list for PBXNativeTarget "ArrayStatusWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0332489B28990336B4276158 /* Debug */,
+				56DCA2B5F501162BB84E3051 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -381,9 +659,25 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = ContinuumRevivedAgentUI;
 		};
+		7567A9DF194CE7511733043F /* ContinuumRevivedRelayClient */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ContinuumRevivedRelayClient;
+		};
+		795A14673D2836A246F3FB5D /* ContinuumRevivedRelayProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ContinuumRevivedRelayProtocol;
+		};
 		9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ContinuumRevivedCore;
+		};
+		C5543E5A6325992EFF3767F2 /* ContinuumRevivedRelayProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ContinuumRevivedRelayProtocol;
+		};
+		D5DDA10A1E12D3537EA4AD98 /* ContinuumRevivedAgentUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ContinuumRevivedAgentUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

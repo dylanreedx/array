@@ -61,6 +61,7 @@ public enum SettingsSchema {
             ]),
         ]
         let activity: [SettingsSection] = [
+            SettingsSection(id: "companion", title: "Companion", iconSystemName: "iphone.and.arrow.forward", fields: []),
             SettingsSection(id: "activityAndNotifications", title: "Activity & Notifications", iconSystemName: "bell.badge", fields: [
                 .toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show Activity Dock", default: WorkspaceSidebarConfig.defaultVisible),
                 .number(key: WorkspaceSidebarConfig.widthKey, label: "Activity Dock Width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),

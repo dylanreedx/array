@@ -368,6 +368,9 @@ leg run_leg swift run ContinuumRevivedFileTreeChecks
 leg run_leg swift run ContinuumRevivedPaletteChecks
 leg run_leg swift run ContinuumRevivedPerfChecks
 leg run_leg swift run ContinuumRevivedRelayChecks
+leg run_leg swift run ContinuumRevivedRelayCoreChecks
+leg run_leg swift run ContinuumRevivedRelayIntegrationChecks
+leg run_leg swift run ContinuumRevivedRelayProtocolChecks
 leg run_leg swift run ContinuumRevivedSyncChecks
 bundle-check --agent-awareness-check
 bundle-check --app-support-channel-check
@@ -383,5 +386,8 @@ count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
 count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 11
 count ContinuumRevivedSyncIntegrationChecks 1

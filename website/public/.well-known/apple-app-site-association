@@ -1,0 +1,15 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["46TTB6J9DZ.dev.dylanreedx.continuum"],
+        "components": [
+          {
+            "/": "/pair",
+            "comment": "Array Companion pairing invitations"
+          }
+        ]
+      }
+    ]
+  }
+}

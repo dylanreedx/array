@@ -3387,11 +3387,6 @@ enum ContinuumApp {
 
         let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
         let debugMenu = NSMenu(title: "Debug")
-        let authItem = NSMenuItem(title: "Auth", action: nil, keyEquivalent: "")
-        let authMenu = NSMenu(title: "Auth")
-        authMenu.addItem(NSMenuItem(title: "Pair Phone…", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: ""))
-        authItem.submenu = authMenu
-        debugMenu.addItem(authItem)
         let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
         let companionMenu = NSMenu(title: "Companion Sync")
         companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
@@ -3511,8 +3506,6 @@ enum ContinuumApp {
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
-        guard let authMenu = debugMenu.item(withTitle: "Auth")?.submenu else { throw SelfCheckError("missing Debug > Auth menu") }
-        try expectMenuItem(authMenu, title: "Pair Phone…", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: "")
         guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
         try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(companionMenu, title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
@@ -3840,6 +3833,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var paletteContextTileId: UUID?
     private var paletteContextZoneId: UUID?
     private var settingsPanel: SettingsPanel?
+    private var companionSettingsView: CompanionSettingsView?
+    private let companionRelayProvisioning = CompanionRelayProvisioning()
+    private var companionRelayPairingGrantID: UUID?
     private var onboardingPanel: OnboardingPanel?
     private lazy var onboardingProgressStore = OnboardingProgressStore()
     private var starterCreationEligible = false
@@ -8214,7 +8210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let service = try ensureCompanionAuthService()
                 let ttl: TimeInterval = 300
                 let instance = try await service.instance()
-                let companionTestScopes: Scope = [.operator, .transcriptRead, .agentStop]
+                let companionTestScopes: Scope = .companionControl
                 let grant = try await service.issuePairingCredential(
                     scopes: companionTestScopes,
                     ttl: ttl,
@@ -8245,7 +8241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: listener.endpointURL)
                 copyPairingURLToPasteboard(cameraURL)
                 logger.notice("pairing listener ready endpoint=\(listener.endpointURL.absoluteString, privacy: .public) expiresAt=\(expiresAt.ISO8601Format(), privacy: .public) scope=\(grant.scopes.rawValue, privacy: .public)")
-                presentPairingURL(url, cameraURL: cameraURL, listener: listener, expiresAt: expiresAt)
+                if let companionSettingsView, let qrImage = makePairingQRCode(for: cameraURL) {
+                    companionSettingsView.showPairing(image: qrImage, expiresAt: expiresAt)
+                    await refreshCompanionSettings()
+                } else {
+                    presentPairingURL(url, cameraURL: cameraURL, listener: listener, expiresAt: expiresAt)
+                }
             } catch {
                 startedListener?.stop()
                 if let startedListener, localPairingListener === startedListener {
@@ -8395,6 +8396,145 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
+    private func makeCompanionSettingsView() -> CompanionSettingsView {
+        if let companionSettingsView { return companionSettingsView }
+        let view = CompanionSettingsView()
+        view.onCreatePairing = { [weak self] in self?.createCompanionPairingInvitation() }
+        view.onCancelPairing = { [weak self] in
+            guard let self else { return }
+            self.localPairingListener?.stop()
+            self.localPairingListener = nil
+            guard let grantID = self.companionRelayPairingGrantID else { return }
+            self.companionRelayPairingGrantID = nil
+            Task {
+                try? await self.companionRelayProvisioning.cancelPairingGrant(id: grantID)
+            }
+        }
+        view.onRefresh = { [weak self] in
+            Task { @MainActor in await self?.refreshCompanionSettings() }
+        }
+        view.onRedeemInvite = { [weak self] invite in
+            self?.redeemCompanionAlphaInvite(invite)
+        }
+        view.onRevoke = { [weak self] deviceID in
+            Task { @MainActor in
+                guard let self else { return }
+                if (try? self.companionRelayProvisioning.loadIdentity()) != nil {
+                    try? await self.companionRelayProvisioning.revoke(deviceID: deviceID)
+                } else {
+                    try? await self.companionAuthService?.revokeDevice(deviceID)
+                }
+                await self.refreshCompanionSettings()
+            }
+        }
+        companionSettingsView = view
+        Task { @MainActor in await refreshCompanionSettings() }
+        return view
+    }
+
+    private func refreshCompanionSettings() async {
+        guard let view = companionSettingsView else { return }
+        do {
+            let hostedIdentity = try companionRelayProvisioning.loadIdentity()
+            let devices: [CompanionSettingsView.Device]
+            if hostedIdentity != nil {
+                devices = try await companionRelayProvisioning.devices().map {
+                    CompanionSettingsView.Device(
+                        id: $0.id,
+                        name: $0.label,
+                        capabilitySummary: "Activity, transcripts, approvals, and stop",
+                        lastSeen: $0.lastSeenAt
+                    )
+                }
+            } else {
+                let service = try ensureCompanionAuthService()
+                devices = try await service.listDevices()
+                    .filter { $0.revokedAt == nil }
+                    .map {
+                        CompanionSettingsView.Device(
+                            id: $0.id,
+                            name: $0.label,
+                            capabilitySummary: "Activity, transcripts, approvals, and stop",
+                            lastSeen: $0.lastSeenAt
+                        )
+                    }
+            }
+            let hostedHealthy = hostedIdentity == nil ? false : await companionRelayProvisioning.health()
+            let relayStatus: String
+            if hostedIdentity == nil {
+                relayStatus = "Enter an alpha invite to connect this Mac."
+            } else if hostedHealthy {
+                relayStatus = "Connected to \(companionRelayProvisioning.httpOrigin.host ?? "Array Relay")"
+            } else {
+                relayStatus = "Provisioned, but the relay is currently unreachable."
+            }
+            view.update(
+                connection: relayStatus,
+                notification: devices.isEmpty ? "Notifications become available after pairing." : "Notification registration is managed by each paired iPhone.",
+                devices: devices
+            )
+        } catch {
+            view.update(connection: "Relay unavailable", notification: "Could not load companion state.", devices: [])
+        }
+    }
+
+    private func redeemCompanionAlphaInvite(_ invite: String) {
+        Task { @MainActor in
+            do {
+                _ = try await companionRelayProvisioning.redeem(
+                    invite: invite,
+                    deviceLabel: Host.current().localizedName ?? "Array for Mac"
+                )
+                await companionSyncService?.stop()
+                companionSyncService = nil
+                relaySyncTransport?.stop()
+                relaySyncTransport = nil
+                startDesktopCompanionSyncService()
+                await refreshCompanionSettings()
+                createCompanionPairingInvitation()
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could not redeem alpha invite"
+                alert.informativeText = "The invite may be invalid, expired, or already used. It was not saved."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
+    private func createCompanionPairingInvitation() {
+        if (try? companionRelayProvisioning.loadIdentity()) == nil {
+            issueObserverPairingTokenFromMenu(nil)
+            return
+        }
+        Task { @MainActor in
+            do {
+                if let previousGrantID = companionRelayPairingGrantID {
+                    try? await companionRelayProvisioning.cancelPairingGrant(id: previousGrantID)
+                    companionRelayPairingGrantID = nil
+                }
+                let grant = try await companionRelayProvisioning.createPairingGrant(deviceLabel: "Array for iPhone")
+                let url = PairingURL.hostedIssue(
+                    credential: grant.code,
+                    relay: companionRelayProvisioning.webSocketEndpoint
+                )
+                copyPairingURLToPasteboard(url)
+                guard let image = makePairingQRCode(for: url) else { throw CompanionRelayProvisioningError.invalidResponse }
+                companionRelayPairingGrantID = grant.id
+                companionSettingsView?.showPairing(image: image, expiresAt: grant.expiresAt)
+                await refreshCompanionSettings()
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could not create iPhone invitation"
+                alert.informativeText = "Check the relay connection and try again."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
     @MainActor
     private func localPairingExchangeDidSucceed(_ exchange: CompanionPairingExchange) {
         Logger(subsystem: "continuum.auth", category: "pairing").notice(
@@ -8497,7 +8637,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // D4-R1 (ticket 86): a configured relay URL selects the self-owned
         // relay transport — no iCloud entitlement, no CloudKit. Absent that,
         // the parked CloudKit path below still works unchanged.
-        if let relayConfig = RelayClientConfig.resolve() {
+        let hostedIdentity = try companionRelayProvisioning.loadIdentity()
+        let relayConfig = hostedIdentity.map {
+            RelayClientConfig(baseURL: companionRelayProvisioning.httpOrigin, operatorToken: $0.credential)
+        } ?? RelayClientConfig.resolve()
+        if let relayConfig {
             guard let operatorToken = relayConfig.operatorToken, !operatorToken.isEmpty else {
                 throw CompanionSyncAppError.missingRelayOperatorToken
             }
@@ -8505,7 +8649,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 baseURL: relayConfig.baseURL,
                 bearerToken: operatorToken,
                 deviceLabel: "mac-desktop",
-                startAtHead: true
+                startAtHead: true,
+                apiVersion: hostedIdentity == nil ? .legacyV1 : .hardenedV2
             )
             transport.start()
             relaySyncTransport = transport
@@ -8754,7 +8899,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func makeSettingsPanel() -> SettingsPanel {
-        let panel = SettingsPanel(navKeymap: navKeymap)
+        let panel = SettingsPanel(
+            navKeymap: navKeymap,
+            customSectionViews: ["companion": { [weak self] in
+                self?.makeCompanionSettingsView() ?? NSView()
+            }]
+        )
         panel.onClose = { [weak self] in
             self?.focusBroker.closeModal(.settings)
             self?.settingsPanel = nil
