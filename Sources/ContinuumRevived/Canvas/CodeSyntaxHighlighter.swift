@@ -43,9 +43,10 @@ enum CodeSyntaxHighlighter {
 
         func paintCode(_ pattern: String, color: NSColor, options: NSRegularExpression.Options = []) {
             guard let expression = try? NSRegularExpression(pattern: pattern, options: options) else { return }
-            for match in expression.matches(in: source, range: styledRange)
-                where !protected.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) {
-                output.addAttribute(.foregroundColor, value: color, range: match.range)
+            for match in expression.matches(in: source, range: styledRange) {
+                let range = match.range
+                guard !protected.contains(where: { NSIntersectionRange($0, range).length > 0 }) else { continue }
+                output.addAttribute(.foregroundColor, value: color, range: range)
             }
         }
 
