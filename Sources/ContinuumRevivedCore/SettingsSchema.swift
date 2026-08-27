@@ -87,6 +87,7 @@ public enum SettingsSchema {
         let advancedRuntime: [SettingsField] = [
             .number(key: ZoneHydrationBudgetConfig.maxLiveZonesKey, label: "Maximum Live Zones", range: 1...64, default: Double(ZoneHydrationBudgetConfig.defaultMaxLiveZones), unit: "zones", step: 1),
             .number(key: BrowserRuntimeBudget.defaultsKey, label: "Maximum Live Web Views", range: 1...128, default: Double(BrowserRuntimeBudget.defaultMaxLive), unit: "views", step: 1),
+            .number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Maximum Active Child Agents (0 = Unlimited)", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
             .number(key: ZoneHydrationReconcileConfig.intervalKey, label: "Zone Hydration Debounce", range: 0...10_000, default: Double(ZoneHydrationReconcileConfig.defaultIntervalMs), unit: "ms", step: 25),
             .toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close Project Runtime When Unused", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
             .number(key: SessionObserverConfig.debounceMsKey, label: "Agent Status Debounce", range: 0...10_000, default: Double(SessionObserverConfig.defaultDebounceMs), unit: "ms", step: 25),

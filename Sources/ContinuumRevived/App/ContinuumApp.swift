@@ -1421,6 +1421,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-spawn-limit-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentSpawnLimitChecks()
+                    print("ContinuumRevivedAgentSpawnLimitChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-completion-semantic-check") {
             _ = NSApplication.shared
             Task { @MainActor in

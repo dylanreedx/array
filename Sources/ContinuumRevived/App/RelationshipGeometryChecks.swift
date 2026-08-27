@@ -167,8 +167,8 @@ enum RelationshipGeometryChecks {
         // `InboxSort.maxVisibleChildren` the way the inbox itself bounds a
         // parent's visible children.
         //
-        // The fixture size is PINNED to the real spawn caps, not to a literal
-        // "16" or "8": two levels of `AgentSupervisor.maxChildrenPerParent` is
+        // The fixture size is PINNED to the human fan-out batch, not to a literal
+        // "16" or "8": two levels of `AgentSupervisor.maxFanOutBatch` is
         // exactly the "16 live streams" a maxed-out fan-out produces, and
         // two PARENTS' worth of that same cap is exactly
         // `InboxSort.maxVisibleChildren` — the relationship
@@ -176,14 +176,14 @@ enum RelationshipGeometryChecks {
         // either cap changes, THIS assertion fails loudly instead of an
         // edge count silently meaning something else.
         try expect(
-            AgentSupervisor.maxChildrenPerParent * AgentSupervisor.maxChildrenPerParent == 16,
-            "the 16-live-stream fixture below assumes maxChildrenPerParent² == 16; "
-            + "maxChildrenPerParent is \(AgentSupervisor.maxChildrenPerParent)")
+            AgentSupervisor.maxFanOutBatch * AgentSupervisor.maxFanOutBatch == 16,
+            "the 16-live-stream fixture below assumes maxFanOutBatch² == 16; "
+            + "maxFanOutBatch is \(AgentSupervisor.maxFanOutBatch)")
         try expect(
-            AgentSupervisor.maxChildrenPerParent + AgentSupervisor.maxChildrenPerParent
+            AgentSupervisor.maxFanOutBatch + AgentSupervisor.maxFanOutBatch
                 == InboxSort.maxVisibleChildren,
             "InboxSort.maxVisibleChildren (\(InboxSort.maxVisibleChildren)) must equal two parents' worth of "
-            + "AgentSupervisor.maxChildrenPerParent (\(AgentSupervisor.maxChildrenPerParent)) — the canvas lineage "
+            + "AgentSupervisor.maxFanOutBatch (\(AgentSupervisor.maxFanOutBatch)) — the canvas lineage "
             + "bound below reuses maxVisibleChildren on exactly that assumption")
 
         let fanParentTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D0")!
@@ -245,7 +245,7 @@ enum RelationshipGeometryChecks {
 
         print("RelationshipGeometryChecks: the document connector and the lineage overlay both "
               + "paint on their endpoints at a panned, zoomed camera, and track it when it moves; "
-              + "a 16-edge fan-out (maxChildrenPerParent² live streams) bounds to exactly "
+              + "a 16-edge fan-out (maxFanOutBatch² live streams) bounds to exactly "
               + "InboxSort.maxVisibleChildren painted edges, each still on its own parent/child pair, "
               + "through one click-transparent animation")
     }

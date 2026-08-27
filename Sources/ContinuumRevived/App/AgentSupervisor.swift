@@ -935,6 +935,9 @@ final class AgentSupervisor {
     /// per-agent projection below is skipped entirely rather than adding
     /// per-event cost to hundreds of unrelated fixtures.
     private let transcriptStore: AgentTranscriptStore?
+    /// Applies only to child turns whose runner Array creates. `nil` means
+    /// unlimited. Provider-owned observed children never consult this value.
+    private let maximumActiveManagedChildren: () -> Int?
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -1048,7 +1051,10 @@ final class AgentSupervisor {
         attachmentStore: AgentComposerAttachmentStore? = nil,
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
         codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
-        transcriptStore: AgentTranscriptStore? = nil
+        transcriptStore: AgentTranscriptStore? = nil,
+        maximumActiveManagedChildren: @escaping () -> Int? = {
+            AgentSpawnLimitConfig.maximumActiveChildren()
+        }
     ) {
         self.store = store
         self.makeRunner = makeRunner
@@ -1061,6 +1067,7 @@ final class AgentSupervisor {
         )
         self.submissionRecoveryStore = submissionRecoveryStore
         self.transcriptStore = transcriptStore
+        self.maximumActiveManagedChildren = maximumActiveManagedChildren
         self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
             guard let threadId = record.codexThreadId else { return nil }
             return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
@@ -2558,10 +2565,9 @@ final class AgentSupervisor {
     /// prompt that tells a worker to delegate produces workers that delegate, and
     /// every one of them is a Pi process. Nothing else in the app bounds that.
     nonisolated static let maxSpawnDepth = 2
-    /// How many children one parent may have. Same reason, the other axis: a single
-    /// turn can emit as many tool calls as the model likes.
-    static let maxChildrenPerParent = 4
-
+    /// The shipped breadth cap retained only as a regression-fixture width. It
+    /// is not an admission policy anymore; production defaults to unlimited.
+    static let formerChildrenPerParentCap = 4
     /// Why a `spawn_agent` call did not produce an agent. Carries counts and caps
     /// only — never the request's `prompt` or a path — because the refusal is
     /// SURFACED IN THE PARENT'S TRANSCRIPT, which is an `AgentRuntimeEvent`, i.e. the
@@ -2654,23 +2660,14 @@ final class AgentSupervisor {
         var translator: PiEventTranslator
     }
 
-    /// (parent, toolUseID)-derived child ids that `adoptObservedChild` REFUSED
-    /// (the depth or per-parent sibling cap), as opposed to merely not having
-    /// minted yet. `bindObservedRun` consults this so it can tell "the child
-    /// doesn't exist yet" (buffer — it may still arrive) from "the child will
-    /// never exist" (don't start tailing work with nowhere to go).
-    private var refusedObservedChildIDs: Set<AgentID> = []
-
     /// Bind a delegated run to the child it belongs to, and start watching for it.
     ///
     /// Called on the main actor from the runner's report. The child may not exist
     /// yet — `tool_execution_end` can be translated before the main-actor hop that
     /// adopted the child from `tool_execution_start` has run — so the binding is
     /// keyed by the tool call id and `deliverSubagentEvent` buffers anything that
-    /// arrives early, exactly as the claude path does. That is distinct from a
-    /// child that will NEVER exist because `adoptObservedChild` already refused
-    /// it (past the per-parent cap): tailing that run would buffer into
-    /// `pendingSubagentEvents` forever, for a destination that cannot appear.
+    /// arrives early, exactly as the claude path does. Provider-owned children
+    /// are always adopted, so a later run update always has a destination.
     private func bindObservedRun(_ handle: ObservedRunHandle, parent: AgentID) {
         guard let parentRecord = records[parent] else { return }
         let childID = AgentID(rawValue: AgentRecord.observedChildID(
@@ -2679,7 +2676,6 @@ final class AgentSupervisor {
         // same cursor rather than starting a second one. Keyed on the tool call id
         // and never on the runId, which embeds a timestamp and a random suffix.
         if observedRunBindings[handle.runId] != nil { return }
-        if records[childID] == nil, refusedObservedChildIDs.contains(childID) { return }
         observedRunBindings[handle.runId] = ObservedRunBinding(
             parent: parent,
             childID: childID,
@@ -3036,31 +3032,17 @@ final class AgentSupervisor {
         guard let toolUseID = request.sourceItemID, !toolUseID.isEmpty else {
             // Without the announcing call's id there is no stable identity, and a
             // child Array cannot re-identify later is not worth minting.
-            return refuseSpawn(.roleUnresolved, for: parentId)
+            let toolName = parent.harness == .claudeCode ? "Agent" : "delegate_agent"
+            return refuseSpawn(.roleUnresolved, for: parentId, toolName: toolName)
         }
         let childID = AgentID(rawValue: AgentRecord.observedChildID(
             parentAgentID: parentId.rawValue, toolUseID: toolUseID))
         if records[childID] != nil { return childID }
 
-        // The caps still bind. They are the only thing bounding a MODEL-authored
-        // spawn request, and an observed child costs a row, a sidebar slot and a
-        // live subscription even though it costs no process.
-        //
-        // Every refusal below records `childID` in `refusedObservedChildIDs`
-        // BEFORE returning — that is what lets `bindObservedRun` tell "this
-        // child hasn't been minted yet" from "this child will never be minted"
-        // for the run its own tool call announced, and refuse to start tailing
-        // work with nowhere to go.
-        let depth = depth(of: parentId) + 1
-        guard depth <= Self.maxSpawnDepth else {
-            refusedObservedChildIDs.insert(childID)
-            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
-        }
-        let siblings = children(of: parentId).count
-        guard siblings < Self.maxChildrenPerParent else {
-            refusedObservedChildIDs.insert(childID)
-            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
-        }
+        // This child already exists inside the provider. Applying Array's spawn
+        // caps here cannot prevent work; it only makes the running child
+        // invisible and leaves its transcript with nowhere to land. Provider-
+        // owned children are therefore always adopted and restored.
 
         let projectRoot = Self.repositoryRoot(of: parent)
         // `prompt: nil` deliberately: the child is already running its task inside
@@ -3163,10 +3145,10 @@ final class AgentSupervisor {
                 .depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId,
                 handle: request.sourceItemID, requestedRole: request.role)
         }
-        let siblings = children(of: parentId).count
-        guard siblings < Self.maxChildrenPerParent else {
+        let activeChildren = activeManagedChildren(of: parentId).count
+        if let cap = maximumActiveManagedChildren(), activeChildren >= cap {
             return refuseSpawn(
-                .childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId,
+                .childCapped(children: activeChildren, cap: cap), for: parentId,
                 handle: request.sourceItemID, requestedRole: request.role)
         }
         // The role resolves against the PROJECT's registry, not the parent's possibly
@@ -3259,9 +3241,10 @@ final class AgentSupervisor {
         _ refusal: SpawnRefusal,
         for parentId: AgentID,
         handle: String? = nil,
-        requestedRole: String? = nil
+        requestedRole: String? = nil,
+        toolName: String = SpawnRequest.toolName
     ) -> AgentID? {
-        warn("AgentSupervisor: refusing \(SpawnRequest.toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
+        warn("AgentSupervisor: refusing \(toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
         guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
@@ -3269,7 +3252,7 @@ final class AgentSupervisor {
             threadId: thread,
             itemId: itemId,
             kind: .error,
-            title: "\(SpawnRequest.toolName) refused: \(refusal.reason)"
+            title: "\(toolName) refused: \(refusal.reason)"
         ), to: parentId)
         deliver(.itemCompleted(
             threadId: thread,
@@ -3302,6 +3285,14 @@ final class AgentSupervisor {
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {
         records.values.filter { $0.parentAgentID == id }.map(\.id)
+    }
+
+    /// Children currently consuming an Array-managed turn slot. Durable child
+    /// records and idle/completed sessions do not block future delegation.
+    private func activeManagedChildren(of id: AgentID) -> [AgentID] {
+        children(of: id).filter { childID in
+            records[childID]?.capabilities != .observedReadOnly && runners[childID] != nil
+        }
     }
 
     /// How many parents this agent has above it. Bounded by the record count so a
@@ -3430,8 +3421,8 @@ final class AgentSupervisor {
 
     /// How many agents ONE fan-out may start. Selecting thirty rows must not start
     /// thirty Pi processes and thirty worktrees; the rest come back as `deferred`.
-    /// Same value as `maxChildrenPerParent`, and for the same reason — this is the
-    /// human-authored twin of that model-authored cap.
+    /// Human-triggered queue batching stays bounded independently from provider
+    /// delegation. It is not a per-parent lifetime cap.
     static let maxFanOutBatch = 4
 
     /// Called when an agent that was fanned out for an item finishes a turn
@@ -3478,8 +3469,8 @@ final class AgentSupervisor {
     /// Siblings by default: `parentAgentID` is nil, because a human selecting rows
     /// is not an agent. Passing one makes them children of the orchestrator that
     /// asked, and the batch is then ALSO held to whatever room that parent has left
-    /// under `maxChildrenPerParent` — otherwise a fan-out would be the way around a
-    /// cap that `handleSpawnRequest` enforces one spawn at a time.
+    /// under the configured active-child limit — otherwise a fan-out would be the
+    /// way around a limit that `handleSpawnRequest` enforces one spawn at a time.
     @discardableResult
     func fanOut(
         items: [FanOutItem],
@@ -3494,8 +3485,8 @@ final class AgentSupervisor {
     ) -> FanOutReport {
         var report = FanOutReport()
         var cap = Self.maxFanOutBatch
-        if let parentAgentID {
-            cap = min(cap, max(0, Self.maxChildrenPerParent - children(of: parentAgentID).count))
+        if let parentAgentID, let maximumActiveManagedChildren = maximumActiveManagedChildren() {
+            cap = min(cap, max(0, maximumActiveManagedChildren - activeManagedChildren(of: parentAgentID).count))
         }
         report.cap = cap
 
@@ -4951,12 +4942,9 @@ final class AgentSupervisor {
         subscribers[id]?.count ?? 0
     }
 
-    /// How many `delegate_agent` runs are currently bound and being tailed. The
-    /// otherwise-unobservable diagnostic C's fix exists for: a run bound to a
-    /// child `adoptObservedChild` will never mint (past the per-parent cap)
-    /// buffers into `pendingSubagentEvents` forever with no external symptom
-    /// except this number never coming back down. Read-only, no production
-    /// caller — the same reason `subscriberCount(for:)` exists.
+    /// How many `delegate_agent` runs are currently bound and being tailed.
+    /// Read-only, no production caller — the same reason
+    /// `subscriberCount(for:)` exists.
     var observedRunBindingCount: Int { observedRunBindings.count }
 
     // MARK: - QA observer counts (M1.4, `.plans/46`)
@@ -7826,7 +7814,7 @@ func runAgentSupervisorChecks() async throws {
     let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
     let codexSubagentReport = try await checkCodexProviderSubagentRouting(fail: fail)
     let refusalReport = try await checkRefusedSpawnIsActionableAndLeavesNothing(fail: fail)
-    let observedCapReport = try await checkObservedRunCapRefusalDoesNotBufferForever(fail: fail)
+    let observedCapReport = try await checkObservedChildrenPastFormerCapStayVisible(fail: fail)
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
 
@@ -12468,28 +12456,33 @@ private func checkPiDelegatedRunTailing(
     return "one pi delegate_agent call became one read-only child keyed on its tool call id, its run was tailed into the child's own transcript without re-delivery, a completion rewrite closed it instead of replaying it, a relaunch added no child and no duplicate events, and a stale running status with a dead pid reads as over"
 }
 
-/// T6-C — a run bound to a child `adoptObservedChild` will NEVER mint does not
-/// start tailing.
+/// T6-C — provider-owned children remain visible past Array's former breadth cap.
 ///
-/// `adoptObservedChild` refuses a 5th `delegate_agent` child past the per-parent
-/// cap (`maxChildrenPerParent`). Before this fix, `bindObservedRun` bound and
-/// began tailing that run's directory anyway — its events had nowhere to go but
-/// `pendingSubagentEvents[childID]`, which no child would ever exist to drain.
-/// No external symptom of that beyond `observedRunBindingCount` never coming
-/// back down, so that diagnostic (added for this witness, no production caller)
-/// is what this asserts.
-///
-/// The cap is filled through the real `handleSpawnRequest` entry point — the
-/// same one a `tool_execution_start` line drives — so the refusal being tested
-/// is the actual production refusal, not a stand-in for it. The refused call's
-/// `tool_execution_end` (the half that reports the run) is then driven through
-/// the real `ObservedRunReporting` wiring via a `FixtureStreamRunner`, not by
-/// calling `bindObservedRun` directly.
+/// Claude `Agent` and Pi `delegate_agent` children already exist when Array sees
+/// them. Refusing the fifth record never prevented work; it only hid the running
+/// child and stranded its transcript. Drive the production adoption entry point
+/// through the exact old boundary and assert every child is retained.
 @MainActor
-private func checkObservedRunCapRefusalDoesNotBufferForever(
+private func checkObservedChildrenPastFormerCapStayVisible(
     fail: (String) -> Error
 ) async throws -> String {
     let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let settingsSuite = "continuum-agent-spawn-limit-check-\(UUID().uuidString)"
+    guard let limitDefaults = UserDefaults(suiteName: settingsSuite) else {
+        throw fail("T6-C: could not create isolated defaults for the agent-limit setting")
+    }
+    defer { UserDefaults.standard.removePersistentDomain(forName: settingsSuite) }
+    guard AgentSpawnLimitConfig.maximumActiveChildren(defaults: limitDefaults) == nil else {
+        throw fail("T6-C: the shipped active-child default is not Unlimited")
+    }
+    limitDefaults.set(7, forKey: AgentSpawnLimitConfig.maximumActiveChildrenKey)
+    guard AgentSpawnLimitConfig.maximumActiveChildren(defaults: limitDefaults) == 7 else {
+        throw fail("T6-C: the configured active-child limit did not resolve")
+    }
+    limitDefaults.set(0, forKey: AgentSpawnLimitConfig.maximumActiveChildrenKey)
+    guard AgentSpawnLimitConfig.maximumActiveChildren(defaults: limitDefaults) == nil else {
+        throw fail("T6-C: zero did not resolve back to Unlimited")
+    }
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("continuum-observed-cap-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -12497,69 +12490,72 @@ private func checkObservedRunCapRefusalDoesNotBufferForever(
     try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
     let store = AgentStore(applicationSupportDirectory: root)
 
-    // Reports ONE `tool_execution_end` for the tool call that will be refused —
-    // the run report a real extension sends once the child's process resolves a
-    // runId, independent of whether Array chose to adopt a child for it.
-    let overflowRunner = FixtureStreamRunner(lines: [
-        #"{"type":"tool_execution_end","toolCallId":"cap-overflow","toolName":"delegate_agent","result":{"details":{"runId":"cap-overflow-run-000"}}}"#
-    ])
     let supervisor = AgentSupervisor(
         store: store,
-        makeRunner: { launch -> AgentRunning in
-            launch.record.parentAgentID == nil
-                ? overflowRunner
-                : ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
-        },
+        makeRunner: { _ in ScriptedAgentRunner(script: [.sessionStateChanged(.ready)]) },
         warn: { _ in })
     let parentId = supervisor.spawn(
         role: nil, prompt: nil, cwd: cwd, harness: .pi,
         model: config.model, thinking: config.thinking)
 
-    for i in 0..<AgentSupervisor.maxChildrenPerParent {
+    for i in 0...AgentSupervisor.formerChildrenPerParentCap {
         guard supervisor.handleSpawnRequest(
-            SpawnRequest(role: nil, prompt: "cap filler \(i)", isolated: false,
+            SpawnRequest(role: nil, prompt: "observed child \(i)", isolated: false,
                          sourceItemID: "cap-fill-\(i)", observedOnly: true),
             from: parentId) != nil
         else {
-            throw fail("T6-C: filling the per-parent cap with observed children was itself refused at \(i)")
+            throw fail("T6-C: provider-owned child \(i + 1) was hidden at Array's former cap")
         }
     }
-    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
-        throw fail("T6-C: expected \(AgentSupervisor.maxChildrenPerParent) children after filling the cap, got \(supervisor.children(of: parentId).count)")
-    }
-    guard supervisor.handleSpawnRequest(
-        SpawnRequest(role: nil, prompt: "cap overflow", isolated: false,
-                     sourceItemID: "cap-overflow", observedOnly: true),
-        from: parentId) == nil
-    else {
-        throw fail("T6-C: a 5th observed child was adopted past the cap of \(AgentSupervisor.maxChildrenPerParent) — the refusal fixture is not exercising the cap")
-    }
-    guard supervisor.observedRunBindingCount == 0 else {
-        throw fail("T6-C: \(supervisor.observedRunBindingCount) run binding(s) already exist before the refused call's tool_execution_end even arrived")
+    let expected = AgentSupervisor.formerChildrenPerParentCap + 1
+    guard supervisor.children(of: parentId).count == expected,
+          supervisor.children(of: parentId).allSatisfy({
+              supervisor.records[$0]?.capabilities == .observedReadOnly
+          }) else {
+        throw fail("T6-C: expected all \(expected) provider-owned children past the old boundary, got \(supervisor.children(of: parentId).count)")
     }
 
-    let parentInbox = EventInbox()
-    let parentStream = supervisor.events(for: parentId)
-    let parentTask = Task { @MainActor in for await e in parentStream { parentInbox.append(e) } }
-    defer { parentTask.cancel() }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        supervisor.subscriberCount(for: parentId) == 1
-    }) else {
-        throw fail("T6-C: the parent's subscriber never registered")
+    // An explicit managed-process limit counts only turns that are actually
+    // running. A completed/stopped durable child must release its slot.
+    let managedStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("managed", isDirectory: true))
+    let managed = AgentSupervisor(
+        store: managedStore,
+        makeRunner: { _ in ScriptedAgentRunner(
+            script: [.turnStarted(threadId: "managed-cap", turnId: UUID().uuidString)],
+            holdUntilStopped: true)
+        },
+        warn: { _ in },
+        maximumActiveManagedChildren: { 1 })
+    let managedParent = managed.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+    guard let firstManaged = managed.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "first active child", isolated: false),
+        from: managedParent) else {
+        throw fail("T6-C: configured managed cap refused its first active child")
     }
-    supervisor.send("delegate one more, past the cap", to: parentId)
+    guard managed.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "second concurrent child", isolated: false),
+        from: managedParent) == nil else {
+        throw fail("T6-C: configured active-child limit did not constrain concurrent Array-managed work")
+    }
+    managed.stop(firstManaged)
+    guard managed.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "replacement after stop", isolated: false),
+        from: managedParent) != nil else {
+        throw fail("T6-C: a stopped durable child kept consuming the active-child slot")
+    }
 
-    // Give the async report every chance to land and be (mis)processed before
-    // asserting it did not start tailing anything.
-    try? await Task.sleep(nanoseconds: 1_500_000_000)
-    guard supervisor.observedRunBindingCount == 0 else {
-        throw fail("T6-C: a run for a REFUSED child was bound and is being tailed (\(supervisor.observedRunBindingCount) binding(s)) — its events have nowhere to go and will buffer forever")
-    }
-    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
-        throw fail("T6-C: the refused call's run report minted a child anyway, past the cap")
-    }
+    return "\(expected) provider-owned children crossed Array's former four-child boundary, while an explicit managed limit counted only active turns and released a stopped child's slot"
+}
 
-    return "a delegate_agent call refused past the per-parent cap never starts tailing its run, even once the refused call's own tool_execution_end arrives"
+@MainActor
+func runAgentSpawnLimitChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    let report = try await checkObservedChildrenPastFormerCapStayVisible {
+        CheckError(description: $0)
+    }
+    print("AgentSpawnLimit: \(report)")
 }
 
 /// T6-D — a parent's watcher is scoped to that parent's own bindings, and a
@@ -12846,9 +12842,8 @@ private func checkObservedRunLivenessSweepClosesQuietDeadRun(
 ///      it: `<repo>/.worktrees/<child>`, with git agreeing.
 ///   5. The depth cap holds: a grandchild is allowed, a great-grandchild is refused,
 ///      and the refusal is SAID in the requesting agent's transcript.
-///   6. The per-parent child cap holds, refusing does not disturb the children that
-///      already exist, and children whose role declares no provider settings still
-///      inherit the parent's (P2D.3).
+///   6. Array's former four-child boundary is crossed, and children whose role
+///      declares no provider settings still inherit the parent's (P2D.3).
 ///   7. A role this project does not define is REFUSED (P2D.3), said on the requesting
 ///      agent's transcript, without echoing the role id or a path.
 ///
@@ -12884,7 +12879,7 @@ private func checkSpawnFromToolCall(
         throw fail("the role fixture must differ from the inherited settings, or the resolution assertions are vacuous")
     }
     try writeSpawnCheckRole(in: repo, id: "code-scout", model: scoutModel, reasoning: scoutThinking, tools: scoutTools)
-    for id in ["grandchild"] + (1..<AgentSupervisor.maxChildrenPerParent).map({ "worker-\($0)" }) {
+    for id in ["grandchild"] + (1...AgentSupervisor.formerChildrenPerParentCap).map({ "worker-\($0)" }) {
         try writeSpawnCheckRole(in: repo, id: id)
     }
     try runIsolatedSpawnGit(["add", ".pi"], in: repo)
@@ -13134,20 +13129,21 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a refusal reason carries the request's prompt or a host path: \(refusalTitles)")
     }
 
-    // MARK: 6 · the per-parent child cap
+    // MARK: 6 · durable history does not impose the former child cap
 
-    // The parent already has one child (the captured call). Fill the rest of the cap,
-    // non-isolated so this stays a records-and-caps assertion rather than N worktrees.
-    for index in 1..<AgentSupervisor.maxChildrenPerParent {
+    // The parent already has one child (the captured call). Add four more,
+    // non-isolated so this stays an admission assertion rather than N worktrees.
+    for index in 1...AgentSupervisor.formerChildrenPerParentCap {
         guard supervisor.handleSpawnRequest(
             SpawnRequest(role: "worker-\(index)", prompt: "task \(index)", isolated: false),
             from: parentId
         ) != nil else {
-            throw fail("child \(index + 1) of \(AgentSupervisor.maxChildrenPerParent) was refused while inside the cap")
+            throw fail("child \(index + 1) was refused at Array's former four-child boundary")
         }
     }
-    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
-        throw fail("the parent has \(supervisor.children(of: parentId).count) children, expected \(AgentSupervisor.maxChildrenPerParent)")
+    let childrenPastFormerCap = AgentSupervisor.formerChildrenPerParentCap + 1
+    guard supervisor.children(of: parentId).count == childrenPastFormerCap else {
+        throw fail("the parent has \(supervisor.children(of: parentId).count) children, expected \(childrenPastFormerCap) past the former cap")
     }
     // P2D.3 — those roles declare no model or reasoning, so the PARENT's settings are
     // still what they run with (and no `--tools`, because the role names none). Red
@@ -13156,8 +13152,8 @@ private func checkSpawnFromToolCall(
     let workers = supervisor.children(of: parentId)
         .compactMap { supervisor.records[$0] }
         .filter { ($0.role ?? "").hasPrefix("worker-") }
-    guard workers.count == AgentSupervisor.maxChildrenPerParent - 1 else {
-        throw fail("expected \(AgentSupervisor.maxChildrenPerParent - 1) role-only children, got \(workers.count)")
+    guard workers.count == AgentSupervisor.formerChildrenPerParentCap else {
+        throw fail("expected \(AgentSupervisor.formerChildrenPerParentCap) role-only children, got \(workers.count)")
     }
     for worker in workers {
         guard worker.model == piConfig.model, worker.thinking == piConfig.thinking else {
@@ -13166,18 +13162,6 @@ private func checkSpawnFromToolCall(
         guard AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs.isEmpty else {
             throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker, spawnDepth: 0).extraArgs)")
         }
-    }
-    let atCap = supervisor.children(of: parentId).count
-    // Red when the child-count guard is deleted: `a 5th child was spawned past the
-    // per-parent cap of 4`.
-    guard supervisor.handleSpawnRequest(
-        SpawnRequest(role: "one-too-many", prompt: "task N", isolated: false),
-        from: parentId
-    ) == nil else {
-        throw fail("a child past the per-parent cap of \(AgentSupervisor.maxChildrenPerParent) was spawned anyway")
-    }
-    guard supervisor.children(of: parentId).count == atCap else {
-        throw fail("a refused spawn disturbed the existing children: \(supervisor.children(of: parentId).count), expected \(atCap)")
     }
     // An agent this supervisor does not know gets nothing, and does not crash.
     guard supervisor.handleSpawnRequest(
@@ -13433,7 +13417,7 @@ private func checkSpawnFromToolCall(
     }
 
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
-    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request; and a claude Agent announcement was ADOPTED as one observedReadOnly, parented, process-less child at a (parent, tool_use_id)-derived id that re-observation converges on, with exactly one chip on the parent and no prompt in it"
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth), \(childrenPastFormerCap) managed children crossed the former breadth cap, \(workers.count) role-only children inherited the parent's settings, an undefined role was refused without echoing its id, a codex parent was refused honestly about transport observability rather than a false claim it cannot spawn, and a mirrored observedReadOnly parent restored from the store was refused for having no runner to spawn through — neither refusal echoing its request; and a claude Agent announcement was ADOPTED as one observedReadOnly, parented, process-less child at a (parent, tool_use_id)-derived id that re-observation converges on, with exactly one chip on the parent and no prompt in it"
 }
 
 /// The `spawn_agent` result-file channel — what makes delegation COLLECTABLE.
@@ -15963,8 +15947,8 @@ private func runnerConstructionSites(typeName: String) throws -> (sites: Set<Str
 ///   4. An item that already has an agent is REFUSED, not fanned out twice.
 ///   5. The mapping survives a relaunch: a second supervisor over the same store
 ///      resolves item → agent from the restored records alone.
-///   6. A fan-out under a parent is also held to `maxChildrenPerParent`, so it is
-///      not a way around the cap `handleSpawnRequest` enforces one spawn at a time.
+///   6. A parent with durable, idle child history still gets a full fan-out batch;
+///      only an explicitly configured active-child limit can reduce it.
 ///
 /// Negative tests observed red at exit 1 with the final code are quoted at the
 /// assertions they land at.
@@ -16217,7 +16201,7 @@ func runAgentFanOutChecks() async throws {
         }
     }
 
-    // MARK: 6 · a fan-out under a parent is held to the parent's child cap too
+    // MARK: 6 · idle durable children do not reduce a parented fan-out
 
     let parentId = supervisor.spawn(
         role: "orchestrator",
@@ -16247,13 +16231,13 @@ func runAgentFanOutChecks() async throws {
         isolated: false
     )
     try requireAccounted(childReport, childItems, "the parented fan-out")
-    // NEGATIVE TEST (observed red): the cap ignoring the parent's existing children
-    // → "FAIL: a parent with 3 of 4 child slots used fanned out 3 …".
-    guard childReport.cap == 1, childReport.launched.count == 1, childReport.deferred == ["CHILD-2", "CHILD-3"] else {
-        throw fail("a parent with 3 of \(AgentSupervisor.maxChildrenPerParent) child slots used fanned out \(childReport.launched.count) (cap \(childReport.cap), deferred \(childReport.deferred))")
+    guard childReport.cap == AgentSupervisor.maxFanOutBatch,
+          childReport.launched.count == 3,
+          childReport.deferred.isEmpty else {
+        throw fail("a parent with 3 idle durable children did not receive a full fan-out: launched \(childReport.launched.count), cap \(childReport.cap), deferred \(childReport.deferred)")
     }
-    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
-        throw fail("the parent ended with \(supervisor.children(of: parentId).count) children, past the cap of \(AgentSupervisor.maxChildrenPerParent)")
+    guard supervisor.children(of: parentId).count == 6 else {
+        throw fail("the parent ended with \(supervisor.children(of: parentId).count) children, expected all 3 existing plus 3 fanned out")
     }
 
     // MARK: 7 · the gesture is REACHABLE in the app, not only from this check
