@@ -13,6 +13,28 @@ private struct DelayedCompletionProvider: AgentCompletionProvider {
     }
 }
 
+private final class BlockingPathDiscovery: @unchecked Sendable {
+    let started = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var count = 0
+
+    func discover(_ root: URL) -> [String]? {
+        lock.lock()
+        count += 1
+        lock.unlock()
+        started.signal()
+        release.wait()
+        return ["README.md"]
+    }
+
+    var invocationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 func runAgentCompletionNegativeWitness() {
     let query = AgentCompletionQueryDetector.activeQuery(
         in: "literal \\@not-a-query",
@@ -445,6 +467,39 @@ func runAgentCompletionChecks() async throws {
     cancelled.cancel()
     let cancelledResults = await cancelled.value
     expect(cancelledResults.isEmpty, "AgentCompletion: cancelled file-index query returned actionable rows")
+
+    // The editor cancels the previous request on every keystroke. Once a scan
+    // has actually begun, it must finish populating the cache for the newer
+    // queued query instead of forcing that query to repeat the full scan.
+    let blockingDiscovery = BlockingPathDiscovery()
+    let cancellationIndex = AgentFileIndex(
+        entryLimit: 100,
+        resultLimit: 3,
+        pathDiscovery: blockingDiscovery.discover
+    )
+    let superseded = Task {
+        await cancellationIndex.suggestions(for: AgentCompletionQuery(
+            trigger: "@", text: "read", replacementRange: NSRange(location: 0, length: 5), context: falconContext
+        ))
+    }
+    expect(
+        blockingDiscovery.started.wait(timeout: .now() + 1) == .success,
+        "AgentCompletion: controlled file-index scan did not start"
+    )
+    superseded.cancel()
+    blockingDiscovery.release.signal()
+    let supersededResults = await superseded.value
+    expect(
+        supersededResults.isEmpty,
+        "AgentCompletion: superseded file-index query returned actionable rows"
+    )
+    let replacementResults = await cancellationIndex.suggestions(for: AgentCompletionQuery(
+        trigger: "@", text: "read", replacementRange: NSRange(location: 0, length: 5), context: falconContext
+    ))
+    expect(
+        replacementResults.first?.title == "README.md" && blockingDiscovery.invocationCount == 1,
+        "AgentCompletion: a superseded in-flight scan was not reused by the next typed query"
+    )
 
     let untrusted = AgentCompletionContext(
         agentID: falconContext.agentID,

@@ -16,6 +16,8 @@ public struct AgentFileIndexEntry: Equatable, Sendable {
 /// the checkout but may move to an explicit host-local directory outside it.
 /// Cache keys include agent/backend/root identity so scopes never cross tiles.
 public actor AgentFileIndex {
+    public typealias PathDiscovery = @Sendable (_ root: URL) -> [String]?
+
     private struct CacheKey: Hashable {
         let agentID: AgentID
         let backend: AgentBackend
@@ -30,11 +32,17 @@ public actor AgentFileIndex {
 
     private let entryLimit: Int
     private let resultLimit: Int
+    private let pathDiscovery: PathDiscovery?
     private var cache: [CacheKey: [AgentFileIndexEntry]] = [:]
 
-    public init(entryLimit: Int = 50_000, resultLimit: Int = 50) {
+    public init(
+        entryLimit: Int = 50_000,
+        resultLimit: Int = 50,
+        pathDiscovery: PathDiscovery? = nil
+    ) {
         self.entryLimit = max(1, entryLimit)
         self.resultLimit = max(1, resultLimit)
+        self.pathDiscovery = pathDiscovery
     }
 
     public func invalidate(context: AgentCompletionContext? = nil) {
@@ -61,10 +69,13 @@ public actor AgentFileIndex {
         if let cached = cache[key] { return cached }
         guard isDirectory(root), !isSymbolicLink(root) else { return [] }
 
-        let paths = gitPaths(root: root) ?? fallbackPaths(root: root)
-        guard !Task.isCancelled else { return [] }
+        let paths = pathDiscovery?(root) ?? gitPaths(root: root) ?? fallbackPaths(root: root)
+        // Finish and cache a scan once it has started, even when the query that
+        // initiated it has already been superseded by another keystroke. The
+        // actor serializes requests: abandoning materialization here made every
+        // queued query start the same full repository scan again, so normal
+        // typing could keep `@` completion permanently behind the editor.
         let entries = materialize(paths: paths, root: root)
-        guard !Task.isCancelled else { return [] }
         cache[key] = entries
         return entries
     }
@@ -198,7 +209,6 @@ public actor AgentFileIndex {
     private func materialize(paths: [String], root: URL) -> [AgentFileIndexEntry] {
         var allPaths: Set<String> = []
         for rawPath in paths.prefix(entryLimit) {
-            guard !Task.isCancelled else { return [] }
             let relative = normalizedRelativePath(rawPath)
             guard !relative.isEmpty,
                   let url = containedURL(relativePath: relative, root: root),
@@ -252,7 +262,7 @@ public actor AgentFileIndex {
         let excluded = Set([".git", ".array", ".build", "build", "DerivedData", "node_modules", ".cache"])
         var queue = [root]
         var result: [String] = []
-        while !queue.isEmpty && result.count < entryLimit && !Task.isCancelled {
+        while !queue.isEmpty && result.count < entryLimit {
             let directory = queue.removeFirst()
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isHiddenKey]
             let children = (try? FileManager.default.contentsOfDirectory(

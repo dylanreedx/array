@@ -778,7 +778,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             let relative = directory.path == checkoutRoot.path
                 ? ""
                 : String(directory.path.dropFirst(checkoutRoot.path.count + 1))
-            return (["Home"] + relative
+            return ([checkoutRoot.lastPathComponent] + relative
                 .split(separator: "/").map(String.init)).joined(separator: "  ›  ")
         }
         let homeComponents = checkoutRoot.pathComponents
@@ -794,7 +794,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         )
         let descendants = directoryComponents.dropFirst(commonCount)
             .filter { $0 != "/" }
-        return (["Home"] + ascents + descendants).joined(separator: "  ›  ")
+        return ([checkoutRoot.lastPathComponent] + ascents + descendants).joined(separator: "  ›  ")
     }
 
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {

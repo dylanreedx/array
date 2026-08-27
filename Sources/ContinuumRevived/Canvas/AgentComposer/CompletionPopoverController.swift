@@ -145,7 +145,7 @@ final class CompletionPopoverController {
                 )
                 popoverLayout = .completion(CompletionPopoverLayout(
                     breadcrumb: breadcrumb,
-                    footer: "↑↓ Navigate   →/Tab Open   ←/⌫ Up   ↵ Select   Esc Close"
+                    footer: "Type to fuzzy find   ↑↓ Choose   Tab/→ Open folder   ↵ Add"
                 ))
                 listPresentation = .completions
             } else {
@@ -297,7 +297,7 @@ final class CompletionPopoverController {
             let relative = directory.path == checkoutRoot.path
                 ? ""
                 : String(directory.path.dropFirst(checkoutRoot.path.count + 1))
-            return (["Home"] + relative
+            return ([checkoutRoot.lastPathComponent] + relative
                 .split(separator: "/").map(String.init)).joined(separator: "  ›  ")
         }
 
@@ -314,7 +314,7 @@ final class CompletionPopoverController {
         )
         let descendants = directoryComponents.dropFirst(commonCount)
             .filter { $0 != "/" }
-        return (["Home"] + ascents + descendants).joined(separator: "  ›  ")
+        return ([checkoutRoot.lastPathComponent] + ascents + descendants).joined(separator: "  ›  ")
     }
 
     private static func commandRowIcon(for completion: AgentCompletion) -> ChoiceIcon? {
