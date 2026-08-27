@@ -35,9 +35,13 @@ final class CompanionSettingsView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(connection: String, notification: String, devices: [Device]) {
+    func update(connection: String, notification: String, devices: [Device], pairingEnabled: Bool) {
         connectionLabel.stringValue = connection
         notificationLabel.stringValue = notification
+        pairButton.isEnabled = pairingEnabled
+        if !pairingEnabled, pairingExpiresAt == nil {
+            expiryLabel.stringValue = "Connect this Mac with an alpha invite before pairing an iPhone."
+        }
         renderDevices(devices)
     }
 

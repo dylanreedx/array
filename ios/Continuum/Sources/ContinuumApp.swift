@@ -400,12 +400,24 @@ private final class AgentsBoardModel: ObservableObject {
             return
         }
 
+        let resolvedRelayConfig = RelayClientConfig.resolve()
+        if HostedPairingPolicy.requiresHostedRepair(
+            isPaired: canUnpairThisPhone,
+            relayURL: resolvedRelayConfig?.baseURL
+        ) {
+            transportAvailability = .transportUnavailable
+            state = .unavailable("This phone uses legacy sync. Unpair it in Settings, then scan a new invitation from a relay-connected Mac.")
+            pairingStatusMessage = "Pair again: this saved pairing predates Array Relay."
+            Self.appendFetchLog("start: legacy pairing has no relay endpoint — explicit re-pair required")
+            return
+        }
+
         // D4-R1 (ticket 86): a configured relay URL selects the self-owned
         // relay — no iCloud account gate, and the transport owns its own
         // poll loop. Without a relay URL the parked CloudKit path below runs
         // unchanged.
         let transport: any ContinuumRevivedSync.SyncTransport
-        if let relayConfig = RelayClientConfig.resolve() {
+        if let relayConfig = resolvedRelayConfig {
             guard case .paired(let pairedSession) = pairedSessionState else {
                 state = .unpaired
                 Self.appendFetchLog("start: relay configured but no paired session token — pair first")
@@ -611,6 +623,7 @@ private final class AgentsBoardModel: ObservableObject {
 
         await tearDownSyncReceivers()
         UserDefaults.standard.removeObject(forKey: Self.relayCursorDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: RelayClientConfig.urlDefaultsKey)
         pairedSessionState = .unpaired
         state = .unpaired
         transportAvailability = .connecting
@@ -1975,14 +1988,21 @@ private struct ActionableErrorView: View {
 private struct WaitingForMacView: View {
     let freshness: CompanionFreshness
 
+    private var copy: (title: String, subtitle: String) {
+        if case .offline(_, .transportUnavailable) = freshness.state {
+            return ("Pair again from Array", "This pairing uses retired local sync. Unpair in Settings, then scan a new invitation from your relay-connected Mac.")
+        }
+        return ("Waiting for your Mac", freshness.subtitle)
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "macbook.and.iphone")
                 .font(.system(size: 30, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Waiting for your Mac")
+            Text(copy.title)
                 .font(.headline)
-            Text(freshness.subtitle)
+            Text(copy.subtitle)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

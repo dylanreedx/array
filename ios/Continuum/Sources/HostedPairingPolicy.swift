@@ -40,4 +40,11 @@ enum HostedPairingPolicy {
         guard !credential.isEmpty, capabilities == RelayWire.companionCapabilities else { return nil }
         return .companionControl
     }
+
+    /// Production no longer has a provisioned CloudKit desktop peer. A saved
+    /// session without a relay endpoint is therefore a legacy pairing that
+    /// must be replaced, not a connection that can eventually become live.
+    static func requiresHostedRepair(isPaired: Bool, relayURL: URL?) -> Bool {
+        isPaired && relayURL == nil
+    }
 }

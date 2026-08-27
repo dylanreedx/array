@@ -55,4 +55,13 @@ final class HostedPairingPolicyTests: XCTestCase {
             credential: ""
         ))
     }
+
+    func testPairedSessionWithoutRelayRequiresExplicitMigration() {
+        XCTAssertTrue(HostedPairingPolicy.requiresHostedRepair(isPaired: true, relayURL: nil))
+        XCTAssertFalse(HostedPairingPolicy.requiresHostedRepair(
+            isPaired: true,
+            relayURL: URL(string: "https://relay.arrayapp.dev")
+        ))
+        XCTAssertFalse(HostedPairingPolicy.requiresHostedRepair(isPaired: false, relayURL: nil))
+    }
 }

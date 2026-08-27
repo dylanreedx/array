@@ -8471,10 +8471,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             view.update(
                 connection: relayStatus,
                 notification: devices.isEmpty ? "Notifications become available after pairing." : "Notification registration is managed by each paired iPhone.",
-                devices: devices
+                devices: devices,
+                pairingEnabled: hostedIdentity != nil
             )
         } catch {
-            view.update(connection: "Relay unavailable", notification: "Could not load companion state.", devices: [])
+            view.update(connection: "Relay unavailable", notification: "Could not load companion state.", devices: [], pairingEnabled: false)
         }
     }
 
@@ -8505,7 +8506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func createCompanionPairingInvitation() {
         if (try? companionRelayProvisioning.loadIdentity()) == nil {
-            issueObserverPairingTokenFromMenu(nil)
+            companionSettingsView?.clearPairing(message: "Connect this Mac with an alpha invite before pairing an iPhone.")
             return
         }
         Task { @MainActor in
