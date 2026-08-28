@@ -120,6 +120,7 @@ private func checkCompanionContainerConfigAgreement() throws {
     )
     let iosSource = try String(contentsOfFile: "ios/Continuum/Sources/ContinuumApp.swift", encoding: .utf8)
     let systemSurfaceSource = try String(contentsOfFile: "ios/Continuum/Sources/SystemSurfaceCoordinator.swift", encoding: .utf8)
+    let desktopSource = try String(contentsOfFile: "Sources/ContinuumRevived/App/ContinuumApp.swift", encoding: .utf8)
 
     expect(desktopEntitlements.contains("<string>\(expected)</string>"), "ticket75 config: desktop entitlements use shared CloudKit container \(expected)")
     expect(iosEntitlements.contains("<string>\(expected)</string>"), "ticket75 config: iOS entitlements use shared CloudKit container \(expected)")
@@ -136,6 +137,10 @@ private func checkCompanionContainerConfigAgreement() throws {
     expect(systemSurfaceSource.contains("if #available(iOS 17.2, *)"), "iOS guards ActivityKit push-to-start observation at its runtime availability")
     expect(systemSurfaceSource.contains("Activity<ArrayAgentActivityAttributes>.pushToStartTokenUpdates"), "iOS observes the ActivityKit push-to-start token stream")
     expect(systemSurfaceSource.contains("kind: .liveActivityStart"), "iOS registers push-to-start separately from per-activity update tokens")
+    expect(
+        desktopSource.contains("companionCanvas.tiles = canvasView.allTilesInWorldFrames()"),
+        "desktop companion snapshot exports installed ZoneLayer tiles instead of the stale flat compatibility canvas"
+    )
 }
 
 private func checkDesktopActivitySnapshotIsSanitized() throws {

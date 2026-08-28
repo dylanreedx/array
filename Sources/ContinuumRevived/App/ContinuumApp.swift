@@ -8752,7 +8752,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         zones: [],
                         lastActiveZoneId: nil
                     )
-                    return (canvasView.canvasState, workspace)
+                    // Once WorkspaceRuntime installs ZoneLayers, the flat
+                    // `canvasState.tiles` collection is intentionally no longer
+                    // the source of truth. Export every installed tile in world
+                    // coordinates so the companion receives the contents of each
+                    // workspace zone, not just the zone geometry.
+                    var companionCanvas = canvasView.canvasState
+                    companionCanvas.tiles = canvasView.allTilesInWorldFrames()
+                    return (companionCanvas, workspace)
                 }
             },
             // P2B.4: the phone is published from the SAME value the desktop is
