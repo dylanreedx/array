@@ -3836,6 +3836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var companionSettingsView: CompanionSettingsView?
     private let companionRelayProvisioning = CompanionRelayProvisioning()
     private var companionRelayPairingGrantID: UUID?
+    private var companionRelayPairingMonitorTask: Task<Void, Never>?
     private var onboardingPanel: OnboardingPanel?
     private lazy var onboardingProgressStore = OnboardingProgressStore()
     private var starterCreationEligible = false
@@ -8402,6 +8403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onCreatePairing = { [weak self] in self?.createCompanionPairingInvitation() }
         view.onCancelPairing = { [weak self] in
             guard let self else { return }
+            self.companionRelayPairingMonitorTask?.cancel()
+            self.companionRelayPairingMonitorTask = nil
             self.localPairingListener?.stop()
             self.localPairingListener = nil
             guard let grantID = self.companionRelayPairingGrantID else { return }
@@ -8515,6 +8518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     try? await companionRelayProvisioning.cancelPairingGrant(id: previousGrantID)
                     companionRelayPairingGrantID = nil
                 }
+                let knownDeviceIDs = Set((try? await companionRelayProvisioning.devices().map(\.id)) ?? [])
                 let grant = try await companionRelayProvisioning.createPairingGrant(deviceLabel: "Array for iPhone")
                 let url = PairingURL.hostedIssue(
                     credential: grant.code,
@@ -8524,6 +8528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard let image = makePairingQRCode(for: url) else { throw CompanionRelayProvisioningError.invalidResponse }
                 companionRelayPairingGrantID = grant.id
                 companionSettingsView?.showPairing(image: image, expiresAt: grant.expiresAt)
+                monitorHostedPairingGrant(expiresAt: grant.expiresAt, knownDeviceIDs: knownDeviceIDs)
                 await refreshCompanionSettings()
             } catch {
                 let alert = NSAlert()
@@ -8533,6 +8538,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
             }
+        }
+    }
+
+    @MainActor
+    private func monitorHostedPairingGrant(expiresAt: Date, knownDeviceIDs: Set<UUID>) {
+        companionRelayPairingMonitorTask?.cancel()
+        companionRelayPairingMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled, Date() < expiresAt {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                guard let devices = try? await self.companionRelayProvisioning.devices() else { continue }
+                let currentIDs = Set(devices.map(\.id))
+                guard !currentIDs.subtracting(knownDeviceIDs).isEmpty else { continue }
+                self.companionRelayPairingGrantID = nil
+                self.companionRelayPairingMonitorTask = nil
+                self.companionSettingsView?.clearPairing(message: "iPhone paired. Publishing its first snapshot…")
+                await self.refreshCompanionSettings()
+                await self.publishCompanionSync(reason: .pairing, diagnosticsReason: "hosted-pairing")
+                return
+            }
+            self?.companionRelayPairingMonitorTask = nil
         }
     }
 
@@ -8796,6 +8822,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func desktopCompanionPairingSnapshot() async -> DesktopCompanionPairingSnapshot {
         do {
+            if let hostedIdentity = try companionRelayProvisioning.loadIdentity() {
+                let devices = try await companionRelayProvisioning.devices()
+                return .hostedRelay(
+                    instanceId: hostedIdentity.instanceID,
+                    pairedDeviceCount: devices.count
+                )
+            }
             guard let companionAuthService else {
                 return DesktopCompanionPairingSnapshot.unpaired(instanceId: UUID(uuidString: "00000000-0000-4000-8000-000000000075")!)
             }

@@ -37,6 +37,19 @@ public struct DesktopCompanionPairingSnapshot: Equatable, Sendable {
         DesktopCompanionPairingSnapshot(instanceId: instanceId, pairedDeviceCount: 0, authorizedScope: [])
     }
 
+    /// The hardened relay, rather than the legacy local auth database, is the
+    /// source of truth for hosted companion devices. Its phone profile is fixed
+    /// server-side, so the desktop must not derive broader authority from client
+    /// input when projecting that state into the sync service.
+    public static func hostedRelay(instanceId: UUID, pairedDeviceCount: Int) -> DesktopCompanionPairingSnapshot {
+        guard pairedDeviceCount > 0 else { return .unpaired(instanceId: instanceId) }
+        return DesktopCompanionPairingSnapshot(
+            instanceId: instanceId,
+            pairedDeviceCount: pairedDeviceCount,
+            authorizedScope: .companionControl
+        )
+    }
+
     public var isPaired: Bool {
         pairedDeviceCount > 0 && authorizedScope.contains(.orchestrationRead)
     }

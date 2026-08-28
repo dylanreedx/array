@@ -301,6 +301,23 @@ private func checkDesktopCompanionServiceGatingAndFreshness() async throws {
     expect(sent.contains { if case .activity(.snapshot) = $0 { return true } else { return false } }, "ticket75 service: paired manual publish sends activity snapshot")
 }
 
+private func checkHostedRelayPairingProjection() {
+    let instanceID = UUID(uuidString: "75000000-0000-4000-8000-0000000000F1")!
+    let unpaired = DesktopCompanionPairingSnapshot.hostedRelay(
+        instanceId: instanceID, pairedDeviceCount: 0)
+    expect(!unpaired.isPaired, "hosted relay pairing: zero relay devices stays unpaired")
+    expect(unpaired.authorizedScope.isEmpty, "hosted relay pairing: zero relay devices grants no authority")
+
+    let paired = DesktopCompanionPairingSnapshot.hostedRelay(
+        instanceId: instanceID, pairedDeviceCount: 2)
+    expect(paired.isPaired, "hosted relay pairing: relay devices unlock desktop publishing")
+    expect(paired.instanceId == instanceID, "hosted relay pairing: relay instance identity is preserved")
+    expect(paired.authorizedScope == .companionControl,
+           "hosted relay pairing: server-fixed companion profile is preserved")
+    expect(!paired.authorizedScope.contains(.terminalOperate),
+           "hosted relay pairing: hosted phones never gain terminal authority")
+}
+
 private func checkDesktopCompanionFakeTransportFetchAndApprovalAck() async throws {
     let transport = ScriptedSyncTransport()
     let freshness = RecordingFreshnessSink()
@@ -354,6 +371,7 @@ func runDesktopCompanionSyncPublisherChecks() async throws {
     try checkCompanionContainerConfigAgreement()
     try checkDesktopActivitySnapshotIsSanitized()
     try checkDesktopSpatialBootstrapDeterminism()
+    checkHostedRelayPairingProjection()
     try await checkDesktopCompanionServiceGatingAndFreshness()
     try await checkDesktopCompanionFakeTransportFetchAndApprovalAck()
     print("desktop companion sync publisher: container agreement, I5-safe degraded activity, deterministic spatial bootstrap, paired gate/freshness heartbeat, fake-transport publish/fetch/approval ack all green")
