@@ -143,8 +143,51 @@ final class CanvasNSView: NSView, TokenThemed {
     private enum ZoneGesture {
         case none
         case creating(originScreen: CGPoint)
-        case movingZone(zoneId: UUID, lastWindowPoint: CGPoint)
-        case resizingZone(zoneId: UUID, edge: ResizeEdge, lastWindowPoint: CGPoint)
+        case movingZone(target: ZoneGestureTarget, lastWindowPoint: CGPoint)
+        case resizingZone(target: ZoneGestureTarget, edge: ResizeEdge, lastWindowPoint: CGPoint)
+    }
+    private struct ZoneGestureTarget {
+        let zoneId: UUID
+        let layer: ZoneLayer?
+        let initialPlacement: ZonePlacement
+        let initialTileFrames: [TileFrame]
+    }
+    private func mountedLayer(for target: ZoneGestureTarget) -> ZoneLayer? {
+        guard let layer = target.layer,
+              zoneLayers.contains(where: { $0 === layer }) else { return nil }
+        return layer
+    }
+    private func isDuplicateLayerTarget(_ target: ZoneGestureTarget) -> Bool {
+        target.layer != nil && zoneLayers.lazy.filter { $0.placement.zoneId == target.zoneId }.prefix(2).count == 2
+    }
+    private func applyConcreteZonePlacement(_ placement: ZonePlacement, to layer: ZoneLayer, registerUndo: Bool) {
+        let previous = layer.placement
+        layer.placement = placement
+        layer.renderModel.placement = placement
+        layoutAllTiles()
+        guard registerUndo, previous != placement else { return }
+        activeCanvasUndoManager?.registerUndo(withTarget: self) { canvas in
+            guard canvas.zoneLayers.contains(where: { $0 === layer }) else { return }
+            canvas.applyConcreteZonePlacement(previous, to: layer, registerUndo: true)
+        }
+    }
+    private func registerConcreteGestureUndo(_ target: ZoneGestureTarget) {
+        guard let layer = mountedLayer(for: target), layer.placement != target.initialPlacement else { return }
+        registerConcreteUndo(layer: layer, placement: target.initialPlacement, tileFrames: target.initialTileFrames)
+    }
+    private func registerConcreteUndo(layer: ZoneLayer, placement: ZonePlacement, tileFrames: [TileFrame]) {
+        activeCanvasUndoManager?.registerUndo(withTarget: self) { canvas in
+            guard canvas.zoneLayers.contains(where: { $0 === layer }) else { return }
+            let inversePlacement = layer.placement
+            let inverseFrames = layer.tiles.map(\.frame)
+            canvas.registerConcreteUndo(layer: layer, placement: inversePlacement, tileFrames: inverseFrames)
+            layer.placement = placement
+            layer.renderModel.placement = placement
+            if layer.tiles.count == tileFrames.count {
+                for index in layer.tiles.indices { layer.tiles[index].frame = tileFrames[index] }
+            }
+            canvas.layoutAllTiles()
+        }
     }
     private var zoneGesture: ZoneGesture = .none
     /// Tracks the latest placement during a render-model zone move (no ZoneLayer).
@@ -2773,8 +2816,8 @@ final class CanvasNSView: NSView, TokenThemed {
     var qaResizeHUDVisible: Bool { resizeDimensionsOverlay?.qaVisible ?? false }
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
     func qaActiveZoneResizeEdge(zoneId: UUID) -> ResizeEdge? {
-        guard case let .resizingZone(activeZoneId, edge, _) = zoneGesture,
-              activeZoneId == zoneId else { return nil }
+        guard case let .resizingZone(target, edge, _) = zoneGesture,
+              target.zoneId == zoneId else { return nil }
         return edge
     }
 
@@ -4356,13 +4399,14 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Zone gesture classification (T19): checks both `zoneRenderModels` and `zoneLayers`
     /// so that zones installed via T05's ZoneLayer API are also recognized.
-    private func _zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
-        if let id = zoneHeaderZoneId(at: screenPoint) { return id }
-        // Also check ZoneLayers installed via T05.
-        return zoneLayers.reversed().first { layer in
+    private func zoneHeaderTarget(at screenPoint: CGPoint) -> ZoneGestureTarget? {
+        if let layer = zoneLayers.reversed().first(where: { layer in
             guard let header = zoneHeaderScreenRect(for: layer.placement) else { return false }
             return header.contains(screenPoint)
-        }?.placement.zoneId
+        }) { return ZoneGestureTarget(zoneId: layer.placement.zoneId, layer: layer, initialPlacement: layer.placement, initialTileFrames: layer.tiles.map(\.frame)) }
+        return liveZones.reversed().first(where: { placement in
+            zoneHeaderScreenRect(for: placement)?.contains(screenPoint) == true
+        }).map { ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: []) }
     }
 
     private func zoneHeaderScreenRect(for placement: ZonePlacement) -> CGRect? {
@@ -4398,9 +4442,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// The topmost zone + edge whose border `screenPoint` is within the resize
     /// band of (8px edges, 16px corners), or nil. Mirrors `TileNSView.resizeEdge`
     /// so a zone resizes by its edges/corners exactly like a tile.
-    private func zoneResizeEdge(at screenPoint: CGPoint) -> (UUID, ResizeEdge)? {
+    private func zoneResizeEdge(at screenPoint: CGPoint) -> (ZoneGestureTarget, ResizeEdge)? {
         let m: CGFloat = 8, c: CGFloat = 16
-        for placement in liveZones.reversed() {
+        let candidates = zoneLayers.reversed().map {
+            (ZoneGestureTarget(zoneId: $0.placement.zoneId, layer: $0, initialPlacement: $0.placement, initialTileFrames: $0.tiles.map(\.frame)), $0.placement)
+        } + liveZones.reversed().map { (ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: []), $0) }
+        for (target, placement) in candidates {
             let f = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
             guard f.width > 0, f.height > 0 else { continue }
             guard screenPoint.x >= f.minX - m, screenPoint.x <= f.maxX + m,
@@ -4424,7 +4471,7 @@ final class CanvasNSView: NSView, TokenThemed {
             else if nearTop { edge = .top } else if nearBottom { edge = .bottom }
             else if nearLeft { edge = .left } else if nearRight { edge = .right }
             else { edge = nil }
-            if let edge { return (placement.zoneId, edge) }
+            if let edge { return (target, edge) }
         }
         return nil
     }
@@ -4470,6 +4517,23 @@ final class CanvasNSView: NSView, TokenThemed {
             zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
             headerHeight: Double(ZoneChromeNSView.headerHeight))
         return transaction.zonePlacements[requested.zoneId] ?? requested
+    }
+
+    private func clampedManualZoneResize(_ requested: ZonePlacement, for layer: ZoneLayer) -> ZonePlacement {
+        guard !layer.tiles.isEmpty else { return requested }
+        let worlds = layer.tiles.map { CanvasEngine.worldFrame(tile: $0, in: layer.placement) }
+        let padding = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
+        let header = Double(ZoneChromeNSView.headerHeight)
+        let left = min(requested.origin.x, worlds.map(\.x).min()! - padding)
+        let top = min(requested.origin.y, worlds.map(\.y).min()! - header - padding)
+        let right = max(requested.origin.x + requested.size.width,
+                        worlds.map { $0.x + $0.width }.max()! + padding)
+        let bottom = max(requested.origin.y + requested.size.height,
+                         worlds.map { $0.y + $0.height }.max()! + padding)
+        var result = requested
+        result.origin = ZonePoint(x: left, y: top)
+        result.size = ZoneSize(width: right - left, height: bottom - top)
+        return result
     }
 
     private static func cgRect(from frame: TileFrame) -> CGRect {
@@ -5078,7 +5142,7 @@ final class CanvasNSView: NSView, TokenThemed {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard !isZoneScopePickerActive else { return nil }
         let point = convert(event.locationInWindow, from: nil)
-        guard let zoneId = _zoneHeaderZoneId(at: point),
+        guard let zoneId = zoneHeaderTarget(at: point)?.zoneId,
               let placement = liveZones.first(where: { $0.zoneId == zoneId })
                 ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement else { return nil }
 
@@ -5259,20 +5323,20 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         // zone-unify: a press on a zone's edge/corner resizes it (like a tile).
         // Checked before the header so the top edge resizes and the band below moves.
-        if let (zoneId, edge) = zoneResizeEdge(at: point) {
+        if let (target, edge) = zoneResizeEdge(at: point) {
             pendingMovedPlacement = nil
             beginAutoLayoutGesture()
-            zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
-            beginGeometryEdit(.resizeZone, zoneIds: [zoneId])
+            zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
+            beginGeometryEdit(.resizeZone, zoneIds: [target.zoneId])
             return
         }
         // Zone gesture classification (T19): check chrome header → move; empty canvas → create.
         // A press that reaches a tile falls through to TileNSView, which owns tile drag.
         pendingMovedPlacement = nil
-        if let zoneId = _zoneHeaderZoneId(at: point) {
+        if let target = zoneHeaderTarget(at: point) {
             beginAutoLayoutGesture()
-            zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
-            beginGeometryEdit(.moveZone, tileIds: geometryTileIds(inZone: zoneId), zoneIds: [zoneId])
+            zoneGesture = .movingZone(target: target, lastWindowPoint: event.locationInWindow)
+            beginGeometryEdit(.moveZone, tileIds: geometryTileIds(inZone: target.zoneId), zoneIds: [target.zoneId])
             return
         }
         if tileId(at: point) == nil && _zoneId(at: point) == nil {
@@ -5332,14 +5396,24 @@ final class CanvasNSView: NSView, TokenThemed {
                 showDragGhost(at: marqueeWorld, label: "New Zone", detail: "Space-drag to pan")
             }
             return
-        case .movingZone(let zoneId, let lastWindowPoint):
+        case .movingZone(let target, let lastWindowPoint):
+            let zoneId = target.zoneId
+            guard target.layer == nil || mountedLayer(for: target) != nil else {
+                zoneGesture = .none; cancelGeometryEdit(); return
+            }
             hideResizeDimensions()
             let dx = event.locationInWindow.x - lastWindowPoint.x
             // Negate dy: window-y-up vs canvas-y-down (same convention as TileNSView.mouseDragged).
             let dy = -(event.locationInWindow.y - lastWindowPoint.y)
-            zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
+            zoneGesture = .movingZone(target: target, lastWindowPoint: event.locationInWindow)
             let vp = canvasState.viewport
             let screenDelta = CGSize(width: dx, height: dy)
+            if let layer = mountedLayer(for: target), isDuplicateLayerTarget(target) {
+                let newPlacement = CanvasEngine.zone(layer.placement, draggedByScreenDelta: screenDelta, viewport: vp)
+                applyConcreteZonePlacement(newPlacement, to: layer, registerUndo: false)
+                pendingMovedPlacement = newPlacement
+                return
+            }
             if isAutoLayoutEnabled,
                let current = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
@@ -5377,10 +5451,28 @@ final class CanvasNSView: NSView, TokenThemed {
                 layoutAllTiles()
             }
             return
-        case .resizingZone(let zoneId, let edge, let lastWindowPoint):
+        case .resizingZone(let target, let edge, let lastWindowPoint):
+            let zoneId = target.zoneId
+            guard target.layer == nil || mountedLayer(for: target) != nil else {
+                zoneGesture = .none; hideResizeDimensions(); cancelGeometryEdit(); return
+            }
             let dx = event.locationInWindow.x - lastWindowPoint.x
             let dy = -(event.locationInWindow.y - lastWindowPoint.y)
-            zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
+            zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
+            if let layer = mountedLayer(for: target), isDuplicateLayerTarget(target) {
+                let worlds = layer.tiles.map { CanvasEngine.worldFrame(tile: $0, in: layer.placement) }
+                let newPlacement = clampedManualZoneResize(
+                    resizedZonePlacement(layer.placement, edge: edge, screenDelta: CGSize(width: dx, height: dy)),
+                    for: layer)
+                applyConcreteZonePlacement(newPlacement, to: layer, registerUndo: false)
+                for index in layer.tiles.indices {
+                    layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(worlds[index], zoneOrigin: newPlacement.origin)
+                }
+                layoutAllTiles()
+                pendingMovedPlacement = newPlacement
+                showResizeDimensions(widthPx: Int(newPlacement.size.width.rounded()), heightPx: Int(newPlacement.size.height.rounded()), atWindowPoint: event.locationInWindow)
+                return
+            }
             if isAutoLayoutEnabled,
                let current = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
@@ -5442,18 +5534,17 @@ final class CanvasNSView: NSView, TokenThemed {
                 ))
             }
             return
-        case .movingZone(let zoneId, _):
+        case .movingZone(let target, _):
             hideDragGhost()
-            _ = zoneId // identity is captured by the pending transaction
-            if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }
-            _ = commitGeometryEdit()
+            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target); cancelGeometryEdit() }
+            else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
-        case .resizingZone:
+        case .resizingZone(let target, _, _):
             hideDragGhost()
             hideResizeDimensions()
-            if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }
-            _ = commitGeometryEdit()
+            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target); cancelGeometryEdit() }
+            else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
         }
