@@ -6,6 +6,11 @@ import Foundation
 /// ignored; semantic stream, item kind, order, and outcome remain blocking.
 enum TranscriptProviderParityChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock(); private var values: [AgentRuntimeObservation] = []
+        func append(_ value: AgentRuntimeObservation) { lock.withLock { values.append(value) } }
+        func snapshot() -> [AgentRuntimeObservation] { lock.withLock { values } }
+    }
 
     static func run() throws {
         let claude = [
@@ -37,14 +42,39 @@ enum TranscriptProviderParityChecks {
             #"{"type":"tool_execution_start","toolCallId":"c2","toolName":"edit","args":{"path":"fixture.txt"}}"#,
             #"{"type":"tool_execution_end","toolCallId":"c2","toolName":"edit","isError":true}"#,
         ]
-        var ct = ClaudeEventTranslator(runToken: "parity")
-        var xt = CodexEventTranslator(runToken: "parity")
-        var pt = PiEventTranslator()
+        let cb = Box(), xb = Box(), pb = Box()
+        var ct = ClaudeEventTranslator(runToken: "parity"); ct.onRuntimeObservation = cb.append
+        var xt = CodexEventTranslator(runToken: "parity"); xt.onRuntimeObservation = xb.append
+        var pt = PiEventTranslator(); pt.onRuntimeObservation = pb.append
         let signatures = [signature(ct.translate(stream: claude)), signature(xt.translate(stream: codex)), signature(pt.translate(stream: pi))]
         guard signatures.dropFirst().allSatisfy({ $0 == signatures[0] }) else {
             throw Failure(description: "raw provider semantic parity diverged: \(signatures)")
         }
-        print("TranscriptProviderParityChecks passed: Claude/Codex/Pi raw fixtures preserve reasoning, prose, command success, and file failure hierarchy")
+        let sharedDetails = [cb, xb, pb].map { detailSignature($0.snapshot()) }
+        guard sharedDetails.dropFirst().allSatisfy({ $0 == sharedDetails[0] }), sharedDetails[0].contains("edit:fixture.txt") else {
+            throw Failure(description: "raw provider host-local detail parity diverged: \(sharedDetails)")
+        }
+
+        let capabilityBox = Box()
+        var capability = CodexEventTranslator(runToken: "capability")
+        capability.onRuntimeObservation = capabilityBox.append
+        _ = capability.translate(stream: [
+            #"{"type":"thread.started","thread_id":"cap"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"id":"files","type":"file_change","changes":[{"path":"Sources/New.swift","kind":"add","diff":"+new"},{"path":"Sources/Old.swift","kind":"delete","diff":"-old"},{"path":"Sources/A.swift","new_path":"Sources/B.swift","kind":"rename","diff":"-a\n+b"},{"path":"Sources/Edit.swift","kind":"update","diff":"-x\n+y"}]}}"#,
+        ])
+        let capabilities = capabilityBox.snapshot().compactMap { observation -> AgentToolDetailObservation? in
+            guard case let .toolDetail(_, detail) = observation else { return nil }; return detail
+        }.flatMap(\.fileChanges)
+        guard capabilities.map(\.action) == [.add, .delete, .rename, .edit],
+              capabilities[2].renamePath == "Sources/B.swift", capabilities.allSatisfy({ $0.diffPreview != nil }) else {
+            throw Failure(description: "Codex explicit file capabilities were discarded: \(capabilities)")
+        }
+        let absolute = AgentToolDetailObservation.FileChange(action: .write, path: "/Users/private/secret.txt")
+        guard absolute.path == "secret.txt", absolute.renamePath == nil else {
+            throw Failure(description: "private absolute path was retained: \(absolute)")
+        }
+        print("TranscriptProviderParityChecks passed: shared hierarchy/detail parity plus honest Codex add/delete/rename/diff capability and path privacy")
     }
 
     private static func signature(_ events: [AgentRuntimeEvent]) -> [String] {
@@ -55,6 +85,14 @@ enum TranscriptProviderParityChecks {
             case .itemCompleted(_, _, let kind, let status): return "end:\(kind.rawValue):\(status.rawValue)"
             default: return nil
             }
+        }
+    }
+
+    private static func detailSignature(_ observations: [AgentRuntimeObservation]) -> [String] {
+        observations.compactMap { observation in
+            guard case let .toolDetail(_, detail) = observation, detail.phase == .started else { return nil }
+            if let change = detail.fileChanges.first { return "\(change.action.rawValue):\(change.path)" }
+            return detail.toolName?.lowercased() == "shell" || detail.toolName?.lowercased() == "bash" ? "command" : nil
         }
     }
 }

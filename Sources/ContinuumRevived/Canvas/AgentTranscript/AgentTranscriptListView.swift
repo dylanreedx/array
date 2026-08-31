@@ -3052,6 +3052,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 identity: identity,
                 toolName: detail.toolName ?? title,
                 arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+                fileChanges: detail.fileChanges,
+                parentItemID: detail.parentItemID,
                 startedAt: detail.observedAt
             )
         default:
@@ -3070,6 +3072,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 fields: detail.fields.isEmpty ? existing.fields : detail.fields,
                 outputPreview: detail.outputPreview ?? existing.outputPreview,
                 exitCode: detail.exitCode ?? existing.exitCode,
+                fileChanges: detail.fileChanges.isEmpty ? existing.fileChanges : detail.fileChanges,
+                parentItemID: detail.parentItemID ?? existing.parentItemID,
                 observedAt: detail.observedAt
             )
         } else {

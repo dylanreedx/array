@@ -119,6 +119,8 @@ public struct AgentToolDetailStart: Equatable, Sendable {
     public var toolName: String
     public var arguments: [AgentToolDetailField]
     public var affectedFiles: [URL]
+    public var fileChanges: [AgentToolDetailObservation.FileChange]
+    public var parentItemID: String?
     /// Provider-authored timestamp. Retention/expiry uses host observation time,
     /// not this value.
     public var startedAt: Date?
@@ -128,7 +130,7 @@ public struct AgentToolDetailStart: Equatable, Sendable {
         identity: AgentToolDetailKey,
         toolName: String,
         arguments: [AgentToolDetailField] = [],
-        affectedFiles: [URL] = [],
+        affectedFiles: [URL] = [], fileChanges: [AgentToolDetailObservation.FileChange] = [], parentItemID: String? = nil,
         startedAt: Date? = nil,
         explicitSecrets: [String] = []
     ) {
@@ -136,6 +138,8 @@ public struct AgentToolDetailStart: Equatable, Sendable {
         self.toolName = toolName
         self.arguments = arguments
         self.affectedFiles = affectedFiles
+        self.fileChanges = fileChanges
+        self.parentItemID = parentItemID
         self.startedAt = startedAt
         self.explicitSecrets = explicitSecrets
     }
@@ -216,6 +220,8 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
     /// timestamps above are never used for expiry.
     public var updatedAt: Date
     public var affectedFiles: [URL]
+    public var fileChanges: [AgentToolDetailObservation.FileChange]
+    public var parentItemID: String?
 
     var sensitiveStartFingerprints: Set<String>
     var latestEndExplicitFingerprints: Set<String>
@@ -236,7 +242,7 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         startedAt: Date? = nil,
         endedAt: Date? = nil,
         updatedAt: Date,
-        affectedFiles: [URL] = [],
+        affectedFiles: [URL] = [], fileChanges: [AgentToolDetailObservation.FileChange] = [], parentItemID: String? = nil,
         sensitiveStartFingerprints: Set<String> = [],
         latestEndExplicitFingerprints: Set<String> = [],
         latestStartTimestamp: Date? = nil,
@@ -254,6 +260,8 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         self.endedAt = endedAt
         self.updatedAt = updatedAt
         self.affectedFiles = affectedFiles
+        self.fileChanges = fileChanges
+        self.parentItemID = parentItemID
         self.sensitiveStartFingerprints = sensitiveStartFingerprints
         self.latestEndExplicitFingerprints = latestEndExplicitFingerprints
         self.latestStartTimestamp = latestStartTimestamp
@@ -401,6 +409,20 @@ public struct AgentToolDetailSanitizer: Sendable {
             if result.count >= limits.maxAffectedFiles { break }
         }
         return result
+    }
+
+    func sanitizeFileChanges(_ changes: [AgentToolDetailObservation.FileChange], explicitSecrets: [String]) -> [AgentToolDetailObservation.FileChange] {
+        changes.prefix(24).compactMap { change in
+            let path = SecretRedactor.redact(change.path, explicitSecrets: explicitSecrets)
+            guard path == change.path, !path.isEmpty else { return nil }
+            let rename = change.renamePath.flatMap { candidate -> String? in
+                SecretRedactor.redact(candidate, explicitSecrets: explicitSecrets) == candidate ? candidate : nil
+            }
+            let diff = change.diffPreview.map { raw in
+                boundText(SecretRedactor.redact(raw, explicitSecrets: explicitSecrets), maxBytes: limits.maxOutputBytes, maxLines: limits.maxOutputLines, redacted: false).text
+            }
+            return .init(action: change.action, path: path, renamePath: rename, diffPreview: diff)
+        }
     }
 
     /// Stable, non-secret event keys used only to break same-ID timestamp ties.
@@ -587,6 +609,7 @@ public actor AgentToolDetailStore {
         let sanitizedToolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: eventSecrets)
         let sanitizedArguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: eventSecrets)
         let sanitizedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: [], explicitSecrets: eventSecrets)
+        let sanitizedChanges = sanitizer.sanitizeFileChanges(start.fileChanges, explicitSecrets: eventSecrets)
         let sensitiveFingerprints = sanitizer.sensitiveFingerprints(in: start.arguments, explicitSecrets: start.explicitSecrets)
         let tieKey = sanitizer.stableStartTieKey(
             toolName: sanitizedToolName,
@@ -610,6 +633,8 @@ public actor AgentToolDetailStore {
             record.latestStartTimestamp = start.startedAt
             record.latestStartTieKey = tieKey
             record.sensitiveStartFingerprints = sensitiveFingerprints
+            record.fileChanges = sanitizedChanges
+            record.parentItemID = start.parentItemID
             if record.output != nil,
                !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
                 record.output = sanitizer.redactionUnavailableOutput()
@@ -956,6 +981,11 @@ public enum AgentToolDetailPresenter {
             // `.plans/45`; the file line never did.
             guard !(affectedFileNames.count == 1 && echoNamesFile(echo, fileName, fileLabel: fileLabel)) else { continue }
             lines.append("\(fileLabel): \(fileName)")
+        }
+        for change in detail.fileChanges.prefix(12) {
+            let destination = change.renamePath.map { " → \($0)" } ?? ""
+            lines.append("\(change.action.rawValue.capitalized): \(change.path)\(destination)")
+            if let diff = change.diffPreview, !diff.isEmpty { lines.append(diff) }
         }
         for argument in detail.arguments.prefix(4)
         where !argument.sensitiveKeyFiltered && !argument.value.redacted {

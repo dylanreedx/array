@@ -53,6 +53,28 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
 /// command BODY never enters (claude's `Bash.description` is the sanctioned
 /// human summary; `command` itself is not carried).
 public struct AgentToolDetailObservation: Equatable, Sendable {
+    public enum FileAction: String, Equatable, Sendable { case add, edit, write, delete, rename, unknown }
+    public struct FileChange: Equatable, Sendable {
+        public static let maxPathCharacters = 240
+        public static let maxDiffCharacters = 2_000
+        public let action: FileAction
+        public let path: String
+        public let renamePath: String?
+        public let diffPreview: String?
+        public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
+            self.action = action
+            self.path = Self.safeDisplayPath(path)
+            self.renamePath = renamePath.map(Self.safeDisplayPath)
+            self.diffPreview = diffPreview.map { String($0.prefix(Self.maxDiffCharacters)) }
+        }
+        private static func safeDisplayPath(_ raw: String) -> String {
+            let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.hasPrefix("/"), !clean.hasPrefix("~"),
+                  !clean.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+            else { return URL(fileURLWithPath: clean).lastPathComponent }
+            return String(clean.prefix(maxPathCharacters))
+        }
+    }
     public enum Phase: Equatable, Sendable {
         case started
         case ended
@@ -68,6 +90,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     public let fields: [(key: String, value: String)]
     public let outputPreview: String?
     public let exitCode: Int?
+    public let fileChanges: [FileChange]
+    public let parentItemID: String?
     public let observedAt: Date
 
     public init(
@@ -76,6 +100,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         fields: [(key: String, value: String)] = [],
         outputPreview: String? = nil,
         exitCode: Int? = nil,
+        fileChanges: [FileChange] = [],
+        parentItemID: String? = nil,
         observedAt: Date
     ) {
         self.phase = phase
@@ -85,6 +111,11 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         }
         self.outputPreview = outputPreview.map { String($0.prefix(Self.maxOutputCharacters)) }
         self.exitCode = exitCode
+        self.fileChanges = Array(fileChanges.prefix(24))
+        self.parentItemID = parentItemID.flatMap {
+            let clean = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty || clean.count > 200 || clean.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) ? nil : clean
+        }
         self.observedAt = observedAt
     }
 
@@ -92,6 +123,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         lhs.phase == rhs.phase && lhs.toolName == rhs.toolName
             && lhs.fields.elementsEqual(rhs.fields, by: { $0.key == $1.key && $0.value == $1.value })
             && lhs.outputPreview == rhs.outputPreview && lhs.exitCode == rhs.exitCode
+            && lhs.fileChanges == rhs.fileChanges && lhs.parentItemID == rhs.parentItemID
             && lhs.observedAt == rhs.observedAt
     }
 }
