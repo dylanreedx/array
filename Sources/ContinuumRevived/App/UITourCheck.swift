@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
+import CryptoKit
 
 /// A labelled contact sheet of the agent surfaces, in both appearances, written
 /// to `qa-runs/<timestamp>/tour/` with an `index.md` that names every parameter
@@ -350,7 +351,7 @@ enum UITourCheck {
                 ))
             }
         }
-        for (label, state) in [("streaming-before", AgentTranscriptReviewState.activeTool), ("streaming-after", .recededWork), ("file-detail-unknown", .mixed)] {
+        for (label, state) in [("lifecycle-active-tool", AgentTranscriptReviewState.activeTool), ("lifecycle-settled-work", .recededWork), ("file-detail-unknown", .mixed)] {
             for appearance in appearances {
                 shots.append(Shot(
                     surface: "semantic-transcript", state: label, size: inventorySize, appearance: appearance,
@@ -510,6 +511,204 @@ enum UITourCheck {
         try data.write(to: url)
     }
 
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A true one-delta pair: both bitmaps come from the same hosted list and
+    /// viewport. A second tail-following list exercises the complementary scroll
+    /// policy without changing the photographed non-tail viewport.
+    static func writeStreamingDeltaPair(to directory: URL) throws -> [Record] {
+        final class Clock: @unchecked Sendable {
+            var value: TimeInterval = 10
+            func now() -> TimeInterval { value }
+        }
+        var records: [Record] = []
+        var semanticPairs: [[String: Any]] = []
+        for appearance in appearances {
+            let size = NSSize(width: 480, height: transcriptReviewHeight)
+            let clock = Clock()
+            var projection = AgentTranscriptProjection(
+                threadId: "streaming-visual", monotonicNow: clock.now,
+                wallClockNow: { Date(timeIntervalSince1970: 1_700_000_000) }
+            )
+            for index in 0..<12 {
+                _ = try projection.appendUserPrompt(
+                    id: AgentNodeID(rawValue: "streaming-history-\(index)")!,
+                    text: "History turn \(index): preserve the semantic anchor while one streamed delta lands."
+                )
+            }
+            projection.ingest(.itemStarted(
+                threadId: "streaming-visual", itemId: "stable-tool",
+                kind: .commandExecution, title: "Stable disclosure"
+            ))
+            projection.ingest(.itemCompleted(
+                threadId: "streaming-visual", itemId: "stable-tool",
+                kind: .commandExecution, status: .completed
+            ))
+            projection.ingest(.turnStarted(threadId: "streaming-visual", turnId: "stream-turn"))
+            projection.ingest(.contentDelta(
+                threadId: "streaming-visual", turnId: "stream-turn",
+                streamKind: .assistant,
+                delta: "Streaming response ready.\n\nContext remains stable above the update.\n\nThis final streaming paragraph is deliberately long enough to wrap across several visible lines while the reader viewport remains outside the forty-eight point tail-follow threshold, preserving a real semantic anchor during the update"
+            ))
+            clock.value += 1
+            projection.ingest(.contentDelta(
+                threadId: "streaming-visual", turnId: "stream-turn",
+                streamKind: .assistant, delta: " ready"
+            ))
+            _ = projection.flushPendingStreamingMarkup()
+            _ = projection.drainTouchedNodes()
+            let initial = projection.document
+            let initialViewDocument = AgentDocument(version: 1, entries: initial.entries)
+            let initialIDs = initial.entries.flatMap { [$0.id] + $0.blocks.map(\.id) }
+            let initialBlockIDs = initial.entries.flatMap(\.blocks).map(\.id)
+            guard let disclosureID = initial.entries.first(where: {
+                if case let .providerItem(_, itemID) = $0.provenance { return itemID == "stable-tool" }
+                return false
+            })?.blocks.first?.id else { throw fail("streaming pair lacks stable disclosure block") }
+            let list = AgentTranscriptListView(renderContext: AgentRenderContext(
+                actions: .disabled, tokens: .transcript,
+                appearance: appearance == .darkAqua ? .dark : .light
+            ))
+            list.frame = NSRect(origin: .zero, size: size)
+            list.qaRetainHostForEverySemanticRow = true
+            try list.apply(
+                document: initialViewDocument,
+                patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: initialBlockIDs)
+            )
+            let probe = try UIProbe.render(
+                UIProbe.Spec(id: "streaming-delta-pair", size: size, appearance: appearance),
+                make: { list }
+            )
+            list.layoutSubtreeIfNeeded(); list.collectionView.layoutSubtreeIfNeeded()
+            let clip = list.scrollView.contentView
+            list.qaSetDisclosureState(for: disclosureID, expanded: true)
+            list.jumpToLatest()
+            let beforeTailOffset = clip.bounds.minY
+            clip.scroll(to: NSPoint(x: 0, y: max(0, beforeTailOffset - 56)))
+            list.scrollView.reflectScrolledClipView(clip)
+            list.layoutSubtreeIfNeeded(); list.collectionView.layoutSubtreeIfNeeded()
+            let beforeOffset = clip.bounds.minY
+            let beforeDistanceToTail = beforeTailOffset - beforeOffset
+            let selectionIndex = IndexPath(item: 11, section: 0)
+            let streamIndex = IndexPath(item: initialBlockIDs.count - 1, section: 0)
+            let anchorNodeID = initial.entries[11].blocks[0].id
+            guard let beforeAnchorFrame = list.collectionView.layoutAttributesForItem(at: selectionIndex)?.frame,
+                  let beforeStreamFrame = list.collectionView.layoutAttributesForItem(at: streamIndex)?.frame,
+                  beforeStreamFrame.intersects(clip.bounds), beforeDistanceToTail > 2 else {
+                throw fail("streaming pair viewport missing stream/non-tail: clip=\(clip.bounds) tail=\(beforeTailOffset) distance=\(beforeDistanceToTail) stream=\(String(describing: list.collectionView.layoutAttributesForItem(at: streamIndex)?.frame))")
+            }
+            list.collectionView.selectionIndexPaths = [selectionIndex]
+            let beforeSelection = list.collectionView.selectionIndexPaths
+            let beforeAnchorY = beforeAnchorFrame.minY - beforeOffset
+            let beforeRep = try UIProbe.bitmap(of: probe.host, id: "streaming-delta-before")
+
+            clock.value += 1
+            projection.ingest(.contentDelta(
+                threadId: "streaming-visual", turnId: "stream-turn",
+                streamKind: .assistant, delta: " plus exactly one delta."
+            ))
+            _ = projection.flushPendingStreamingMarkup()
+            let touched = projection.drainTouchedNodes()
+            let final = projection.document
+            let finalViewDocument = AgentDocument(version: 2, entries: final.entries)
+            let updated = Array(touched.ids).sorted { $0.rawValue < $1.rawValue }
+            let patch = try AgentDocumentPatch(
+                fromVersion: 1, toVersion: 2, updated: updated
+            )
+            try list.apply(document: finalViewDocument, patch: patch)
+            list.layoutSubtreeIfNeeded(); list.collectionView.layoutSubtreeIfNeeded()
+            let afterOffset = clip.bounds.minY
+            let afterTailOffset = max(0, list.collectionView.bounds.height - clip.bounds.height)
+            let afterDistanceToTail = afterTailOffset - afterOffset
+            guard let afterAnchorFrame = list.collectionView.layoutAttributesForItem(at: selectionIndex)?.frame,
+                  let afterStreamFrame = list.collectionView.layoutAttributesForItem(at: streamIndex)?.frame,
+                  afterStreamFrame.intersects(clip.bounds), afterDistanceToTail > 2 else {
+                throw fail("streaming pair lost anchor/stream/non-tail clip=\(clip.bounds) tail=\(afterTailOffset) distance=\(afterDistanceToTail) stream=\(String(describing: list.collectionView.layoutAttributesForItem(at: streamIndex)?.frame))")
+            }
+            let afterSelection = list.collectionView.selectionIndexPaths
+            let afterAnchorY = afterAnchorFrame.minY - afterOffset
+            let afterRep = try UIProbe.bitmap(of: probe.host, id: "streaming-delta-after")
+
+            let finalIDs = final.entries.flatMap { [$0.id] + $0.blocks.map(\.id) }
+            guard initialIDs == finalIDs, updated.count == 2,
+                  beforeSelection == afterSelection,
+                  list.qaDisclosureState(for: disclosureID) == true,
+                  abs(afterAnchorY - beforeAnchorY) <= 2 else {
+                throw fail("streaming delta pair violated invariants ids=\(initialIDs == finalIDs) updated=\(updated.map(\.rawValue)) selection=\(beforeSelection)->\(afterSelection) anchor=\(beforeAnchorY)->\(afterAnchorY)")
+            }
+
+            let tailList = AgentTranscriptListView(renderContext: AgentRenderContext(
+                actions: .disabled, tokens: .transcript,
+                appearance: appearance == .darkAqua ? .dark : .light
+            ))
+            tailList.frame = NSRect(origin: .zero, size: size)
+            try tailList.apply(
+                document: initialViewDocument,
+                patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: initialBlockIDs)
+            )
+            tailList.layoutSubtreeIfNeeded(); tailList.collectionView.layoutSubtreeIfNeeded()
+            let tailClip = tailList.scrollView.contentView
+            tailList.jumpToLatest()
+            try tailList.apply(document: finalViewDocument, patch: patch)
+            tailList.layoutSubtreeIfNeeded(); tailList.collectionView.layoutSubtreeIfNeeded()
+            let tailMaximum = max(0, tailList.collectionView.bounds.height - tailClip.bounds.height)
+            guard abs(tailClip.bounds.minY - tailMaximum) <= 2 else {
+                throw fail("streaming delta pair did not keep a tail-following viewport pinned")
+            }
+
+            let beforeName = "semantic-transcript-streaming-delta-before-480x720-\(shortName(appearance)).png"
+            let afterName = "semantic-transcript-streaming-delta-after-480x720-\(shortName(appearance)).png"
+            guard let beforePNG = beforeRep.representation(using: .png, properties: [:]),
+                  let afterPNG = afterRep.representation(using: .png, properties: [:]) else {
+                throw fail("streaming delta pair could not encode PNG")
+            }
+            let beforeBytes = beforeRep.bitmapData.map { Data(bytes: $0, count: beforeRep.bytesPerRow * beforeRep.pixelsHigh) } ?? Data()
+            let afterBytes = afterRep.bitmapData.map { Data(bytes: $0, count: afterRep.bytesPerRow * afterRep.pixelsHigh) } ?? Data()
+            let changedBytes = zip(beforeBytes, afterBytes).reduce(0) { $0 + ($1.0 == $1.1 ? 0 : 1) }
+            let changedFraction = beforeBytes.isEmpty ? 1 : Double(changedBytes) / Double(beforeBytes.count)
+            guard changedBytes > 0, changedFraction < 0.20 else {
+                throw fail("streaming delta pixel diff was empty or unbounded: \(changedBytes) bytes, \(changedFraction)")
+            }
+            try beforePNG.write(to: directory.appendingPathComponent(beforeName))
+            try afterPNG.write(to: directory.appendingPathComponent(afterName))
+            records.append(Record(surface: "semantic-transcript", state: "streaming-delta-before", size: size, appearance: appearance, fileName: beforeName, digest: UIProbe.digest(of: beforeRep)))
+            records.append(Record(surface: "semantic-transcript", state: "streaming-delta-after", size: size, appearance: appearance, fileName: afterName, digest: UIProbe.digest(of: afterRep)))
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            semanticPairs.append([
+                "appearance": shortName(appearance), "delta_count": 1,
+                "initial_document_sha256": sha256(try encoder.encode(initial)),
+                "final_document_sha256": sha256(try encoder.encode(final)),
+                "stable_node_ids": initialIDs.map(\.rawValue),
+                "updated_node_ids": updated.map(\.rawValue),
+                "initial_version": initial.version, "final_version": final.version,
+                "projection_initial_version": initial.version, "projection_final_version": final.version,
+                "patch": ["from": patch.fromVersion, "to": patch.toVersion, "updated": updated.map(\.rawValue)],
+                "selection_unchanged": true,
+                "selection_index_paths": beforeSelection.map { [$0.section, $0.item] },
+                "disclosure_state": ["block_id": disclosureID.rawValue, "expanded_before_after": true],
+                "non_tail_before_offset": beforeOffset, "non_tail_after_offset": afterOffset,
+                "anchor_node_id": anchorNodeID.rawValue, "anchor_before_y": beforeAnchorY, "anchor_after_y": afterAnchorY,
+                "anchor_delta": abs(afterAnchorY - beforeAnchorY), "tail_following_pinned": true,
+                "non_tail_before_distance_to_tail": beforeDistanceToTail,
+                "non_tail_after_distance_to_tail": afterDistanceToTail,
+                "changed_pixel_bytes": changedBytes, "changed_pixel_fraction": changedFraction,
+                "before_pixel_sha256": sha256(beforePNG), "after_pixel_sha256": sha256(afterPNG),
+                "point_size": [480, 720], "pixel_size": [960, 1440], "scale": 2
+            ])
+        }
+        let semantic: [String: Any] = [
+            "schema_version": 1, "state_id": "streaming-delta-pair",
+            "candidate_sha": ProcessInfo.processInfo.environment["CONTINUUM_CANDIDATE_SHA"] ?? "precommit",
+            "production_path": "AgentTranscriptProjection.ingest -> drainTouchedNodes -> AgentDocumentPatch -> AgentTranscriptListView.apply",
+            "pairs": semanticPairs, "candidate_only": true, "judgment": "NEEDS_JUDGMENT"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: semantic, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: directory.appendingPathComponent("streaming-delta-pair.semantic.json"))
+        return records
+    }
+
     /// One row of the contact sheet.
     struct Record {
         let surface: String
@@ -601,6 +800,8 @@ enum UITourCheck {
                 fileName: fileName, digest: UIProbe.digest(of: rep)
             ))
         }
+
+        records.append(contentsOf: try writeStreamingDeltaPair(to: directory))
 
         let indexURL = directory.appendingPathComponent("index.md")
         try indexMarkdown(records: records, directory: directory).write(to: indexURL, atomically: true, encoding: .utf8)
