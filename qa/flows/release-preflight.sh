@@ -165,7 +165,11 @@ on run argv
   tell application "System Events"
     set p to first process whose unix id is (item 1 of argv as integer)
     if frontmost of p is false then error "candidate not frontmost"
-    if value of attribute "AXMain" of window 1 of p is false then error "target AX window not main"
+    set hasMain to false
+    repeat with w in windows of p
+      if value of attribute "AXMain" of w is true then set hasMain to true
+    end repeat
+    if hasMain is false then error "candidate has no main AX window"
   end tell
 end run
 APPLESCRIPT
