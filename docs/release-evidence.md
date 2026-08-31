@@ -16,14 +16,23 @@ scripts/release-evidence.js summary --root "$run_root" --output "$run_root/morni
 The root-owned inventory is immutable and must be locked before ingestion. It
 declares every expected workstream/role, visual state/appearance/role,
 performance case/repetition/artifact role, and capture manifest. Empty visual or
-performance inventories are valid only when explicitly locked as empty for that
-workstream. `ingest` is idempotent for the same path and bytes, but rejects a report or
+performance inventories are valid only when the role explicitly sets
+`allow_zero_performance: true`. A nonempty performance inventory is always a
+release lane with a nonempty seed, at least five repetitions, global identity
+binding, and the complete raw/profiler/signpost/sample/vmmap/soak/diagnostic/
+visual-boundary role set. The hashed inventory file—not the convenience copy in
+`manifest.json`—is authoritative. `ingest` is idempotent for the same path and bytes, but rejects a report or
 capture manifest changed in place. `validate` re-hashes all ingested inputs and
 their referenced artifacts before atomically recording validation. It rejects
 partial visual inventories, unproven baselines or masks, incomplete performance
 repetitions, and summaries that cannot be traced to their raw inputs. A missing
 WindowServer capture is represented only by a `DISPLAY_DEFERRED` report with a
 typed `capture_unavailable` failure.
+
+Capture manifests use `kind: qacapture|external`, bind every artifact by unique
+case/iteration/visual-state/role, and hash both image and semantic artifact. A
+`PASS` capture contains only inspected-PASS actual artifacts; failures, deferrals,
+and judgment states must use matching manifest and artifact statuses.
 
 The release identity commands bind a clean source commit and exact release argv
 and log to the app bundle, executable, signing/notary state, and DMG:
