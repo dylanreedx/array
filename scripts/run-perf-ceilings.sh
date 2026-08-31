@@ -21,6 +21,32 @@ run() {
   "$@"
 }
 
+isolation_root=
+active_app_pid=
+
+cleanup_isolation() {
+  if [[ -n "$isolation_root" && -d "$isolation_root" ]]; then
+    rm -rf -- "$isolation_root"
+  fi
+  isolation_root=
+}
+
+handle_signal() {
+  local signal=$1
+  trap - "$signal"
+  if [[ -n "$active_app_pid" ]]; then
+    kill -s "$signal" "$active_app_pid" 2>/dev/null || true
+    wait "$active_app_pid" 2>/dev/null || true
+    active_app_pid=
+  fi
+  cleanup_isolation
+  kill -s "$signal" "$$"
+}
+
+trap cleanup_isolation EXIT
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+
 if [[ -n "${CONTINUUM_PERF_APP:-}" ]]; then
   if [[ ! -x "$APP" ]]; then
     echo "CONTINUUM_PERF_APP is not executable: $APP" >&2
@@ -52,8 +78,10 @@ mkdir -p "$OUT_ROOT"
 
 for flow in "${FLOWS[@]}"; do
   flow_out="$OUT_ROOT/$flow"
-  project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-perf-project.XXXXXX")
-  app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-perf-appsupport.XXXXXX")
+  isolation_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-perf-isolation.XXXXXX")
+  project_root="$isolation_root/project"
+  app_support="$isolation_root/app-support"
+  mkdir -p "$project_root" "$app_support"
   mkdir -p "$flow_out"
 
   printf '\n==> perf flow %s (artifacts: %s)\n' "$flow" "$flow_out"
@@ -64,13 +92,16 @@ for flow in "${FLOWS[@]}"; do
     CONTINUUM_QA_PERF_BASELINE="$BASELINE" \
     CONTINUUM_PROJECT_ROOT="$project_root" \
     CONTINUUM_APP_SUPPORT="$app_support" \
-    "$APP"
-  status=$?
+    "$APP" &
+  active_app_pid=$!
+  wait "$active_app_pid"
+  app_status=$?
+  active_app_pid=
   set -e
-  rm -rf "$project_root" "$app_support"
-  if [[ $status -ne 0 ]]; then
-    echo "perf flow $flow failed with exit status $status" >&2
-    exit "$status"
+  cleanup_isolation
+  if [[ $app_status -ne 0 ]]; then
+    echo "perf flow $flow failed with exit status $app_status" >&2
+    exit "$app_status"
   fi
   if [[ ! -f "$flow_out/perf-report.json" ]]; then
     echo "perf flow $flow did not write $flow_out/perf-report.json" >&2
