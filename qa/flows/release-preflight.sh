@@ -170,6 +170,7 @@ r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2])); digest=hashlib.s
 for k in ['runID','readyChallenge','launchNonce','candidateSHA','pid','windowID','title','executablePath','executableSHA256','beforeBounds','requestedDelta']: assert d.get(k)==r.get(k)
 driver=os.path.realpath(sys.argv[3]); assert os.path.realpath(d.get('driverPath',''))==driver and d.get('driverSHA256')==hashlib.sha256(open(driver,'rb').read()).hexdigest()
 assert d.get('readySHA256')==digest and len(d.get('cliclickArgv',[]))==4 and d.get('startedAtNs',0) < d.get('finishedAtNs',0) < d.get('doneAtNs',0)
+assert [d.get('topmostPID'),d.get('topmostWindowID'),d.get('topmostTitle')]==[r['pid'],r['windowID'],r['title']]
 assert os.stat(sys.argv[2]).st_mtime_ns > os.stat(sys.argv[1]).st_mtime_ns and d.get('doneAtNs',0) > r['readyPublishedAtNs']
 assert d.get('actualDelta') == [d['afterBounds'][0]-r['beforeBounds'][0],d['afterBounds'][1]-r['beforeBounds'][1]]
 PY
@@ -178,6 +179,10 @@ import hashlib,json,sys
 r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2])); path=d['eventArtifactPath']; assert hashlib.sha256(open(path,'rb').read()).hexdigest()==d['eventArtifactSHA256']
 ev=json.load(open(path))['events']; types=[x['type'] for x in ev]; assert 1 in types and 6 in types and 2 in types and types.index(1)<types.index(6)<types.index(2)
 down=ev[types.index(1)]; up=ev[types.index(2)]; dx,dy=r['requestedDelta']; assert abs((up['x']-down['x'])-dx)<=3 and abs((up['y']-down['y'])-dy)<=3
+assert abs(down['x']-d['startPoint'][0])<=3 and abs(down['y']-d['startPoint'][1])<=3
+assert abs(up['x']-d['endPoint'][0])<=3 and abs(up['y']-d['endPoint'][1])<=3
+assert down['monotonicNs'] < ev[types.index(6)]['monotonicNs'] < up['monotonicNs']
+assert r['readyPublishedAtNs'] < down['wallTimeNs'] <= up['wallTimeNs'] < d['doneAtNs']
 assert d['startedAtNs'] <= d['finishedAtNs'] <= d['doneAtNs']
 PY
   assert_window_owned_by_pid || defer_display "external-input-window-identity" "exact window ownership changed during external input"

@@ -35,20 +35,27 @@ end run
 APPLESCRIPT
 sleep 0.2
 IFS=',' read -r x y w h <<< "$observed_before"; IFS=',' read -r dx dy <<< "$requestedDelta"
-sx=$((x+w/2)); sy=$((y+14)); args=("m:${sx},${sy}" "dd:${sx},${sy}" "dm:$((sx+dx)),$((sy+dy))" "du:$((sx+dx)),$((sy+dy))")
-swift - "$pid" "$windowID" "$title" "$sx" "$sy" <<'SWIFT'
+start_point="$(swift - "$pid" "$windowID" "$title" "$x" "$y" "$w" <<'SWIFT'
 import CoreGraphics; import Foundation
-let pid=Int32(CommandLine.arguments[1])!, id=UInt32(CommandLine.arguments[2])!, title=CommandLine.arguments[3], x=Double(CommandLine.arguments[4])!, y=Double(CommandLine.arguments[5])!
+let pid=Int32(CommandLine.arguments[1])!, id=UInt32(CommandLine.arguments[2])!, title=CommandLine.arguments[3]
+let x=Int(CommandLine.arguments[4])!, y=Int(CommandLine.arguments[5])!, width=Int(CommandLine.arguments[6])!
 let ws=CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
-guard let top=ws.first(where:{ w in guard (w[kCGWindowLayer as String] as? Int)==0, let b=w[kCGWindowBounds as String] as? CFDictionary, let r=CGRect(dictionaryRepresentation:b) else{return false}; return r.contains(CGPoint(x:x,y:y)) }), (top[kCGWindowNumber as String] as? UInt32)==id, (top[kCGWindowOwnerPID as String] as? Int32)==pid, (top[kCGWindowName as String] as? String)==title else { exit(1) }
+for px in stride(from:x+width-80, through:x+80, by:-40) {
+ let point=CGPoint(x:px,y:y+14)
+ guard let top=ws.first(where:{ w in guard (w[kCGWindowLayer as String] as? Int)==0, let b=w[kCGWindowBounds as String] as? NSDictionary, let r=CGRect(dictionaryRepresentation:b) else{return false}; return r.contains(point) }) else { continue }
+ if (top[kCGWindowNumber as String] as? UInt32)==id && (top[kCGWindowOwnerPID as String] as? Int32)==pid && (top[kCGWindowName as String] as? String)==title { print("\(px),\(y+14)"); exit(0) }
+}
+exit(1)
 SWIFT
+)" || { echo "no exact-candidate topmost titlebar point" >&2; exit 4; }
+IFS=',' read -r sx sy <<< "$start_point"; args=("m:${sx},${sy}" "dd:${sx},${sy}" "dm:$((sx+dx)),$((sy+dy))" "du:$((sx+dx)),$((sy+dy))")
 event_path="$(dirname "$done_path")/external-driver-events.json"; tap_ready="$(dirname "$done_path")/.event-tap-ready"
 rm -f "$event_path" "$tap_ready"
 swift - "$event_path" "$tap_ready" <<'SWIFT' &
 import CoreGraphics; import Foundation
 let out=URL(fileURLWithPath:CommandLine.arguments[1]), ready=URL(fileURLWithPath:CommandLine.arguments[2]); var rows:[[String:Any]]=[]
 let callback: CGEventTapCallBack = { _,type,event,_ in
- if [.leftMouseDown,.leftMouseDragged,.leftMouseUp].contains(type) { let p=event.location; rows.append(["type":type.rawValue,"monotonicNs":DispatchTime.now().uptimeNanoseconds,"x":p.x,"y":p.y]); if type == .leftMouseUp { if let d=try? JSONSerialization.data(withJSONObject:["events":rows],options:[.prettyPrinted,.sortedKeys]) { try? d.write(to:out,options:.atomic) }; CFRunLoopStop(CFRunLoopGetCurrent()) } }; return Unmanaged.passUnretained(event)
+ if [.leftMouseDown,.leftMouseDragged,.leftMouseUp].contains(type) { let p=event.location; rows.append(["type":type.rawValue,"monotonicNs":DispatchTime.now().uptimeNanoseconds,"wallTimeNs":UInt64(Date().timeIntervalSince1970*1_000_000_000),"x":p.x,"y":p.y]); if type == .leftMouseUp { if let d=try? JSONSerialization.data(withJSONObject:["events":rows],options:[.prettyPrinted,.sortedKeys]) { try? d.write(to:out,options:.atomic) }; CFRunLoopStop(CFRunLoopGetCurrent()) } }; return Unmanaged.passUnretained(event)
 }
 guard let tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.headInsertEventTap,options:.listenOnly,eventsOfInterest:(1 << CGEventType.leftMouseDown.rawValue)|(1 << CGEventType.leftMouseDragged.rawValue)|(1 << CGEventType.leftMouseUp.rawValue),callback:callback,userInfo:nil) else { exit(2) }
 let src=CFMachPortCreateRunLoopSource(nil,tap,0); CFRunLoopAddSource(CFRunLoopGetCurrent(),src,.commonModes); CGEvent.tapEnable(tap:tap,enable:true); try! Data("ready\n".utf8).write(to:ready,options:.atomic); CFRunLoopRun()
@@ -57,9 +64,9 @@ tap_pid=$!
 for _ in {1..100}; do [[ -s "$tap_ready" ]] && break; kill -0 "$tap_pid" 2>/dev/null || { echo "CGEventTap unavailable" >&2; exit 3; }; sleep 0.05; done
 [[ -s "$tap_ready" ]] || exit 3
 started="$(python3 -c 'import time;print(time.time_ns())')"; cliclick "${args[@]}"; wait "$tap_pid"; finished="$(python3 -c 'import time;print(time.time_ns())')"; after="$(query_window)"; event_sha="$(shasum -a 256 "$event_path"|awk '{print $1}')"
-python3 - "$ready" "$done_path" "$ready_sha" "$driver" "$driver_sha" "$after" "$started" "$finished" "${args[*]}" "$event_path" "$event_sha" <<'PY'
+python3 - "$ready" "$done_path" "$ready_sha" "$driver" "$driver_sha" "$after" "$started" "$finished" "${args[*]}" "$event_path" "$event_sha" "$sx" "$sy" <<'PY'
 import json,os,sys,tempfile,time
-r=json.load(open(sys.argv[1])); a=[int(x) for x in sys.argv[6].split(',')]; b=r['beforeBounds']; d=dict(r,readySHA256=sys.argv[3],driverPath=sys.argv[4],driverSHA256=sys.argv[5],afterBounds=a,actualDelta=[a[0]-b[0],a[1]-b[1]],startedAtNs=int(sys.argv[7]),finishedAtNs=int(sys.argv[8]),doneAtNs=time.time_ns(),cliclickArgv=sys.argv[9].split(),eventArtifactPath=sys.argv[10],eventArtifactSHA256=sys.argv[11])
+r=json.load(open(sys.argv[1])); a=[int(x) for x in sys.argv[6].split(',')]; b=r['beforeBounds']; sx,sy=int(sys.argv[12]),int(sys.argv[13]); dx,dy=r['requestedDelta']; d=dict(r,readySHA256=sys.argv[3],driverPath=sys.argv[4],driverSHA256=sys.argv[5],afterBounds=a,actualDelta=[a[0]-b[0],a[1]-b[1]],startedAtNs=int(sys.argv[7]),finishedAtNs=int(sys.argv[8]),doneAtNs=time.time_ns(),cliclickArgv=sys.argv[9].split(),eventArtifactPath=sys.argv[10],eventArtifactSHA256=sys.argv[11],startPoint=[sx,sy],endPoint=[sx+dx,sy+dy],topmostPID=r['pid'],topmostWindowID=r['windowID'],topmostTitle=r['title'])
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(sys.argv[2])); os.write(fd,(json.dumps(d,sort_keys=True,indent=2)+'\n').encode()); os.close(fd); os.replace(tmp,sys.argv[2])
 PY
 cp "$done_path" "$log"
