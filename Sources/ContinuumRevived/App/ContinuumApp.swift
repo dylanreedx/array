@@ -17471,10 +17471,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    let nonce = ProcessInfo.processInfo.environment["CONTINUUM_QA_LAUNCH_NONCE"] {
                     window.title = "ARRAY_QA_INPUT_\(nonce.prefix(10)) — Array"
                     self.qaExternalPointerEvents = []
-                    self.qaExternalEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self, weak window] event in
-                        guard let self, let window, event.windowNumber == window.windowNumber else { return event }
+                    self.qaExternalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self, weak window] event in
+                        guard let self, let window else { return }
                         let kind: String = event.type == .leftMouseDown ? "down" : (event.type == .leftMouseDragged ? "dragged" : "up")
-                        self.qaExternalPointerEvents.append(["kind": kind, "uptime": ProcessInfo.processInfo.systemUptime, "windowID": window.windowNumber, "x": event.locationInWindow.x, "y": event.locationInWindow.y])
+                        let screenLocation = NSEvent.mouseLocation
+                        self.qaExternalPointerEvents.append(["kind": kind, "uptime": ProcessInfo.processInfo.systemUptime, "windowID": window.windowNumber, "x": screenLocation.x, "y": screenLocation.y])
                         if event.type == .leftMouseUp,
                            let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT"],
                            let readyPath = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_READY_PATH"],
@@ -17484,7 +17485,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                                 try? data.write(to: URL(fileURLWithPath: output), options: .atomic)
                             }
                         }
-                        return event
                     }
                 }
                 window.setContentSize(NSSize(width: 960, height: 720))

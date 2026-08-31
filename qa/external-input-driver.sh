@@ -18,8 +18,9 @@ query_window() { swift - "$pid" "$windowID" "$title" <<'SWIFT'
 import CoreGraphics; import Foundation
 let pid=Int32(CommandLine.arguments[1])!, id=UInt32(CommandLine.arguments[2])!, title=CommandLine.arguments[3]
 let ws=CGWindowListCopyWindowInfo(.optionAll,kCGNullWindowID) as? [[String:Any]] ?? []
-guard let w=ws.first(where:{($0[kCGWindowNumber as String] as? UInt32)==id}), ($0[kCGWindowOwnerPID as String] as? Int32)==pid, ($0[kCGWindowName as String] as? String)==title, let b=w[kCGWindowBounds as String] as? [String:Any] else { exit(1) }
-print("\(b[\"X\"]!),\(b[\"Y\"]!),\(b[\"Width\"]!),\(b[\"Height\"]!)")
+guard let w=ws.first(where:{ ($0[kCGWindowNumber as String] as? UInt32)==id && ($0[kCGWindowOwnerPID as String] as? Int32)==pid && ($0[kCGWindowName as String] as? String)==title }), let b=w[kCGWindowBounds as String] as? [String:Any] else { exit(1) }
+let x=b["X"]!, y=b["Y"]!, width=b["Width"]!, height=b["Height"]!
+print("\(x),\(y),\(width),\(height)")
 SWIFT
 }
 observed_before="$(query_window)"; [[ "$observed_before" == "$beforeBounds" ]]
