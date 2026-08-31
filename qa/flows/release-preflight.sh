@@ -153,6 +153,7 @@ on run argv
 end run
 APPLESCRIPT
 click_center_of_window || defer_display "accessibility" "cliclick could not focus exact app window"
+sleep 0.3
 assert_flow "frontmost-focused-after-click" "exact candidate app is frontmost and its target window is focused/main" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
   tell application "System Events"
