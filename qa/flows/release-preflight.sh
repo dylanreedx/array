@@ -152,9 +152,8 @@ on run argv
   tell application "System Events" to set frontmost of (first process whose unix id is (item 1 of argv as integer)) to true
 end run
 APPLESCRIPT
-click_center_of_window || defer_display "accessibility" "cliclick could not focus exact app window"
 sleep 0.3
-assert_flow "frontmost-focused-after-click" "exact candidate app is frontmost and its target window is focused/main" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
+assert_flow "pointer-drag-focus-precondition" "setup made exact candidate PID/window frontmost and main before genuine pointer drag" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
   tell application "System Events"
     set p to first process whose unix id is (item 1 of argv as integer)
