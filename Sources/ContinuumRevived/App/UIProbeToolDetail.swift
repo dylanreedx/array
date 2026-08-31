@@ -94,9 +94,12 @@ extension UIProbeGeometry {
         await expiringList.qaWaitForToolDetailRefresh()
         guard let storedDisclosure = expiringList.qaPresentedToolSummary(for: blockID),
               storedDisclosure.contains("Read Agent.swift"),
-              storedDisclosure.contains("Read: …/Sources/Agent.swift"),
-              !storedDisclosure.contains("/Users/private") else {
-            throw GeometryError(message: "fresh store detail did not disclose its abbreviated affected file before expiry")
+              !storedDisclosure.contains("Read: …/Sources/Agent.swift"),
+              !storedDisclosure.contains("/Users/private"),
+              AgentToolDetailPresenter.observableAffectedFileNames(
+                await store.detail(for: currentIdentity)!
+              ) == ["…/Sources/Agent.swift"] else {
+            throw GeometryError(message: "fresh store detail did not compact a single-file read while retaining its safe expanded target")
         }
 
         // File changes use the Changes renderer rather than ToolCallRenderer,
@@ -167,12 +170,12 @@ extension UIProbeGeometry {
         // Hostile witness: an entry binding is lifecycle immutable. A conflicting
         // rebind must not alter the identity used by a refreshed rendered snapshot.
         let firstRecord = AgentToolDetailRecord(
-            identity: priorIdentity, toolName: "first-tool", status: .completed,
-            updatedAt: clock.now()
+            identity: priorIdentity, toolName: "edit", status: .completed,
+            updatedAt: clock.now(), fileChanges: [.init(action: .edit, path: "First.swift")]
         )
         let secondRecord = AgentToolDetailRecord(
-            identity: currentIdentity, toolName: "second-tool", status: .completed,
-            updatedAt: clock.now()
+            identity: currentIdentity, toolName: "edit", status: .completed,
+            updatedAt: clock.now(), fileChanges: [.init(action: .edit, path: "Second.swift")]
         )
         let immutableList = AgentTranscriptListView(toolDetailProvider: { key in
             switch key {
@@ -180,20 +183,20 @@ extension UIProbeGeometry {
             case currentIdentity: return secondRecord
             default: return nil
             }
-        })
+        }, toolDetailClock: clock.now)
         immutableList.bindToolDetailIdentity(priorIdentity, to: entryID)
         try immutableList.apply(
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
-        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("first-tool") == true else {
-            throw GeometryError(message: "initial immutable host-local identity did not render")
+        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("Edit: First.swift") == true else {
+            throw GeometryError(message: "initial immutable host-local identity did not render: \(immutableList.qaPresentedToolSummary(for: blockID) ?? "nil")")
         }
         guard !immutableList.bindToolDetailIdentity(currentIdentity, to: entryID) else {
             throw GeometryError(message: "conflicting host-local rebind was not rejected")
         }
         immutableList.refreshToolDetailPresentation()
-        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("first-tool") == true else {
+        guard immutableList.qaPresentedToolSummary(for: blockID)?.contains("Edit: First.swift") == true else {
             throw GeometryError(message: "conflicting host-local rebind retroactively changed rendered identity")
         }
 
@@ -215,7 +218,7 @@ extension UIProbeGeometry {
             case currentIdentity: return secondRecord
             default: return nil
             }
-        })
+        }, toolDetailClock: clock.now)
         resetList.bindToolDetailIdentity(priorIdentity, to: entryID)
         try resetList.apply(
             document: document,
@@ -358,8 +361,8 @@ extension UIProbeGeometry {
         )!
         let mixedIdentity = AgentToolDetailKey(scope: mixedScope, providerItemID: mixedItemID)
         let mixedRecord = AgentToolDetailRecord(
-            identity: mixedIdentity, toolName: "old-provider-tool", status: .completed,
-            updatedAt: mixedClock.now()
+            identity: mixedIdentity, toolName: "edit", status: .completed,
+            updatedAt: mixedClock.now(), fileChanges: [.init(action: .edit, path: "Old.swift")]
         )
         let mixedList = AgentTranscriptListView(
             toolDetailProvider: { key in key == mixedIdentity ? mixedRecord : nil },
@@ -401,7 +404,7 @@ extension UIProbeGeometry {
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [mixedEntryID, mixedParagraphID, mixedOldToolID])
         )
         await mixedList.qaWaitForToolDetailRefresh()
-        guard mixedList.qaPresentedToolSummary(for: mixedOldToolID)?.contains("old-provider-tool") == true else {
+        guard mixedList.qaPresentedToolSummary(for: mixedOldToolID)?.contains("Edit: Old.swift") == true else {
             throw GeometryError(message: "mixed replacement fixture did not establish the old runtime provider detail")
         }
         mixedList.qaSetDisclosureState(for: mixedOldToolID, expanded: true)
@@ -451,8 +454,8 @@ extension UIProbeGeometry {
         )!
         let stableIdentity = AgentToolDetailKey(scope: stableScope, providerItemID: stableItemID)
         let stableRecord = AgentToolDetailRecord(
-            identity: stableIdentity, toolName: "stable-provider-tool", status: .completed,
-            updatedAt: mixedClock.now()
+            identity: stableIdentity, toolName: "edit", status: .completed,
+            updatedAt: mixedClock.now(), fileChanges: [.init(action: .edit, path: "Stable.swift")]
         )
         let stableList = AgentTranscriptListView(
             toolDetailProvider: { key in key == stableIdentity ? stableRecord : nil },
@@ -482,7 +485,7 @@ extension UIProbeGeometry {
             document: AgentDocument(version: 1, entries: [stableInitial]),
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [stableEntryID, stableParagraphID, stableToolID])
         )
-        guard stableList.qaPresentedToolSummary(for: stableToolID)?.contains("stable-provider-tool") == true else {
+        guard stableList.qaPresentedToolSummary(for: stableToolID)?.contains("Edit: Stable.swift") == true else {
             throw GeometryError(message: "stable sibling fixture did not establish immutable provider identity")
         }
         stableList.qaSetDisclosureState(for: stableToolID, expanded: true)
@@ -495,7 +498,7 @@ extension UIProbeGeometry {
             )
         )
         guard stableList.qaDisclosureState(for: stableToolID) == true,
-              stableList.qaPresentedToolSummary(for: stableToolID)?.contains("stable-provider-tool") == true else {
+              stableList.qaPresentedToolSummary(for: stableToolID)?.contains("Edit: Stable.swift") == true else {
             throw GeometryError(message: "same-ID sibling update discarded disclosure or immutable provider identity")
         }
 

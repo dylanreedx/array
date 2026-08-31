@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 
 /// A labelled contact sheet of the agent surfaces, in both appearances, written
@@ -159,6 +160,51 @@ enum UITourCheck {
         )
     }
 
+    /// Raw provider fixtures rendered through the production translators and
+    /// transcript projection. This is QA-only evidence, but it deliberately
+    /// avoids a hand-authored provider lookalike.
+    static func makeProviderTranscript(provider: String, size: NSSize, appearance: NSAppearance.Name) -> NSView {
+        let claude = [
+            #"{"type":"system","subtype":"init","session_id":"visual","cwd":"/fixture"}"#,
+            #"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Inspect the typed file detail."}},"parent_tool_use_id":null}"#,
+            #"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The transcript keeps one aligned semantic column."}},"parent_tool_use_id":null}"#,
+            #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"Sources/Agent.swift"}}]},"parent_tool_use_id":null}"#,
+            #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read","is_error":false,"content":"ok"}]},"parent_tool_use_id":null}"#,
+        ]
+        let codex = [
+            #"{"type":"thread.started","thread_id":"visual"}"#, #"{"type":"turn.started"}"#,
+            #"{"type":"item.completed","item":{"id":"reason","type":"reasoning","text":"Inspect the typed file detail."}}"#,
+            #"{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"The transcript keeps one aligned semantic column."}}"#,
+            #"{"type":"item.started","item":{"id":"read","type":"file_change","changes":[{"path":"Sources/Agent.swift","kind":"update"}],"status":"in_progress"}}"#,
+            #"{"type":"item.completed","item":{"id":"read","type":"file_change","changes":[{"path":"Sources/Agent.swift","kind":"update"}],"status":"completed"}}"#,
+        ]
+        let pi = [
+            #"{"type":"session","id":"visual","cwd":"/fixture"}"#, #"{"type":"agent_start"}"#,
+            #"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Inspect the typed file detail."}}"#,
+            #"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"The transcript keeps one aligned semantic column."}}"#,
+            #"{"type":"tool_execution_start","toolCallId":"read","toolName":"read","args":{"path":"Sources/Agent.swift"}}"#,
+            #"{"type":"tool_execution_end","toolCallId":"read","toolName":"read","isError":false}"#,
+        ]
+        let events: [AgentRuntimeEvent]
+        switch provider {
+        case "claude": var translator = ClaudeEventTranslator(runToken: "visual"); events = translator.translate(stream: claude)
+        case "codex": var translator = CodexEventTranslator(runToken: "visual"); events = translator.translate(stream: codex)
+        default: var translator = PiEventTranslator(); events = translator.translate(stream: pi)
+        }
+        var projection = AgentTranscriptProjection(threadId: "visual-thread")
+        try? projection.appendUserPrompt(id: AgentNodeID(rawValue: "visual-\(provider)-user")!, text: "Review the transcript detail and report the result.")
+        for event in events { projection.ingest(event.withThreadId("visual-thread")) }
+        let list = AgentTranscriptListView(renderContext: AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: appearance == .darkAqua ? .dark : .light
+        ))
+        list.frame = NSRect(origin: .zero, size: size)
+        let document = AgentDocument(version: 1, entries: projection.document.entries)
+        try? list.apply(document: document, patch: AgentDocumentPatch(
+            fromVersion: 0, toVersion: 1, inserted: document.entries.flatMap(\.blocks).map(\.id)
+        ))
+        return list
+    }
+
     /// `.plans/45` — the transcript AFTER the reader opens things. Dylan's
     /// review found both defects that only exist in this state: reasoning rows
     /// that expand without remeasuring, and folded tool runs whose expanded
@@ -183,6 +229,25 @@ enum UITourCheck {
         surface.layoutSubtreeIfNeeded()
         surface.transcript.layoutSubtreeIfNeeded()
         surface.transcript.collectionView.layoutSubtreeIfNeeded()
+        surface.removeFromSuperview()
+        surface.frame = NSRect(origin: .zero, size: size)
+        return surface
+    }
+
+    static func makePositionedSemanticTranscript(
+        state: AgentTranscriptReviewState, position: CGFloat,
+        size: NSSize, appearance: NSAppearance.Name
+    ) -> AgentTranscriptReviewSurface {
+        let surface = makeSemanticTranscript(state: state, size: size, appearance: appearance)
+        let host = NSView(frame: surface.frame)
+        host.addSubview(surface)
+        surface.layoutSubtreeIfNeeded()
+        surface.transcript.layoutSubtreeIfNeeded()
+        surface.transcript.collectionView.layoutSubtreeIfNeeded()
+        let clip = surface.transcript.scrollView.contentView
+        let maximum = max(0, surface.transcript.collectionView.bounds.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: 0, y: maximum * min(1, max(0, position))))
+        surface.transcript.scrollView.reflectScrolledClipView(clip)
         surface.removeFromSuperview()
         surface.frame = NSRect(origin: .zero, size: size)
         return surface
@@ -227,6 +292,18 @@ enum UITourCheck {
                 ))
             }
         }
+        for provider in ["claude", "codex", "pi"] {
+            for width in transcriptReviewWidths {
+                let size = NSSize(width: width, height: transcriptReviewHeight)
+                for appearance in appearances {
+                    shots.append(Shot(
+                        surface: "semantic-transcript", state: "actual-\(provider)", size: size,
+                        appearance: appearance,
+                        make: { makeProviderTranscript(provider: provider, size: size, appearance: appearance) }
+                    ))
+                }
+            }
+        }
         for state in [
             AgentTranscriptReviewState.long, .activeTool, .failedTool, .approval,
             // `.plans/45` T2. Advisory PNGs are the review mechanism for the
@@ -258,6 +335,26 @@ enum UITourCheck {
                     surface: "semantic-transcript", state: "\(state.rawValue)-expanded",
                     size: size, appearance: appearance,
                     make: { makeExpandedSemanticTranscript(state: state, size: size, appearance: appearance) }
+                ))
+            }
+        }
+        // WS6 deterministic viewport/state inventory. These are aliases of the
+        // production fixtures with the viewport/disclosure state made explicit
+        // in the artifact name for review.
+        let inventorySize = NSSize(width: 480, height: transcriptReviewHeight)
+        for (label, fraction) in [("long-history-top", CGFloat(0)), ("long-history-middle", CGFloat(0.5)), ("long-history-bottom", CGFloat(1))] {
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "semantic-transcript", state: label, size: inventorySize, appearance: appearance,
+                    make: { makePositionedSemanticTranscript(state: .long, position: fraction, size: inventorySize, appearance: appearance) }
+                ))
+            }
+        }
+        for (label, state) in [("streaming-before", AgentTranscriptReviewState.activeTool), ("streaming-after", .recededWork), ("file-detail-unknown", .mixed)] {
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "semantic-transcript", state: label, size: inventorySize, appearance: appearance,
+                    make: { makeSemanticTranscript(state: state, size: inventorySize, appearance: appearance) }
                 ))
             }
         }
@@ -392,6 +489,11 @@ enum UITourCheck {
     // MARK: - Output
 
     static func tourDirectory() throws -> URL {
+        if let explicit = ProcessInfo.processInfo.environment["CONTINUUM_UI_TOUR_OUTPUT"], !explicit.isEmpty {
+            let directory = URL(fileURLWithPath: explicit, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory
+        }
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
