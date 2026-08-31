@@ -8,7 +8,8 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const cli = path.join(__dirname, "release-evidence.js");
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "array-release-evidence-test-"));
+const retainedRoot = process.env.RELEASE_EVIDENCE_RETAIN_VALID || "";
+const scratch = retainedRoot ? path.dirname(retainedRoot) : fs.mkdtempSync(path.join(os.tmpdir(), "array-release-evidence-test-"));
 let checks = 0;
 
 function run(args, env = {}, cwd) {
@@ -31,6 +32,10 @@ function artifactFixture(name, staleLog = false) {
   const repo = path.join(scratch, `${name}-source`); fs.mkdirSync(repo); text(path.join(repo, "source"), "source\n");
   for (const args of [["init", "-q"], ["add", "source"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "fixture"]]) { const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" }); assert.strictEqual(result.status, 0, result.stderr); }
   const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+  const tools = path.join(root, "system-tools"); fs.mkdirSync(tools);
+  text(path.join(tools, "codesign"), "#!/bin/sh\necho 'Authority=Developer ID Application: Fixture' >&2\necho 'TeamIdentifier=FIXTURETEAM' >&2\necho 'designated => identifier dev.arrayapp.macos and anchor apple generic' >&2\nexit 0\n");
+  for (const name of ["xcrun", "spctl"]) text(path.join(tools, name), "#!/bin/sh\necho verified >&2\nexit 0\n");
+  for (const name of ["codesign", "xcrun", "spctl"]) fs.chmodSync(path.join(tools, name), 0o755);
   ok(run(["init", "--run-id", name, "--root", root, "--base-sha", head]).status === 0, `${name}: artifact init`);
   const app = path.join(root, "Array.app"), macos = path.join(app, "Contents", "MacOS"); fs.mkdirSync(macos, { recursive: true });
   text(path.join(app, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>Array</string><key>CFBundleIdentifier</key><string>dev.arrayapp.macos</string><key>CFBundleShortVersionString</key><string>0.8.0</string><key>CFBundleVersion</key><string>56</string></dict></plist>\n`);
@@ -38,7 +43,7 @@ function artifactFixture(name, staleLog = false) {
   const dmg = path.join(root, "Array-0.8.0.dmg"); text(dmg, "canonical dmg bytes\n");
   const argv = path.join(root, "release.argv"); text(argv, "scripts/release-app.sh\0--set-version\00.8.0\0--set-build\056\0");
   const log = path.join(root, "release.log"); text(log, staleLog ? "old unrelated log\n" : "==> notarize app\nid: 11111111-1111-1111-1111-111111111111\nstatus: Accepted\n==> build DMG\n==> notarize DMG\nid: 22222222-2222-2222-2222-222222222222\nstatus: Accepted\n==> Gatekeeper verification\n");
-  return { root, repo, head, app, dmg, argv, log, manifest: path.join(root, "canonical.json") };
+  return { root, repo, tools, head, app, dmg, argv, log, manifest: path.join(root, "canonical.json") };
 }
 function baseReport(root, role = "lead") {
   const semantic = path.join(root, "semantic.json"); text(semantic, "{}\n");
@@ -73,7 +78,7 @@ function fixture(name, mutate, expected) {
 }
 
 try {
-  const valid = fixture("valid", null, "pass");
+  const valid = fixture(retainedRoot ? path.basename(retainedRoot) : "valid", null, "pass");
   for (const role of ["reviewer", "tester", "auditor"]) fixture(`null-${role}`, (report, root) => Object.assign(report, baseReport(root, role)), "pass");
   const duplicate = run(["ingest", "--root", valid.root, "--report", valid.reportPath]);
   ok(duplicate.status === 0, "duplicate ingestion is idempotent");
@@ -102,17 +107,18 @@ try {
 
   const canonical = artifactFixture("canonical");
   const createArgs = ["artifact-create", "--root", canonical.root, "--candidate-sha", canonical.head, "--release-argv", canonical.argv, "--release-log", canonical.log, "--app", canonical.app, "--dmg", canonical.dmg, "--output", canonical.manifest];
-  const created = run(createArgs, {}, canonical.repo); ok(created.status === 0, `canonical artifact creates: ${created.stderr}`);
+  const systemEnv = { RELEASE_EVIDENCE_SYSTEM_TOOLS: canonical.tools };
+  const created = run(createArgs, systemEnv, canonical.repo); ok(created.status === 0, `canonical artifact creates: ${created.stderr}`);
   const mounted = path.join(canonical.root, "mounted", "Array.app"); copyTree(canonical.app, mounted);
-  const verified = path.join(canonical.root, "verified.json"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified]).status === 0, "canonical mounted artifact verifies");
-  text(path.join(mounted, "Contents", "MacOS", "Array"), "modified after signing\n"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified]).status !== 0, "modified executable after signing is rejected");
-  fs.rmSync(path.dirname(mounted), { recursive: true }); copyTree(canonical.app, mounted); text(canonical.dmg, "renamed-only impostor bytes\n"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified]).status !== 0, "renamed-only DMG impostor is rejected");
-  text(canonical.dmg, "canonical dmg bytes\n"); text(path.join(canonical.root, "SHA256SUMS"), `${"0".repeat(64)}  Array-0.8.0.dmg\n`); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified]).status !== 0, "mismatched checksum is rejected");
-  ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", "f".repeat(40), "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified]).status !== 0, "wrong source SHA is rejected");
-  ok(run([...createArgs.slice(0, -1), path.join(canonical.root, "second.json")], {}, canonical.repo).status !== 0, "second canonical conflict is rejected");
-  const interruptedChecksum = artifactFixture("interrupted-checksum"); ok(run(["artifact-create", "--root", interruptedChecksum.root, "--candidate-sha", interruptedChecksum.head, "--release-argv", interruptedChecksum.argv, "--release-log", interruptedChecksum.log, "--app", interruptedChecksum.app, "--dmg", interruptedChecksum.dmg, "--output", interruptedChecksum.manifest], { RELEASE_EVIDENCE_INTERRUPT_AT: "checksum" }, interruptedChecksum.repo).status !== 0 && !fs.existsSync(path.join(interruptedChecksum.root, "SHA256SUMS")), "interrupted checksum write leaves no partial checksum");
-  const stale = artifactFixture("stale-notary", true); ok(run(["artifact-create", "--root", stale.root, "--candidate-sha", stale.head, "--release-argv", stale.argv, "--release-log", stale.log, "--app", stale.app, "--dmg", stale.dmg, "--output", stale.manifest], {}, stale.repo).status !== 0, "stale notary log is rejected");
+  const verified = path.join(canonical.root, "verified.json"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified], systemEnv).status === 0, "canonical mounted artifact verifies");
+  text(path.join(mounted, "Contents", "MacOS", "Array"), "modified after signing\n"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified], systemEnv).status !== 0, "modified executable after signing is rejected");
+  fs.rmSync(path.dirname(mounted), { recursive: true }); copyTree(canonical.app, mounted); text(canonical.dmg, "renamed-only impostor bytes\n"); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified], systemEnv).status !== 0, "renamed-only DMG impostor is rejected");
+  text(canonical.dmg, "canonical dmg bytes\n"); text(path.join(canonical.root, "SHA256SUMS"), `${"0".repeat(64)}  Array-0.8.0.dmg\n`); ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", canonical.head, "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified], systemEnv).status !== 0, "mismatched checksum is rejected");
+  ok(run(["artifact-verify", "--manifest", canonical.manifest, "--candidate-sha", "f".repeat(40), "--dmg", canonical.dmg, "--mounted-app", mounted, "--output", verified], systemEnv).status !== 0, "wrong source SHA is rejected");
+  ok(run([...createArgs.slice(0, -1), path.join(canonical.root, "second.json")], systemEnv, canonical.repo).status !== 0, "second canonical conflict is rejected");
+  const interruptedChecksum = artifactFixture("interrupted-checksum"); ok(run(["artifact-create", "--root", interruptedChecksum.root, "--candidate-sha", interruptedChecksum.head, "--release-argv", interruptedChecksum.argv, "--release-log", interruptedChecksum.log, "--app", interruptedChecksum.app, "--dmg", interruptedChecksum.dmg, "--output", interruptedChecksum.manifest], { RELEASE_EVIDENCE_INTERRUPT_AT: "checksum", RELEASE_EVIDENCE_SYSTEM_TOOLS: interruptedChecksum.tools }, interruptedChecksum.repo).status !== 0 && !fs.existsSync(path.join(interruptedChecksum.root, "SHA256SUMS")), "interrupted checksum write leaves no partial checksum");
+  const stale = artifactFixture("stale-notary", true); ok(run(["artifact-create", "--root", stale.root, "--candidate-sha", stale.head, "--release-argv", stale.argv, "--release-log", stale.log, "--app", stale.app, "--dmg", stale.dmg, "--output", stale.manifest], { RELEASE_EVIDENCE_SYSTEM_TOOLS: stale.tools }, stale.repo).status !== 0, "stale notary log is rejected");
   console.log(`release-evidence checks passed (${checks})`);
 } finally {
-  fs.rmSync(scratch, { recursive: true, force: true });
+  if (!retainedRoot) fs.rmSync(scratch, { recursive: true, force: true });
 }
