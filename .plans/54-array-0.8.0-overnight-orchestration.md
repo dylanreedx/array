@@ -344,6 +344,18 @@ Judge the matrix by its final inventory summary, not only its exit status. The f
 
 ## 8. Hard stop conditions
 
+### Live execution ledger
+
+| Checkpoint | SHA | Result | Evidence |
+|---|---|---|---|
+| P0 control packet | `569209c714fd500bce7d2242148f8aae102172eb` | PASS | Run `20260831T011923Z-080`; product base `d41598dd08ef19da97cd14c5b5e74adbef8d10bd` |
+| Wave-0 performance runner | integrated through `d7bdc709` | PROMOTE | `wave0/perf-*` reports; interruption cleanup fix retained |
+| Wave-0 evidence trust boundary | integrated through `c297f3a6` | PROMOTE | 145 contract assertions; round-two 5/5 and round-three 4/4 adversarial attacks rejected |
+| Wave-0 GUI preflight | source `1e9ae1a084dabca0e223afc673ff57b970602e99`; integrated as `b9b029aa` | PROMOTE FOUNDATION | Reviewer r6 PROMOTE; tester r6 retained one safe functional failure and the single authorized unchanged retry passed 12/12 compact assertions. The physical 1440x900-content and Aqua lanes remain `DISPLAY_DEFERRED` and therefore remain release blockers until later evidence is available. |
+| E0 combined checkpoint | `b9b029aa4fa354c7591eb47fb8b2abb58683167e` | PASS | `integration/e0/logs`: GUI contracts, 145 evidence assertions, 9 adversarial evidence attacks, shell syntax, `swift build --product Array`, and `git diff --check` all pass. |
+
+No production Array process, production Application Support/defaults, global appearance, TCC grant, appcast, tag, push, or installed application was changed during Wave 0.
+
 Stop and preserve evidence if any of the following occurs:
 
 - a worker may have touched `/Applications/Array.app`, production Application Support, production defaults, or a real project `.array/`;
