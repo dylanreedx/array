@@ -26,9 +26,14 @@ SWIFT
 observed_before="$(query_window)"; [[ "$observed_before" == "$beforeBounds" ]]
 osascript - "$pid" <<'APPLESCRIPT' >/dev/null
 on run argv
- tell application "System Events" to perform action "AXRaise" of window 1 of (first process whose unix id is (item 1 of argv as integer))
+ tell application "System Events"
+  set p to first process whose unix id is (item 1 of argv as integer)
+  set frontmost of p to true
+  perform action "AXRaise" of window 1 of p
+ end tell
 end run
 APPLESCRIPT
+sleep 0.2
 IFS=',' read -r x y w h <<< "$observed_before"; IFS=',' read -r dx dy <<< "$requestedDelta"
 sx=$((x+w/2)); sy=$((y+14)); args=("m:${sx},${sy}" "dd:${sx},${sy}" "dm:$((sx+dx)),$((sy+dy))" "du:$((sx+dx)),$((sy+dy))")
 started="$(python3 -c 'import time;print(time.time_ns())')"; cliclick "${args[@]}"; finished="$(python3 -c 'import time;print(time.time_ns())')"; after="$(query_window)"
