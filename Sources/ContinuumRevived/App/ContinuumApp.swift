@@ -17474,7 +17474,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     self.qaExternalEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self, weak window] event in
                         guard let self, let window else { return event }
                         let kind: String = event.type == .leftMouseDown ? "down" : (event.type == .leftMouseDragged ? "dragged" : "up")
-                        self.qaExternalPointerEvents.append(["kind": kind, "uptime": ProcessInfo.processInfo.systemUptime, "windowID": window.windowNumber, "x": event.locationInWindow.x, "y": event.locationInWindow.y])
+                        let global = event.cgEvent?.location ?? .zero
+                        self.qaExternalPointerEvents.append(["kind": kind, "monotonicNs": DispatchTime.now().uptimeNanoseconds, "wallTimeNs": UInt64(Date().timeIntervalSince1970 * 1_000_000_000), "windowID": window.windowNumber, "x": global.x, "y": global.y])
                         if event.type == .leftMouseUp,
                            let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT"],
                            let readyPath = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_READY_PATH"],
@@ -17482,6 +17483,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                             let payload: [String: Any] = ["runID": ready["runID"] ?? "", "readyChallenge": ready["readyChallenge"] ?? "", "launchNonce": nonce, "windowID": window.windowNumber, "title": window.title, "events": self.qaExternalPointerEvents]
                             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                                 try? data.write(to: URL(fileURLWithPath: output), options: .atomic)
+                            }
+                            if let monitor = self.qaExternalEventMonitor {
+                                NSEvent.removeMonitor(monitor)
+                                self.qaExternalEventMonitor = nil
                             }
                         }
                         return event

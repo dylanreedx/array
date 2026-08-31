@@ -2,7 +2,23 @@
 set -euo pipefail
 [[ $# -eq 3 ]] || { echo "usage: $0 READY DONE LOG" >&2; exit 2; }
 ready="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1")"; done_path="$2"; log="$3"
-driver="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$0")"; driver_sha="$(shasum -a 256 "$driver"|awk '{print $1}')"; ready_sha="$(shasum -a 256 "$ready"|awk '{print $1}')"
+driver="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$0")"; qa_root="$(cd "$(dirname "$driver")/.." && pwd -P)"; driver_sha="$(shasum -a 256 "$driver"|awk '{print $1}')"; ready_sha="$(shasum -a 256 "$ready"|awk '{print $1}')"
+python3 - "$ready" "$driver" "$driver_sha" "$qa_root" "$done_path" "$log" <<'PY'
+import hashlib,json,os,stat,subprocess,sys
+r=json.load(open(sys.argv[1])); driver,driver_sha,root=sys.argv[2:5]
+assert r.get('schemaVersion')=='external-input-v1'
+assert r['title']==f"ARRAY_QA_INPUT_{r['launchNonce'][:10]} — Array"
+assert r['candidateSHA']==subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
+assert os.path.realpath(r['driverPath'])==driver and r['driverSHA256']==driver_sha
+exe=r['executablePath']; real=os.path.realpath(exe); expected=os.path.join(root,'.build')+os.sep
+assert exe==real and os.path.isfile(exe) and not os.path.islink(exe) and real.startswith(expected) and '/debug/Array' in real and real.endswith('/Array')
+assert not real.startswith('/Applications/') and '.app/Contents/MacOS/' not in real
+assert hashlib.sha256(open(real,'rb').read()).hexdigest()==r['executableSHA256']
+run=os.path.realpath(r['runRoot']); assert os.path.isdir(run) and not os.path.islink(r['runRoot'])
+for k in ['globalEventPath','targetEventPath']:
+ p=r[k]; assert os.path.realpath(os.path.dirname(p))==run and os.path.dirname(p)==run and not os.path.islink(p)
+for p in [sys.argv[5],sys.argv[6]]: assert os.path.realpath(os.path.dirname(p))==run and os.path.dirname(p)==run and not os.path.islink(p)
+PY
 read_field() { python3 - "$ready" "$1" <<'PY'
 import json,sys
 v=json.load(open(sys.argv[1]))[sys.argv[2]]
@@ -49,7 +65,7 @@ exit(1)
 SWIFT
 )" || { echo "no exact-candidate topmost titlebar point" >&2; exit 4; }
 IFS=',' read -r sx sy <<< "$start_point"; args=("m:${sx},${sy}" "dd:${sx},${sy}" "dm:$((sx+dx)),$((sy+dy))" "du:$((sx+dx)),$((sy+dy))")
-event_path="$(dirname "$done_path")/external-driver-events.json"; tap_ready="$(dirname "$done_path")/.event-tap-ready"
+event_path="$(read_field globalEventPath)"; target_event_path="$(read_field targetEventPath)"; tap_ready="$(dirname "$done_path")/.event-tap-ready"
 rm -f "$event_path" "$tap_ready"
 swift - "$event_path" "$tap_ready" <<'SWIFT' &
 import CoreGraphics; import Foundation
@@ -64,9 +80,12 @@ tap_pid=$!
 for _ in {1..100}; do [[ -s "$tap_ready" ]] && break; kill -0 "$tap_pid" 2>/dev/null || { echo "CGEventTap unavailable" >&2; exit 3; }; sleep 0.05; done
 [[ -s "$tap_ready" ]] || exit 3
 started="$(python3 -c 'import time;print(time.time_ns())')"; cliclick "${args[@]}"; wait "$tap_pid"; finished="$(python3 -c 'import time;print(time.time_ns())')"; after="$(query_window)"; event_sha="$(shasum -a 256 "$event_path"|awk '{print $1}')"
-python3 - "$ready" "$done_path" "$ready_sha" "$driver" "$driver_sha" "$after" "$started" "$finished" "${args[*]}" "$event_path" "$event_sha" "$sx" "$sy" <<'PY'
+for _ in {1..100}; do [[ -s "$target_event_path" ]] && break; sleep 0.05; done
+[[ -f "$target_event_path" && ! -L "$target_event_path" ]] || { echo "target event artifact missing" >&2; exit 5; }
+target_event_sha="$(shasum -a 256 "$target_event_path"|awk '{print $1}')"
+python3 - "$ready" "$done_path" "$ready_sha" "$driver" "$driver_sha" "$after" "$started" "$finished" "${args[*]}" "$event_path" "$event_sha" "$sx" "$sy" "$target_event_path" "$target_event_sha" <<'PY'
 import json,os,sys,tempfile,time
-r=json.load(open(sys.argv[1])); a=[int(x) for x in sys.argv[6].split(',')]; b=r['beforeBounds']; sx,sy=int(sys.argv[12]),int(sys.argv[13]); dx,dy=r['requestedDelta']; d=dict(r,readySHA256=sys.argv[3],driverPath=sys.argv[4],driverSHA256=sys.argv[5],afterBounds=a,actualDelta=[a[0]-b[0],a[1]-b[1]],startedAtNs=int(sys.argv[7]),finishedAtNs=int(sys.argv[8]),doneAtNs=time.time_ns(),cliclickArgv=sys.argv[9].split(),eventArtifactPath=sys.argv[10],eventArtifactSHA256=sys.argv[11],startPoint=[sx,sy],endPoint=[sx+dx,sy+dy],topmostPID=r['pid'],topmostWindowID=r['windowID'],topmostTitle=r['title'])
+r=json.load(open(sys.argv[1])); a=[int(x) for x in sys.argv[6].split(',')]; b=r['beforeBounds']; sx,sy=int(sys.argv[12]),int(sys.argv[13]); dx,dy=r['requestedDelta']; d=dict(r,readySHA256=sys.argv[3],afterBounds=a,actualDelta=[a[0]-b[0],a[1]-b[1]],startedAtNs=int(sys.argv[7]),finishedAtNs=int(sys.argv[8]),doneAtNs=time.time_ns(),cliclickArgv=sys.argv[9].split(),eventArtifactPath=sys.argv[10],eventArtifactSHA256=sys.argv[11],startPoint=[sx,sy],endPoint=[sx+dx,sy+dy],topmostPID=r['pid'],topmostWindowID=r['windowID'],topmostTitle=r['title'],targetEventPath=sys.argv[14],targetEventSHA256=sys.argv[15])
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(sys.argv[2])); os.write(fd,(json.dumps(d,sort_keys=True,indent=2)+'\n').encode()); os.close(fd); os.replace(tmp,sys.argv[2])
 PY
 cp "$done_path" "$log"
