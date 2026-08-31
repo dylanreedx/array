@@ -133,6 +133,7 @@ check --tile-world-bounds-check
 check --topology-migration-check
 check --transcript-delta-index-oracle-check
 check --transcript-rhythm-check
+check --transcript-provider-parity-check
 check --ui-baseline-check
 check --ui-contrast-check
 check --ui-geometry-check
@@ -315,6 +316,7 @@ leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --topology-migration-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --transcript-rhythm-check
+leg run_app_check .build/debug/Array --transcript-provider-parity-check
 leg run_app_check .build/debug/Array --ui-baseline-check
 leg run_app_check .build/debug/Array --ui-contrast-check
 leg run_app_check .build/debug/Array --ui-geometry-check
