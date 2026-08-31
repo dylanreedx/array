@@ -4,7 +4,13 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
-APP="${CONTINUUM_PERF_APP:-.build/debug/Array}"
+CONFIGURATION="${CONTINUUM_PERF_CONFIGURATION:-debug}"
+if [[ "$CONFIGURATION" != debug && "$CONFIGURATION" != release ]]; then
+  echo "CONTINUUM_PERF_CONFIGURATION must be debug or release (got: $CONFIGURATION)" >&2
+  exit 2
+fi
+
+APP="${CONTINUUM_PERF_APP:-$ROOT_DIR/.build/$CONFIGURATION/Array}"
 BASELINE="${CONTINUUM_QA_PERF_BASELINE:-$ROOT_DIR/qa/perf-baseline.json}"
 RUN_ID="${CONTINUUM_PERF_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${CONTINUUM_PERF_OUT:-$ROOT_DIR/qa-runs/$RUN_ID/perf}"
@@ -15,16 +21,32 @@ run() {
   "$@"
 }
 
-run swift run ContinuumRevivedPerfChecks
-
 if [[ -n "${CONTINUUM_PERF_APP:-}" ]]; then
   if [[ ! -x "$APP" ]]; then
     echo "CONTINUUM_PERF_APP is not executable: $APP" >&2
     exit 1
   fi
+  resolved_app=$(realpath "$APP")
+  case "$resolved_app" in
+    */.build/debug/*)
+      app_configuration=debug
+      ;;
+    */.build/release/*)
+      app_configuration=release
+      ;;
+    *)
+      app_configuration=
+      ;;
+  esac
+  if [[ -n "$app_configuration" && "$app_configuration" != "$CONFIGURATION" ]]; then
+    echo "CONTINUUM_PERF_APP resolves to $resolved_app, which conflicts with requested $CONFIGURATION configuration" >&2
+    exit 1
+  fi
 else
-  run swift build
+  run swift build -c "$CONFIGURATION"
 fi
+
+run swift run -c "$CONFIGURATION" ContinuumRevivedPerfChecks
 
 mkdir -p "$OUT_ROOT"
 
