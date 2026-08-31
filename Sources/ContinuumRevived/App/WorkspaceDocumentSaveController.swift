@@ -26,6 +26,8 @@ final class WorkspaceDocumentSaveController {
     private var pendingDocument: WorkspaceDocument?
     private(set) var state: WorkspaceDocumentSaveState = .saved
     private(set) var lastError: Error?
+    private(set) var scheduledGeneration: UInt64 = 0
+    private(set) var acknowledgedGeneration: UInt64 = 0
     var onStateChange: ((WorkspaceDocumentSaveState) -> Void)?
 
     init(store: any WorkspaceStoring, defaults: UserDefaults = .standard) {
@@ -33,7 +35,9 @@ final class WorkspaceDocumentSaveController {
         self.defaults = defaults
     }
 
-    func scheduleZoneLayoutSave(_ document: WorkspaceDocument) {
+    @discardableResult
+    func scheduleZoneLayoutSave(_ document: WorkspaceDocument) -> UInt64 {
+        scheduledGeneration &+= 1
         pendingDocument = document
         lastError = nil
         setState(.unsavedChanges)
@@ -44,6 +48,7 @@ final class WorkspaceDocumentSaveController {
         ) { [weak self] _ in
             Task { @MainActor in try? self?.flushPendingSave() }
         }
+        return scheduledGeneration
     }
 
     func flushPendingSave() throws {
@@ -54,6 +59,7 @@ final class WorkspaceDocumentSaveController {
         do {
             try store.save(document)
             pendingDocument = nil
+            acknowledgedGeneration = scheduledGeneration
             lastError = nil
             setState(.saved)
         } catch {
@@ -63,9 +69,22 @@ final class WorkspaceDocumentSaveController {
         }
     }
 
+    func flush(through generation: UInt64) throws {
+        if acknowledgedGeneration >= generation { return }
+        try flushPendingSave()
+        guard acknowledgedGeneration >= generation else {
+            throw WorkspaceSaveAcknowledgementError.generationNotAcknowledged(
+                requested: generation, acknowledged: acknowledgedGeneration)
+        }
+    }
+
     private func setState(_ newState: WorkspaceDocumentSaveState) {
         guard state != newState else { return }
         state = newState
         onStateChange?(newState)
     }
+}
+
+enum WorkspaceSaveAcknowledgementError: Error, Equatable {
+    case generationNotAcknowledged(requested: UInt64, acknowledged: UInt64)
 }

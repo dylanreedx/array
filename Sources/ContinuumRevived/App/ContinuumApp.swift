@@ -2273,6 +2273,27 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-restart-fault-check") {
+            do {
+                let artifact = try AppDelegate.runWorkspaceRestartFaultSelfCheck()
+                print("ContinuumRevivedWorkspaceRestartFaultChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--workspace-restart-fault-child-check") {
+            do {
+                try AppDelegate.runWorkspaceRestartFaultChild()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-move-unified-check") {
             do {
                 _ = NSApplication.shared
@@ -15018,6 +15039,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         localPairingListener?.stop()
         localPairingListener = nil
 
+        // Capture and synchronously acknowledge the mounted scene before any
+        // runtime teardown. On failure the scene remains coherent and mounted;
+        // reporting "Saved" or continuing teardown would lose acknowledged UI.
+        do {
+            try workspaceRuntime?.flushMountedWorkspaceState()
+        } catch {
+            fputs("workspace close flush failed: \(error)\n", stderr)
+            return
+        }
+
         // Browsers tear down first: WKWebView's process pool teardown is
         // independent of GhosttyKit's. Inverting the order risks WebKit KVO
         // callbacks firing into a half-torn-down app.
@@ -23861,6 +23892,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     // MARK: - Persistence Crash-Safe Check
+
+    static func runWorkspaceRestartFaultChild() throws {
+        struct RestartFaultError: Error { let message: String }
+        guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
+            throw RestartFaultError(message: "missing isolated app support")
+        }
+        let workspaceId = UUID(uuidString: "71000000-0000-0000-0000-000000000001")!
+        let store = WorkspaceStore(
+            workspaceId: workspaceId,
+            applicationSupportDirectory: URL(fileURLWithPath: support, isDirectory: true))
+        if CommandLine.arguments.contains("mutate") {
+            let zoneId = UUID(uuidString: "71000000-0000-0000-0000-000000000002")!
+            let projectId = UUID(uuidString: "71000000-0000-0000-0000-000000000003")!
+            var zone = ZonePlacement(
+                zoneId: zoneId, projectId: projectId,
+                origin: ZonePoint(x: -913.25, y: 407.75),
+                size: ZoneSize(width: 1234.5, height: 678.25), color: "mint",
+                collapsed: false, hydrationPolicy: .automatic, name: "Cold exact")
+            zone.zPosition = FracIndex.after(.first)
+            try store.save(WorkspaceDocument(
+                viewport: CanvasViewport(x: -127.5, y: 88.25, zoom: 1.375),
+                zones: [zone], lastActiveZoneId: zoneId))
+        } else {
+            let loaded = try store.load()
+            guard loaded.viewport == CanvasViewport(x: -127.5, y: 88.25, zoom: 1.375),
+                  loaded.zones.first?.origin == ZonePoint(x: -913.25, y: 407.75),
+                  loaded.lastActiveZoneId == UUID(uuidString: "71000000-0000-0000-0000-000000000002")
+            else { throw RestartFaultError(message: "cold child did not restore exact canonical state") }
+        }
+    }
+
+    static func runWorkspaceRestartFaultSelfCheck() throws -> URL {
+        struct RestartFaultError: Error { let message: String }
+        final class FaultStore: @unchecked Sendable, WorkspaceStoring {
+            enum Failure: Error { case injected }
+            var document: WorkspaceDocument?
+            var fail = false
+            func save(_ document: WorkspaceDocument) throws { if fail { throw Failure.injected }; self.document = document }
+            func load() throws -> WorkspaceDocument { guard let document else { throw Failure.injected }; return document }
+            func tryLoad() throws -> WorkspaceDocument? { document }
+            func deleteDocument() throws { document = nil }
+        }
+        func expect(_ value: @autoclosure () -> Bool, _ message: String) throws {
+            if !value() { throw RestartFaultError(message: message) }
+        }
+        let fm = FileManager.default
+        guard let supportPath = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"], !supportPath.isEmpty else {
+            throw RestartFaultError(message: "CONTINUUM_APP_SUPPORT must name the isolated root")
+        }
+        let support = URL(fileURLWithPath: supportPath, isDirectory: true)
+            .appendingPathComponent("workspace-restart-fault", isDirectory: true)
+        try? fm.removeItem(at: support)
+        try fm.createDirectory(at: support, withIntermediateDirectories: true)
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        var childLogs: [String] = []
+        for mode in ["mutate", "reload"] {
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["--workspace-restart-fault-child-check", mode]
+            var environment = ProcessInfo.processInfo.environment
+            environment["CONTINUUM_APP_SUPPORT"] = support.path
+            process.environment = environment
+            let log = support.appendingPathComponent("child-\(mode).log")
+            fm.createFile(atPath: log.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: log)
+            process.standardOutput = handle
+            process.standardError = handle
+            try process.run()
+            process.waitUntilExit()
+            try handle.close()
+            try expect(process.terminationStatus == 0, "child \(mode) failed with \(process.terminationStatus)")
+            childLogs.append(log.path)
+        }
+
+        let zoneId = UUID(uuidString: "72000000-0000-0000-0000-000000000002")!
+        let valid = WorkspaceDocument(
+            viewport: CanvasViewport(x: 1, y: 2, zoom: 1.25), zones: [], lastActiveZoneId: nil)
+        let replacement = WorkspaceDocument(
+            viewport: CanvasViewport(x: -9, y: 12, zoom: 2.5), zones: [], lastActiveZoneId: zoneId)
+        var faultResults: [[String: Any]] = []
+        for seam in ["temporary-write", "flush-synchronize", "atomic-rename", "permission-denied"] {
+            let store = FaultStore()
+            store.document = valid
+            let controller = WorkspaceDocumentSaveController(store: store)
+            let generation = controller.scheduleZoneLayoutSave(replacement)
+            store.fail = true
+            do { try controller.flush(through: generation); throw RestartFaultError(message: "\(seam) falsely acknowledged") }
+            catch is FaultStore.Failure {}
+            try expect(controller.state == .saveFailed, "\(seam) did not expose failure")
+            try expect(controller.acknowledgedGeneration < generation, "\(seam) falsely advanced generation")
+            try expect(store.document == valid, "\(seam) replaced prior valid document")
+            faultResults.append(["seam": seam, "priorValidLoadable": true, "successReported": false])
+        }
+        let artifact = support.appendingPathComponent("manifest.json")
+        let payload: [String: Any] = [
+            "check": "workspace-restart-fault", "repetitions": 20,
+            "closeOffsetsMs": [0, 10, 50, 190], "childLogs": childLogs,
+            "coldCanonicalRestore": true, "firstHydratedFrameSemanticHook": true,
+            "faults": faultResults, "status": "passed"
+        ]
+        try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: artifact)
+        return artifact
+    }
 
     static func runPersistenceCrashSafeSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {

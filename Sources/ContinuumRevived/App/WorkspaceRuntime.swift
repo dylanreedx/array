@@ -671,6 +671,16 @@ final class WorkspaceRuntime {
         }
     }
 
+    /// Persist every acknowledged register owned by the mounted scene before
+    /// any layer or controller is released. A failed write deliberately leaves
+    /// the scene mounted so callers can surface the failure and retry or cancel.
+    func flushMountedWorkspaceState() throws {
+        let focus = departingFocusSnapshot(from: canvasView)
+        flushAll()
+        flushPendingArmingSave()
+        try persistDepartingWorkspaceState(focus: focus)
+    }
+
     /// Release every acquired controller via the registry (ref-count → close-at-zero),
     /// clear the canvas zone set (which unregisters tile adapters), drop references.
     func closeAll() {
@@ -1146,9 +1156,7 @@ final class WorkspaceRuntime {
 
         // Capture every visible register and synchronously save it while the
         // departing scene is still mounted and interactive.
-        let departingFocus = departingFocusSnapshot(from: canvasView)
-        flushAll()
-        try persistDepartingWorkspaceState(focus: departingFocus)
+        try flushMountedWorkspaceState()
 
         // 3. Diff project sets.
         let currentProjectIds = Set(acquiredProjectIds)
