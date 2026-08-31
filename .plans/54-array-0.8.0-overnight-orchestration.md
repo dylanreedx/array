@@ -353,6 +353,7 @@ Judge the matrix by its final inventory summary, not only its exit status. The f
 | Wave-0 evidence trust boundary | integrated through `c297f3a6` | PROMOTE | 145 contract assertions; round-two 5/5 and round-three 4/4 adversarial attacks rejected |
 | Wave-0 GUI preflight | source `1e9ae1a084dabca0e223afc673ff57b970602e99`; integrated as `b9b029aa` | PROMOTE FOUNDATION | Reviewer r6 PROMOTE; tester r6 retained one safe functional failure and the single authorized unchanged retry passed 12/12 compact assertions. The physical 1440x900-content and Aqua lanes remain `DISPLAY_DEFERRED` and therefore remain release blockers until later evidence is available. |
 | E0 combined checkpoint | `b9b029aa4fa354c7591eb47fb8b2abb58683167e` | PASS | `integration/e0/logs`: GUI contracts, 145 evidence assertions, 9 adversarial evidence attacks, shell syntax, `swift build --product Array`, and `git diff --check` all pass. |
+| E0 product baseline | `2736347795491d39b5e5425347bfd6f0baa4540b` | READY FOR WAVE 1; RELEASE NOT READY | 180 fast-matrix legs; 5 executed KNOWN-RED and 3 display-deferred KNOWN-RED, no unexpected KNOWN-RED pass. Unexpected baseline failures: agent supervisor, palette key capture, and non-exiting agent inbox; palette leak is a separate real functional red. Release report remains `DISPLAY_DEFERRED`/`DO_NOT_PROMOTE`; WS3 owns the complete 11-role performance inventory. |
 
 No production Array process, production Application Support/defaults, global appearance, TCC grant, appcast, tag, push, or installed application was changed during Wave 0.
 
