@@ -1,5 +1,13 @@
 import Foundation
 
+private func geometryFirstWinsDictionary<Key: Hashable, Value>(
+    _ pairs: some Sequence<(Key, Value)>
+) -> [Key: Value] {
+    var result: [Key: Value] = [:]
+    for (key, value) in pairs where result[key] == nil { result[key] = value }
+    return result
+}
+
 /// The user-visible geometry operations that may participate in canvas undo.
 /// Viewport navigation and entity lifecycle deliberately do not appear here.
 public enum CanvasGeometryAction: String, Codable, Equatable, Sendable {
@@ -87,10 +95,12 @@ public struct CanvasGeometryTransaction: Codable, Equatable, Sendable {
     public var isNoOp: Bool { before == after }
 
     public var changedEntityCount: Int {
-        let beforeTiles = Dictionary(uniqueKeysWithValues: before.tiles.map { ($0.tileId, $0) })
-        let beforeZones = Dictionary(uniqueKeysWithValues: before.zones.map { ($0.zoneId, $0) })
-        let changedTiles = after.tiles.lazy.filter { beforeTiles[$0.tileId] != $0 }.count
-        let changedZones = after.zones.lazy.filter { beforeZones[$0.zoneId] != $0 }.count
+        let beforeTiles = geometryFirstWinsDictionary(before.tiles.map { ($0.tileId, $0) })
+        let beforeZones = geometryFirstWinsDictionary(before.zones.map { ($0.zoneId, $0) })
+        let afterTiles = geometryFirstWinsDictionary(after.tiles.map { ($0.tileId, $0) })
+        let afterZones = geometryFirstWinsDictionary(after.zones.map { ($0.zoneId, $0) })
+        let changedTiles = afterTiles.lazy.filter { beforeTiles[$0.key] != $0.value }.count
+        let changedZones = afterZones.lazy.filter { beforeZones[$0.key] != $0.value }.count
         return changedTiles + changedZones
     }
 }

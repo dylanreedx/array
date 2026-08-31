@@ -1,6 +1,14 @@
 import CoreGraphics
 import Foundation
 
+private func autoLayoutFirstWinsDictionary<Key: Hashable, Value>(
+    _ pairs: some Sequence<(Key, Value)>
+) -> [Key: Value] {
+    var result: [Key: Value] = [:]
+    for (key, value) in pairs where result[key] == nil { result[key] = value }
+    return result
+}
+
 public struct CanvasLayoutTransaction: Equatable, Sendable {
     public var tileFrames: [UUID: TileFrame]
     public var zonePlacements: [UUID: ZonePlacement]
@@ -66,8 +74,8 @@ public enum CanvasAutoLayoutEngine {
         let gap = max(0, preferredGap.isFinite ? preferredGap : 0)
         let padding = max(0, preferredPadding.isFinite ? preferredPadding : 0)
         let header = max(0, headerHeight.isFinite ? headerHeight : 0)
-        var tiles = Dictionary(uniqueKeysWithValues: scene.tiles.map { ($0.id, $0) })
-        var zones = Dictionary(uniqueKeysWithValues: scene.zones.map { ($0.zoneId, $0) })
+        var tiles = autoLayoutFirstWinsDictionary(scene.tiles.map { ($0.id, $0) })
+        var zones = autoLayoutFirstWinsDictionary(scene.zones.map { ($0.zoneId, $0) })
         var activeTile: UUID?
         var activeZone: UUID?
         var activeZoneOnlyTranslated = false
@@ -750,8 +758,8 @@ public enum CanvasAutoLayoutEngine {
         // anything and settles by the drop policy), and a member tile's world
         // ends at its zone. "Zones push tiles; tiles never push zones."
         guard let active = activeZone.map(Peer.zone) else { return }
-        let baselineTiles = Dictionary(uniqueKeysWithValues: scene.tiles.map { ($0.id, $0.frame) })
-        let baselineZones = Dictionary(uniqueKeysWithValues: scene.zones.map { placement in
+        let baselineTiles = autoLayoutFirstWinsDictionary(scene.tiles.map { ($0.id, $0.frame) })
+        let baselineZones = autoLayoutFirstWinsDictionary(scene.zones.map { placement in
             (placement.zoneId, TileFrame(x: placement.origin.x, y: placement.origin.y, width: placement.size.width, height: placement.size.height))
         })
         func frame(_ peer: Peer) -> TileFrame? {

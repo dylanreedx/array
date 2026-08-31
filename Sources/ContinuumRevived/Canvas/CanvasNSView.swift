@@ -15,6 +15,14 @@ private final class CanvasWorldPlaneSubviewSortContext {
     init(keys: [ObjectIdentifier: CanvasWorldPlaneSubviewSortKey]) { self.keys = keys }
 }
 
+private func firstWinsDictionary<Key: Hashable, Value>(
+    _ pairs: some Sequence<(Key, Value)>
+) -> [Key: Value] {
+    var result: [Key: Value] = [:]
+    for (key, value) in pairs where result[key] == nil { result[key] = value }
+    return result
+}
+
 /// Top-level canvas view: hosts tile subviews, owns the viewport, translates
 /// world-space tile frames into AppKit subview frames, and routes pan/zoom
 /// gestures to the underlying viewport. Flipped so the y-axis matches the
@@ -408,42 +416,63 @@ final class CanvasNSView: NSView, TokenThemed {
         // rebase only members for which the transaction has no authoritative
         // world frame. Ordinary zone moves do not opt into this behavior: their
         // members intentionally translate as one rigid body with the zone.
-        let preservedLayerWorldFrames: [(zoneId: UUID, tileId: UUID, frame: TileFrame)] =
-            zoneLayers
-                .filter { preservedZoneIds.contains($0.placement.zoneId) }
-                .flatMap { layer in
-                    layer.tiles.map { tile in
-                        (
-                            zoneId: layer.placement.zoneId,
-                            tileId: tile.id,
-                            frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement)
-                        )
-                    }
-                }
-
-        // A malformed-but-loadable legacy snapshot may repeat a tile UUID in
-        // multiple layers. CanvasLayoutTransaction's public frame map is keyed by
-        // tile UUID, so route that authoritative frame to the active zone when it
-        // is known. Otherwise prefer the sole affected zone containing the tile,
-        // then use stable zone UUID order as a deterministic nontrapping fallback.
-        var authoritativeLayerByTileId: [UUID: UUID] = [:]
-        for tileId in transaction.tileFrames.keys {
-            let containingZoneIds = zoneLayers.compactMap { layer in
-                layer.tiles.contains(where: { $0.id == tileId }) ? layer.placement.zoneId : nil
+        struct LayerTileOccurrence {
+            let layer: ZoneLayer
+            let layerIndex: Int
+            let tileIndex: Int
+            let zoneId: UUID
+            let tileId: UUID
+        }
+        enum TileOccurrence {
+            case flat(index: Int)
+            case layered(LayerTileOccurrence)
+        }
+        // Enumerate the mounted objects once. UUIDs are persistence identities,
+        // not occurrence identities: malformed legacy data can legally reach us
+        // with duplicates within a layer or across layers (including duplicate
+        // zone IDs). Holding the layer object and tile index keeps every later
+        // mutation attached to the exact occurrence selected here.
+        var occurrences: [LayerTileOccurrence] = []
+        var occurrencesByTileId: [UUID: [LayerTileOccurrence]] = [:]
+        for (layerIndex, layer) in zoneLayers.enumerated() {
+            for tileIndex in layer.tiles.indices {
+                let occurrence = LayerTileOccurrence(
+                    layer: layer,
+                    layerIndex: layerIndex,
+                    tileIndex: tileIndex,
+                    zoneId: layer.placement.zoneId,
+                    tileId: layer.tiles[tileIndex].id)
+                occurrences.append(occurrence)
+                occurrencesByTileId[occurrence.tileId, default: []].append(occurrence)
             }
-            if let activeZoneId,
-               containingZoneIds.contains(activeZoneId) {
-                authoritativeLayerByTileId[tileId] = activeZoneId
+        }
+        let preservedLayerWorldFrames = occurrences.compactMap { occurrence in
+            preservedZoneIds.contains(occurrence.zoneId)
+                ? (occurrence, CanvasEngine.worldFrame(
+                    tile: occurrence.layer.tiles[occurrence.tileIndex],
+                    in: occurrence.layer.placement))
+                : nil
+        }
+
+        // The public transaction can name only a tile UUID. Select one concrete
+        // occurrence deterministically: active-zone occurrence first, then an
+        // affected-zone occurrence, then mounted order. Same-zone duplicates do
+        // not become co-authoritative merely because their metadata matches.
+        var authoritativeOccurrenceByTileId: [UUID: TileOccurrence] = [:]
+        for tileId in transaction.tileFrames.keys {
+            // autoLayoutScene makes the flat compatibility occurrence canonical
+            // before it admits layer members. Mirror that choice here so a flat
+            // resize cannot accidentally mutate a same-UUID layered peer.
+            if flatCompatibilitySceneActive,
+               let flatIndex = canvasState.tiles.firstIndex(where: { $0.id == tileId }) {
+                authoritativeOccurrenceByTileId[tileId] = .flat(index: flatIndex)
                 continue
             }
-            let affectedZoneIds = containingZoneIds.filter { transaction.zonePlacements[$0] != nil }
-            if affectedZoneIds.count == 1 {
-                authoritativeLayerByTileId[tileId] = affectedZoneIds[0]
-            } else {
-                authoritativeLayerByTileId[tileId] = containingZoneIds.min {
-                    $0.uuidString < $1.uuidString
-                }
-            }
+            guard let candidates = occurrencesByTileId[tileId], !candidates.isEmpty else { continue }
+            let selected = candidates.first(where: { $0.zoneId == activeZoneId })
+                ?? candidates.first(where: { transaction.zonePlacements[$0.zoneId] != nil })
+                ?? candidates[0]
+            authoritativeOccurrenceByTileId[tileId] = .layered(selected)
         }
         // Placements must land first: ZoneLayer stores member frames locally, so
         // converting a solver's world target against the previous origin would
@@ -460,22 +489,21 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         for (id, frame) in transaction.tileFrames {
-            if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
+            if case let .flat(index)? = authoritativeOccurrenceByTileId[id] {
+                canvasState.tiles[index].frame = frame
+            } else if case let .layered(occurrence)? = authoritativeOccurrenceByTileId[id] {
+                occurrence.layer.tiles[occurrence.tileIndex].frame = CanvasEngine.worldToZoneLocal(
+                    frame, zoneOrigin: occurrence.layer.placement.origin)
+            } else if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
                 canvasState.tiles[index].frame = frame
             }
-            if let authoritativeZoneId = authoritativeLayerByTileId[id],
-               let layer = zoneLayers.first(where: { $0.placement.zoneId == authoritativeZoneId }),
-               let index = layer.tiles.firstIndex(where: { $0.id == id }) {
-                layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
-            }
         }
-        for preserved in preservedLayerWorldFrames
-        where authoritativeLayerByTileId[preserved.tileId] != preserved.zoneId {
-            guard let layer = zoneLayers.first(where: { $0.placement.zoneId == preserved.zoneId }),
-                  let index = layer.tiles.firstIndex(where: { $0.id == preserved.tileId }) else { continue }
-            layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(
-                preserved.frame,
-                zoneOrigin: layer.placement.origin)
+        for (occurrence, worldFrame) in preservedLayerWorldFrames {
+            if case let .layered(authoritative)? = authoritativeOccurrenceByTileId[occurrence.tileId],
+               authoritative.layer === occurrence.layer,
+               authoritative.tileIndex == occurrence.tileIndex { continue }
+            occurrence.layer.tiles[occurrence.tileIndex].frame = CanvasEngine.worldToZoneLocal(
+                worldFrame, zoneOrigin: occurrence.layer.placement.origin)
         }
         layoutAllTiles()
 
@@ -507,11 +535,17 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutGestureBaseline = nil
         autoLayoutSwapLatch = nil
         let current = autoLayoutScene()
-        let oldTiles = Dictionary(uniqueKeysWithValues: baseline.tiles.map { ($0.id, $0.frame) })
-        let oldZones = Dictionary(uniqueKeysWithValues: baseline.zones.map { ($0.zoneId, $0) })
+        let oldTiles = firstWinsDictionary(baseline.tiles.map { ($0.id, $0.frame) })
+        let oldZones = firstWinsDictionary(baseline.zones.map { ($0.zoneId, $0) })
         var transaction = CanvasLayoutTransaction()
-        for tile in current.tiles where oldTiles[tile.id] != tile.frame { transaction.tileFrames[tile.id] = tile.frame }
-        for zone in current.zones where oldZones[zone.zoneId] != zone { transaction.zonePlacements[zone.zoneId] = zone }
+        var seenTileIds = Set<UUID>()
+        for tile in current.tiles where seenTileIds.insert(tile.id).inserted && oldTiles[tile.id] != tile.frame {
+            transaction.tileFrames[tile.id] = tile.frame
+        }
+        var seenZoneIds = Set<UUID>()
+        for zone in current.zones where seenZoneIds.insert(zone.zoneId).inserted && oldZones[zone.zoneId] != zone {
+            transaction.zonePlacements[zone.zoneId] = zone
+        }
         guard !transaction.tileFrames.isEmpty || !transaction.zonePlacements.isEmpty else { return nil }
         return transaction
     }
@@ -596,9 +630,9 @@ final class CanvasNSView: NSView, TokenThemed {
         guard expanded != zone else { return }
         zone = expanded
         applyLayoutTransaction(CanvasLayoutTransaction(
-            tileFrames: Dictionary(uniqueKeysWithValues: members.map { ($0.id, $0.frame) }),
+            tileFrames: firstWinsDictionary(members.map { ($0.id, $0.frame) }),
             zonePlacements: [zoneId: zone]
-        ))
+        ), preservingLayerMemberWorldFramesIn: [zoneId])
     }
 
     func setZoneAutoLayoutMode(_ mode: ZoneAutoLayoutMode, zoneId: UUID) {
@@ -2149,9 +2183,15 @@ final class CanvasNSView: NSView, TokenThemed {
         // still carries the boot-time copy for hit testing, so letting it win here
         // makes a layer drag appear unchanged to the transaction and suppresses
         // both undo registration and `onZoneMoved`.
-        var byId = Dictionary(uniqueKeysWithValues: liveZones.map { ($0.zoneId, $0) })
-        for layer in zoneLayers { byId[layer.placement.zoneId] = layer.placement }
-        return Array(byId.values)
+        var seen = Set<UUID>()
+        var placements: [ZonePlacement] = []
+        for layer in zoneLayers where seen.insert(layer.placement.zoneId).inserted {
+            placements.append(layer.placement)
+        }
+        for placement in liveZones where seen.insert(placement.zoneId).inserted {
+            placements.append(placement)
+        }
+        return placements
     }
 
     /// Complete zone state exactly as the mounted workspace is displaying it.
@@ -2171,11 +2211,13 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func captureGeometry(tileIds: Set<UUID>, zoneIds: Set<UUID>) -> CanvasGeometrySnapshot {
         var tilesById: [UUID: CanvasTileGeometry] = [:]
-        for tile in canvasState.tiles where tileIds.contains(tile.id) {
-            tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
+        if flatCompatibilitySceneActive {
+            for tile in canvasState.tiles where tileIds.contains(tile.id) && tilesById[tile.id] == nil {
+                tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
+            }
         }
         for layer in zoneLayers {
-            for tile in layer.tiles where tileIds.contains(tile.id) {
+            for tile in layer.tiles where tileIds.contains(tile.id) && tilesById[tile.id] == nil {
                 tilesById[tile.id] = CanvasTileGeometry(
                     tileId: tile.id,
                     frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
@@ -2203,9 +2245,17 @@ final class CanvasNSView: NSView, TokenThemed {
         previous: CanvasGeometrySnapshot? = nil,
         notifyCommit: Bool = true
     ) -> Bool {
-        let zoneValues = Dictionary(uniqueKeysWithValues: snapshot.zones.map { ($0.zoneId, $0) })
+        let layerWorldFramesBeforeSnapshot = zoneLayers.flatMap { layer in
+            layer.tiles.indices.map { index in
+                (layer: layer, index: index, frame: CanvasEngine.worldFrame(
+                    tile: layer.tiles[index], in: layer.placement))
+            }
+        }
+        let zoneValues = firstWinsDictionary(snapshot.zones.map { ($0.zoneId, $0) })
+        var mirroredLiveZoneIds = Set<UUID>()
         for index in liveZones.indices {
-            guard let value = zoneValues[liveZones[index].zoneId] else { continue }
+            guard mirroredLiveZoneIds.insert(liveZones[index].zoneId).inserted,
+                  let value = zoneValues[liveZones[index].zoneId] else { continue }
             liveZones[index].origin = value.origin
             liveZones[index].size = value.size
             if var model = zoneDisplayByZoneId[value.zoneId] {
@@ -2215,34 +2265,54 @@ final class CanvasNSView: NSView, TokenThemed {
                 zoneChromeViews[value.zoneId]?.update(model: model)
             }
         }
+        var appliedZoneIds = Set<UUID>()
         for layer in zoneLayers {
-            guard let value = zoneValues[layer.placement.zoneId] else { continue }
+            guard appliedZoneIds.insert(layer.placement.zoneId).inserted,
+                  let value = zoneValues[layer.placement.zoneId] else { continue }
             layer.placement.origin = value.origin
             layer.placement.size = value.size
             layer.renderModel.placement.origin = value.origin
             layer.renderModel.placement.size = value.size
         }
 
-        let tileValues = Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0) })
-        for index in canvasState.tiles.indices {
-            guard let value = tileValues[canvasState.tiles[index].id] else { continue }
-            canvasState.tiles[index].frame = value.frame
-            canvasState.tiles[index].zoneId = value.zoneId
-            if let zoneId = value.zoneId {
-                tileZoneMembership[value.tileId] = zoneId
-            } else {
-                tileZoneMembership.removeValue(forKey: value.tileId)
+        let tileValues = firstWinsDictionary(snapshot.tiles.map { ($0.tileId, $0) })
+        var appliedTileIds = Set<UUID>()
+        var appliedLayerOccurrences: [(layer: ZoneLayer, index: Int)] = []
+        if flatCompatibilitySceneActive {
+            for index in canvasState.tiles.indices {
+                guard appliedTileIds.insert(canvasState.tiles[index].id).inserted,
+                      let value = tileValues[canvasState.tiles[index].id] else { continue }
+                canvasState.tiles[index].frame = value.frame
+                canvasState.tiles[index].zoneId = value.zoneId
+                if let zoneId = value.zoneId {
+                    tileZoneMembership[value.tileId] = zoneId
+                } else {
+                    tileZoneMembership.removeValue(forKey: value.tileId)
+                }
             }
         }
         for layer in zoneLayers {
             for index in layer.tiles.indices {
-                guard let value = tileValues[layer.tiles[index].id] else { continue }
+                guard appliedTileIds.insert(layer.tiles[index].id).inserted,
+                      let value = tileValues[layer.tiles[index].id] else { continue }
                 layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(
                     value.frame,
                     zoneOrigin: layer.placement.origin
                 )
                 layer.tiles[index].zoneId = value.zoneId
+                appliedLayerOccurrences.append((layer, index))
+                if let zoneId = value.zoneId {
+                    tileZoneMembership[value.tileId] = zoneId
+                } else {
+                    tileZoneMembership.removeValue(forKey: value.tileId)
+                }
             }
+        }
+        for preserved in layerWorldFramesBeforeSnapshot where !appliedLayerOccurrences.contains(where: {
+            $0.layer === preserved.layer && $0.index == preserved.index
+        }) {
+            preserved.layer.tiles[preserved.index].frame = CanvasEngine.worldToZoneLocal(
+                preserved.frame, zoneOrigin: preserved.layer.placement.origin)
         }
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
@@ -2259,9 +2329,9 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func persistGeometrySnapshot(_ snapshot: CanvasGeometrySnapshot) -> Bool {
         guard let onLayoutCommitted else { return true }
-        let placements = Dictionary(uniqueKeysWithValues: allZonePlacements().map { ($0.zoneId, $0) })
+        let placements = firstWinsDictionary(allZonePlacements().map { ($0.zoneId, $0) })
         var layout = CanvasLayoutTransaction(
-            tileFrames: Dictionary(uniqueKeysWithValues: snapshot.tiles.map { ($0.tileId, $0.frame) }),
+            tileFrames: firstWinsDictionary(snapshot.tiles.map { ($0.tileId, $0.frame) }),
             zonePlacements: [:]
         )
         for zone in snapshot.zones {
@@ -5507,12 +5577,15 @@ final class CanvasNSView: NSView, TokenThemed {
         installZoneChromeViews()
 
         // Install the new layers back-to-front by zone zPosition.
-        let orderedLayers = layers.sorted { lhs, rhs in
-            if lhs.placement.zPosition != rhs.placement.zPosition {
-                return lhs.placement.zPosition < rhs.placement.zPosition
+        let orderedLayers = layers.enumerated().sorted { lhs, rhs in
+            if lhs.element.placement.zPosition != rhs.element.placement.zPosition {
+                return lhs.element.placement.zPosition < rhs.element.placement.zPosition
             }
-            return lhs.placement.zoneId.uuidString < rhs.placement.zoneId.uuidString
-        }
+            if lhs.element.placement.zoneId != rhs.element.placement.zoneId {
+                return lhs.element.placement.zoneId.uuidString < rhs.element.placement.zoneId.uuidString
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
         for layer in orderedLayers {
             _installLayer(layer)
         }
@@ -7763,9 +7836,130 @@ final class CanvasNSView: NSView, TokenThemed {
         let duplicateWorldAAfterFallback = try duplicateWorldFrame(duplicateZoneAId)
         let duplicateWorldBAfterFallback = try duplicateWorldFrame(duplicateZoneBId)
         try expect(duplicateWorldAAfterFallback == deterministicFallbackTarget,
-                   "ambiguous duplicate-ID fallback must deterministically select the stable lowest zone UUID")
+                   "ambiguous duplicate-ID fallback must deterministically select the first mounted occurrence")
         try expect(duplicateWorldBAfterFallback == duplicateWorldBBeforeFallback,
                    "ambiguous duplicate-ID fallback must not also move the same-ID peer layer")
+
+        // Exercise the public production callers that Review H found trapping.
+        // finish canonicalizes the malformed scene without requiring a mutation.
+        duplicateCanvas.autoLayoutGestureBaseline = duplicateCanvas.autoLayoutScene()
+        _ = duplicateCanvas.finishAutoLayoutGesture()
+
+        // A second occurrence in one mounted layer extends beyond its left/top
+        // bounds. arrangeAutoLayoutAfterSpawn drives expand -> tidy -> finish ->
+        // geometry snapshot/persist; the noncanonical concrete occurrence must
+        // survive expansion at its exact world frame.
+        guard let duplicateLayerA = duplicateCanvas.zoneLayers.first(where: {
+            $0.placement.zoneId == duplicateZoneAId
+        }) else { throw CheckError.failed("duplicate layer A disappeared") }
+        var withinLayerPeer = duplicateTileA
+        withinLayerPeer.frame = TileFrame(x: -61.375, y: -49.625, width: 93.25, height: 77.5)
+        duplicateLayerA.tiles.append(withinLayerPeer)
+        let withinLayerPeerIndex = duplicateLayerA.tiles.index(before: duplicateLayerA.tiles.endIndex)
+        let withinLayerPeerWorldBefore = CanvasEngine.worldFrame(
+            tile: duplicateLayerA.tiles[withinLayerPeerIndex], in: duplicateLayerA.placement)
+        duplicateCanvas.autoLayoutDefaults = defaults
+        duplicateCanvas.arrangeAutoLayoutAfterSpawn(zoneId: duplicateZoneAId)
+        let withinLayerPeerWorldAfter = CanvasEngine.worldFrame(
+            tile: duplicateLayerA.tiles[withinLayerPeerIndex], in: duplicateLayerA.placement)
+        try expect(withinLayerPeerWorldAfter == withinLayerPeerWorldBefore,
+                   "spawn expand/tidy/finish must preserve a noncanonical within-layer duplicate occurrence exactly; before=\(withinLayerPeerWorldBefore), after=\(withinLayerPeerWorldAfter)")
+
+        // Flat compatibility is an occurrence too. A real resize gesture on the
+        // flat view must not be redirected to a same-UUID layered peer.
+        var flatDuplicate = duplicateTileA
+        flatDuplicate.frame = TileFrame(x: -210.5, y: 162.25, width: 140.5, height: 104.75)
+        flatDuplicate.zoneId = nil
+        let flatPeerPlacement = shifted(duplicatePlacementB, dx: 510.25, dy: 95.5, dw: 0, dh: 0)
+        var layeredFlatPeer = duplicateTileB
+        layeredFlatPeer.frame = TileFrame(x: 21.125, y: 59.375, width: 164.25, height: 122.5)
+        let flatCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [flatDuplicate],
+            groups: [], lastActiveTileId: nil), showsZoneChrome: true)
+        flatCanvas.autoLayoutDefaults = defaults
+        flatCanvas.autoLayoutReduceMotionProvider = { true }
+        flatCanvas.frame = NSRect(x: 0, y: 0, width: 1_300, height: 700)
+        let flatWindow = NSWindow(contentRect: flatCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        flatWindow.contentView = flatCanvas
+        let flatView = DescriptorTileNSView(tile: flatDuplicate)
+        flatCanvas.install(tileView: flatView, for: flatDuplicate)
+        let flatPeerLayer = ZoneLayer(
+            placement: flatPeerPlacement,
+            renderModel: ZoneRenderModel(placement: flatPeerPlacement, displayName: "Flat peer"),
+            tiles: [layeredFlatPeer])
+        flatPeerLayer.tileViews[duplicateTileId] = DescriptorTileNSView(tile: layeredFlatPeer)
+        flatCanvas.upsertZoneLayer(flatPeerLayer)
+        flatCanvas.layoutSubtreeIfNeeded()
+        let flatPeerWorldBefore = CanvasEngine.worldFrame(tile: flatPeerLayer.tiles[0], in: flatPeerLayer.placement)
+        var flatPersisted: [CanvasLayoutTransaction] = []
+        flatCanvas.onLayoutCommitted = { flatPersisted.append($0); return true }
+        flatCanvas.activateUndoWorkspace(UUID(uuidString: "A1300000-0000-4000-8000-000000000053")!)
+        try resizeTileRight(flatView, worldDX: 37.5, window: flatWindow)
+        try expect(flatCanvas.canvasState.tiles[0].frame.width > flatDuplicate.frame.width,
+                   "real flat resize must authoritatively grow the flat occurrence; before=\(flatDuplicate.frame), after=\(flatCanvas.canvasState.tiles[0].frame)")
+        try expect(CanvasEngine.worldFrame(tile: flatPeerLayer.tiles[0], in: flatPeerLayer.placement) == flatPeerWorldBefore,
+                   "real flat resize must preserve the same-UUID layered peer")
+        try expect(flatPersisted.count == 1 && flatCanvas.activeCanvasUndoManager?.canUndo == true,
+                   "real flat duplicate resize must reach persistence and register coherent undo")
+        flatCanvas.activeCanvasUndoManager?.undo()
+        try expect(flatCanvas.canvasState.tiles[0].frame == flatDuplicate.frame,
+                   "flat duplicate resize undo must restore the canonical flat occurrence")
+        try expect(CanvasEngine.worldFrame(tile: flatPeerLayer.tiles[0], in: flatPeerLayer.placement) == flatPeerWorldBefore,
+                   "flat duplicate resize undo must preserve the layered peer")
+
+        // Two concrete layer objects may share a corrupt zone ID. `setZones`
+        // accepts that persisted form; arrange drives expand/tidy/finish and a
+        // real geometry persistence callback. Only the first mounted occurrence
+        // is canonical and the peer object remains exact.
+        let sameZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000051")!
+        let samePlacementA = ZonePlacement(
+            zoneId: sameZoneId, projectId: duplicatePlacementA.projectId,
+            origin: duplicatePlacementA.origin, size: duplicatePlacementA.size,
+            color: duplicatePlacementA.color, collapsed: duplicatePlacementA.collapsed,
+            hydrationPolicy: duplicatePlacementA.hydrationPolicy,
+            autoLayoutMode: duplicatePlacementA.autoLayoutMode,
+            name: duplicatePlacementA.name, navKey: duplicatePlacementA.navKey,
+            zPosition: duplicatePlacementA.zPosition)
+        let samePlacementB = ZonePlacement(
+            zoneId: sameZoneId, projectId: duplicatePlacementB.projectId,
+            origin: duplicatePlacementB.origin, size: duplicatePlacementB.size,
+            color: duplicatePlacementB.color, collapsed: duplicatePlacementB.collapsed,
+            hydrationPolicy: duplicatePlacementB.hydrationPolicy,
+            autoLayoutMode: duplicatePlacementB.autoLayoutMode,
+            name: duplicatePlacementB.name, navKey: duplicatePlacementB.navKey,
+            zPosition: duplicatePlacementB.zPosition)
+        var sameTileA = duplicateTileA; sameTileA.zoneId = sameZoneId
+        var sameTileB = duplicateTileB; sameTileB.zoneId = sameZoneId
+        sameTileA.frame = TileFrame(x: -91.25, y: -66.5, width: 101.75, height: 84.25)
+        let sameLayerA = ZoneLayer(placement: samePlacementA,
+            renderModel: ZoneRenderModel(placement: samePlacementA, displayName: "Same A"), tiles: [sameTileA])
+        let sameLayerB = ZoneLayer(placement: samePlacementB,
+            renderModel: ZoneRenderModel(placement: samePlacementB, displayName: "Same B"), tiles: [sameTileB])
+        sameLayerA.tileViews[duplicateTileId] = DescriptorTileNSView(tile: sameTileA)
+        sameLayerB.tileViews[duplicateTileId] = DescriptorTileNSView(tile: sameTileB)
+        let sameCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true)
+        sameCanvas.autoLayoutDefaults = defaults
+        sameCanvas.autoLayoutReduceMotionProvider = { true }
+        sameCanvas.upsertZoneLayer(sameLayerA)
+        sameCanvas.setZones([sameLayerA, sameLayerB])
+        for _ in 0..<16 {
+            sameCanvas.setZones([sameLayerA, sameLayerB])
+            try expect(sameCanvas.zoneLayers.first === sameLayerA,
+                       "equal zoneId/zPosition layers must retain caller order deterministically")
+        }
+        let samePeerWorldBefore = CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement)
+        var samePersisted: [CanvasLayoutTransaction] = []
+        sameCanvas.onLayoutCommitted = { samePersisted.append($0); return true }
+        sameCanvas.activateUndoWorkspace(UUID(uuidString: "A1300000-0000-4000-8000-000000000052")!)
+        sameCanvas.arrangeAutoLayoutAfterSpawn(zoneId: sameZoneId)
+        try expect(!samePersisted.isEmpty, "corrupt same-zone arrange must reach the persistence callback")
+        try expect(CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == samePeerWorldBefore,
+                   "same-zone noncanonical layer object must remain exact through expand/tidy/persist")
+        sameCanvas.activeCanvasUndoManager?.undo()
+        try expect(CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == samePeerWorldBefore,
+                   "same-zone noncanonical layer object must remain exact through geometry undo")
 
         // Spawn a third member beyond the old right edge, then swap the middle
         // member into the left member's slot through a real title-bar drag.
