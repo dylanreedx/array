@@ -35,7 +35,18 @@ if CommandLine.arguments.contains("--exact-rebase-performance-check") {
         checksum += origin.x + origin.y
     }
     let elapsed = ContinuousClock.now - started
-    print("ExactRebasePerformance iterations=\(iterations) frames=8 candidateBound=2049 localBound=9 worstDistanceULP=683 elapsed=\(elapsed) checksum=\(checksum)")
+    let perCall = Double(elapsed.components.seconds) / Double(iterations)
+        + Double(elapsed.components.attoseconds) / 1e18 / Double(iterations)
+    print("ExactRebasePerformance iterations=\(iterations) frames=8 candidateBound=2049 localBound=9 worstDistanceULP=683 elapsed=\(elapsed) perCallSeconds=\(perCall) checksum=\(checksum)")
+    // This runs per zone per mouseDragged, so the WORST supported distance has
+    // to stay off the input path's critical budget. The leg previously printed
+    // this number and asserted nothing, so any regression was invisible. The
+    // bound is deliberately loose (debug measures ~1.4 ms) to catch an order-of
+    // -magnitude regression, not to police normal noise.
+    if perCall > 0.005 {
+        fputs("FAIL: exact rebase worst case \(perCall)s per call exceeds the 0.005s debug bound\n", stderr)
+        Foundation.exit(1)
+    }
     Foundation.exit(0)
 }
 
@@ -4794,8 +4805,9 @@ do {
 
     // Unvetted-origin policy. `applyLayoutTransaction` vets origins only for
     // zones the transaction MOVES, so a tile resized inside an unmoved zone
-    // reaches the rebase with an origin nobody corrected. Measured ~1.8% of
-    // such coordinates have no exact local. Rejecting them dropped the whole
+    // reaches the rebase with an origin nobody corrected. This corpus measures
+    // ~17% of such coordinates having no exact local (a solver-shaped corpus
+    // measured ~1.8%; the rate depends entirely on the fraction family). Rejecting them dropped the whole
     // layout transaction (and its relayout) for ~1 drag frame in 30, which is
     // strictly worse than landing the moving tile a sub-ULP away. This witness
     // pins the fallback policy: the conversion ALWAYS yields a usable local,
@@ -4830,8 +4842,13 @@ do {
         expect(round.width == world.width && round.height == world.height,
                "Unvetted-origin fallback never changes tile size at case \(caseIndex)")
     }
-    expect(unvettedFallbacks == unvettedRejects,
-           "Every unvetted rejection took the plain-subtraction fallback")
+    // Not a tautology about the loop's own bookkeeping: pin that unvetted
+    // origins really do produce exact-rebase failures at a material rate, so a
+    // helper silently widened to "never fails" would go red here and stop
+    // pretending this corpus exercises the fallback at all.
+    expect(unvettedRejects > 500,
+           "Unvetted-origin corpus must actually exercise the fallback; rejections=\(unvettedRejects)")
+    expect(unvettedFallbacks == unvettedRejects, "Fallback taken for every rejection")
     FileHandle.standardError.write(
         "UnvettedOriginFallback cases=20000 exactRejections=\(unvettedRejects) worstError=\(worstUnvettedError)\n"
             .data(using: .utf8)!)

@@ -619,7 +619,9 @@ final class CanvasNSView: NSView, TokenThemed {
             // search bound preserves every member, reject the whole
             // transaction rather than drift tiles the user did not touch.
             guard let exactOrigin = CanvasEngine.exactRebaseOriginIfPossible(
-                near: proposed.origin, preserving: desiredWorldFrames) else { return }
+                near: proposed.origin, preserving: desiredWorldFrames) else {
+                rejectTransaction(); return
+            }
             corrected.origin = exactOrigin
             corrected.size = ZoneSize(
                 width: proposed.origin.x + proposed.size.width - corrected.origin.x,
@@ -634,6 +636,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // instead. Staging against the resolved origin (rather than reading
         // `layer.placement` back after mutation) is also what lets the writes
         // move after the placements without applying a zone move twice.
+        func rejectTransaction() { qaRejectedLayoutTransactions += 1 }
         func resolvedOrigin(for layer: ZoneLayer) -> ZonePoint {
             // Duplicate same-zone layers share a zoneId, but the placement loop
             // below writes only the first of them. A noncanonical peer keeps its
@@ -674,11 +677,23 @@ final class CanvasNSView: NSView, TokenThemed {
                 // requirement (the contract scopes that to PASSIVE tiles), so it
                 // falls back to plain subtraction. Rejecting here dropped the
                 // whole transaction, and its relayout, for ~1 drag frame in 30.
-                let vetted = resolvedZonePlacements[occurrence.layer.placement.zoneId] != nil
+                //
+                // Note this set is the solver's whole output, not just the tile
+                // under the cursor: jelly reflow puts neighbours here too. They
+                // are still "moving" tiles with an explicit target, which is
+                // what makes a sub-ULP landing harmless for them.
+                // Key on whether THIS layer's origin was actually corrected. A
+                // noncanonical duplicate-zoneId peer keeps its own unvetted
+                // origin even though its zoneId is in the resolved set, so
+                // keying on the id alone would reinstate the dropped-frame bug
+                // exactly where it looks impossible.
+                let vetted = resolvedOrigin(for: occurrence.layer) != occurrence.layer.placement.origin
+                    || resolvedZonePlacements[occurrence.layer.placement.zoneId]?.origin
+                        == occurrence.layer.placement.origin
                 let exact = CanvasEngine.worldToZoneLocalPreservingWorld(frame, zoneOrigin: origin)
                 guard let local = exact
                     ?? (vetted ? nil : CanvasEngine.worldToZoneLocal(frame, zoneOrigin: origin))
-                else { return }
+                else { rejectTransaction(); return }
                 stagedLayerFrames.append((occurrence.layer, occurrence.tileIndex, local))
             } else if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
                 stagedFlatFrames.append((index, frame))
@@ -696,7 +711,7 @@ final class CanvasNSView: NSView, TokenThemed {
             // the origin correction above guarantees for a vetted origin. Reject
             // rather than drift a tile the user never touched.
             guard let local = CanvasEngine.worldToZoneLocalPreservingWorld(
-                worldFrame, zoneOrigin: origin) else { return }
+                worldFrame, zoneOrigin: origin) else { rejectTransaction(); return }
             stagedLayerFrames.append((occurrence.layer, occurrence.tileIndex, local))
         }
 
@@ -3047,6 +3062,12 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// QA: resize HUD visibility + current text, for the real-path self-check.
     var qaResizeHUDVisible: Bool { resizeDimensionsOverlay?.qaVisible ?? false }
+
+    /// QA: how many layout transactions were abandoned because no exact zone
+    /// rebase existed. Every other assertion in the passive corpus describes
+    /// what must NOT change, and a wholly dropped transaction satisfies all of
+    /// them — so this counter is the only thing that can witness the drop.
+    var qaRejectedLayoutTransactions = 0
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
     func qaActiveZoneResizeEdge(zoneId: UUID) -> ResizeEdge? {
         guard case let .resizingZone(target, edge, _) = zoneGesture,
@@ -5654,7 +5675,6 @@ final class CanvasNSView: NSView, TokenThemed {
                 pendingMovedPlacement = newPlacement
                 return
             }
-            zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
             if isAutoLayoutEnabled,
                let current = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
@@ -5744,6 +5764,7 @@ final class CanvasNSView: NSView, TokenThemed {
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
                 let newPlacement = clampedManualZoneResize(
                     resizedZonePlacement(current, edge: edge, screenDelta: CGSize(width: dx, height: dy)))
+                zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
                 applyAutoLayout(.zone(id: zoneId, placement: newPlacement), baseline: autoLayoutGestureBaseline)
                 pendingMovedPlacement = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
@@ -5758,6 +5779,7 @@ final class CanvasNSView: NSView, TokenThemed {
             if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
                 let newPlacement = clampedManualZoneResize(
                     resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy)))
+                zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
                 applyLayoutTransaction(
                     CanvasLayoutTransaction(zonePlacements: [zoneId: newPlacement]),
                     activeZoneId: zoneId,
@@ -7989,6 +8011,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let passiveRebaseBaselinePlacement = layer.placement
         let passiveRebaseBaselineCommits = layerCommits
         let passiveRebaseBaselineViewport = layerCanvas.canvasState.viewport
+        var passiveRebaseUnmovedCases: [Int] = []
         let passiveRebaseSeed: UInt64 = 0x080100662E1365
         let passiveRebaseHandles: [(NSPoint, CGFloat, CGFloat)] = [
             (NSPoint(x: layerFirstView.bounds.maxX - 1, y: layerFirstView.bounds.midY), 4, 0),
@@ -8017,6 +8040,16 @@ final class CanvasNSView: NSView, TokenThemed {
                 window: layerWindow
             )
             let after = try layerWorldFrames()
+            // POSITIVE CONTROL. Every assertion below is about what must NOT
+            // move, and a transaction that is dropped entirely satisfies all of
+            // them. Without this the corpus stays green through the exact
+            // regression it exists to catch: rejecting an unvetted rebase and
+            // discarding the whole layout frame. Assert the ACTIVE tile
+            // actually moved.
+            guard let activeBefore = before[layerFirstId], let activeAfter = after[layerFirstId] else {
+                throw CheckError.failed("seeded passive rebase \(caseIndex) lost the active occurrence")
+            }
+            if activeAfter == activeBefore { passiveRebaseUnmovedCases.append(caseIndex) }
             for id in [layerSecondId, layerThirdId] {
                 try expect(after[id] == before[id],
                            "seeded passive rebase \(caseIndex) changed full world frame for \(id)")
@@ -8032,7 +8065,26 @@ final class CanvasNSView: NSView, TokenThemed {
             try expect(!layerCanvas.qaResizeHUDVisible,
                        "seeded passive rebase \(caseIndex) leaked resize HUD")
         }
-        print("PassiveWorldRebaseCorpus seed=\(passiveRebaseSeed) cases=1024 failures=0 skipped=0")
+        // POSITIVE CONTROL. Every other assertion in this corpus is about what
+        // must NOT move, and a transaction dropped in its entirety satisfies all
+        // of them — so without this the corpus stays green through exactly the
+        // regression it exists to catch. A handful of cases legitimately clamp
+        // and produce no change; a rebase regression drops ~1 in 30 (~34 cases).
+        // POSITIVE CONTROL. Everything else in this corpus asserts what must NOT
+        // move, and a wholly dropped transaction satisfies all of it. The unmoved
+        // count alone cannot serve as the control: ~27% of these seeded handles
+        // legitimately produce no resize (measured identical with every rejection
+        // path disabled), so that number is not a signal. The rejection counter is.
+        try expect(layerCanvas.qaRejectedLayoutTransactions == 0,
+                   "seeded passive rebase abandoned \(layerCanvas.qaRejectedLayoutTransactions) layout transactions across the corpus")
+        print("PassiveWorldRebaseCorpus seed=\(passiveRebaseSeed) cases=1024 failures=0 skipped=0 unmovedActive=\(passiveRebaseUnmovedCases.count) \(passiveRebaseUnmovedCases)")
+        layer.tiles = passiveRebaseBaselineTiles
+        layer.placement = passiveRebaseBaselinePlacement
+        layerCommits = passiveRebaseBaselineCommits
+        layerCanvas.canvasState.viewport = passiveRebaseBaselineViewport
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
+
         layer.tiles = passiveRebaseBaselineTiles
         layer.placement = passiveRebaseBaselinePlacement
         layerCommits = passiveRebaseBaselineCommits
