@@ -11334,14 +11334,14 @@ func runCanvasAutoLayoutChecks() {
         scene: .init(tiles: tiles, zones: [zone, neighbor]), mutation: .zone(id: zoneId, placement: squeezed),
         gap: 8, zonePadding: 8, headerHeight: 20)
     let committedZone = result.zonePlacements[zoneId] ?? squeezed
-    expect(committedZone.size.width >= 100, "jelly: zone clamps at its widest fixed-size member")
-    expect(result.blockedZoneIds.contains(zoneId), "jelly: clamped resize reports resistance")
+    expect(committedZone.size.width == 224, "jelly: zone clamps at the full padded member envelope")
+    expect(result.blockedZoneIds.isEmpty, "jelly: envelope clamp commits without packing resistance")
     let a = result.tileFrames[firstId] ?? tiles[0].frame
     let b = result.tileFrames[secondId] ?? tiles[1].frame
     expect(a.width == 100 && a.height == 72 && b.width == 100 && b.height == 72,
            "jelly: solver never resizes member tiles")
-    expect(!(a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y),
-           "jelly: squeezed members reflow without overlap")
+    expect(a == tiles[0].frame && b == tiles[1].frame,
+           "jelly: manual zone resize preserves member frames exactly")
 
     var grown = zone
     grown.size.width = 260
@@ -11349,8 +11349,8 @@ func runCanvasAutoLayoutChecks() {
         scene: .init(tiles: tiles, zones: [zone, neighbor]), mutation: .zone(id: zoneId, placement: grown),
         gap: 8, zonePadding: 8, headerHeight: 20)
     let pushedNeighbor = pushed.zonePlacements[neighborZoneId]
-    expect((pushedNeighbor?.origin.x ?? neighbor.origin.x) >= 268,
-           "jelly: incoming zone has priority and pushes the neighboring zone by the configured gap")
+    expect(pushedNeighbor == nil,
+           "jelly: outward zone growth never pushes a neighboring zone")
     let movedMember = pushed.tileFrames[neighborTileId]
     let neighborDelta = (pushedNeighbor?.origin.x ?? neighbor.origin.x) - neighbor.origin.x
     expect((movedMember?.x ?? tiles[2].frame.x) == tiles[2].frame.x + neighborDelta,
@@ -11380,8 +11380,8 @@ func runCanvasAutoLayoutChecks() {
         scene: .init(tiles: Array(tiles.dropLast()) + [outsideTile], zones: [zone]),
         mutation: .zone(id: zoneId, placement: zoneThroughTile),
         gap: 8, zonePadding: 8, headerHeight: 20)
-    expect((zoneBlockedByTile.tileFrames[outsideId]?.x ?? outsideTile.frame.x) >= 288,
-           "jelly: the inverse stays solid — an expanding zone pushes an outside tile")
+    expect(zoneBlockedByTile.tileFrames[outsideId] == nil,
+           "jelly: an expanding zone preserves an outside tile exactly")
 
     let pressureZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000020")!
     let pressureActiveId = UUID(uuidString: "A1100000-0000-4000-8000-000000000021")!
@@ -11415,8 +11415,8 @@ func runCanvasAutoLayoutChecks() {
         mutation: .tile(id: pressureActiveId, frame: sizePressureFrame),
         gap: 8, zonePadding: 8, headerHeight: 32)
     let sizePressureNeighbor = sizePressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
-    expect(sizePressureNeighbor.width < 360 && sizePressureNeighbor.width >= 240,
-           "jelly resize pressure shrinks a neighbor only after the available gap reaches zero")
+    expect(sizePressureNeighbor == pressureTiles[1].frame,
+           "jelly direct resize preserves a passive neighbor exactly")
     expect(sizePressure.zonePlacements[pressureZoneId] == nil,
            "jelly keeps the zone fixed while neighbor shrink capacity remains")
 
@@ -11428,12 +11428,69 @@ func runCanvasAutoLayoutChecks() {
         gap: 8, zonePadding: 8, headerHeight: 32)
     let exhaustedNeighbor = exhaustedPressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
     let exhaustedActive = exhaustedPressure.tileFrames[pressureActiveId] ?? exhaustedPressureFrame
-    expect(abs(exhaustedNeighbor.width - 240) < 0.01,
-           "jelly clamps a pressured neighbor at its existing tile-kind minimum")
-    expect(exhaustedNeighbor.x >= exhaustedActive.x + exhaustedActive.width,
-           "jelly keeps pressured neighbors non-overlapping after their minimum is exhausted")
-    expect((exhaustedPressure.zonePlacements[pressureZoneId]?.size.width ?? pressureZone.size.width) > pressureZone.size.width,
-           "jelly expands the zone only after neighbor shrink capacity is exhausted")
+    expect(exhaustedNeighbor == pressureTiles[1].frame,
+           "jelly never shrinks or moves a passive neighbor under resize pressure")
+    expect(exhaustedActive == exhaustedPressureFrame,
+           "jelly preserves the pointer-owned requested active frame")
+    expect((exhaustedPressure.zonePlacements[pressureZoneId]?.size.width ?? pressureZone.size.width) >= exhaustedActive.x + exhaustedActive.width + 8 - pressureZone.origin.x,
+           "jelly minimally expands the zone when the active tile crosses its padded edge")
+
+    // Fixed-seed permutation corpus: direct horizontal/vertical/corner pressure
+    // across 128 unequal scenes preserves every passive frame and every peer
+    // placement exactly, for global/on/off/inherit resolution states.
+    var seed: UInt64 = 0x0801_CAFE_F00D_BAAD
+    func nextUnit() -> Double {
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Double((seed >> 11) & 0x1f_ffff) / Double(0x1f_ffff)
+    }
+    for iteration in 0..<128 {
+        let activeID = UUID(uuidString: String(format: "A1200000-0000-4000-8000-%012X", iteration * 4 + 1))!
+        let passiveID = UUID(uuidString: String(format: "A1200000-0000-4000-8000-%012X", iteration * 4 + 2))!
+        let secondRowID = UUID(uuidString: String(format: "A1200000-0000-4000-8000-%012X", iteration * 4 + 3))!
+        let outsideID = UUID(uuidString: String(format: "A1200000-0000-4000-8000-%012X", iteration * 4 + 4))!
+        var seededZone = pressureZone
+        seededZone.autoLayoutMode = iteration % 3 == 0 ? .inherit : (iteration % 3 == 1 ? .enabled : .disabled)
+        let active = CanvasAutoLayoutEngine.LayoutTile(
+            id: activeID, frame: TileFrame(x: 108, y: 140, width: 180 + nextUnit() * 120, height: 120 + nextUnit() * 140), zoneId: pressureZoneId)
+        let passive = CanvasAutoLayoutEngine.LayoutTile(
+            id: passiveID, frame: TileFrame(x: 430, y: 150 + nextUnit() * 80, width: 160 + nextUnit() * 180, height: 130 + nextUnit() * 150), zoneId: pressureZoneId)
+        let secondRow = CanvasAutoLayoutEngine.LayoutTile(
+            id: secondRowID, frame: TileFrame(x: 150 + nextUnit() * 80, y: 455, width: 190 + nextUnit() * 130, height: 110 + nextUnit() * 90), zoneId: pressureZoneId)
+        let outside = CanvasAutoLayoutEngine.LayoutTile(
+            id: outsideID, frame: TileFrame(x: 760, y: 120, width: 140, height: 120), zoneId: nil)
+        var requested = active.frame
+        if iteration % 3 != 1 { requested.width += 220 + nextUnit() * 160 }
+        if iteration % 3 != 0 { requested.height += 180 + nextUnit() * 120 }
+        let members = [requested, passive.frame, secondRow.frame]
+        let expectedRight = max(seededZone.origin.x + seededZone.size.width, members.map { $0.x + $0.width }.max()! + 8)
+        let expectedBottom = max(seededZone.origin.y + seededZone.size.height, members.map { $0.y + $0.height }.max()! + 8)
+        let seeded = CanvasAutoLayoutEngine.solve(
+            scene: .init(tiles: [active, passive, secondRow, outside], zones: [seededZone, neighbor], globalEnabled: iteration % 4 != 0),
+            mutation: .tile(id: activeID, frame: requested), gap: 8, zonePadding: 8, headerHeight: 32)
+        expect(seeded.tileFrames[activeID] == requested, "seeded resize \(iteration): active frame")
+        expect(seeded.tileFrames[passiveID] == nil && seeded.tileFrames[secondRowID] == nil && seeded.tileFrames[outsideID] == nil,
+               "seeded resize \(iteration): passive frames exact")
+        expect(seeded.zonePlacements[neighborZoneId] == nil,
+               "seeded resize \(iteration): peer zone exact")
+        let expectedZone = ZoneSize(width: expectedRight - seededZone.origin.x, height: expectedBottom - seededZone.origin.y)
+        expect((seeded.zonePlacements[pressureZoneId] ?? seededZone).size == expectedZone,
+               "seeded resize \(iteration): minimal union plus padding")
+
+        var requestedZone = seededZone
+        requestedZone.origin.x += 120
+        requestedZone.origin.y += 90
+        requestedZone.size.width -= 180
+        requestedZone.size.height -= 140
+        let zoneResize = CanvasAutoLayoutEngine.solve(
+            scene: .init(tiles: [active, passive, secondRow, outside], zones: [seededZone, neighbor], globalEnabled: iteration % 4 != 0),
+            mutation: .zone(id: pressureZoneId, placement: requestedZone), gap: 8, zonePadding: 8, headerHeight: 32)
+        expect(zoneResize.tileFrames.isEmpty && zoneResize.zonePlacements[neighborZoneId] == nil,
+               "seeded zone resize \(iteration): all member/outside/peer frames exact")
+        let clamped = zoneResize.zonePlacements[pressureZoneId] ?? requestedZone
+        expect(clamped.origin.x <= [active.frame.x, passive.frame.x, secondRow.frame.x].min()! - 8
+                   && clamped.origin.y <= [active.frame.y, passive.frame.y, secondRow.frame.y].min()! - 40,
+               "seeded zone resize \(iteration): inward edges clamp to padded envelope")
+    }
 
     let swapZoneId = UUID(uuidString: "A1100000-0000-4000-8000-000000000030")!
     let swapLeftId = UUID(uuidString: "A1100000-0000-4000-8000-000000000031")!
@@ -11581,9 +11638,8 @@ func runCanvasAutoLayoutChecks() {
         scene: .init(tiles: tiles.dropLast(), zones: [zone]), mutation: .zone(id: zoneId, placement: compressedZone),
         gap: 8, zonePadding: 8, headerHeight: 20)
     let compressedFrames = tiles.dropLast().map { compressed.tileFrames[$0.id] ?? $0.frame }.sorted { $0.x < $1.x }
-    let compressedGap = compressedFrames[1].x - compressedFrames[0].x - compressedFrames[0].width
-    expect(compressedGap >= -0.001 && compressedGap < 8,
-           "jelly: a constrained topology compresses gaps evenly toward zero")
+    expect(compressedFrames == tiles.dropLast().map(\.frame).sorted { $0.x < $1.x },
+           "jelly: a constrained manual zone resize preserves member frames exactly")
     let compressedScene = CanvasAutoLayoutEngine.Scene(
         tiles: zip(tiles.dropLast(), compressedFrames).map { original, frame in .init(id: original.id, frame: frame, zoneId: zoneId) },
         zones: [compressed.zonePlacements[zoneId] ?? compressedZone])
@@ -11593,8 +11649,8 @@ func runCanvasAutoLayoutChecks() {
         scene: compressedScene, mutation: .zone(id: zoneId, placement: expandedZone),
         gap: 8, zonePadding: 8, headerHeight: 20)
     let restoredFrames = compressedScene.tiles.map { restored.tileFrames[$0.id] ?? $0.frame }.sorted { $0.x < $1.x }
-    expect(abs(restoredFrames[1].x - restoredFrames[0].x - restoredFrames[0].width - 8) < 0.01,
-           "jelly: expansion restores the configured gap in the current topology")
+    expect(restoredFrames == compressedFrames,
+           "jelly: manual zone expansion does not reflow the current topology")
 
     let negativeZone = ZonePlacement(
         zoneId: zoneId, projectId: nil, origin: ZonePoint(x: -500, y: -300),

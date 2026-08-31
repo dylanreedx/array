@@ -354,6 +354,23 @@ final class CanvasNSView: NSView, TokenThemed {
         case let .zone(id, _): activeTileId = nil; activeZoneId = id
         case .tidy, .settle: activeTileId = nil; activeZoneId = nil
         }
+        let isDirectResize: Bool
+        switch mutation {
+        case let .tile(id, frame):
+            isDirectResize = scene.tiles.first(where: { $0.id == id }).map {
+                $0.frame.width != frame.width || $0.frame.height != frame.height
+            } ?? false
+        case let .zone(id, placement):
+            isDirectResize = scene.zones.first(where: { $0.zoneId == id }).map {
+                $0.size != placement.size
+            } ?? false
+        case .tidy, .settle:
+            isDirectResize = false
+        }
+        if isDirectResize {
+            applyLayoutTransaction(transaction, activeTileId: activeTileId, activeZoneId: activeZoneId)
+            return
+        }
         // The solver reports frames that differ from the SCENE it was given.
         // Mid-gesture the live views hold the PREVIOUS frame's solve, so a tile
         // whose solved position returned to its baseline (a relaxed push) would
@@ -386,6 +403,9 @@ final class CanvasNSView: NSView, TokenThemed {
         for (id, placement) in transaction.zonePlacements {
             if let index = liveZones.firstIndex(where: { $0.zoneId == id }) { liveZones[index] = placement }
             if let layer = zoneLayers.first(where: { $0.placement.zoneId == id }) { layer.placement = placement }
+            if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == id }) {
+                zoneRenderModels[index].placement = placement
+            }
             if var model = zoneDisplayByZoneId[id] {
                 model.placement = placement
                 zoneDisplayByZoneId[id] = model
@@ -1326,6 +1346,12 @@ final class CanvasNSView: NSView, TokenThemed {
             name: NSApplication.didResignActiveNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowDidResignKeyDuringGeometryEdit),
+            name: NSWindow.didResignKeyNotification,
+            object: nil
+        )
         // Ticket 24: a lazy-resume failure (ZoneRuntimeController.recoverManagedSessionOnFocus)
         // has no other subscriber anywhere in the UI — without this, recovery failures are
         // silent. Surface them as the stale indicator + a non-empty error label on the tile.
@@ -1466,7 +1492,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// new placement via `onZoneMoved` so the grown size survives relaunch.
     private func growZoneToFitMembers(_ zoneId: UUID, notifyChange: Bool = true) {
         guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
-        let members = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }
+        let members = autoLayoutScene().tiles.filter { $0.zoneId == zoneId }
         guard !members.isEmpty else { return }
         let pad = ZoneBoundsConfig.padding(defaults: autoLayoutDefaults)
         let hh = Double(ZoneChromeNSView.headerHeight)
@@ -2523,6 +2549,33 @@ final class CanvasNSView: NSView, TokenThemed {
                 for view in layer.tileViews.values { view.cancelActiveGeometryGesture() }
             }
         }
+    }
+
+    @objc private func windowDidResignKeyDuringGeometryEdit(_ note: Notification) {
+        guard pendingGeometryEdit != nil,
+              note.object == nil || (note.object as? NSWindow) === window else { return }
+        cancelActiveGeometryCapture()
+    }
+
+    private func cancelActiveGeometryCapture() {
+        guard pendingGeometryEdit != nil else { return }
+        cancelGeometryEdit()
+        zoneGesture = .none
+        pendingMovedPlacement = nil
+        hideDragGhost()
+        hideResizeDimensions()
+        for view in tileViews.values { view.cancelActiveGeometryGesture() }
+        for layer in zoneLayers {
+            for view in layer.tileViews.values { view.cancelActiveGeometryGesture() }
+        }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if pendingGeometryEdit != nil {
+            cancelActiveGeometryCapture()
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     private func focusBorderOverlayView() -> FocusBorderOverlayView {
@@ -4273,6 +4326,20 @@ final class CanvasNSView: NSView, TokenThemed {
         return p
     }
 
+    /// Clamp a manual resize through the real member envelope independently of
+    /// whether automatic layout is globally or locally enabled.
+    private func clampedManualZoneResize(_ requested: ZonePlacement) -> ZonePlacement {
+        var scene = autoLayoutScene()
+        scene.globalEnabled = true
+        let transaction = CanvasAutoLayoutEngine.solve(
+            scene: scene,
+            mutation: .zone(id: requested.zoneId, placement: requested),
+            gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
+            zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
+            headerHeight: Double(ZoneChromeNSView.headerHeight))
+        return transaction.zonePlacements[requested.zoneId] ?? requested
+    }
+
     private static func cgRect(from frame: TileFrame) -> CGRect {
         CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
@@ -5134,6 +5201,7 @@ final class CanvasNSView: NSView, TokenThemed {
             }
             return
         case .movingZone(let zoneId, let lastWindowPoint):
+            hideResizeDimensions()
             let dx = event.locationInWindow.x - lastWindowPoint.x
             // Negate dy: window-y-up vs canvas-y-down (same convention as TileNSView.mouseDragged).
             let dy = -(event.locationInWindow.y - lastWindowPoint.y)
@@ -5148,11 +5216,6 @@ final class CanvasNSView: NSView, TokenThemed {
                 pendingMovedPlacement = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
                 if let final = pendingMovedPlacement {
-                    showResizeDimensions(
-                        widthPx: Int(final.size.width.rounded()),
-                        heightPx: Int(final.size.height.rounded()),
-                        atWindowPoint: event.locationInWindow
-                    )
                     if autoLayoutBlockedZoneIds.contains(zoneId) {
                         showDragGhost(at: CanvasEngine.zoneWorldFrame(final))
                     } else {
@@ -5189,17 +5252,29 @@ final class CanvasNSView: NSView, TokenThemed {
             if isAutoLayoutEnabled,
                let current = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement {
-                let newPlacement = resizedZonePlacement(current, edge: edge, screenDelta: CGSize(width: dx, height: dy))
+                let newPlacement = clampedManualZoneResize(
+                    resizedZonePlacement(current, edge: edge, screenDelta: CGSize(width: dx, height: dy)))
                 applyAutoLayout(.zone(id: zoneId, placement: newPlacement), baseline: autoLayoutGestureBaseline)
                 pendingMovedPlacement = liveZones.first(where: { $0.zoneId == zoneId })
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+                if let final = pendingMovedPlacement {
+                    showResizeDimensions(
+                        widthPx: Int(final.size.width.rounded()),
+                        heightPx: Int(final.size.height.rounded()),
+                        atWindowPoint: event.locationInWindow)
+                }
                 return
             }
             if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
-                let newPlacement = resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy))
+                let newPlacement = clampedManualZoneResize(
+                    resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy)))
                 liveZones[idx] = newPlacement
                 pendingMovedPlacement = newPlacement
                 layoutAllTiles()
+                showResizeDimensions(
+                    widthPx: Int(newPlacement.size.width.rounded()),
+                    heightPx: Int(newPlacement.size.height.rounded()),
+                    atWindowPoint: event.locationInWindow)
             }
             return
         }
@@ -7038,18 +7113,18 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
         func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: 700 - cy) }
+        func ev(_ t: NSEvent.EventType, _ p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: t == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("synth \(t)") }
+            return e
+        }
         func drag(_ canvas: CanvasNSView, from: NSPoint, to: NSPoint, window: NSWindow) throws {
-            func ev(_ t: NSEvent.EventType, _ p: NSPoint) throws -> NSEvent {
-                guard let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [],
-                                                 timestamp: ProcessInfo.processInfo.systemUptime,
-                                                 windowNumber: window.windowNumber, context: nil,
-                                                 eventNumber: 0, clickCount: 1, pressure: t == .leftMouseUp ? 0 : 1)
-                else { throw CheckError.failed("synth \(t)") }
-                return e
-            }
-            canvas.mouseDown(with: try ev(.leftMouseDown, from))
-            canvas.mouseDragged(with: try ev(.leftMouseDragged, to))
-            canvas.mouseUp(with: try ev(.leftMouseUp, to))
+            canvas.mouseDown(with: try ev(.leftMouseDown, from, window: window))
+            canvas.mouseDragged(with: try ev(.leftMouseDragged, to, window: window))
+            canvas.mouseUp(with: try ev(.leftMouseUp, to, window: window))
         }
 
         let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
@@ -7065,7 +7140,9 @@ final class CanvasNSView: NSView, TokenThemed {
         let legacySuite = "zone-resize-legacy-\(UUID().uuidString)"
         let legacyDefaults = UserDefaults(suiteName: legacySuite)!
         legacyDefaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        legacyDefaults.set(true, forKey: ResizeHUDConfig.enabledKey)
         canvas.autoLayoutDefaults = legacyDefaults
+        canvas.resizeHUDDefaults = legacyDefaults
         defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -7084,8 +7161,9 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvas.tileView(for: memberId)?.frame == memberStart, "right-edge resize must NOT move the member")
 
         // 2. Bottom edge +50 → height 300→350.
+        let heightBeforeBottomDrag = canvas.qaLiveZonePlacement(zoneId)!.size.height
         try drag(canvas, from: win(300, 400), to: win(300, 450), window: window)
-        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.height ?? 0) - 350) < 0.5, "bottom-edge resize should grow height to 350; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.height))")
+        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.height ?? 0) - heightBeforeBottomDrag - 50) < 0.5, "bottom-edge resize should grow height by 50; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.height))")
 
         // 3. Left edge dragged left 50 → origin.x 100→50, width 500→550, member unmoved.
         try drag(canvas, from: win(100, 250), to: win(50, 250), window: window)
@@ -7093,8 +7171,32 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.width ?? 0) - 550) < 0.5, "left-edge resize should grow width to 550; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.width))")
         try expect(canvas.tileView(for: memberId)?.frame == memberStart, "left-edge resize must NOT move the member (container resize keeps contents put)")
 
+        // Auto-layout OFF still clamps inward through member + padding.
+        try drag(canvas, from: win(600, 250), to: win(200, 250), window: window)
+        let offModeClamped = canvas.qaLiveZonePlacement(zoneId)!
+        let expectedRight = member.frame.x + member.frame.width + ZoneBoundsConfig.padding(defaults: legacyDefaults)
+        try expect(abs(offModeClamped.origin.x + offModeClamped.size.width - expectedRight) < 0.5,
+                   "off-mode inward resize must clamp at the padded member envelope")
+
+        // Cancellation and window resignation both roll back the preview and
+        // tear down the noninteractive HUD without waiting for mouse-up.
+        let cancelBaseline = canvas.qaLiveZonePlacement(zoneId)!
+        let cancelStart = win(cancelBaseline.origin.x + cancelBaseline.size.width, 250)
+        canvas.mouseDown(with: try ev(.leftMouseDown, cancelStart, window: window))
+        canvas.mouseDragged(with: try ev(.leftMouseDragged, NSPoint(x: cancelStart.x + 80, y: cancelStart.y), window: window))
+        try expect(canvas.qaResizeHUDVisible, "zone resize must show the dimensions HUD mid-drag")
+        canvas.cancelOperation(nil)
+        try expect(!canvas.qaResizeHUDVisible && canvas.qaLiveZonePlacement(zoneId) == cancelBaseline,
+                   "cancel must hide the HUD and restore zone geometry")
+
+        canvas.mouseDown(with: try ev(.leftMouseDown, cancelStart, window: window))
+        canvas.mouseDragged(with: try ev(.leftMouseDragged, NSPoint(x: cancelStart.x + 80, y: cancelStart.y), window: window))
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try expect(!canvas.qaResizeHUDVisible && canvas.qaLiveZonePlacement(zoneId) == cancelBaseline,
+                   "window resignation must hide the HUD and restore zone geometry")
+
         // 4. Each resize committed once.
-        try expect(moved == 3, "each edge resize should fire onZoneMoved once; got \(moved)")
+        try expect(moved == 4, "each completed edge resize should fire onZoneMoved once; got \(moved)")
 
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
@@ -7182,8 +7284,8 @@ final class CanvasNSView: NSView, TokenThemed {
         try drag(canvas, from: win(332, 190), to: win(304, 190), window: window)
         try expect(commits.count == 1, "one zone-resize gesture must commit one transaction; got \(commits.count)")
         guard let squeezed = canvas.qaLiveZonePlacement(zoneId) else { throw CheckError.failed("zone disappeared") }
-        try expect(squeezed.size.width >= 200 && squeezed.size.width <= 205,
-                   "zone should stop at feasible fixed-size packing; got \(squeezed.size.width)")
+        try expect(abs(squeezed.size.width - 224) < 0.1,
+                   "zone should clamp at the padded member envelope; got \(squeezed.size.width)")
         let first = canvas.canvasState.tiles.first { $0.id == firstId }!.frame
         let second = canvas.canvasState.tiles.first { $0.id == secondId }!.frame
         try expect(first.width == 100 && second.width == 100 && first.x + first.width <= second.x,
@@ -7191,6 +7293,7 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvas.qaZoneMembership(of: firstId) == zoneId && canvas.qaZoneMembership(of: secondId) == zoneId,
                    "solver displacement must not change membership")
 
+        let bareBeforeZoneExpansion = canvas.canvasState.tiles.first { $0.id == bareId }!.frame
         let squeezedRight = squeezed.origin.x + squeezed.size.width
         try drag(canvas, from: win(squeezedRight, 190), to: win(450, 190), window: window)
         try expect(commits.count == 2, "the expansion gesture must add exactly one final commit")
@@ -7200,8 +7303,8 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(abs(restoredB.x - restoredA.x - restoredA.width - 8) < 0.1,
                    "expansion must restore the configured tile gap; A=\(restoredA), B=\(restoredB), zone=\(expanded)")
         let pushedBare = canvas.canvasState.tiles.first { $0.id == bareId }!.frame
-        try expect(pushedBare.x >= expanded.origin.x + expanded.size.width + 8,
-                   "expanding a zone must push a bare tile through the external rigid-body solver")
+        try expect(pushedBare == bareBeforeZoneExpansion,
+                   "manual zone growth must preserve an outside tile exactly")
 
         let zoneBeforeEntry = canvas.qaLiveZonePlacement(zoneId)!
         guard let bareView = canvas.tileView(for: bareId) else { throw CheckError.failed("bare tile view disappeared") }
@@ -7249,9 +7352,9 @@ final class CanvasNSView: NSView, TokenThemed {
                    "a rejected cross-store transaction must restore the last durable geometry")
 
         // The production multi-zone representation stores member frames locally
-        // in ZoneLayer. Drive a real right-edge resize through TileNSView and prove
-        // that the same world solver moves and shrinks its neighbor before the
-        // zone itself needs to expand.
+        // in ZoneLayer. A direct resize is pointer-owned: the active tile changes,
+        // while every passive member remains byte-for-byte exact. Overlap is less
+        // destructive than silently moving or shrinking somebody else's surface.
         let layerZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000021")!
         let layerFirstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000022")!
         let layerSecondId = UUID(uuidString: "A1300000-0000-4000-8000-000000000023")!
@@ -7287,6 +7390,9 @@ final class CanvasNSView: NSView, TokenThemed {
         layer.tileViews[layerSecondId] = layerSecondView
         layerCanvas.upsertZoneLayer(layer)
         layerCanvas.layoutSubtreeIfNeeded()
+        guard let passiveLayerBaseline = layerCanvas.tiles(inZone: layerZoneId)?.first(where: { $0.id == layerSecondId })?.frame else {
+            throw CheckError.failed("ZoneLayer passive baseline disappeared")
+        }
         var layerCommits: [CanvasLayoutTransaction] = []
         layerCanvas.onLayoutCommitted = { layerCommits.append($0); return true }
         try resizeTileRight(layerFirstView, worldDX: 120, window: layerWindow)
@@ -7298,13 +7404,10 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         try expect(resizedLayerFirst.width == 360,
                    "direct ZoneLayer resize must preserve the requested tile width; got \(resizedLayerFirst.width)")
-        try expect(resizedLayerSecond.x >= resizedLayerFirst.x + resizedLayerFirst.width,
-                   "an in-zone neighbor must move away from the resized tile instead of overlapping; active=\(resizedLayerFirst), neighbor=\(resizedLayerSecond), zone=\(resizedLayerZone)")
-        try expect(resizedLayerSecond.width < layerSecond.frame.width
-                       && resizedLayerSecond.width >= TileGeometry.minimumSize(for: .note).width,
-                   "after gaps reach zero, resize pressure must shrink the neighbor toward its minimum")
+        try expect(resizedLayerSecond == passiveLayerBaseline,
+                   "direct resize must preserve the passive member exactly; before=\(passiveLayerBaseline), after=\(resizedLayerSecond), active=\(resizedLayerFirst)")
         try expect(resizedLayerZone.size.width == layerPlacement.size.width,
-                   "the zone must stay fixed while neighbor shrink capacity can absorb the resize")
+                   "the zone must stay fixed when the resized tile still fits")
         try expect(layerCommits.count == 1,
                    "one ZoneLayer tile resize must produce one final geometry transaction")
 
