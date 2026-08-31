@@ -42,7 +42,10 @@ only with no unresolved P0/P1/P2 findings. `PASS` may conservatively recommend
 `DO_NOT_PROMOTE`; every other status must. Unresolved P3 findings remain explicit
 and nonblocking. Validation holds the manifest transaction lock across its entire
 snapshot read, artifact hashing, reconciliation, and atomic `validated_at` write,
-and retains `validated_snapshot_sha256` for the exact checked entry set.
+and retains `validated_snapshot_sha256` for the exact checked entry set. Every
+successful manifest transaction—including idempotent ingestion—atomically clears
+both validation fields. They are valid only as a coherent pair; a failed mutation
+that changes no manifest state preserves the existing pair.
 
 The release identity commands bind a clean source commit and exact release argv
 and log to the app bundle, executable, signing/notary state, and DMG:
