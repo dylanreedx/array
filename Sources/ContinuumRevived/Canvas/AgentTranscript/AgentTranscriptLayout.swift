@@ -25,7 +25,7 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     /// "slightly bigger paragraph gap" the turn witness's own failure message
     /// forbids — part of what Dylan rejected. `Space.xl * 2`; the final value
     /// is judged in the S7 gallery, not by this number.
-    static let interTurnSpacing = CGFloat(Space.xl * 2)
+    static let interTurnSpacing: CGFloat = 24
     /// Returns the gap to leave ABOVE `index`, or nil for the default `rowSpacing`.
     var spacingBefore: ((Int) -> CGFloat?)?
     /// Cheap digest of where the turn boundaries currently are.

@@ -1061,6 +1061,15 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--transcript-provider-parity-check") {
+            do {
+                try TranscriptProviderParityChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("transcript-provider-parity check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--relationship-geometry-check") {
             do {
                 _ = NSApplication.shared
