@@ -27,7 +27,8 @@ qa/flows/cmdk-spam.sh
 
 Common environment variables:
 
-- `CONTINUUM_APP`: executable to launch, default `.build/debug/continuum-revived`.
+- `CONTINUUM_APP`: executable to launch, default `.build/debug/Array`.
+- `CONTINUUM_QA_RUN_DIR`: explicit absolute run directory (required by release preflight).
 - `CONTINUUM_FLOW_ITERATIONS`: iteration count for looped flows.
 - `CONTINUUM_RUNS_DIR`: output root, default `qa-runs`.
 - `CONTINUUM_QA_KEEP_APP=1`: leave the app running after the flow.
@@ -57,6 +58,7 @@ Use `qa/reviewer-prompt.md` as the reviewer contract. It requires reviewers to r
 - `qa/flows/drag-past-edge.sh`: drags the first tile far beyond the canvas edge to preserve clamp evidence.
 - `qa/flows/window-resize-stress.sh`: resizes the app window through widths from 320 to 1920 and captures layout stability.
 - `qa/flows/quit-during-load.sh`: starts a browser load flow, quits during load, and compares DiagnosticReports before and after.
+- `qa/flows/release-preflight.sh`: proves exact-PID/CGWindow capture, named readiness, Accessibility actions, Retina scale, isolated state, and honest `DISPLAY_DEFERRED` diagnostics.
 
 ## Adding A Flow
 

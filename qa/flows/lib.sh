@@ -10,8 +10,10 @@ set -euo pipefail
 QA_FLOW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QA_ROOT="$(cd "$QA_FLOW_DIR/../.." && pwd)"
 QA_RUNS_ROOT="${CONTINUUM_RUNS_DIR:-$QA_ROOT/qa-runs}"
-QA_APP="${CONTINUUM_APP:-$QA_ROOT/.build/debug/continuum-revived}"
+QA_APP="${CONTINUUM_APP:-$QA_ROOT/.build/debug/Array}"
 QA_APP_PID=""
+QA_WINDOW_ID=""
+QA_CAFFEINATE_PID=""
 QA_FLOW_NAME=""
 QA_RUN_DIR=""
 QA_MANIFEST_EVENTS=""
@@ -38,11 +40,20 @@ begin_flow() {
   QA_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local timestamp
   timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
-  QA_RUN_DIR="$QA_RUNS_ROOT/${QA_FLOW_NAME}-${timestamp}"
+  if [[ -n "${CONTINUUM_QA_RUN_DIR:-}" ]]; then
+    [[ "$CONTINUUM_QA_RUN_DIR" == /* ]] || { echo "CONTINUUM_QA_RUN_DIR must be absolute" >&2; return 2; }
+    QA_RUN_DIR="$CONTINUUM_QA_RUN_DIR"
+  else
+    QA_RUN_DIR="$QA_RUNS_ROOT/${QA_FLOW_NAME}-${timestamp}"
+  fi
   mkdir -p "$QA_RUN_DIR"
   QA_MANIFEST_EVENTS="$QA_RUN_DIR/.events.jsonl"
   : > "$QA_MANIFEST_EVENTS"
   trap flow_abort ERR INT TERM
+  if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -dimsu -w "$$" &
+    QA_CAFFEINATE_PID="$!"
+  fi
   echo "QA run: $QA_RUN_DIR"
 }
 
@@ -57,7 +68,16 @@ flow_abort() {
     kill "$QA_APP_PID" >/dev/null 2>&1 || true
     wait "$QA_APP_PID" >/dev/null 2>&1 || true
   fi
+  cleanup_flow_resources
   exit "$exit_code"
+}
+
+cleanup_flow_resources() {
+  if [[ -n "$QA_CAFFEINATE_PID" ]]; then
+    kill "$QA_CAFFEINATE_PID" >/dev/null 2>&1 || true
+    wait "$QA_CAFFEINATE_PID" >/dev/null 2>&1 || true
+    QA_CAFFEINATE_PID=""
+  fi
 }
 
 json_escape() {
@@ -86,7 +106,7 @@ capture_step() {
   local notes="${2:-}"
   local png_name
   png_name="$(printf "%02d-%s.png" "$(wc -l < "$QA_MANIFEST_EVENTS" | tr -d " ")" "$(slug "$step")")"
-  if screencapture -x "$QA_RUN_DIR/$png_name"; then
+  if capture_app_window "$QA_RUN_DIR/$png_name"; then
     append_event "$step" "pass" "$png_name" "$notes"
   else
     append_event "$step" "fail" "" "screencapture failed: $notes"
@@ -169,8 +189,12 @@ finish_flow() {
     kill "$QA_APP_PID" >/dev/null 2>&1 || true
     wait "$QA_APP_PID" >/dev/null 2>&1 || true
   fi
+  cleanup_flow_resources
   if [[ "$status" == "pass" ]]; then
     echo "QA flow passed: $QA_RUN_DIR"
+  elif [[ "$status" == "DISPLAY_DEFERRED" ]]; then
+    echo "QA flow DISPLAY_DEFERRED: $QA_RUN_DIR" >&2
+    return 3
   else
     echo "QA flow failed: $QA_RUN_DIR" >&2
     return 1
@@ -194,10 +218,101 @@ launch_continuum() {
     CONTINUUM_QA_CAPTURE="$QA_RUN_DIR/capture" "$QA_APP" &
   fi
   QA_APP_PID="$!"
-  sleep "${CONTINUUM_QA_BOOT_DELAY:-1.0}"
+  wait_for_app_window "${CONTINUUM_QA_READY_TIMEOUT:-20}"
+}
+
+resolve_window_id_for_pid() {
+  swift - "$QA_APP_PID" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let pid = Int32(CommandLine.arguments[1])!
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let candidates = windows.filter {
+  ($0[kCGWindowOwnerPID as String] as? Int32) == pid &&
+  ($0[kCGWindowLayer as String] as? Int) == 0 &&
+  (($0[kCGWindowAlpha as String] as? Double) ?? 0) > 0
+}
+func area(_ w: [String: Any]) -> Double {
+  let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+  return (b["Width"] as? Double ?? 0) * (b["Height"] as? Double ?? 0)
+}
+guard let window = candidates.max(by: { area($0) < area($1) }),
+      area(window) > 0,
+      let id = window[kCGWindowNumber as String] as? UInt32 else { exit(1) }
+print(id)
+SWIFT
+}
+
+wait_for_app_window() {
+  local timeout="$1" deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$QA_APP_PID" 2>/dev/null; then
+      echo "launched app PID $QA_APP_PID exited before window readiness" >&2
+      return 1
+    fi
+    if QA_WINDOW_ID="$(resolve_window_id_for_pid 2>/dev/null)" && [[ -n "$QA_WINDOW_ID" ]]; then
+      append_event "window-ready" "pass" "" "pid=$QA_APP_PID cgWindowID=$QA_WINDOW_ID"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "timed out waiting for named readiness app-window(pid=$QA_APP_PID) after ${timeout}s" >&2
+  append_event "window-ready" "fail" "" "readiness_timeout pid=$QA_APP_PID timeout=${timeout}s"
+  return 1
+}
+
+wait_for_named_readiness() {
+  local name="$1" path="$2" timeout="${3:-20}" deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$path" ]]; then
+      append_event "$name" "pass" "" "named readiness file: $path"
+      return 0
+    fi
+    sleep 0.1
+  done
+  append_event "$name" "fail" "" "readiness_timeout missing: $path"
+  return 1
+}
+
+assert_window_owned_by_pid() {
+  local actual
+  actual="$(swift - "$QA_WINDOW_ID" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let wanted = UInt32(CommandLine.arguments[1])!
+let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+guard let w = windows.first(where: { ($0[kCGWindowNumber as String] as? UInt32) == wanted }),
+      let pid = w[kCGWindowOwnerPID as String] else { exit(1) }
+print(pid)
+SWIFT
+)"
+  [[ "$actual" == "$QA_APP_PID" ]]
+}
+
+capture_app_window() {
+  local output="$1"
+  [[ -n "$QA_WINDOW_ID" ]] || return 1
+  assert_window_owned_by_pid || return 1
+  screencapture -x -l "$QA_WINDOW_ID" "$output" || return 1
+  [[ -s "$output" ]] || return 1
+  local width height
+  width="$(sips -g pixelWidth "$output" 2>/dev/null | awk '/pixelWidth/{print $2}')"
+  height="$(sips -g pixelHeight "$output" 2>/dev/null | awk '/pixelHeight/{print $2}')"
+  [[ "${width:-0}" -gt 32 && "${height:-0}" -gt 32 && $(stat -f %z "$output") -gt 4096 ]]
 }
 
 window_bounds() {
+  swift - "$QA_WINDOW_ID" <<'SWIFT'
+import CoreGraphics
+import Foundation
+let wanted = UInt32(CommandLine.arguments[1])!
+let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+guard let window = windows.first(where: { ($0[kCGWindowNumber as String] as? UInt32) == wanted }),
+      let bounds = window[kCGWindowBounds as String] as? [String: Any],
+      let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"] else { exit(1) }
+print("\(x),\(y),\(width),\(height)")
+SWIFT
+  return
   osascript <<'APPLESCRIPT' 2>/dev/null || swift - <<'SWIFT'
 tell application "System Events"
   set matches to windows of processes whose name contains "continuum-revived"
@@ -243,16 +358,16 @@ set_window_bounds() {
   local top="$2"
   local width="$3"
   local height="$4"
-  if osascript - "$left" "$top" "$width" "$height" <<'APPLESCRIPT' 2>/dev/null; then
+  if osascript - "$QA_APP_PID" "$left" "$top" "$width" "$height" <<'APPLESCRIPT' 2>/dev/null; then
 on run argv
-  set leftPos to item 1 of argv as integer
-  set topPos to item 2 of argv as integer
-  set targetWidth to item 3 of argv as integer
-  set targetHeight to item 4 of argv as integer
+  set targetPID to item 1 of argv as integer
+  set leftPos to item 2 of argv as integer
+  set topPos to item 3 of argv as integer
+  set targetWidth to item 4 of argv as integer
+  set targetHeight to item 5 of argv as integer
   tell application "System Events"
-    set matches to windows of processes whose name contains "continuum-revived"
-    if (count of matches) is 0 then error "continuum-revived window not found"
-    tell item 1 of matches
+    set targetProcess to first process whose unix id is targetPID
+    tell window 1 of targetProcess
       set position to {leftPos, topPos}
       set size to {targetWidth, targetHeight}
     end tell
@@ -305,13 +420,13 @@ escape_key() {
 }
 
 quit_app_with_osascript() {
-  osascript <<'APPLESCRIPT'
+  osascript - "$QA_APP_PID" <<'APPLESCRIPT'
+on run argv
 tell application "System Events"
-  set matches to processes whose name contains "continuum-revived"
-  repeat with appProcess in matches
-    tell appProcess to keystroke "q" using command down
-  end repeat
+  set appProcess to first process whose unix id is (item 1 of argv as integer)
+  tell appProcess to keystroke "q" using command down
 end tell
+end run
 APPLESCRIPT
 }
 

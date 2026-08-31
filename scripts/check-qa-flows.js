@@ -13,6 +13,7 @@ const requiredExecutables = [
   "qa/flows/drag-past-edge.sh",
   "qa/flows/window-resize-stress.sh",
   "qa/flows/quit-during-load.sh"
+  ,"qa/flows/release-preflight.sh"
 ];
 
 const markerChecks = new Map([
@@ -24,7 +25,9 @@ const markerChecks = new Map([
   ["qa/expectations/drag-past-edge.md", ["drag-past-edge", "before-drag", "after-drag-past-edge", "verified-working"]],
   ["qa/expectations/window-resize-stress.md", ["window-resize-stress", "before-resize", "window-width-320", "window-width-1920", "verified-working"]],
   ["qa/expectations/quit-during-load.md", ["quit-during-load", "before-quit", "diagnosticreports-clean", "verified-working"]],
+  ["qa/expectations/release-preflight.md", ["release-preflight", "CGWindowID", "WKWebView", "DISPLAY_DEFERRED", "verified-working"]],
   ["qa/flows/lib.sh", ["begin_flow", "capture_step", "assert_flow", "QA_ASSERTIONS", "write_manifest", "launch_continuum"]],
+  ["qa/flows/release-preflight.sh", ["release-preflight", "DISPLAY_DEFERRED", "wait_for_named_readiness", "capture_app_window", "assert_window_owned_by_pid", "CONTINUUM_QA_RUN_DIR", "caffeinate"]],
   ["qa/flows/cmdk-spam.sh", ["CONTINUUM_QA_FLOW=palette-open-close", "cliclick", "capture_step", "assert_flow"]],
   ["qa/flows/drag-past-edge.sh", ["CONTINUUM_QA_FLOW=canvas-drag-resize", "cliclick", "drag", "assert_flow"]],
   ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step", "assert_flow"]],

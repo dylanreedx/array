@@ -16,7 +16,7 @@ elif ! command -v cliclick >/dev/null 2>&1; then
   brew install cliclick
 fi
 
-for tool in osascript screencapture python3; do
+for tool in osascript screencapture python3 caffeinate sips; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "$tool is missing from PATH." >&2
     missing=1
@@ -38,6 +38,8 @@ Verified commands:
   - osascript
   - screencapture
   - python3
+  - caffeinate
+  - sips
 EOF
 
 if [[ "$missing" -ne 0 ]]; then
