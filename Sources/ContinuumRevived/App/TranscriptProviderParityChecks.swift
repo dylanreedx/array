@@ -74,6 +74,33 @@ enum TranscriptProviderParityChecks {
         guard absolute.path == "secret.txt", absolute.renamePath == nil else {
             throw Failure(description: "private absolute path was retained: \(absolute)")
         }
+        let hostileClaudeBox = Box(), hostileCodexBox = Box(), hostilePiBox = Box()
+        var hostileClaude = ClaudeEventTranslator(runToken: "hostile"); hostileClaude.onRuntimeObservation = hostileClaudeBox.append
+        var hostileCodex = CodexEventTranslator(runToken: "hostile"); hostileCodex.onRuntimeObservation = hostileCodexBox.append
+        var hostilePi = PiEventTranslator(); hostilePi.onRuntimeObservation = hostilePiBox.append
+        _ = hostileClaude.translate(stream: [
+            #"{"type":"system","subtype":"init","session_id":"hostile","cwd":"/fixture"}"#,
+            #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"h1","name":"Edit","input":{"file_path":"C:\\Users\\Alice\\Secrets\\token.txt"}}]},"parent_tool_use_id":"file:///Users/alice/private/parent"}"#
+        ])
+        _ = hostileCodex.translate(stream: [
+            #"{"type":"thread.started","thread_id":"hostile"}"#, #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"id":"h1","type":"file_change","changes":[{"path":"../../.ssh/id_rsa","new_path":"\\\\server\\private\\renamed.txt","kind":"rename","diff":"+ Authorization: Bearer codex-secret\n+ /Users/alice/private"}]}}"#
+        ])
+        _ = hostilePi.translate(stream: [
+            #"{"type":"session","id":"hostile","cwd":"/fixture"}"#, #"{"type":"agent_start"}"#,
+            #"{"type":"tool_execution_start","toolCallId":"h1","toolName":"edit","args":{"path":"file:///Users/alice/private/pi.swift"},"parentToolCallId":"https://user:password@example.invalid/parent"}"#
+        ])
+        for (provider, box) in [("claude", hostileClaudeBox), ("codex", hostileCodexBox), ("pi", hostilePiBox)] {
+            let details = box.snapshot().compactMap { observation -> AgentToolDetailObservation? in
+                guard case let .toolDetail(_, detail) = observation else { return nil }; return detail
+            }
+            let surface = details.flatMap(\.fileChanges).map { [$0.path, $0.renamePath ?? "", $0.diffPreview ?? ""].joined(separator: "\n") }.joined(separator: "\n")
+                + details.compactMap(\.parentItemID).joined(separator: "\n")
+            guard !surface.contains("Alice"), !surface.contains("alice"), !surface.contains("server"),
+                  !surface.contains("codex-secret"), !surface.contains("/Users/"), !surface.contains(":\\") else {
+                throw Failure(description: "\(provider) hostile raw detail leaked into host-local presentation facts: \(surface)")
+            }
+        }
         print("TranscriptProviderParityChecks passed: shared hierarchy/detail parity plus honest Codex add/delete/rename/diff capability and path privacy")
     }
 

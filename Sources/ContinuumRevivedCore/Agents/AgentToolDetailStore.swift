@@ -139,7 +139,7 @@ public struct AgentToolDetailStart: Equatable, Sendable {
         self.arguments = arguments
         self.affectedFiles = affectedFiles
         self.fileChanges = fileChanges
-        self.parentItemID = parentItemID
+        self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
         self.startedAt = startedAt
         self.explicitSecrets = explicitSecrets
     }
@@ -231,6 +231,11 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
     // lexicographically larger key wins; identical keys are idempotent.
     var latestStartTieKey: String?
     var latestEndTieKey: String?
+    // Parent observations form a set-valued lattice. One explicit value is
+    // useful; conflicting explicit values are ambiguous and therefore expose
+    // no parent rather than fabricating a winner from arrival order.
+    package var observedParentItemIDs: Set<String>
+    package var observedParentConflict: Bool
 
     public init(
         identity: AgentToolDetailKey,
@@ -248,7 +253,9 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         latestStartTimestamp: Date? = nil,
         latestEndTimestamp: Date? = nil,
         latestStartTieKey: String? = nil,
-        latestEndTieKey: String? = nil
+        latestEndTieKey: String? = nil,
+        observedParentItemIDs: Set<String> = [],
+        observedParentConflict: Bool = false
     ) {
         self.identity = identity
         self.toolName = toolName
@@ -261,13 +268,19 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         self.updatedAt = updatedAt
         self.affectedFiles = affectedFiles
         self.fileChanges = fileChanges
-        self.parentItemID = parentItemID
+        self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
         self.sensitiveStartFingerprints = sensitiveStartFingerprints
         self.latestEndExplicitFingerprints = latestEndExplicitFingerprints
         self.latestStartTimestamp = latestStartTimestamp
         self.latestEndTimestamp = latestEndTimestamp
         self.latestStartTieKey = latestStartTieKey
         self.latestEndTieKey = latestEndTieKey
+        self.observedParentItemIDs = observedParentItemIDs.union(self.parentItemID.map { [$0] } ?? [])
+        self.observedParentConflict = observedParentConflict || self.observedParentItemIDs.count > 1
+        if self.observedParentConflict {
+            self.parentItemID = nil
+            self.observedParentItemIDs = []
+        }
     }
 
     public var duration: TimeInterval? {
@@ -413,16 +426,82 @@ public struct AgentToolDetailSanitizer: Sendable {
 
     func sanitizeFileChanges(_ changes: [AgentToolDetailObservation.FileChange], explicitSecrets: [String]) -> [AgentToolDetailObservation.FileChange] {
         changes.prefix(24).compactMap { change in
-            let path = SecretRedactor.redact(change.path, explicitSecrets: explicitSecrets)
-            guard path == change.path, !path.isEmpty else { return nil }
+            guard SecretRedactor.redact(change.path, explicitSecrets: explicitSecrets) == change.path,
+                  let path = AgentToolDetailDisplaySanitizer.path(change.path) else { return nil }
             let rename = change.renamePath.flatMap { candidate -> String? in
-                SecretRedactor.redact(candidate, explicitSecrets: explicitSecrets) == candidate ? candidate : nil
+                guard SecretRedactor.redact(candidate, explicitSecrets: explicitSecrets) == candidate else { return nil }
+                return AgentToolDetailDisplaySanitizer.path(candidate)
             }
-            let diff = change.diffPreview.map { raw in
-                boundText(SecretRedactor.redact(raw, explicitSecrets: explicitSecrets), maxBytes: limits.maxOutputBytes, maxLines: limits.maxOutputLines, redacted: false).text
-            }
+            guard change.renamePath == nil || rename != nil else { return nil }
+            let diff = AgentToolDetailDisplaySanitizer.diffPreview(change.diffPreview, explicitSecrets: explicitSecrets,
+                maxBytes: limits.maxOutputBytes, maxLines: limits.maxOutputLines)
             return .init(action: change.action, path: path, renamePath: rename, diffPreview: diff)
         }
+    }
+
+    func mergeFileChanges(_ lhs: [AgentToolDetailObservation.FileChange], _ rhs: [AgentToolDetailObservation.FileChange]) -> [AgentToolDetailObservation.FileChange] {
+        var unique: [String: AgentToolDetailObservation.FileChange] = [:]
+        for change in lhs + rhs {
+            let key = [change.action.rawValue, change.path, change.renamePath ?? ""].joined(separator: "\u{1f}")
+            if let prior = unique[key] {
+                // The logical row is action/source/destination. Conflicting
+                // explicit previews choose one actually observed value by a
+                // stable total order; they never duplicate a disclosure row.
+                let selectedDiff = [prior.diffPreview, change.diffPreview].compactMap { $0 }.max()
+                unique[key] = .init(action: change.action, path: change.path,
+                    renamePath: change.renamePath, diffPreview: selectedDiff)
+            } else {
+                unique[key] = change
+            }
+        }
+        return unique.sorted { $0.key < $1.key }.prefix(24).map(\.value)
+    }
+
+    func excludesSensitiveFingerprints(
+        _ changes: [AgentToolDetailObservation.FileChange],
+        fingerprints: Set<String>
+    ) -> [AgentToolDetailObservation.FileChange] {
+        guard !fingerprints.isEmpty else { return changes }
+        let lengths = Set(fingerprints.compactMap { Int($0.split(separator: ":", maxSplits: 1).first ?? "") })
+        guard lengths.count == 1, let length = lengths.first, length >= 4 else { return [] }
+        let allFields = changes.flatMap { [$0.path, $0.renamePath].compactMap { $0 } }
+        let candidateWindows = allFields.reduce(0) { $0 + max(0, $1.utf8.count - length + 1) }
+        guard candidateWindows <= 1_024 else { return [] }
+        return changes.compactMap { change in
+            let fields = [change.path, change.renamePath].compactMap { $0 }
+            guard !containsSensitiveFingerprint(fields, fingerprints: fingerprints) else { return nil }
+            return .init(action: change.action, path: change.path,
+                renamePath: change.renamePath, diffPreview: nil)
+        }
+    }
+
+    func exceedsSensitiveFingerprintWorkBudget(
+        _ changes: [AgentToolDetailObservation.FileChange],
+        fingerprints: Set<String>
+    ) -> Bool {
+        guard !fingerprints.isEmpty else { return false }
+        let lengths = Set(fingerprints.compactMap { Int($0.split(separator: ":", maxSplits: 1).first ?? "") })
+        guard lengths.count == 1, let length = lengths.first, length >= 4 else { return true }
+        let fields = changes.prefix(24).flatMap { [$0.path, $0.renamePath].compactMap { $0 } }
+        return fields.reduce(0) { $0 + max(0, $1.utf8.count - length + 1) } > 1_024
+    }
+
+    func containsSensitiveFingerprint(_ fields: [String], fingerprints: Set<String>) -> Bool {
+        guard !fingerprints.isEmpty else { return false }
+        let lengths = Set(fingerprints.compactMap { Int($0.split(separator: ":", maxSplits: 1).first ?? "") })
+        // Short secrets and multiple lengths fail closed: exhaustive matching
+        // would either miss substring capabilities or multiply hot-path work.
+        guard lengths.count == 1, let length = lengths.first, length >= 4 else { return true }
+        for field in fields {
+            let bytes = Array(field.utf8)
+            guard length <= bytes.count else { continue }
+            for offset in 0...(bytes.count - length) {
+                guard let candidate = String(bytes: bytes[offset..<(offset + length)], encoding: .utf8),
+                      let value = fingerprint(candidate) else { continue }
+                if fingerprints.contains(value) { return true }
+            }
+        }
+        return false
     }
 
     /// Stable, non-secret event keys used only to break same-ID timestamp ties.
@@ -508,7 +587,7 @@ public struct AgentToolDetailSanitizer: Sendable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let digest = HMAC<SHA256>.authenticationCode(for: Data(trimmed.utf8), using: fingerprintKey)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return "\(trimmed.utf8.count):" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func sanitizedFileURL(_ file: URL, explicitSecrets: [String]) -> URL? {
@@ -609,15 +688,19 @@ public actor AgentToolDetailStore {
         let sanitizedToolName = sanitizer.sanitizeToolName(start.toolName, explicitSecrets: eventSecrets)
         let sanitizedArguments = sanitizer.sanitizeArguments(start.arguments, explicitSecrets: eventSecrets)
         let sanitizedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: [], explicitSecrets: eventSecrets)
-        let sanitizedChanges = sanitizer.sanitizeFileChanges(start.fileChanges, explicitSecrets: eventSecrets)
         let sensitiveFingerprints = sanitizer.sensitiveFingerprints(in: start.arguments, explicitSecrets: start.explicitSecrets)
+        let existing = details[start.identity]
+        let knownFingerprints = (existing?.sensitiveStartFingerprints ?? []).union(sensitiveFingerprints)
+        let sanitizedChanges = sanitizer.exceedsSensitiveFingerprintWorkBudget(
+            start.fileChanges, fingerprints: knownFingerprints
+        ) ? [] : sanitizer.sanitizeFileChanges(start.fileChanges, explicitSecrets: eventSecrets)
         let tieKey = sanitizer.stableStartTieKey(
             toolName: sanitizedToolName,
             arguments: sanitizedArguments,
             affectedFiles: sanitizedFiles
         )
-        let existing = details[start.identity]
         var record = existing ?? AgentToolDetailRecord(identity: start.identity, updatedAt: observedAt)
+        record.sensitiveStartFingerprints.formUnion(sensitiveFingerprints)
         let shouldApplyStart = isNewer(
             timestamp: start.startedAt,
             tieKey: tieKey,
@@ -632,9 +715,6 @@ public actor AgentToolDetailStore {
             record.startedAt = start.startedAt
             record.latestStartTimestamp = start.startedAt
             record.latestStartTieKey = tieKey
-            record.sensitiveStartFingerprints = sensitiveFingerprints
-            record.fileChanges = sanitizedChanges
-            record.parentItemID = start.parentItemID
             if record.output != nil,
                !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
                 record.output = sanitizer.redactionUnavailableOutput()
@@ -646,12 +726,35 @@ public actor AgentToolDetailStore {
             // same-lifecycle associations instead of whichever arrived first.
             // This makes later output handling fail closed for every candidate
             // secret while keeping the secrets themselves out of the record.
-            record.sensitiveStartFingerprints.formUnion(sensitiveFingerprints)
             if record.output != nil,
                !record.sensitiveStartFingerprints.isSubset(of: record.latestEndExplicitFingerprints) {
                 record.output = sanitizer.redactionUnavailableOutput()
             }
         }
+        // Explicit file and parent facts are monotonic and independent of the
+        // name/argument timestamp winner. This join is commutative, associative
+        // and idempotent, so weak/rich arrival permutations converge.
+        // Re-run prior facts through newly learned explicit secrets, then use
+        // opaque fingerprints to make the reverse order fail closed too.
+        let resanitizedExisting = sanitizer.sanitizeFileChanges(record.fileChanges, explicitSecrets: eventSecrets)
+        record.fileChanges = sanitizer.excludesSensitiveFingerprints(
+            sanitizer.mergeFileChanges(resanitizedExisting, sanitizedChanges),
+            fingerprints: record.sensitiveStartFingerprints)
+        record.observedParentItemIDs = Set(record.observedParentItemIDs.filter {
+            !sanitizer.containsSensitiveFingerprint([$0], fingerprints: record.sensitiveStartFingerprints)
+        })
+        if !record.observedParentConflict,
+           let parent = AgentToolDetailDisplaySanitizer.parentItemID(start.parentItemID),
+           SecretRedactor.redact(parent, explicitSecrets: eventSecrets) == parent,
+           !sanitizer.containsSensitiveFingerprint([parent], fingerprints: record.sensitiveStartFingerprints) {
+            if let existingParent = record.observedParentItemIDs.first, existingParent != parent {
+                record.observedParentItemIDs = []
+                record.observedParentConflict = true
+            } else {
+                record.observedParentItemIDs = [parent]
+            }
+        }
+        record.parentItemID = record.observedParentConflict ? nil : record.observedParentItemIDs.first
         record.updatedAt = observedAt
         record.affectedFiles = sanitizer.sanitizeFiles(start.affectedFiles, existing: record.affectedFiles, explicitSecrets: eventSecrets)
         details[start.identity] = record
@@ -876,6 +979,16 @@ public enum AgentToolDetailPresenter {
         sanitized.toolName = safeName
         sanitized.arguments = Array(safeArguments)
         sanitized.output = safeOutput
+        sanitized.fileChanges = Array(record.fileChanges.prefix(24).compactMap { change in
+            guard let path = AgentToolDetailDisplaySanitizer.path(change.path) else { return nil }
+            let rename = change.renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
+            let diff = AgentToolDetailDisplaySanitizer.diffPreview(change.diffPreview, maxBytes: 16_384, maxLines: 200)
+            return AgentToolDetailObservation.FileChange(
+                action: change.action, path: path, renamePath: rename, diffPreview: diff)
+        })
+        sanitized.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(record.parentItemID)
+        sanitized.observedParentItemIDs = Set(sanitized.parentItemID.map { [$0] } ?? [])
+        sanitized.observedParentConflict = false
         // Provider closures cannot attest that a URL was sanitized. Do not
         // retain or render provider paths at this boundary.
         sanitized.affectedFiles = []

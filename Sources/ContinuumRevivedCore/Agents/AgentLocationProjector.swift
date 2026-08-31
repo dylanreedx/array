@@ -45,6 +45,97 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     case toolDetail(itemId: String, detail: AgentToolDetailObservation)
 }
 
+/// The single host-local privacy boundary for strings that can become file
+/// disclosure text. It deliberately returns display paths, never filesystem
+/// locations: ordinary repository-relative paths survive, while every private
+/// or ambiguous syntax is reduced to a non-secret basename (or dropped).
+public enum AgentToolDetailDisplaySanitizer {
+    private static let bidiScalars: Set<UInt32> = [
+        0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+        0x2066, 0x2067, 0x2068, 0x2069
+    ]
+
+    public static func path(_ raw: String, maxBytes: Int = AgentToolDetailObservation.FileChange.maxPathCharacters) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, isScalarSafe(value), SecretRedactor.redact(value) == value else { return nil }
+        // Decode encoded separators before classifying. A small fixed point is
+        // sufficient for double-encoded provider payloads without unbounded work.
+        for _ in 0..<3 {
+            guard let decoded = value.removingPercentEncoding, decoded != value else { break }
+            value = decoded
+        }
+        guard isScalarSafe(value), SecretRedactor.redact(value) == value else { return nil }
+
+        let slashPath = value.replacingOccurrences(of: "\\", with: "/")
+        let lower = slashPath.lowercased()
+        let isDrive = slashPath.count >= 3 && slashPath[slashPath.index(after: slashPath.startIndex)] == ":"
+        let hasScheme = lower.range(of: #"^[a-z][a-z0-9+.-]*://"#, options: .regularExpression) != nil
+        let components = slashPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let isUnsafeShape = slashPath.hasPrefix("/") || slashPath.hasPrefix("~") || value.hasPrefix("\\\\")
+            || isDrive || hasScheme || components.contains("..") || components.contains(".")
+        let candidate: String
+        if isUnsafeShape {
+            let withoutQuery = slashPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? slashPath
+            let withoutFragment = withoutQuery.split(separator: "#", maxSplits: 1).first.map(String.init) ?? withoutQuery
+            guard let basename = withoutFragment.split(separator: "/", omittingEmptySubsequences: true).last,
+                  !basename.isEmpty else { return nil }
+            candidate = String(basename)
+        } else {
+            guard !slashPath.hasSuffix("/") else { return nil }
+            candidate = slashPath
+        }
+        guard !candidate.isEmpty, candidate != ".", candidate != "..", !candidate.contains(":"),
+              isScalarSafe(candidate), SecretRedactor.redact(candidate) == candidate else { return nil }
+        return boundedUTF8(candidate, maxBytes: maxBytes)
+    }
+
+    public static func parentItemID(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 200, isScalarSafe(value),
+              SecretRedactor.redact(value) == value,
+              !value.contains("/"), !value.contains("\\"), !value.contains(":"), !value.contains("~") else { return nil }
+        return value
+    }
+
+    public static func diffPreview(_ raw: String?, explicitSecrets: [String] = [], maxBytes: Int = 16_384, maxLines: Int = 200) -> String? {
+        guard let raw else { return nil }
+        let redacted = SecretRedactor.redact(raw, explicitSecrets: explicitSecrets)
+        let lower = redacted.lowercased()
+        let hostilePath = lower.contains("/users/") || lower.contains("/home/")
+            || lower.contains("/private/") || lower.contains("/var/folders/")
+            || lower.contains("file://") || redacted.contains("\\\\")
+            || redacted.contains("../") || redacted.contains("..\\")
+            || redacted.range(of: #"(?i)(^|[\s\"'])[a-z]:[/\\]"#, options: .regularExpression) != nil
+            || redacted.range(of: #"(?i)https?://[^\s/@]+:[^\s/@]+@"#, options: .regularExpression) != nil
+        guard isDiffScalarSafe(redacted), !hostilePath else { return "[REDACTED]" }
+        let lines = redacted.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
+        let bounded = boundedUTF8(lines.joined(separator: "\n"), maxBytes: maxBytes)
+        return bounded.isEmpty ? nil : bounded
+    }
+
+    private static func isScalarSafe(_ value: String) -> Bool {
+        !value.unicodeScalars.contains {
+            CharacterSet.controlCharacters.contains($0) || bidiScalars.contains($0.value)
+        }
+    }
+
+    private static func isDiffScalarSafe(_ value: String) -> Bool {
+        !value.unicodeScalars.contains {
+            (CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t")
+                || bidiScalars.contains($0.value)
+        }
+    }
+
+    private static func boundedUTF8(_ value: String, maxBytes: Int) -> String {
+        guard maxBytes > 0, value.utf8.count > maxBytes else { return value }
+        var result = ""
+        result.reserveCapacity(maxBytes)
+        for character in value where result.utf8.count + String(character).utf8.count <= maxBytes { result.append(character) }
+        return result
+    }
+}
+
 /// One tool call's whitelisted detail, as observed from a provider stream.
 ///
 /// Values are BOUNDED AT CONSTRUCTION and the store's sanitizer runs on top —
@@ -63,16 +154,9 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         public let diffPreview: String?
         public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
             self.action = action
-            self.path = Self.safeDisplayPath(path)
-            self.renamePath = renamePath.map(Self.safeDisplayPath)
-            self.diffPreview = diffPreview.map { String($0.prefix(Self.maxDiffCharacters)) }
-        }
-        private static func safeDisplayPath(_ raw: String) -> String {
-            let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !clean.hasPrefix("/"), !clean.hasPrefix("~"),
-                  !clean.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
-            else { return URL(fileURLWithPath: clean).lastPathComponent }
-            return String(clean.prefix(maxPathCharacters))
+            self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
+            self.renamePath = renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
+            self.diffPreview = AgentToolDetailDisplaySanitizer.diffPreview(diffPreview, maxBytes: Self.maxDiffCharacters, maxLines: 80)
         }
     }
     public enum Phase: Equatable, Sendable {
@@ -112,10 +196,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         self.outputPreview = outputPreview.map { String($0.prefix(Self.maxOutputCharacters)) }
         self.exitCode = exitCode
         self.fileChanges = Array(fileChanges.prefix(24))
-        self.parentItemID = parentItemID.flatMap {
-            let clean = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-            return clean.isEmpty || clean.count > 200 || clean.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) ? nil : clean
-        }
+        self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
         self.observedAt = observedAt
     }
 

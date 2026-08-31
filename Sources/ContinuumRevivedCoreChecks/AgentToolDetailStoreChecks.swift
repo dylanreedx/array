@@ -34,12 +34,67 @@ private func runAgentToolDetailSemanticFileChecks() async throws {
     let record = await store.detail(for: identity)
     expect(record?.fileChanges.map(\.action) == [.rename, .unknown], "typed file actions must survive the host-local store")
     expect(record?.fileChanges.first?.renamePath == "Sources/After.swift" && record?.fileChanges.first?.diffPreview == "-before\n+after",
-           "explicit rename endpoints and bounded diff must survive the host-local store")
+           "explicit rename endpoints and bounded diff must survive the host-local store: \(String(describing: record?.fileChanges))")
     expect(record?.fileChanges.last?.path == "secret.txt", "absolute private paths must be reduced before retention")
     expect(record?.parentItemID == "parent-explicit", "explicit parent linkage must survive; absent linkage remains nil")
     let disclosure = record.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
     expect(disclosure.contains("Rename: Sources/Before.swift → Sources/After.swift") && disclosure.contains("-before"),
            "the shipped transcript presenter must expose stored semantic detail")
+
+    let hostilePaths = [
+        #"C:\Users\Alice\Secrets\token.txt"#,
+        #"\\server\private\share\token.txt"#,
+        "../../.ssh/id_rsa",
+        "https://user:password@example.invalid/private/remote.swift",
+        "file:///Users/alice/private/local.swift",
+        "%2FUsers%2Falice%2Fprivate%2Fencoded.swift",
+        "..%252F..%252Fsecret%252Fnested.swift",
+        "Sources/evil\u{202E}txt.swift",
+        String(repeating: "界", count: 300) + ".swift"
+    ]
+    let normalized = hostilePaths.map {
+        AgentToolDetailObservation.FileChange(action: .edit, path: $0).path
+    }
+    expect(normalized.allSatisfy { !$0.contains("Alice") && !$0.contains("alice") && !$0.contains("server")
+        && !$0.contains("..") && !$0.contains(":") && !$0.contains("@") && !$0.contains("\\")
+        && !$0.unicodeScalars.contains(where: { $0.value == 0x202E }) && $0.utf8.count <= 240 },
+        "file-change construction must reduce hostile path syntaxes to bounded non-private display forms: \(normalized)")
+    expect(AgentToolDetailObservation.FileChange(action: .edit, path: "Sources/Foo.swift").path == "Sources/Foo.swift",
+           "ordinary safe repository-relative paths must remain explicit")
+    expect(AgentToolDetailObservation.FileChange(action: .edit, path: "Sources/user@host.swift").path == "Sources/user@host.swift",
+           "a harmless @ in a repository-relative filename is not URL userinfo")
+
+    let hostileIdentity = testToolDetailKey("semantic-hostile")
+    _ = await store.recordStart(.init(identity: hostileIdentity, toolName: "Edit", fileChanges: [
+        .init(action: .rename, path: #"C:\Users\Alice\Secrets\token.txt"#,
+              renamePath: #"\\server\private\renamed.txt"#,
+              diffPreview: "+ Authorization: Bearer credential-secret\n+ /Users/alice/private/file"),
+        .init(action: .edit, path: "Sources/Safe.swift", diffPreview: "-old\n+new")
+    ], parentItemID: "file:///Users/alice/private/parent", explicitSecrets: ["credential-secret"]))
+    let hostileRecord = await store.detail(for: hostileIdentity)
+    let hostileDisclosure = hostileRecord.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
+    expect(!hostileDisclosure.contains("Alice") && !hostileDisclosure.contains("server")
+        && !hostileDisclosure.contains("credential-secret") && !hostileDisclosure.contains("/Users/")
+        && hostileDisclosure.contains("Safe.swift"),
+        "store/presenter must redact hostile source, rename and diff while preserving safe explicit facts: \(hostileDisclosure) record=\(String(describing: hostileRecord))")
+    expect(hostileRecord?.parentItemID == nil, "path/URL-shaped parent IDs must be dropped")
+
+    // A direct provider closure bypasses the store; presenter defense-in-depth
+    // must enforce the identical policy for disclosure and accessibility.
+    let direct = AgentToolDetailRecord(identity: hostileIdentity, toolName: "Edit", updatedAt: Date(),
+        fileChanges: [
+            .init(action: .edit, path: #"C:\Users\Alice\Secrets\direct.swift"#,
+                  diffPreview: "+ token=direct-secret\n+ /Users/alice/private"),
+            .init(action: .write, path: "Sources/DirectSafe.swift", diffPreview: "+safe")
+        ], parentItemID: #"\\server\private\parent"#)
+    let safeDirect = AgentToolDetailPresenter.sanitizedProviderRecord(direct)
+    let directDisclosure = safeDirect.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
+    let directAX = safeDirect.map { AgentToolDetailPresenter.expanded($0).accessibilitySummary } ?? ""
+    let directSurface = directDisclosure + "\n" + directAX
+    expect(!directSurface.contains("Alice") && !directSurface.contains("direct-secret")
+        && !directSurface.contains("/Users/") && directSurface.contains("DirectSafe.swift"),
+        "direct provider record must be safe in visible disclosure and accessibility: \(directSurface)")
+    expect(safeDirect?.parentItemID == nil, "direct provider hostile parent must be dropped")
 }
 
 private func runAgentToolDetailPrivacyChecks() async throws {
@@ -584,6 +639,170 @@ private func runAgentToolDetailConcurrencyChecks() async throws {
                    "AgentToolDetailStore ordering: cross-store \(timestampLabel) secret-bearing start winner must not depend on random HMAC or arrival")
         }
     }
+
+    // File/parent detail is a separate monotonic lattice from name/argument
+    // timestamp selection. Every weak/rich order and timestamp relation must
+    // converge, including scoped-ID reuse after a fresh store lifecycle.
+    let timestampPairs: [(Date?, Date?)] = [
+        (base, base), (nil, nil), (base.addingTimeInterval(10), base),
+        (base, base.addingTimeInterval(10)), (nil, base), (base, nil)
+    ]
+    for (index, pair) in timestampPairs.enumerated() {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-detail-lattice-\(index)")!)
+        let weak = AgentToolDetailStart(identity: identity, toolName: "Edit", startedAt: pair.0)
+        let rich = AgentToolDetailStart(identity: identity, toolName: "Edit", fileChanges: [
+            .init(action: .edit, path: "Sources/Rich.swift", diffPreview: "+rich")
+        ], parentItemID: "parent-rich", startedAt: pair.1)
+        let left = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        let right = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        _ = await left.recordStart(weak); _ = await left.recordStart(rich)
+        _ = await right.recordStart(rich); _ = await right.recordStart(weak)
+        let lhs = await left.detail(for: identity)
+        let rhs = await right.detail(for: identity)
+        expect(lhs?.fileChanges == rhs?.fileChanges && lhs?.parentItemID == rhs?.parentItemID
+            && lhs?.fileChanges.first?.path == "Sources/Rich.swift" && lhs?.parentItemID == "parent-rich",
+            "start detail lattice must converge for weak/rich timestamp permutation \(pair): \(String(describing: lhs)) vs \(String(describing: rhs))")
+    }
+    for secretFirst in [false, true] {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-late-secret-\(secretFirst)")!)
+        let leaky = AgentToolDetailStart(identity: identity, toolName: "Edit", fileChanges: [
+            .init(action: .edit, path: "Sources/late-secret-value.swift")
+        ])
+        let knowledge = AgentToolDetailStart(identity: identity, toolName: "Edit", explicitSecrets: ["late-secret-value"])
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in secretFirst ? [knowledge, leaky] : [leaky, knowledge] { _ = await store.recordStart(event) }
+        let retained = await store.detail(for: identity)
+        let surface = retained.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
+        expect(retained?.fileChanges.isEmpty == true && !surface.contains("late-secret-value"),
+               "late secret knowledge must remove prior/future matching file facts in either arrival order: \(surface)")
+    }
+    for secretFirst in [false, true] {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-short-secret-\(secretFirst)")!)
+        let leaky = AgentToolDetailStart(identity: identity, toolName: "Edit",
+            fileChanges: [.init(action: .edit, path: "Sources/prefixabc.swift")], parentItemID: "parent-prefixabc")
+        let knowledge = AgentToolDetailStart(identity: identity, toolName: "Edit", explicitSecrets: ["abc"])
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in secretFirst ? [knowledge, leaky] : [leaky, knowledge] { _ = await store.recordStart(event) }
+        let retained = await store.detail(for: identity)
+        expect(retained?.fileChanges.isEmpty == true && retained?.parentItemID == nil,
+               "short opaque secrets must fail closed for file and parent facts in both orders")
+    }
+    for secretFirst in [false, true] {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-parent-secret-\(secretFirst)")!)
+        let leaky = AgentToolDetailStart(identity: identity, toolName: "Edit", parentItemID: "prefix-parent-secret-suffix")
+        let knowledge = AgentToolDetailStart(identity: identity, toolName: "Edit", explicitSecrets: ["parent-secret"])
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in secretFirst ? [knowledge, leaky] : [leaky, knowledge] { _ = await store.recordStart(event) }
+        let retained = await store.detail(for: identity)
+        expect(retained?.parentItemID == nil,
+               "late parent secret knowledge must remove/prevent substring parent facts")
+    }
+    let sameParentIdentity = testToolDetailKey("tool-parent-same-event-secret")
+    let sameParentStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    _ = await sameParentStore.recordStart(.init(identity: sameParentIdentity, toolName: "Edit",
+        parentItemID: "prefix-parent-secret-suffix", explicitSecrets: ["parent-secret"]))
+    let sameParent = await sameParentStore.detail(for: sameParentIdentity)
+    expect(sameParent?.parentItemID == nil, "same-event explicit secret must suppress parent linkage")
+    let costIdentity = testToolDetailKey("tool-secret-scan-cost")
+    let costStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    _ = await costStore.recordStart(.init(identity: costIdentity, toolName: "Edit",
+        explicitSecrets: ["bounded-secret"] ))
+    let worstRows = (0..<24).map { index in
+        AgentToolDetailObservation.FileChange(action: .rename,
+            path: "Sources/\(String(repeating: "p", count: 210))\(index).swift",
+            renamePath: "Sources/\(String(repeating: "r", count: 208))\(index).swift",
+            diffPreview: String(repeating: "+ safe explicit diff\n", count: 100))
+    }
+    let costStart = Date()
+    _ = await costStore.recordStart(.init(identity: costIdentity, toolName: "Edit", fileChanges: worstRows))
+    let costElapsed = Date().timeIntervalSince(costStart)
+    expect(costElapsed < 0.1,
+           "over-window 24-row opaque-secret input did not fail closed within the generous 100ms debug budget: \(costElapsed)s")
+    let costRecord = await costStore.detail(for: costIdentity)
+    expect(costRecord?.fileChanges.isEmpty == true,
+           "over-1024 candidate windows must fail closed before substring HMAC work")
+    print(String(format: "AgentToolDetail privacy over-window fail-closed: %.6fs (budget 0.100000s)", costElapsed))
+    let underIdentity = testToolDetailKey("tool-secret-scan-under-cap")
+    let underStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    _ = await underStore.recordStart(.init(identity: underIdentity, toolName: "Edit", explicitSecrets: ["absent-secret"]))
+    let underRows = (0..<2).map { index in
+        AgentToolDetailObservation.FileChange(action: .rename,
+            path: "Sources/\(String(repeating: "p", count: 220))\(index).swift",
+            renamePath: "Sources/\(String(repeating: "r", count: 220))\(index).swift")
+    }
+    let underStart = Date()
+    _ = await underStore.recordStart(.init(identity: underIdentity, toolName: "Edit", fileChanges: underRows))
+    let underElapsed = Date().timeIntervalSince(underStart)
+    let underRecord = await underStore.detail(for: underIdentity)
+    expect(underElapsed < 0.1 && underRecord?.fileChanges.count == 2,
+           "just-under-cap safe rows must remain useful within 100ms: \(underElapsed)s")
+    print(String(format: "AgentToolDetail privacy under-window retained: %.6fs (budget 0.100000s)", underElapsed))
+    let normalIdentity = testToolDetailKey("tool-secret-scan-normal")
+    let normalStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    _ = await normalStore.recordStart(.init(identity: normalIdentity, toolName: "Edit", explicitSecrets: ["unrelated-secret"]))
+    _ = await normalStore.recordStart(.init(identity: normalIdentity, toolName: "Edit", fileChanges: [
+        .init(action: .edit, path: "Sources/One.swift", diffPreview: "+safe"),
+        .init(action: .write, path: "Sources/Two.swift", diffPreview: "+safe-two")
+    ]))
+    let normalRecord = await normalStore.detail(for: normalIdentity)
+    expect(normalRecord?.fileChanges.map(\.path) == ["Sources/One.swift", "Sources/Two.swift"]
+        && normalRecord?.fileChanges.allSatisfy({ $0.diffPreview == nil }) == true,
+        "normal one/two-row safe paths must remain useful while opaque-secret diffs fail closed")
+    let manySecretStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    _ = await manySecretStore.recordStart(.init(identity: costIdentity, toolName: "Edit",
+        explicitSecrets: ["first-secret", "second-longer-secret"]))
+    _ = await manySecretStore.recordStart(.init(identity: costIdentity, toolName: "Edit", fileChanges: worstRows))
+    let manySecretRecord = await manySecretStore.detail(for: costIdentity)
+    expect(manySecretRecord?.fileChanges.isEmpty == true,
+           "multiple opaque secret lengths must drop file rows without multiplicative substring work")
+    for secretFirst in [false, true] {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-late-embedded-secret-\(secretFirst)")!)
+        let leaky = AgentToolDetailStart(identity: identity, toolName: "Edit", fileChanges: [
+            .init(action: .rename, path: "Sources/prefix-late-secret-value-suffix.swift",
+                  renamePath: "Sources/prefix-late-secret-value-destination.swift")
+        ])
+        let knowledge = AgentToolDetailStart(identity: identity, toolName: "Edit", explicitSecrets: ["late-secret-value"])
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in secretFirst ? [knowledge, leaky] : [leaky, knowledge] { _ = await store.recordStart(event) }
+        let retained = await store.detail(for: identity)
+        expect(retained?.fileChanges.isEmpty == true,
+               "bounded substring HMAC must remove embedded source+rename secrets in both orders")
+    }
+    for secretFirst in [false, true] {
+        let identity = testToolDetailKey(AgentToolDetailID("tool-late-rename-secret-\(secretFirst)")!)
+        let leaky = AgentToolDetailStart(identity: identity, toolName: "Edit", fileChanges: [
+            .init(action: .rename, path: "Sources/SafeBefore.swift", renamePath: "Sources/late-rename-secret.swift")
+        ])
+        let knowledge = AgentToolDetailStart(identity: identity, toolName: "Edit", explicitSecrets: ["late-rename-secret"])
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in secretFirst ? [knowledge, leaky] : [leaky, knowledge] { _ = await store.recordStart(event) }
+        let retained = await store.detail(for: identity)
+        expect(retained?.fileChanges.isEmpty == true,
+               "late secret knowledge must remove rename-only facts in either arrival order")
+    }
+    let conflictIdentity = testToolDetailKey("tool-parent-conflict")
+    let parentA = AgentToolDetailStart(identity: conflictIdentity, toolName: "Edit", parentItemID: "parent-a")
+    let parentB = AgentToolDetailStart(identity: conflictIdentity, toolName: "Edit", parentItemID: "parent-b")
+    for ordered in [[parentA, parentB], [parentB, parentA]] {
+        let store = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+        for event in ordered { _ = await store.recordStart(event) }
+        let conflict = await store.detail(for: conflictIdentity)
+        expect(conflict?.parentItemID == nil,
+               "conflicting explicit parents must deterministically expose no fabricated parent")
+    }
+    let parentStressStore = AgentToolDetailStore(clock: { equalClock.now() }, timeToLive: 60)
+    for index in 0..<10_000 {
+        _ = await parentStressStore.recordStart(.init(identity: conflictIdentity, toolName: "Edit", parentItemID: "parent-\(index)"))
+    }
+    let parentStressRecord = await parentStressStore.detail(for: conflictIdentity)
+    expect(parentStressRecord?.parentItemID == nil
+        && parentStressRecord?.observedParentItemIDs.count ?? 99 <= 1
+        && parentStressRecord?.observedParentConflict == true,
+           "10k distinct parents must remain permanently ambiguous with bounded retained state")
+    let directConflict = AgentToolDetailRecord(identity: conflictIdentity, updatedAt: equalClock.now(),
+        parentItemID: "parent-should-drop", observedParentItemIDs: ["parent-a"], observedParentConflict: true)
+    expect(directConflict.parentItemID == nil && directConflict.observedParentItemIDs.isEmpty,
+           "direct record construction must normalize permanent parent conflict to no exposed parent")
 
     // Secret-only sanitized ties must merge their opaque associations. The
     // subsequent end supplies only A: either arrival order must therefore
