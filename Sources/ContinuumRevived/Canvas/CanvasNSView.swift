@@ -408,14 +408,43 @@ final class CanvasNSView: NSView, TokenThemed {
         // rebase only members for which the transaction has no authoritative
         // world frame. Ordinary zone moves do not opt into this behavior: their
         // members intentionally translate as one rigid body with the zone.
-        let preservedLayerWorldFrames: [UUID: TileFrame] = Dictionary(
-            uniqueKeysWithValues: zoneLayers
+        let preservedLayerWorldFrames: [(zoneId: UUID, tileId: UUID, frame: TileFrame)] =
+            zoneLayers
                 .filter { preservedZoneIds.contains($0.placement.zoneId) }
                 .flatMap { layer in
                     layer.tiles.map { tile in
-                        (tile.id, CanvasEngine.worldFrame(tile: tile, in: layer.placement))
+                        (
+                            zoneId: layer.placement.zoneId,
+                            tileId: tile.id,
+                            frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                        )
                     }
-                })
+                }
+
+        // A malformed-but-loadable legacy snapshot may repeat a tile UUID in
+        // multiple layers. CanvasLayoutTransaction's public frame map is keyed by
+        // tile UUID, so route that authoritative frame to the active zone when it
+        // is known. Otherwise prefer the sole affected zone containing the tile,
+        // then use stable zone UUID order as a deterministic nontrapping fallback.
+        var authoritativeLayerByTileId: [UUID: UUID] = [:]
+        for tileId in transaction.tileFrames.keys {
+            let containingZoneIds = zoneLayers.compactMap { layer in
+                layer.tiles.contains(where: { $0.id == tileId }) ? layer.placement.zoneId : nil
+            }
+            if let activeZoneId,
+               containingZoneIds.contains(activeZoneId) {
+                authoritativeLayerByTileId[tileId] = activeZoneId
+                continue
+            }
+            let affectedZoneIds = containingZoneIds.filter { transaction.zonePlacements[$0] != nil }
+            if affectedZoneIds.count == 1 {
+                authoritativeLayerByTileId[tileId] = affectedZoneIds[0]
+            } else {
+                authoritativeLayerByTileId[tileId] = containingZoneIds.min {
+                    $0.uuidString < $1.uuidString
+                }
+            }
+        }
         // Placements must land first: ZoneLayer stores member frames locally, so
         // converting a solver's world target against the previous origin would
         // apply a zone move twice.
@@ -434,16 +463,18 @@ final class CanvasNSView: NSView, TokenThemed {
             if let index = canvasState.tiles.firstIndex(where: { $0.id == id }) {
                 canvasState.tiles[index].frame = frame
             }
-            if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == id }) }),
+            if let authoritativeZoneId = authoritativeLayerByTileId[id],
+               let layer = zoneLayers.first(where: { $0.placement.zoneId == authoritativeZoneId }),
                let index = layer.tiles.firstIndex(where: { $0.id == id }) {
                 layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
             }
         }
-        for (id, worldFrame) in preservedLayerWorldFrames where transaction.tileFrames[id] == nil {
-            guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == id }) }),
-                  let index = layer.tiles.firstIndex(where: { $0.id == id }) else { continue }
+        for preserved in preservedLayerWorldFrames
+        where authoritativeLayerByTileId[preserved.tileId] != preserved.zoneId {
+            guard let layer = zoneLayers.first(where: { $0.placement.zoneId == preserved.zoneId }),
+                  let index = layer.tiles.firstIndex(where: { $0.id == preserved.tileId }) else { continue }
             layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(
-                worldFrame,
+                preserved.frame,
                 zoneOrigin: layer.placement.origin)
         }
         layoutAllTiles()
@@ -7626,6 +7657,115 @@ final class CanvasNSView: NSView, TokenThemed {
             window: layerWindow))
         try expectPassiveLayerWorldFrames(beforeGlobalOffZone, "global-off manual left resize")
         defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
+
+        // Malformed legacy snapshots can be loaded with the same tile UUID in
+        // more than one hydrated layer. Transaction application must keep layer
+        // identity in addition to tile identity: no dictionary trap, no rebasing
+        // an earlier peer, and no routing an active tile's authoritative frame to
+        // the wrong layer merely because it appears first.
+        let duplicateTileId = UUID(uuidString: "A1300000-0000-4000-8000-000000000041")!
+        let duplicateZoneAId = UUID(uuidString: "A1300000-0000-4000-8000-000000000042")!
+        let duplicateZoneBId = UUID(uuidString: "A1300000-0000-4000-8000-000000000043")!
+        let duplicatePlacementA = ZonePlacement(
+            zoneId: duplicateZoneAId, projectId: nil,
+            origin: ZonePoint(x: -80.5, y: 30.25),
+            size: ZoneSize(width: 300.75, height: 260.5), color: "purple",
+            collapsed: false, hydrationPolicy: .automatic, name: "Duplicate A", navKey: nil)
+        let duplicatePlacementB = ZonePlacement(
+            zoneId: duplicateZoneBId, projectId: nil,
+            origin: ZonePoint(x: 340.125, y: -45.75),
+            size: ZoneSize(width: 360.5, height: 300.25), color: "orange",
+            collapsed: false, hydrationPolicy: .automatic, name: "Duplicate B", navKey: nil)
+        let duplicateTileA = Tile(
+            id: duplicateTileId, kind: .note, title: "Duplicate A",
+            frame: TileFrame(x: 17.25, y: 53.5, width: 141.75, height: 109.25),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let duplicateTileB = Tile(
+            id: duplicateTileId, kind: .note, title: "Duplicate B",
+            frame: TileFrame(x: 63.5, y: 81.25, width: 188.5, height: 127.75),
+            zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let duplicateCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true)
+        duplicateCanvas.autoLayoutReduceMotionProvider = { true }
+        for (placement, tile) in [(duplicatePlacementA, duplicateTileA), (duplicatePlacementB, duplicateTileB)] {
+            let layer = ZoneLayer(
+                placement: placement,
+                renderModel: ZoneRenderModel(placement: placement, displayName: placement.name),
+                tiles: [tile])
+            layer.tileViews[duplicateTileId] = DescriptorTileNSView(tile: tile)
+            duplicateCanvas.upsertZoneLayer(layer)
+        }
+        func duplicateWorldFrame(_ zoneId: UUID) throws -> TileFrame {
+            guard let layer = duplicateCanvas.zoneLayers.first(where: { $0.placement.zoneId == zoneId }),
+                  let tile = layer.tiles.first(where: { $0.id == duplicateTileId }) else {
+                throw CheckError.failed("duplicate-ID layer fixture disappeared for \(zoneId)")
+            }
+            return CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+        }
+        func shifted(
+            _ placement: ZonePlacement, dx: Double, dy: Double,
+            dw: Double, dh: Double
+        ) -> ZonePlacement {
+            var result = placement
+            result.origin = ZonePoint(x: placement.origin.x + dx, y: placement.origin.y + dy)
+            result.size = ZoneSize(width: placement.size.width + dw, height: placement.size.height + dh)
+            return result
+        }
+
+        let duplicateWorldA0 = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldB0 = try duplicateWorldFrame(duplicateZoneBId)
+        let duplicateA1 = shifted(duplicatePlacementA, dx: -14.25, dy: 0, dw: 14.25, dh: 0)
+        let duplicateB1 = shifted(duplicatePlacementB, dx: 0, dy: -18.5, dw: 0, dh: 18.5)
+        duplicateCanvas.applyLayoutTransaction(
+            CanvasLayoutTransaction(zonePlacements: [duplicateZoneAId: duplicateA1, duplicateZoneBId: duplicateB1]),
+            preservingLayerMemberWorldFramesIn: [duplicateZoneAId, duplicateZoneBId])
+        let duplicateWorldAAfterBoth = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldBAfterBoth = try duplicateWorldFrame(duplicateZoneBId)
+        try expect(duplicateWorldAAfterBoth == duplicateWorldA0
+                       && duplicateWorldBAfterBoth == duplicateWorldB0,
+                   "duplicate UUIDs in two simultaneously preserved layers must not trap or move either passive world frame")
+
+        let duplicateWorldA1 = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldB1 = try duplicateWorldFrame(duplicateZoneBId)
+        let duplicateB2 = shifted(duplicateB1, dx: -9.75, dy: -11.125, dw: 9.75, dh: 11.125)
+        duplicateCanvas.applyLayoutTransaction(
+            CanvasLayoutTransaction(zonePlacements: [duplicateZoneBId: duplicateB2]),
+            preservingLayerMemberWorldFramesIn: [duplicateZoneBId])
+        let duplicateWorldAAfterLaterOnly = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldBAfterLaterOnly = try duplicateWorldFrame(duplicateZoneBId)
+        try expect(duplicateWorldAAfterLaterOnly == duplicateWorldA1,
+                   "an earlier same-ID peer layer must remain exact when only the later layer changes")
+        try expect(duplicateWorldBAfterLaterOnly == duplicateWorldB1,
+                   "the later affected same-ID layer must rebase its own passive member on corner growth")
+
+        let duplicateWorldA2 = try duplicateWorldFrame(duplicateZoneAId)
+        let activeTarget = TileFrame(x: 271.375, y: -92.625, width: 207.25, height: 149.5)
+        let duplicateB3 = shifted(duplicateB2, dx: -7.5, dy: -6.25, dw: 7.5, dh: 6.25)
+        duplicateCanvas.applyLayoutTransaction(
+            CanvasLayoutTransaction(
+                tileFrames: [duplicateTileId: activeTarget],
+                zonePlacements: [duplicateZoneBId: duplicateB3]),
+            activeZoneId: duplicateZoneBId,
+            preservingLayerMemberWorldFramesIn: [duplicateZoneBId])
+        let duplicateWorldAAfterActive = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldBAfterActive = try duplicateWorldFrame(duplicateZoneBId)
+        try expect(duplicateWorldAAfterActive == duplicateWorldA2,
+                   "authoritative duplicate-ID application must not move the earlier peer layer")
+        try expect(duplicateWorldBAfterActive == activeTarget,
+                   "activeZoneId must route the authoritative duplicate-ID frame to the active layer")
+
+        let duplicateWorldBBeforeFallback = try duplicateWorldFrame(duplicateZoneBId)
+        let deterministicFallbackTarget = TileFrame(
+            x: -121.875, y: 44.125, width: 151.5, height: 118.25)
+        duplicateCanvas.applyLayoutTransaction(CanvasLayoutTransaction(
+            tileFrames: [duplicateTileId: deterministicFallbackTarget]))
+        let duplicateWorldAAfterFallback = try duplicateWorldFrame(duplicateZoneAId)
+        let duplicateWorldBAfterFallback = try duplicateWorldFrame(duplicateZoneBId)
+        try expect(duplicateWorldAAfterFallback == deterministicFallbackTarget,
+                   "ambiguous duplicate-ID fallback must deterministically select the stable lowest zone UUID")
+        try expect(duplicateWorldBAfterFallback == duplicateWorldBBeforeFallback,
+                   "ambiguous duplicate-ID fallback must not also move the same-ID peer layer")
 
         // Spawn a third member beyond the old right edge, then swap the middle
         // member into the left member's slot through a real title-bar drag.
