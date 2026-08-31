@@ -153,6 +153,9 @@ final class CanvasNSView: NSView, TokenThemed {
         let initialPlacement: ZonePlacement
         let initialTileFrames: [TileFrame]
         let routingMode: RoutingMode
+        /// Mounted same-ID occurrence order captured at mouse-down. The UUID
+        /// compatibility path is valid only while this exact topology remains.
+        let initialSameIDTopology: [ObjectIdentifier]
     }
     private func mountedLayer(for target: ZoneGestureTarget) -> ZoneLayer? {
         guard let layer = target.layer,
@@ -165,6 +168,40 @@ final class CanvasNSView: NSView, TokenThemed {
     private func gestureRoutingMode(for layer: ZoneLayer) -> ZoneGestureTarget.RoutingMode {
         zoneLayers.lazy.filter { $0.placement.zoneId == layer.placement.zoneId }.prefix(2).count == 2
             ? .concreteOccurrence : .uuidCanonical
+    }
+    private func sameIDTopology(for zoneId: UUID) -> [ObjectIdentifier] {
+        zoneLayers.lazy.filter { $0.placement.zoneId == zoneId }.map(ObjectIdentifier.init)
+    }
+    private func canonicalGestureTopologyIsValid(_ target: ZoneGestureTarget) -> Bool {
+        guard target.routingMode == .uuidCanonical, target.layer != nil else { return true }
+        return sameIDTopology(for: target.zoneId) == target.initialSameIDTopology
+    }
+    private func cancelCanonicalLayerGesture(_ target: ZoneGestureTarget) {
+        guard let layer = mountedLayer(for: target) else {
+            abandonConcreteGestureTransaction()
+            return
+        }
+        layer.placement = target.initialPlacement
+        layer.renderModel.placement = target.initialPlacement
+        if layer.tiles.count == target.initialTileFrames.count {
+            for index in layer.tiles.indices { layer.tiles[index].frame = target.initialTileFrames[index] }
+        }
+        // These UUID-keyed mirrors described the sole captured occurrence when
+        // the gesture began. Restore them directly; never choose a layer by UUID.
+        if let index = liveZones.firstIndex(where: { $0.zoneId == target.zoneId }) {
+            liveZones[index] = target.initialPlacement
+        }
+        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == target.zoneId }) {
+            zoneRenderModels[index].placement = target.initialPlacement
+        }
+        if var model = zoneDisplayByZoneId[target.zoneId] {
+            model.placement = target.initialPlacement
+            zoneDisplayByZoneId[target.zoneId] = model
+            zoneChromeViews[target.zoneId]?.update(model: model)
+        }
+        layoutAllTiles()
+        layoutZoneChromeViews()
+        abandonConcreteGestureTransaction()
     }
     private func applyConcreteZonePlacement(_ placement: ZonePlacement, to layer: ZoneLayer, registerUndo: Bool) {
         let previous = layer.placement
@@ -4418,10 +4455,10 @@ final class CanvasNSView: NSView, TokenThemed {
         if let layer = zoneLayers.reversed().first(where: { layer in
             guard let header = zoneHeaderScreenRect(for: layer.placement) else { return false }
             return header.contains(screenPoint)
-        }) { return ZoneGestureTarget(zoneId: layer.placement.zoneId, layer: layer, initialPlacement: layer.placement, initialTileFrames: layer.tiles.map(\.frame), routingMode: gestureRoutingMode(for: layer)) }
+        }) { return ZoneGestureTarget(zoneId: layer.placement.zoneId, layer: layer, initialPlacement: layer.placement, initialTileFrames: layer.tiles.map(\.frame), routingMode: gestureRoutingMode(for: layer), initialSameIDTopology: sameIDTopology(for: layer.placement.zoneId)) }
         return liveZones.reversed().first(where: { placement in
             zoneHeaderScreenRect(for: placement)?.contains(screenPoint) == true
-        }).map { ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: [], routingMode: .uuidCanonical) }
+        }).map { ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: [], routingMode: .uuidCanonical, initialSameIDTopology: []) }
     }
 
     private func zoneHeaderScreenRect(for placement: ZonePlacement) -> CGRect? {
@@ -4460,8 +4497,8 @@ final class CanvasNSView: NSView, TokenThemed {
     private func zoneResizeEdge(at screenPoint: CGPoint) -> (ZoneGestureTarget, ResizeEdge)? {
         let m: CGFloat = 8, c: CGFloat = 16
         let candidates = zoneLayers.reversed().map {
-            (ZoneGestureTarget(zoneId: $0.placement.zoneId, layer: $0, initialPlacement: $0.placement, initialTileFrames: $0.tiles.map(\.frame), routingMode: gestureRoutingMode(for: $0)), $0.placement)
-        } + liveZones.reversed().map { (ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: [], routingMode: .uuidCanonical), $0) }
+            (ZoneGestureTarget(zoneId: $0.placement.zoneId, layer: $0, initialPlacement: $0.placement, initialTileFrames: $0.tiles.map(\.frame), routingMode: gestureRoutingMode(for: $0), initialSameIDTopology: sameIDTopology(for: $0.placement.zoneId)), $0.placement)
+        } + liveZones.reversed().map { (ZoneGestureTarget(zoneId: $0.zoneId, layer: nil, initialPlacement: $0, initialTileFrames: [], routingMode: .uuidCanonical, initialSameIDTopology: []), $0) }
         for (target, placement) in candidates {
             let f = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
             guard f.width > 0, f.height > 0 else { continue }
@@ -5416,6 +5453,13 @@ final class CanvasNSView: NSView, TokenThemed {
             guard target.layer == nil || mountedLayer(for: target) != nil else {
                 zoneGesture = .none; abandonConcreteGestureTransaction(); return
             }
+            guard canonicalGestureTopologyIsValid(target) else {
+                zoneGesture = .none
+                hideDragGhost()
+                cancelCanonicalLayerGesture(target)
+                pendingMovedPlacement = nil
+                return
+            }
             hideResizeDimensions()
             let dx = event.locationInWindow.x - lastWindowPoint.x
             // Negate dy: window-y-up vs canvas-y-down (same convention as TileNSView.mouseDragged).
@@ -5470,6 +5514,13 @@ final class CanvasNSView: NSView, TokenThemed {
             let zoneId = target.zoneId
             guard target.layer == nil || mountedLayer(for: target) != nil else {
                 zoneGesture = .none; hideResizeDimensions(); abandonConcreteGestureTransaction(); return
+            }
+            guard canonicalGestureTopologyIsValid(target) else {
+                zoneGesture = .none
+                hideResizeDimensions()
+                cancelCanonicalLayerGesture(target)
+                pendingMovedPlacement = nil
+                return
             }
             let dx = event.locationInWindow.x - lastWindowPoint.x
             let dy = -(event.locationInWindow.y - lastWindowPoint.y)
@@ -5551,14 +5602,16 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         case .movingZone(let target, _):
             hideDragGhost()
-            if usesConcreteOccurrence(target) { registerConcreteGestureUndo(target, actionName: "Move Zone"); abandonConcreteGestureTransaction() }
+            if !canonicalGestureTopologyIsValid(target) { cancelCanonicalLayerGesture(target) }
+            else if usesConcreteOccurrence(target) { registerConcreteGestureUndo(target, actionName: "Move Zone"); abandonConcreteGestureTransaction() }
             else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
         case .resizingZone(let target, _, _):
             hideDragGhost()
             hideResizeDimensions()
-            if usesConcreteOccurrence(target) { registerConcreteGestureUndo(target, actionName: "Resize Zone"); abandonConcreteGestureTransaction() }
+            if !canonicalGestureTopologyIsValid(target) { cancelCanonicalLayerGesture(target) }
+            else if usesConcreteOccurrence(target) { registerConcreteGestureUndo(target, actionName: "Resize Zone"); abandonConcreteGestureTransaction() }
             else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
@@ -8155,6 +8208,69 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(sameLayerB.placement == cardinalityB1,
                    "frozen concrete move must redo exactly after sibling removal")
         sameCanvas.activeCanvasUndoManager?.undo()
+        sameCanvas.setZones([sameLayerA, sameLayerB])
+
+        // A gesture that began while its layer UUID was unique must never become
+        // UUID-first when a corrupt sibling appears. Topology change atomically
+        // cancels both move and resize, restoring the exact captured occurrence.
+        sameCanvas.setZones([sameLayerB])
+        let uniqueMoveB0 = sameLayerB.placement
+        let uniqueMoveLocal0 = sameLayerB.tiles.map(\.frame)
+        let uniqueMovePersist0 = samePersisted.count
+        let uniqueMoveStart = win(CGFloat(uniqueMoveB0.origin.x + 80), CGFloat(uniqueMoveB0.origin.y + 16))
+        sameCanvas.mouseDown(with: try event(.leftMouseDown, uniqueMoveStart, window: sameWindow))
+        sameCanvas.setZones([sameLayerA, sameLayerB]) // insert before captured target
+        let insertedMoveA0 = sameLayerA.placement
+        sameCanvas.mouseDragged(with: try event(
+            .leftMouseDragged, NSPoint(x: uniqueMoveStart.x + 42.75, y: uniqueMoveStart.y - 17.25), window: sameWindow))
+        sameCanvas.mouseUp(with: try event(
+            .leftMouseUp, NSPoint(x: uniqueMoveStart.x + 42.75, y: uniqueMoveStart.y - 17.25), window: sameWindow))
+        try expect(sameLayerB.placement == uniqueMoveB0 && sameLayerB.tiles.map(\.frame) == uniqueMoveLocal0,
+                   "unique-to-duplicate move must cancel against the exact captured occurrence")
+        try expect(sameLayerA.placement == insertedMoveA0 && samePersisted.count == uniqueMovePersist0,
+                   "unique-to-duplicate move must not mutate or persist the inserted same-ID sibling")
+
+        sameCanvas.setZones([sameLayerB])
+        let uniqueResizeB0 = sameLayerB.placement
+        let uniqueResizeLocal0 = sameLayerB.tiles.map(\.frame)
+        let uniqueResizeWorld0 = CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement)
+        let uniqueResizePersist0 = samePersisted.count
+        let uniqueResizeStart = win(CGFloat(uniqueResizeB0.origin.x + uniqueResizeB0.size.width),
+                                    CGFloat(uniqueResizeB0.origin.y + uniqueResizeB0.size.height / 2))
+        sameCanvas.mouseDown(with: try event(.leftMouseDown, uniqueResizeStart, window: sameWindow))
+        sameCanvas.setZones([sameLayerB, sameLayerA]) // insert after, then reorder
+        sameCanvas.setZones([sameLayerA, sameLayerB])
+        let insertedResizeA0 = sameLayerA.placement
+        sameCanvas.mouseDragged(with: try event(
+            .leftMouseDragged, NSPoint(x: uniqueResizeStart.x + 53.5, y: uniqueResizeStart.y), window: sameWindow))
+        sameCanvas.mouseUp(with: try event(
+            .leftMouseUp, NSPoint(x: uniqueResizeStart.x + 53.5, y: uniqueResizeStart.y), window: sameWindow))
+        try expect(sameLayerB.placement == uniqueResizeB0 && sameLayerB.tiles.map(\.frame) == uniqueResizeLocal0
+                       && CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == uniqueResizeWorld0,
+                   "unique-to-duplicate resize must cancel with exact target local/world geometry")
+        try expect(sameLayerA.placement == insertedResizeA0 && samePersisted.count == uniqueResizePersist0
+                       && !sameCanvas.qaResizeHUDVisible,
+                   "unique-to-duplicate resize must preserve sibling, suppress persistence, and clear HUD")
+
+        // Finish validates the same token too: insertion after a valid live
+        // update but before mouse-up must roll the captured occurrence back.
+        sameCanvas.setZones([sameLayerB])
+        let finishB0 = sameLayerB.placement
+        let finishLocal0 = sameLayerB.tiles.map(\.frame)
+        let finishPersist0 = samePersisted.count
+        let finishStart = win(CGFloat(finishB0.origin.x + 80), CGFloat(finishB0.origin.y + 16))
+        let finishEnd = NSPoint(x: finishStart.x + 28.5, y: finishStart.y - 9.75)
+        sameCanvas.mouseDown(with: try event(.leftMouseDown, finishStart, window: sameWindow))
+        sameCanvas.mouseDragged(with: try event(.leftMouseDragged, finishEnd, window: sameWindow))
+        try expect(sameLayerB.placement != finishB0,
+                   "unique gesture finish fixture must perform a live exact-target update")
+        sameCanvas.setZones([sameLayerA, sameLayerB])
+        let finishA0 = sameLayerA.placement
+        sameCanvas.mouseUp(with: try event(.leftMouseUp, finishEnd, window: sameWindow))
+        try expect(sameLayerB.placement == finishB0 && sameLayerB.tiles.map(\.frame) == finishLocal0,
+                   "same-ID insertion before finish must roll back the captured occurrence")
+        try expect(sameLayerA.placement == finishA0 && samePersisted.count == finishPersist0,
+                   "finish topology validation must preserve sibling and suppress UUID persistence")
         sameCanvas.setZones([sameLayerA, sameLayerB])
 
         // Removing the exact concrete target after mouseDown must cancel the
