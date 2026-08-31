@@ -145,6 +145,11 @@ exit(pass ? 0 : 1)
 SWIFT
 assert_flow "wkwebview-ruler-pixels" "external PNG contains substantial red/green/blue fixture bands; counts in $ruler_json" grep -q '"pass" : true' "$ruler_json"
 before_ax="$(window_bounds)"
+osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null
+on run argv
+  tell application "System Events" to set frontmost of (first process whose unix id is (item 1 of argv as integer)) to true
+end run
+APPLESCRIPT
 click_center_of_window || defer_display "accessibility" "cliclick could not focus exact app window"
 assert_flow "frontmost-focused-after-click" "exact candidate app is frontmost and its target window is focused/main" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
