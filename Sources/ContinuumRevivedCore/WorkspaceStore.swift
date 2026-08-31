@@ -46,7 +46,8 @@ public struct WorkspaceStore: Sendable {
             retainedBackups: retainedBackups,
             descriptorOperations: descriptorOperations,
             fileOperations: fileOperations,
-            backupDate: backupDate
+            backupDate: backupDate,
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

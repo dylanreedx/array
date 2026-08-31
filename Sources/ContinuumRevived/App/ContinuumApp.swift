@@ -24467,7 +24467,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 "backward clock did not retain exact generations 2 and 3")
             try Data("corrupt".utf8).write(to: layout.canvasFile)
             let recovered: WorkspaceDocument = try AtomicWriter(
-                backupsDirectory: layout.backupsDirectory, retainedBackups: 2).read(at: layout.canvasFile)
+                backupsDirectory: layout.backupsDirectory, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated).read(at: layout.canvasFile)
             try expect(recovered == documents[2], "backward clock recovery did not choose D2")
             faultResults.append(["seam":"backward-clock-generations", "dates":dates,
                 "writeBytesX":[301,302,303], "retainedGenerations":[3,2],
@@ -24490,7 +24491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("canvas.prod.extra.2099-01-01T00-00-00.000Z.000999.json"))
             try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("array-backup-v2-00-malformed"))
             let writer = AtomicWriter(backupsDirectory: backups, retainedBackups: 3,
-                backupDate: { Date(timeIntervalSince1970: 1_000) })
+                backupDate: { Date(timeIntervalSince1970: 1_000) }, legacyBackupPolicy: .targetDedicated)
             try encoder.encode(valid).write(to: target)
             try writer.write(replacement, to: target)
             try encoder.encode(valid).write(to: other)
@@ -24505,10 +24506,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try encoder.encode(dLegacy2).write(to: backups.appendingPathComponent("archive.2031-01-01T00-00-00.000Z.000002.json"))
             try Data("corrupt".utf8).write(to: legacyOnly)
             let legacyRecovered: WorkspaceDocument = try AtomicWriter(
-                backupsDirectory: backups, retainedBackups: 2).read(at: legacyOnly)
+                backupsDirectory: backups, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated).read(at: legacyOnly)
             try expect(legacyRecovered == dLegacy2, "legacy newest-first recovery changed")
             try encoder.encode(valid).write(to: legacyOnly)
-            let legacyAger = AtomicWriter(backupsDirectory: backups, retainedBackups: 2)
+            let legacyAger = AtomicWriter(backupsDirectory: backups, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated)
             try legacyAger.write(dLegacy1, to: legacyOnly)
             try legacyAger.write(dLegacy2, to: legacyOnly)
             let archiveEntries = try FileManager.default.contentsOfDirectory(atPath: backups.path)
@@ -24524,7 +24527,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let root = support.appendingPathComponent("fault-alternating-clock", isDirectory: true)
             let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000019")!
             let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
-            let identity = Data(layout.canvasFile.lastPathComponent.utf8).map { String(format:"%02x",$0) }.joined()
+            let canonical = layout.canvasFile.deletingLastPathComponent().standardizedFileURL
+                .resolvingSymlinksInPath().appendingPathComponent(layout.canvasFile.lastPathComponent)
+            let identity = SHA256.hash(data: Data(canonical.path.utf8)).map { String(format:"%02x",$0) }.joined()
             let prefix = "array-backup-v2-\(identity)-"
             try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
                 retainedBackups: 3).save(valid)
@@ -24557,17 +24562,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let target = root.appendingPathComponent("overflow.json")
             try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
             try JSONCodec.makeEncoder(prettyPrinted:true).encode(valid).write(to: target)
-            let identity = Data(target.lastPathComponent.utf8).map { String(format:"%02x",$0) }.joined()
-            let maxName = "array-backup-v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z"
+            let canonical = target.deletingLastPathComponent().standardizedFileURL
+                .resolvingSymlinksInPath().appendingPathComponent(target.lastPathComponent)
+            let identity = SHA256.hash(data: Data(canonical.path.utf8)).map { String(format:"%02x",$0) }.joined()
+            let malformed = [
+                "array-backup-v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z-junk",
+                "array-backup-v2-\(identity)-1844674407370955161-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-184467440737095516150-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-18446744073709551615-not-a-timestamp",
+                "array_backup_v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity.uppercased())-00000000000000000042-2030-01-01T00-00-00.000Z"
+            ]
+            for name in malformed { try Data("junk".utf8).write(to: backups.appendingPathComponent(name)) }
+            try AtomicWriter(backupsDirectory: backups, retainedBackups: 4,
+                backupDate: { Date(timeIntervalSince1970: 1_000) }).write(replacement, to: target)
+            let generated = try FileManager.default.contentsOfDirectory(atPath: backups.path)
+                .first { $0.hasPrefix("array-backup-v2-\(identity)-00000000000000000001-") }!
+            let generatedBytes = Array(generated.utf8)
+            let maxName = String(decoding: generatedBytes.dropLast(45), as: UTF8.self)
+                + "18446744073709551615-2030-01-01T00-00-00.000Z"
             try Data("sentinel".utf8).write(to: backups.appendingPathComponent(maxName))
+            try expect(FileManager.default.fileExists(atPath: backups.appendingPathComponent(maxName).path)
+                && maxName.contains(identity), "valid exact-ID max fixture was not constructed")
+            let overflowWriter = AtomicWriter(backupsDirectory: backups)
+            try expect(overflowWriter.debugBackupGeneration(named: maxName, for: target) == UInt64.max,
+                "production parser did not classify the derived valid-max fixture")
             var overflowed = false
-            do { try AtomicWriter(backupsDirectory: backups).write(replacement, to: target) }
+            do { try overflowWriter.write(replacement, to: target) }
             catch { overflowed = true }
             let primary: WorkspaceDocument = try JSONCodec.makeDecoder().decode(
                 WorkspaceDocument.self, from: Data(contentsOf: target))
-            try expect(overflowed && primary == valid, "generation overflow did not fail closed")
+            try expect(overflowed && primary == replacement,
+                "generation overflow did not fail closed overflowed=\(overflowed) primaryX=\(primary.viewport.x)")
             faultResults.append(["seam":"generation-overflow", "successReported":false,
-                "primaryByteTruth":"valid", "existingBackupPreserved":true])
+                "primaryByteTruth":"replacement", "malformedLookalikesIgnored":malformed.count,
+                "existingBackupPreserved":true])
+        }
+
+        // Same basename under different canonical parents shares neither lock
+        // nor backup namespace, even with one shared backup directory.
+        do {
+            let root = support.appendingPathComponent("fault-canonical-target-namespace", isDirectory:true)
+            let shared = root.appendingPathComponent("shared", isDirectory:true)
+            let a = root.appendingPathComponent("a/canvas.ü.json")
+            let b = root.appendingPathComponent("b/canvas.ü.json")
+            try FileManager.default.createDirectory(at: a.deletingLastPathComponent(), withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at: b.deletingLastPathComponent(), withIntermediateDirectories:true)
+            let encoder = JSONCodec.makeEncoder(prettyPrinted:true)
+            try encoder.encode(valid).write(to:a); try encoder.encode(replacement).write(to:b)
+            let wa = AtomicWriter(backupsDirectory:shared, retainedBackups:3,
+                backupDate:{ Date(timeIntervalSince1970:1_900_000_000) })
+            let wb = AtomicWriter(backupsDirectory:shared, retainedBackups:3,
+                backupDate:{ Date(timeIntervalSince1970:1_900_000_000) })
+            let da = WorkspaceDocument(viewport:.init(x:701,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let db = WorkspaceDocument(viewport:.init(x:702,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let group = DispatchGroup(); final class Errors: @unchecked Sendable { let lock=NSLock(); var values:[Error]=[] }
+            let errors=Errors()
+            group.enter(); DispatchQueue.global().async { defer { group.leave() }; do { try wa.write(da,to:a) } catch { errors.lock.lock(); errors.values.append(error); errors.lock.unlock() } }
+            group.enter(); DispatchQueue.global().async { defer { group.leave() }; do { try wb.write(db,to:b) } catch { errors.lock.lock(); errors.values.append(error); errors.lock.unlock() } }
+            try expect(group.wait(timeout:.now()+5) == .success && errors.values.isEmpty,
+                "same-basename canonical targets collided")
+            try Data("corrupt".utf8).write(to:a); try Data("corrupt".utf8).write(to:b)
+            let ra:WorkspaceDocument = try wa.read(at:a); let rb:WorkspaceDocument = try wb.read(at:b)
+            try expect(ra == valid && rb == replacement, "same-basename targets cross-recovered")
+            let names = try FileManager.default.contentsOfDirectory(atPath:shared.path)
+            let namespaces = Set(names.compactMap { $0.split(separator:"-").dropFirst(3).first.map(String.init) })
+            try expect(names.count == 2 && namespaces.count == 2, "canonical namespace IDs were not independent")
+            faultResults.append(["seam":"canonical-target-namespace", "namespaceCount":namespaces.count,
+                "concurrent":true,"sameBasename":true,"independentRecovery":[1,-9]])
+        }
+
+        do {
+            let root = support.appendingPathComponent("fault-ambiguous-legacy", isDirectory:true)
+            let shared = root.appendingPathComponent("shared", isDirectory:true)
+            let target = root.appendingPathComponent("parent/canvas.json")
+            try FileManager.default.createDirectory(at: shared, withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories:true)
+            try Data("corrupt".utf8).write(to: target)
+            try JSONCodec.makeEncoder(prettyPrinted:true).encode(valid).write(
+                to: shared.appendingPathComponent("canvas.2030-01-01T00-00-00.000Z.000001.json"))
+            var failedClosed = false
+            do { let _:WorkspaceDocument = try AtomicWriter(backupsDirectory:shared).read(at:target) }
+            catch AtomicWriterError.noValidBackup { failedClosed = true }
+            try expect(failedClosed, "ambiguous shared-directory legacy cross-recovered")
+            faultResults.append(["seam":"ambiguous-legacy-policy","policy":"disabled","failedClosed":true])
         }
 
         // An unreadable existing target is not the same state as ENOENT. It is

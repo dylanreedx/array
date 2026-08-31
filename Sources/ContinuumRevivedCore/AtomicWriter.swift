@@ -1,5 +1,11 @@
 import Darwin
 import Foundation
+import CryptoKit
+
+public enum AtomicWriterLegacyBackupPolicy: Sendable, Equatable {
+    case disabled
+    case targetDedicated
+}
 
 public enum AtomicWriterError: Error, Equatable, CustomStringConvertible {
     case noValidBackup(path: String)
@@ -80,6 +86,7 @@ public struct AtomicWriter: Sendable {
     public let descriptorOperations: AtomicWriterDescriptorOperations
     public let fileOperations: AtomicWriterFileOperations
     public let backupDate: @Sendable () -> Date
+    public let legacyBackupPolicy: AtomicWriterLegacyBackupPolicy
 
     public init(
         backupsDirectory: URL? = nil,
@@ -87,7 +94,8 @@ public struct AtomicWriter: Sendable {
         prettyPrint: Bool = true,
         descriptorOperations: AtomicWriterDescriptorOperations = .live,
         fileOperations: AtomicWriterFileOperations = .live,
-        backupDate: @escaping @Sendable () -> Date = { Date() }
+        backupDate: @escaping @Sendable () -> Date = { Date() },
+        legacyBackupPolicy: AtomicWriterLegacyBackupPolicy = .disabled
     ) {
         self.backupsDirectory = backupsDirectory
         self.retainedBackups = max(0, retainedBackups)
@@ -95,6 +103,7 @@ public struct AtomicWriter: Sendable {
         self.descriptorOperations = descriptorOperations
         self.fileOperations = fileOperations
         self.backupDate = backupDate
+        self.legacyBackupPolicy = legacyBackupPolicy
     }
 
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
@@ -160,9 +169,7 @@ public struct AtomicWriter: Sendable {
     // MARK: - Internal helpers
 
     private func withTargetLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
-        let canonicalParent = url.deletingLastPathComponent()
-            .standardizedFileURL.resolvingSymlinksInPath()
-        let canonical = canonicalParent.appendingPathComponent(url.lastPathComponent)
+        let canonical = canonicalTarget(for: url)
         // Resolving the parent collapses relative and symlink aliases before
         // choosing both locks. Workspace documents are owned canonical paths;
         // callers must not address one document through distinct hardlinks.
@@ -194,6 +201,16 @@ public struct AtomicWriter: Sendable {
             _ = Darwin.close(fd)
         }
         return try body()
+    }
+
+    private func canonicalTarget(for url: URL) -> URL {
+        url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+            .appendingPathComponent(url.lastPathComponent)
+    }
+
+    private func targetNamespace(for url: URL) -> String {
+        SHA256.hash(data: Data(canonicalTarget(for: url).path.utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     /// Write `data` to `url` durably:
@@ -364,8 +381,7 @@ public struct AtomicWriter: Sendable {
     }
 
     private func backupEntries(for url: URL, entries: [URL]) -> [BackupEntry] {
-        let targetName = url.lastPathComponent
-        let identity = Data(targetName.utf8).map { String(format: "%02x", $0) }.joined()
+        let identity = targetNamespace(for: url)
         let newPrefix = "array-backup-v2-\(identity)-"
         let legacyStem = url.deletingPathExtension().lastPathComponent
         let legacyPrefix = "\(legacyStem)."
@@ -373,17 +389,14 @@ public struct AtomicWriter: Sendable {
         return entries.compactMap { entry in
             let name = entry.lastPathComponent
             if name.hasPrefix(newPrefix) {
-                let remainder = name.dropFirst(newPrefix.count)
-                guard remainder.count >= 21 else { return nil }
-                let token = remainder.prefix(20)
-                guard remainder.dropFirst(20).first == "-", token.allSatisfy(\.isNumber),
-                      let generation = UInt64(token) else { return nil }
+                guard let generation = v2Generation(in: name, identity: identity) else { return nil }
                 return BackupEntry(url: entry, generation: generation)
             }
             // Legacy: exact stem/extension plus a parseable ISO-8601 timestamp
             // and the historical 6- or 12-digit suffix. This rejects similarly
             // prefixed and dotted target names sharing one backup directory.
-            guard name.hasPrefix(legacyPrefix), name.hasSuffix(legacySuffix) else { return nil }
+            guard legacyBackupPolicy == .targetDedicated,
+                  name.hasPrefix(legacyPrefix), name.hasSuffix(legacySuffix) else { return nil }
             let body = name.dropFirst(legacyPrefix.count).dropLast(legacySuffix.count)
             guard let separator = body.lastIndex(of: ".") else { return nil }
             var timestamp = String(body[..<separator])
@@ -402,8 +415,41 @@ public struct AtomicWriter: Sendable {
         }
     }
 
+    private func v2Generation(in name: String, identity: String) -> UInt64? {
+        let prefix = "array-backup-v2-\(identity)-"
+        guard name.hasPrefix(prefix) else { return nil }
+        let remainder = String(name.dropFirst(prefix.count))
+        guard remainder.utf8.count == 45 else { return nil }
+        let bytes = Array(remainder.utf8)
+        guard bytes[20] == 45, bytes[0..<20].allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+        let token = String(decoding: bytes[0..<20], as: UTF8.self)
+        let metadata = String(decoding: bytes[21..<45], as: UTF8.self)
+        guard isValidBackupTimestamp(metadata) else { return nil }
+        return UInt64(token)
+    }
+
+#if DEBUG
+    public func debugBackupGeneration(named name: String, for target: URL) -> UInt64? {
+        v2Generation(in: name, identity: targetNamespace(for: target))
+    }
+#endif
+
+    private func isValidBackupTimestamp(_ value: String) -> Bool {
+        guard value.utf8.count == 24 else { return false }
+        let bytes = Array(value.utf8)
+        let separators: [Int: UInt8] = [4:45, 7:45, 10:84, 13:45, 16:45, 19:46, 23:90]
+        for index in bytes.indices {
+            if let expected = separators[index] { if bytes[index] != expected { return false } }
+            else if bytes[index] < 48 || bytes[index] > 57 { return false }
+        }
+        func number(_ range: Range<Int>) -> Int { range.reduce(0) { $0 * 10 + Int(bytes[$1] - 48) } }
+        guard (1...12).contains(number(5..<7)), (1...31).contains(number(8..<10)),
+              number(11..<13) < 24, number(14..<16) < 60, number(17..<19) < 60 else { return false }
+        return true
+    }
+
     private func backupName(for url: URL, at date: Date, generation: UInt64) -> String {
-        let identity = Data(url.lastPathComponent.utf8).map { String(format: "%02x", $0) }.joined()
+        let identity = targetNamespace(for: url)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let iso = formatter.string(from: date).replacingOccurrences(of: ":", with: "-")
