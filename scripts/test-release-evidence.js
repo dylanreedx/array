@@ -64,10 +64,27 @@ function baseReport(root, role = "lead") {
     semantic_artifacts: [semantic], expected_performance_cases: [], performance_artifacts: [], performance: [], known_red_observed: [], unexpected_failures: [], risks: [], gaps_or_skips: [], promotion_recommendation: "PROMOTE"
   };
 }
+function installInventory(root, report, overrides = {}) {
+  const inventoryPath = path.join(root, "expected-inventory.json");
+  const inventory = {
+    candidate_sha: report.candidate_sha,
+    workstreams: [{ workstream: report.workstream, base_sha: report.base_sha, roles: [{
+      role: report.role,
+      visual_states: JSON.parse(JSON.stringify(report.expected_visual_states)),
+      performance_cases: JSON.parse(JSON.stringify(report.expected_performance_cases)),
+      capture_manifests: []
+    }] }],
+    global_performance_identity: true,
+    ...overrides
+  };
+  json(inventoryPath, inventory);
+  const result = run(["inventory", "--root", root, "--file", inventoryPath]);
+  ok(result.status === 0, `inventory locks: ${result.stderr}`);
+}
 function fixture(name, mutate, expected) {
   const root = path.join(scratch, name); fs.mkdirSync(root, { recursive: true });
   ok(run(["init", "--run-id", name, "--root", root, "--base-sha", "a".repeat(40)]).status === 0, `${name}: init`);
-  const report = baseReport(root); if (mutate) mutate(report, root);
+  const report = baseReport(root); installInventory(root, report); if (mutate) mutate(report, root);
   const reportPath = path.join(root, "report.json"); json(reportPath, report);
   const ingested = run(["ingest", "--root", root, "--report", reportPath]);
   if (expected === "ingest-fail") return ok(ingested.status !== 0, `${name}: ingestion should fail`);
@@ -79,6 +96,7 @@ function fixture(name, mutate, expected) {
 
 try {
   const valid = fixture(retainedRoot ? path.basename(retainedRoot) : "valid", null, "pass");
+  fixture("explicit-zero-inventory", report => { report.expected_visual_states = []; report.screenshots = []; }, "fail");
   for (const role of ["reviewer", "tester", "auditor"]) fixture(`null-${role}`, (report, root) => Object.assign(report, baseReport(root, role)), "pass");
   const duplicate = run(["ingest", "--root", valid.root, "--report", valid.reportPath]);
   ok(duplicate.status === 0, "duplicate ingestion is idempotent");
