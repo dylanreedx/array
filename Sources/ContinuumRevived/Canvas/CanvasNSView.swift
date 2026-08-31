@@ -2504,7 +2504,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 }
             guard !desiredFrames.isEmpty else { continue }
             guard let exactOrigin = CanvasEngine.exactRebaseOriginIfPossible(
-                near: value.origin, preserving: desiredFrames) else { return false }
+                near: value.origin, preserving: desiredFrames) else {
+                qaRejectedGeometrySnapshots += 1
+                return false
+            }
             var corrected = value
             corrected.origin = exactOrigin
             corrected.size = ZoneSize(
@@ -2542,7 +2545,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 guard let value = tileValues[layer.tiles[index].id],
                       plannedTileIds.insert(layer.tiles[index].id).inserted else { continue }
                 guard let local = CanvasEngine.worldToZoneLocalPreservingWorld(
-                    value.frame, zoneOrigin: snapshotResolvedOrigin(for: layer)) else { return false }
+                    value.frame, zoneOrigin: snapshotResolvedOrigin(for: layer)) else {
+                    qaRejectedGeometrySnapshots += 1
+                    return false
+                }
                 plannedLayerFrames.append((layer, index, local))
             }
         }
@@ -2556,7 +2562,10 @@ final class CanvasNSView: NSView, TokenThemed {
             // round-tripping it through world space and drifting it.
             if origin == preserved.layer.placement.origin { continue }
             guard let local = CanvasEngine.worldToZoneLocalPreservingWorld(
-                preserved.frame, zoneOrigin: origin) else { return false }
+                preserved.frame, zoneOrigin: origin) else {
+                qaRejectedGeometrySnapshots += 1
+                return false
+            }
             plannedPreservedFrames.append((preserved.layer, preserved.index, local))
         }
         var mirroredLiveZoneIds = Set<UUID>()
@@ -3068,6 +3077,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// what must NOT change, and a wholly dropped transaction satisfies all of
     /// them — so this counter is the only thing that can witness the drop.
     var qaRejectedLayoutTransactions = 0
+
+    /// QA: how many geometry snapshots were abandoned for the same reason.
+    /// `applyGeometrySnapshot` backs undo/redo replay, so a silent abandon here
+    /// drops a whole history step rather than one drag frame.
+    var qaRejectedGeometrySnapshots = 0
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
     func qaActiveZoneResizeEdge(zoneId: UUID) -> ResizeEdge? {
         guard case let .resizingZone(target, edge, _) = zoneGesture,
@@ -5789,7 +5803,12 @@ final class CanvasNSView: NSView, TokenThemed {
                     widthPx: Int(newPlacement.size.width.rounded()),
                     heightPx: Int(newPlacement.size.height.rounded()),
                     atWindowPoint: event.locationInWindow)
+                return
             }
+            // Fall-through: nothing matched, so nothing consumed the delta.
+            // Advance anyway -- leaving lastWindowPoint pinned makes dx grow
+            // 5, 10, 15 ... for the rest of the gesture.
+            zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
             return
         }
         super.mouseDragged(with: event)
@@ -8012,6 +8031,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let passiveRebaseBaselineCommits = layerCommits
         let passiveRebaseBaselineViewport = layerCanvas.canvasState.viewport
         var passiveRebaseUnmovedCases: [Int] = []
+        layerCanvas.qaRejectedLayoutTransactions = 0
         let passiveRebaseSeed: UInt64 = 0x080100662E1365
         let passiveRebaseHandles: [(NSPoint, CGFloat, CGFloat)] = [
             (NSPoint(x: layerFirstView.bounds.maxX - 1, y: layerFirstView.bounds.midY), 4, 0),
@@ -8069,12 +8089,12 @@ final class CanvasNSView: NSView, TokenThemed {
         // must NOT move, and a transaction dropped in its entirety satisfies all
         // of them — so without this the corpus stays green through exactly the
         // regression it exists to catch. A handful of cases legitimately clamp
-        // and produce no change; a rebase regression drops ~1 in 30 (~34 cases).
-        // POSITIVE CONTROL. Everything else in this corpus asserts what must NOT
-        // move, and a wholly dropped transaction satisfies all of it. The unmoved
-        // count alone cannot serve as the control: ~27% of these seeded handles
-        // legitimately produce no resize (measured identical with every rejection
-        // path disabled), so that number is not a signal. The rejection counter is.
+        // Everything else in this corpus asserts what must NOT move, and a wholly
+        // dropped transaction satisfies all of it. The unmoved count cannot serve
+        // as a control either: 280 of 1,024 seeded handles legitimately produce no
+        // resize (measured identical with every rejection path disabled), so it is
+        // reported, not asserted. This corpus also never reaches an unrepresentable
+        // pair -- the targeted witness below covers that.
         try expect(layerCanvas.qaRejectedLayoutTransactions == 0,
                    "seeded passive rebase abandoned \(layerCanvas.qaRejectedLayoutTransactions) layout transactions across the corpus")
         print("PassiveWorldRebaseCorpus seed=\(passiveRebaseSeed) cases=1024 failures=0 skipped=0 unmovedActive=\(passiveRebaseUnmovedCases.count) \(passiveRebaseUnmovedCases)")
@@ -8084,6 +8104,41 @@ final class CanvasNSView: NSView, TokenThemed {
         layerCanvas.canvasState.viewport = passiveRebaseBaselineViewport
         layerCanvas.upsertZoneLayer(layer)
         layerCanvas.layoutAllTiles()
+
+        // END-TO-END UNVETTED-ORIGIN WITNESS. The corpus above always GROWS the
+        // zone, so its origin is always corrected and the unvetted branch never
+        // runs -- reverting the fallback leaves every assertion above green,
+        // which an independent mutation proved.
+        //
+        // An earlier attempt called this unseedable, reasoning that an
+        // unrepresentable world cannot be expressed as `local + origin`. That is
+        // true of CAPTURED frames and false of the frames that actually arrive
+        // here: `transaction.tileFrames` is SOLVER output, computed against the
+        // requested geometry and never against this layer's origin. Drive the
+        // transaction directly, naming a zone the transaction does not move.
+        var unvettedPlacement = passiveRebaseBaselinePlacement
+        unvettedPlacement.origin = ZonePoint(
+            x: passiveRebaseBaselinePlacement.origin.x, y: -3816.3333333333335)
+        layer.placement = unvettedPlacement
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
+        let unvettedTargetY = -7917.666666666667
+        var unvettedTarget = CanvasEngine.worldFrame(tile: layer.tiles[0], in: layer.placement)
+        unvettedTarget.y = unvettedTargetY
+        try expect(CanvasEngine.worldToZoneLocalPreservingWorld(
+            unvettedTarget, zoneOrigin: unvettedPlacement.origin) == nil,
+                   "unvetted witness seed must be genuinely unrepresentable; world=\(unvettedTarget) origin=\(unvettedPlacement.origin)")
+        let unvettedRejectionsBefore = layerCanvas.qaRejectedLayoutTransactions
+        layerCanvas.applyLayoutTransaction(
+            CanvasLayoutTransaction(tileFrames: [layerFirstId: unvettedTarget]),
+            preservingLayerMemberWorldFramesIn: [layerZoneId])
+        try expect(layerCanvas.qaRejectedLayoutTransactions == unvettedRejectionsBefore,
+                   "a solver target against an unvetted zone origin must not abandon the layout transaction (rejections \(unvettedRejectionsBefore) -> \(layerCanvas.qaRejectedLayoutTransactions))")
+        let unvettedLanded = CanvasEngine.worldFrame(tile: layer.tiles[0], in: layer.placement)
+        try expect(
+            abs(unvettedLanded.y - unvettedTargetY)
+                <= 2 * Swift.max(abs(unvettedTargetY), abs(unvettedPlacement.origin.y)).ulp,
+            "unvetted-origin tile must land within rounding of its solver target; got \(unvettedLanded.y) want \(unvettedTargetY)")
 
         layer.tiles = passiveRebaseBaselineTiles
         layer.placement = passiveRebaseBaselinePlacement
