@@ -32,7 +32,17 @@ typed `capture_unavailable` failure.
 Capture manifests use `kind: qacapture|external`, bind every artifact by unique
 case/iteration/visual-state/role, and hash both image and semantic artifact. A
 `PASS` capture contains only inspected-PASS actual artifacts; failures, deferrals,
-and judgment states must use matching manifest and artifact statuses.
+and judgment states must use matching manifest and artifact statuses. Actual
+captures carry the same candidate commit, exact point/pixel geometry, backing
+scale, zoom, command/semantic hashes, and closed baseline/diff/mask provenance as
+standalone screenshots.
+
+Promotion is a closed verdict table: only `PASS` may recommend `PROMOTE`, and
+only with no unresolved P0/P1/P2 findings. `PASS` may conservatively recommend
+`DO_NOT_PROMOTE`; every other status must. Unresolved P3 findings remain explicit
+and nonblocking. Validation holds the manifest transaction lock across its entire
+snapshot read, artifact hashing, reconciliation, and atomic `validated_at` write,
+and retains `validated_snapshot_sha256` for the exact checked entry set.
 
 The release identity commands bind a clean source commit and exact release argv
 and log to the app bundle, executable, signing/notary state, and DMG:
