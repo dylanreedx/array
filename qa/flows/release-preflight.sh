@@ -147,11 +147,13 @@ exit(pass ? 0 : 1)
 SWIFT
 assert_flow "wkwebview-ruler-pixels" "external PNG contains substantial red/green/blue fixture bands; counts in $ruler_json" grep -q '"pass" : true' "$ruler_json"
 before_ax="$(window_bounds)"
-osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null
-on run argv
-  tell application "System Events" to set frontmost of (first process whose unix id is (item 1 of argv as integer)) to true
-end run
-APPLESCRIPT
+swift - "$QA_APP_PID" <<'SWIFT'
+import AppKit
+import Foundation
+let pid = Int32(CommandLine.arguments[1])!
+guard let app = NSRunningApplication(processIdentifier: pid),
+      app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else { exit(1) }
+SWIFT
 sleep 0.3
 assert_flow "pointer-drag-focus-precondition" "setup made exact candidate PID/window frontmost and main before genuine pointer drag" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
