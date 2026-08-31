@@ -197,6 +197,12 @@ target=d['targetEventPath']; assert target==r['targetEventPath']; contained(targ
 t=json.load(open(target)); assert [t.get(k) for k in ['runID','readyChallenge','launchNonce','windowID','title']]==[r.get(k) for k in ['runID','readyChallenge','launchNonce','windowID','title']]
 tdown,tup=strict(t['events'],[x['kind'] for x in t['events']]); assert all(x['windowID']==r['windowID'] for x in t['events'])
 assert abs((tup['x']-tdown['x'])-dx)<=3 and abs((tup['y']-tdown['y'])-dy)<=3
+assert abs(tdown['x']-d['startPoint'][0])<=3 and abs(tdown['y']-d['startPoint'][1])<=3 and abs(tup['x']-d['endPoint'][0])<=3 and abs(tup['y']-d['endPoint'][1])<=3
+# AppKit and the session tap may coalesce different numbers of dragged events;
+# their endpoint events and the first/last observed drag locations must agree.
+gd,td=ev[1:-1],t['events'][1:-1]
+assert abs(down['x']-tdown['x'])<=3 and abs(down['y']-tdown['y'])<=3 and abs(up['x']-tup['x'])<=3 and abs(up['y']-tup['y'])<=3
+assert abs(gd[0]['x']-td[0]['x'])<=3 and abs(gd[0]['y']-td[0]['y'])<=3 and abs(gd[-1]['x']-td[-1]['x'])<=3 and abs(gd[-1]['y']-td[-1]['y'])<=3
 assert r['readyPublishedAtNs'] < down['wallTimeNs'] <= up['wallTimeNs'] < d['doneAtNs'] and r['readyPublishedAtNs'] < tdown['wallTimeNs'] <= tup['wallTimeNs'] < d['doneAtNs']
 assert d['startedAtNs'] <= d['finishedAtNs'] <= d['doneAtNs']
 PY

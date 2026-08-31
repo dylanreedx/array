@@ -50,6 +50,16 @@ python3 <<'PY'
 def valid(k): return len(k)>=3 and k[0]=='down' and k[-1]=='up' and all(x=='dragged' for x in k[1:-1]) and k.count('down')==1 and k.count('up')==1
 assert valid(['down','dragged','dragged','up'])
 for attack in (['down','down','dragged','up'],['down','dragged','up','up'],['move','down','dragged','up'],['down','up'],[]): assert not valid(attack)
+# The target stream is bound to exact absolute start/end and exact window ID;
+# preserving relative delta while shifting all coordinates cannot pass.
+def target_valid(events,start,end,window):
+ return all(e['windowID']==window for e in events) and abs(events[0]['x']-start[0])<=3 and abs(events[0]['y']-start[1])<=3 and abs(events[-1]['x']-end[0])<=3 and abs(events[-1]['y']-end[1])<=3
+good=[dict(x=1140,y=128,windowID=7),dict(x=1164,y=140,windowID=7)]
+assert target_valid(good,[1140,128],[1164,140],7)
+shifted=[dict(e,x=e['x']+400,y=e['y']+200) for e in good]
+wrong_window=[dict(e,windowID=8) for e in good]
+assert not target_valid(shifted,[1140,128],[1164,140],7)
+assert not target_valid(wrong_window,[1140,128],[1164,140],7)
 PY
 rg -q "targetEventSHA256" "$ROOT/qa/external-input-driver.sh" "$ROOT/qa/flows/release-preflight.sh"
 rg -q "NSEvent.removeMonitor" "$ROOT/Sources/ContinuumRevived/App/ContinuumApp.swift"

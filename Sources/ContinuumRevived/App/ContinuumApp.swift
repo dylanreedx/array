@@ -17473,9 +17473,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     self.qaExternalPointerEvents = []
                     self.qaExternalEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self, weak window] event in
                         guard let self, let window else { return event }
+                        guard let eventWindow = event.window, eventWindow.windowNumber == window.windowNumber else { return event }
                         let kind: String = event.type == .leftMouseDown ? "down" : (event.type == .leftMouseDragged ? "dragged" : "up")
                         let global = event.cgEvent?.location ?? .zero
-                        self.qaExternalPointerEvents.append(["kind": kind, "monotonicNs": DispatchTime.now().uptimeNanoseconds, "wallTimeNs": UInt64(Date().timeIntervalSince1970 * 1_000_000_000), "windowID": window.windowNumber, "x": global.x, "y": global.y])
+                        self.qaExternalPointerEvents.append(["kind": kind, "monotonicNs": DispatchTime.now().uptimeNanoseconds, "wallTimeNs": UInt64(Date().timeIntervalSince1970 * 1_000_000_000), "windowID": eventWindow.windowNumber, "x": global.x, "y": global.y])
                         if event.type == .leftMouseUp,
                            let output = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT"],
                            let readyPath = ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_READY_PATH"],
