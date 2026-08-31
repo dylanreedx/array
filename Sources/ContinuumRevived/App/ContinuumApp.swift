@@ -24054,6 +24054,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasState: bootState, installsGlobalEventMonitors: false)
         canvas.layoutSubtreeIfNeeded()
         guard let firstHydrated, let bootSettled else { throw Failure.message("production hydration observations missing") }
+        let firstViewport = firstHydrated["viewport"] as! [String: Double]
+        guard firstViewport["x"] == initialDocument.viewport.x,
+              firstViewport["y"] == initialDocument.viewport.y,
+              firstViewport["zoom"] == initialDocument.viewport.zoom else {
+            throw Failure.message("first hydration used project viewport instead of workspace viewport")
+        }
         var switchSnapshots: [[String: Any]] = []
         var settled = try snapshot("settled")
         var mountedSceneContinuity = false
