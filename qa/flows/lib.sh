@@ -209,13 +209,17 @@ launch_continuum() {
     return 1
   fi
   mkdir -p "$QA_RUN_DIR/capture"
+  local app_args=()
+  if [[ -n "${CONTINUUM_QA_PROJECT_GRANT_KEY:-}" ]]; then
+    app_args+=("-${CONTINUUM_QA_PROJECT_GRANT_KEY}" YES)
+  fi
   if [[ -n "$in_process_flow" ]]; then
     CONTINUUM_SMOKE_TEST=1 \
       CONTINUUM_QA_FLOW="$in_process_flow" \
       CONTINUUM_QA_CAPTURE="$QA_RUN_DIR/capture" \
-      "$QA_APP" &
+      "$QA_APP" "${app_args[@]}" &
   else
-    CONTINUUM_QA_CAPTURE="$QA_RUN_DIR/capture" "$QA_APP" &
+    CONTINUUM_QA_CAPTURE="$QA_RUN_DIR/capture" "$QA_APP" "${app_args[@]}" &
   fi
   QA_APP_PID="$!"
   wait_for_app_window "${CONTINUUM_QA_READY_TIMEOUT:-20}"
@@ -295,12 +299,15 @@ capture_app_window() {
   local output="$1"
   [[ -n "$QA_WINDOW_ID" ]] || return 1
   assert_window_owned_by_pid || return 1
-  screencapture -x -l "$QA_WINDOW_ID" "$output" || return 1
+  screencapture -x -o -l"$QA_WINDOW_ID" "$output" || return 1
   [[ -s "$output" ]] || return 1
   local width height
   width="$(sips -g pixelWidth "$output" 2>/dev/null | awk '/pixelWidth/{print $2}')"
   height="$(sips -g pixelHeight "$output" 2>/dev/null | awk '/pixelHeight/{print $2}')"
-  [[ "${width:-0}" -gt 32 && "${height:-0}" -gt 32 && $(stat -f %z "$output") -gt 4096 ]]
+  local bounds _left _top point_width point_height
+  bounds="$(window_bounds)"
+  IFS=',' read -r _left _top point_width point_height <<< "$bounds"
+  [[ "${width:-0}" -eq $((point_width * 2)) && "${height:-0}" -eq $((point_height * 2)) && $(stat -f %z "$output") -gt 4096 ]]
 }
 
 window_bounds() {

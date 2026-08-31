@@ -17461,11 +17461,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         notes: String? = nil
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + tSec) {
+            var captureNotes = notes
+            if ProcessInfo.processInfo.environment["CONTINUUM_QA_HOLD_OPEN"] == "1" {
+                window.setContentSize(NSSize(width: 960, height: 720))
+                window.layoutIfNeeded()
+                captureNotes = [notes, "qaContentSize=960x720"].compactMap { $0 }.joined(separator: "; ")
+            }
             self.recordLaunchTime()
-            capture(step, tSec, notes)
+            capture(step, tSec, captureNotes)
             qaCapture?.writeManifest()
             self.qaPerf?.writeReport()
             self.smokeTestExitCode = success ? 0 : 2
+            if ProcessInfo.processInfo.environment["CONTINUUM_QA_HOLD_OPEN"] == "1" {
+                return
+            }
             window.performClose(nil)
         }
     }
@@ -17536,7 +17545,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let (qaCapture, capture) = makeQACapture(window: window)
         scheduleInitialCapture(capture)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            let notes = self.spawnBrowserForQA(url: "data:text/html;charset=utf-8,<html><head><title>qa-browser</title></head><body>browser ok</body></html>")
+            let rulerHTML = "<html><head><title>ARRAY_QA_RULER_V1</title><style>html,body{margin:0;background:#101820;color:white;font:700 28px monospace}.r{height:120px}.a{background:#ff1744}.b{background:#00e676}.c{background:#2976ff}</style></head><body><div class='r a'></div><div class='r b'></div><div class='r c'></div><p>ARRAY_QA_RULER_V1</p></body></html>"
+            let rulerFixture = "data:text/html;base64,\(Data(rulerHTML.utf8).base64EncodedString())"
+            let notes = self.spawnBrowserForQA(url: rulerFixture) + "; fixture=ARRAY_QA_RULER_V1"
             capture("cmd-3-browser-requested", 0.4, notes)
         }
         finishQAFlow(
@@ -17544,7 +17555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             qaCapture: qaCapture,
             capture: capture,
             step: "cmd-3-browser-final-state",
-            tSec: 1.4,
+            tSec: 2.4,
             success: true
         )
     }
