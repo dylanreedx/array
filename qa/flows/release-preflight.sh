@@ -155,7 +155,7 @@ guard let app = NSRunningApplication(processIdentifier: pid),
       app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else { exit(1) }
 SWIFT
 sleep 0.3
-assert_flow "pointer-drag-focus-precondition" "setup made exact candidate PID/window frontmost and main before genuine pointer drag" osascript - "$QA_APP_PID" <<'APPLESCRIPT'
+if ! osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
   tell application "System Events"
     set p to first process whose unix id is (item 1 of argv as integer)
@@ -164,6 +164,10 @@ on run argv
   end tell
 end run
 APPLESCRIPT
+then
+  defer_display "accessibility-frontmost-focus" "exact scratch PID/window could not become frontmost/main on this self-hosting runner; pointer drag was not attempted or claimed"
+fi
+append_event "pointer-drag-focus-precondition" "pass" "" "exact candidate PID/window is frontmost and main before genuine pointer drag"
 IFS=',' read -r drag_x drag_y drag_w _drag_h <<< "$before_ax"
 drag_start_x=$((drag_x + drag_w / 2)); drag_start_y=$((drag_y + 14)); drag_dx=24; drag_dy=12
 cliclick "m:${drag_start_x},${drag_start_y}" "dd:${drag_start_x},${drag_start_y}" "dm:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))" "du:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))"

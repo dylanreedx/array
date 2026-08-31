@@ -17463,6 +17463,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         DispatchQueue.main.asyncAfter(deadline: .now() + tSec) {
             var captureNotes = notes
             if ProcessInfo.processInfo.environment["CONTINUUM_QA_HOLD_OPEN"] == "1" {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
                 window.setContentSize(NSSize(width: 960, height: 720))
                 window.layoutIfNeeded()
                 captureNotes = [notes, "qaContentSize=960x720"].compactMap { $0 }.joined(separator: "; ")
