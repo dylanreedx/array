@@ -154,6 +154,11 @@ let pid = Int32(CommandLine.arguments[1])!
 guard let app = NSRunningApplication(processIdentifier: pid),
       app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else { exit(1) }
 SWIFT
+osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null
+on run argv
+  tell application "System Events" to set frontmost of (first process whose unix id is (item 1 of argv as integer)) to true
+end run
+APPLESCRIPT
 sleep 0.3
 if ! osascript - "$QA_APP_PID" <<'APPLESCRIPT'
 on run argv
