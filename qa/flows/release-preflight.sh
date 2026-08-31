@@ -147,6 +147,28 @@ exit(pass ? 0 : 1)
 SWIFT
 assert_flow "wkwebview-ruler-pixels" "external PNG contains substantial red/green/blue fixture bands; counts in $ruler_json" grep -q '"pass" : true' "$ruler_json"
 before_ax="$(window_bounds)"
+IFS=',' read -r drag_x drag_y drag_w _drag_h <<< "$before_ax"
+drag_start_x=$((drag_x + drag_w / 2)); drag_start_y=$((drag_y + 14)); drag_dx=24; drag_dy=12
+if [[ "${CONTINUUM_QA_EXTERNAL_INPUT:-0}" == "1" ]]; then
+  ready="$QA_RUN_DIR/external-input-ready.json"; done_marker="$QA_RUN_DIR/external-input-done.json"
+  rm -f "$ready" "$done_marker"
+  input_title="ARRAY_QA_INPUT_${CONTINUUM_QA_LAUNCH_NONCE:0:10} — Array"
+  python3 - "$ready" "$CONTINUUM_QA_RUN_ID" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$QA_APP_PID" "$QA_WINDOW_ID" "$before_ax" "$drag_dx" "$drag_dy" "$input_title" "$CONTINUUM_QA_EXECUTABLE_PATH" <<'PY'
+import json,os,sys,tempfile
+out=sys.argv[1]; payload=dict(runID=sys.argv[2],launchNonce=sys.argv[3],candidateSHA=sys.argv[4],pid=int(sys.argv[5]),windowID=int(sys.argv[6]),beforeBounds=[int(x) for x in sys.argv[7].split(',')],requestedDelta=[int(sys.argv[8]),int(sys.argv[9])],title=sys.argv[10],executablePath=sys.argv[11])
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(out)); os.write(fd,json.dumps(payload,sort_keys=True,indent=2).encode()+b'\n'); os.close(fd); os.replace(tmp,out)
+PY
+  append_event "external-input-ready" "pass" "" "nonce-bound scratch title=$input_title; waiting for authorized pointer input"
+  wait_for_named_readiness "external-input-done-ready" "$done_marker" 60 || defer_display "external-input-timeout" "authorized external input did not produce a fresh done marker"
+  assert_flow "external-input-done-identity" "done marker matches exact nonce and CGWindowID" python3 - "$done_marker" "$CONTINUUM_QA_LAUNCH_NONCE" "$QA_WINDOW_ID" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1])); assert p.get('launchNonce')==sys.argv[2] and p.get('windowID')==int(sys.argv[3])
+PY
+  assert_window_owned_by_pid || defer_display "external-input-window-identity" "exact window ownership changed during external input"
+  after_ax="$(window_bounds)"
+  IFS=',' read -r after_x after_y _after_w _after_h <<< "$after_ax"
+  assert_flow "pointer-titlebar-drag" "authorized external pointer drag moved exact CGWindowID by intended nonzero delta" assert_pointer_drag_delta "$drag_x" "$drag_y" "$after_x" "$after_y" 16 6
+else
 swift - "$QA_APP_PID" <<'SWIFT'
 import AppKit
 import Foundation
@@ -177,13 +199,12 @@ then
   defer_display "accessibility-frontmost-focus" "exact scratch PID/window could not become frontmost/main on this self-hosting runner; pointer drag was not attempted or claimed"
 fi
 append_event "pointer-drag-focus-precondition" "pass" "" "exact candidate PID/window is frontmost and main before genuine pointer drag"
-IFS=',' read -r drag_x drag_y drag_w _drag_h <<< "$before_ax"
-drag_start_x=$((drag_x + drag_w / 2)); drag_start_y=$((drag_y + 14)); drag_dx=24; drag_dy=12
 cliclick "m:${drag_start_x},${drag_start_y}" "dd:${drag_start_x},${drag_start_y}" "dm:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))" "du:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))"
 after_ax="$(window_bounds)"
 IFS=',' read -r after_x after_y _after_w _after_h <<< "$after_ax"
 actual_dx=$((after_x-drag_x)); actual_dy=$((after_y-drag_y))
 assert_flow "pointer-titlebar-drag" "real cliclick down/move/up moved exact CGWindowID by intended nonzero delta" assert_pointer_drag_delta "$drag_x" "$drag_y" "$after_x" "$after_y" 16 6
+fi
 assert_flow "isolated-roots" "project and app-support roots are distinct QA paths" test "$CONTINUUM_PROJECT_ROOT" != "$CONTINUUM_APP_SUPPORT"
 grant_persisted_after="$(defaults read "$defaults_domain" "$CONTINUUM_QA_PROJECT_GRANT_KEY" 2>/dev/null || true)"
 assert_flow "volatile-project-ack" "process launch acknowledgement did not mutate persistent defaults" test "$grant_persisted_before" = "$grant_persisted_after"

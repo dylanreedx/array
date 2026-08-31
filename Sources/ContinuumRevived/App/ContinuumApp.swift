@@ -17465,6 +17465,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if ProcessInfo.processInfo.environment["CONTINUUM_QA_HOLD_OPEN"] == "1" {
                 NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
+                if ProcessInfo.processInfo.environment["CONTINUUM_QA_EXTERNAL_INPUT"] == "1",
+                   let nonce = ProcessInfo.processInfo.environment["CONTINUUM_QA_LAUNCH_NONCE"] {
+                    window.title = "ARRAY_QA_INPUT_\(nonce.prefix(10)) — Array"
+                }
                 window.setContentSize(NSSize(width: 960, height: 720))
                 window.layoutIfNeeded()
                 captureNotes = [notes, "qaContentSize=960x720"].compactMap { $0 }.joined(separator: "; ")
