@@ -15,6 +15,7 @@ const requiredExecutables = [
   "qa/flows/quit-during-load.sh"
   ,"qa/flows/release-preflight.sh"
   ,"qa/tests/wave0-gui-adversarial.sh"
+  ,"qa/external-input-driver.sh"
 ];
 
 const markerChecks = new Map([

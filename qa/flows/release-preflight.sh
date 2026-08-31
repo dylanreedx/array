@@ -49,6 +49,8 @@ export CONTINUUM_QA_CANDIDATE_SHA="$(git -C "$QA_ROOT" rev-parse HEAD)"
 export CONTINUUM_QA_EXECUTABLE_PATH="$(canonical_path "$QA_APP")"
 export CONTINUUM_QA_EXECUTABLE_SHA256="$(shasum -a 256 "$CONTINUUM_QA_EXECUTABLE_PATH" | awk '{print $1}')"
 export CONTINUUM_QA_FIXTURE_ID="ARRAY_QA_RULER_V1"
+export CONTINUUM_QA_EXTERNAL_READY_PATH="$QA_RUN_DIR/external-input-ready.json"
+export CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT="$QA_RUN_DIR/external-pointer-events.json"
 defaults_domain="dev.arrayapp.macos.dev"
 grant_persisted_before="$(defaults read "$defaults_domain" "$CONTINUUM_QA_PROJECT_GRANT_KEY" 2>/dev/null || true)"
 probe="$CONTINUUM_PROJECT_ROOT/.array-release-preflight-write-probe"
@@ -152,17 +154,31 @@ drag_start_x=$((drag_x + drag_w / 2)); drag_start_y=$((drag_y + 14)); drag_dx=24
 if [[ "${CONTINUUM_QA_EXTERNAL_INPUT:-0}" == "1" ]]; then
   ready="$QA_RUN_DIR/external-input-ready.json"; done_marker="$QA_RUN_DIR/external-input-done.json"
   rm -f "$ready" "$done_marker"
+  ready_challenge="$(openssl rand -hex 24)"
+  ready_published_ns="$(python3 -c 'import time; print(time.time_ns())')"
   input_title="ARRAY_QA_INPUT_${CONTINUUM_QA_LAUNCH_NONCE:0:10} — Array"
-  python3 - "$ready" "$CONTINUUM_QA_RUN_ID" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$QA_APP_PID" "$QA_WINDOW_ID" "$before_ax" "$drag_dx" "$drag_dy" "$input_title" "$CONTINUUM_QA_EXECUTABLE_PATH" <<'PY'
+  python3 - "$ready" "$CONTINUUM_QA_RUN_ID" "$ready_challenge" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$QA_APP_PID" "$QA_WINDOW_ID" "$before_ax" "$drag_dx" "$drag_dy" "$input_title" "$CONTINUUM_QA_EXECUTABLE_PATH" "$CONTINUUM_QA_EXECUTABLE_SHA256" "$ready_published_ns" <<'PY'
 import json,os,sys,tempfile
-out=sys.argv[1]; payload=dict(runID=sys.argv[2],launchNonce=sys.argv[3],candidateSHA=sys.argv[4],pid=int(sys.argv[5]),windowID=int(sys.argv[6]),beforeBounds=[int(x) for x in sys.argv[7].split(',')],requestedDelta=[int(sys.argv[8]),int(sys.argv[9])],title=sys.argv[10],executablePath=sys.argv[11])
+out=sys.argv[1]; payload=dict(runID=sys.argv[2],readyChallenge=sys.argv[3],launchNonce=sys.argv[4],candidateSHA=sys.argv[5],pid=int(sys.argv[6]),windowID=int(sys.argv[7]),beforeBounds=[int(x) for x in sys.argv[8].split(',')],requestedDelta=[int(sys.argv[9]),int(sys.argv[10])],title=sys.argv[11],executablePath=sys.argv[12],executableSHA256=sys.argv[13],readyPublishedAtNs=int(sys.argv[14]))
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(out)); os.write(fd,json.dumps(payload,sort_keys=True,indent=2).encode()+b'\n'); os.close(fd); os.replace(tmp,out)
 PY
   append_event "external-input-ready" "pass" "" "nonce-bound scratch title=$input_title; waiting for authorized pointer input"
   wait_for_named_readiness "external-input-done-ready" "$done_marker" 60 || defer_display "external-input-timeout" "authorized external input did not produce a fresh done marker"
-  assert_flow "external-input-done-identity" "done marker matches exact nonce and CGWindowID" python3 - "$done_marker" "$CONTINUUM_QA_LAUNCH_NONCE" "$QA_WINDOW_ID" <<'PY'
+  assert_flow "external-input-done-identity" "done marker completely matches ready identity, digest, driver and ordering" python3 - "$ready" "$done_marker" "$QA_ROOT/qa/external-input-driver.sh" <<'PY'
+import hashlib,json,os,sys
+r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2])); digest=hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()
+for k in ['runID','readyChallenge','launchNonce','candidateSHA','pid','windowID','title','executablePath','executableSHA256','beforeBounds','requestedDelta']: assert d.get(k)==r.get(k)
+driver=os.path.realpath(sys.argv[3]); assert os.path.realpath(d.get('driverPath',''))==driver and d.get('driverSHA256')==hashlib.sha256(open(driver,'rb').read()).hexdigest()
+assert d.get('readySHA256')==digest and len(d.get('cliclickArgv',[]))==4 and d.get('startedAtNs',0) < d.get('finishedAtNs',0) < d.get('doneAtNs',0)
+assert os.stat(sys.argv[2]).st_mtime_ns > os.stat(sys.argv[1]).st_mtime_ns and d.get('doneAtNs',0) > r['readyPublishedAtNs']
+assert d.get('actualDelta') == [d['afterBounds'][0]-r['beforeBounds'][0],d['afterBounds'][1]-r['beforeBounds'][1]]
+PY
+  assert_flow "external-pointer-event-proof" "target app observed ordered down-dragged-up bound to challenge/window" python3 - "$ready" "$CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT" <<'PY'
 import json,sys
-p=json.load(open(sys.argv[1])); assert p.get('launchNonce')==sys.argv[2] and p.get('windowID')==int(sys.argv[3])
+r=json.load(open(sys.argv[1])); e=json.load(open(sys.argv[2])); ev=e['events']; kinds=[x['kind'] for x in ev]
+assert e['readyChallenge']==r['readyChallenge'] and e['launchNonce']==r['launchNonce'] and e['windowID']==r['windowID'] and e['title']==r['title']
+assert 'down' in kinds and 'dragged' in kinds and 'up' in kinds and kinds.index('down') < kinds.index('dragged') < kinds.index('up')
+assert all(x['windowID']==r['windowID'] for x in ev)
 PY
   assert_window_owned_by_pid || defer_display "external-input-window-identity" "exact window ownership changed during external input"
   after_ax="$(window_bounds)"
