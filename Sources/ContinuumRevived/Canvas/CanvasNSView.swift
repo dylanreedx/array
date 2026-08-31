@@ -7684,6 +7684,19 @@ final class CanvasNSView: NSView, TokenThemed {
                    "the zone must stay fixed when the resized tile still fits")
         try expect(layerCommits.count == 1,
                    "one ZoneLayer tile resize must produce one final geometry transaction")
+        try expect(layerCanvas.qaLiveZonePlacement(layerZoneId) == resizedLayerZone
+                       && layerCanvas.zoneRenderModels.first(where: { $0.placement.zoneId == layerZoneId })?.placement == resizedLayerZone
+                       && layerCanvas.zoneDisplayByZoneId[layerZoneId]?.placement == resizedLayerZone,
+                   "normal unique-layer real gesture must keep liveZones and both render mirrors synchronized")
+        let expectedUniqueChrome = CanvasEngine.tileScreenFrame(
+            CanvasEngine.zoneWorldFrame(resizedLayerZone), viewport: layerCanvas.canvasState.viewport)
+        try expect(layerCanvas.zoneLayerChromeFrame(for: layerZoneId) == CGRect(
+            x: expectedUniqueChrome.minX, y: expectedUniqueChrome.minY,
+            width: expectedUniqueChrome.width, height: expectedUniqueChrome.height),
+                   "normal unique-layer chrome must track the synchronized placement")
+        try expect(layerSecondView.frame == CanvasEngine.tileScreenFrame(
+            resizedLayerSecondWorld, viewport: layerCanvas.canvasState.viewport),
+                   "normal unique-layer installed tile view must track its exact world model")
 
         func layerWorldFrames() throws -> [UUID: TileFrame] {
             guard let placement = layerCanvas.qaZoneLayerPlacement(for: layerZoneId),
@@ -8106,6 +8119,23 @@ final class CanvasNSView: NSView, TokenThemed {
         sameCanvas.activeCanvasUndoManager?.undo()
         try expect(CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == samePeerWorldBefore,
                    "same-zone noncanonical layer object must remain exact through geometry undo")
+
+        // Removing the exact concrete target after mouseDown must cancel the
+        // gesture on the next event without redirecting it to a surviving
+        // same-UUID peer or leaking resize HUD state.
+        let removalA0 = sameLayerA.placement
+        let removalStart = win(CGFloat(sameLayerB.placement.origin.x + 80),
+                               CGFloat(sameLayerB.placement.origin.y + 16))
+        sameCanvas.mouseDown(with: try event(.leftMouseDown, removalStart, window: sameWindow))
+        sameCanvas.zoneLayers.removeAll { $0 === sameLayerB }
+        sameCanvas.mouseDragged(with: try event(
+            .leftMouseDragged, NSPoint(x: removalStart.x + 55, y: removalStart.y - 20), window: sameWindow))
+        sameCanvas.mouseUp(with: try event(
+            .leftMouseUp, NSPoint(x: removalStart.x + 55, y: removalStart.y - 20), window: sameWindow))
+        try expect(sameLayerA.placement == removalA0 && sameCanvas.zoneLayers.contains(where: { $0 === sameLayerA }),
+                   "removed concrete gesture target must not mutate its surviving same-ID peer")
+        try expect(!sameCanvas.qaResizeHUDVisible,
+                   "target removal cancellation must leave no resize HUD residue")
 
         // Spawn a third member beyond the old right edge, then swap the middle
         // member into the left member's slot through a real title-bar drag.
