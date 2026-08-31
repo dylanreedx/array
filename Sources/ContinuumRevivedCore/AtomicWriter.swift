@@ -311,20 +311,19 @@ public struct AtomicWriter: Sendable {
             withIntermediateDirectories: true
         )
 
-        // Writers for one canonical target hold the cross-process target lock,
-        // so probing for the first free monotonic suffix is race-free. Never
-        // delete a collision: it is retained history from another process.
-        let date = backupDate()
-        var suffix: UInt64 = 1
-        var backupURL = backupsDirectory.appendingPathComponent(
-            backupName(for: url, at: date, suffix: suffix)
+        // The canonical target lock covers this directory scan and copy. The
+        // generation is therefore durable, process-independent ordering truth;
+        // wall clock is only human-readable metadata.
+        let existing = try backupEntries(for: url, entries:
+            FileManager.default.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil))
+        let maximum = existing.compactMap(\.generation).max() ?? 0
+        guard maximum < UInt64.max else { throw POSIXError(.EOVERFLOW) }
+        let generation = maximum + 1
+        let backupURL = backupsDirectory.appendingPathComponent(
+            backupName(for: url, at: backupDate(), generation: generation)
         )
-        while FileManager.default.fileExists(atPath: backupURL.path) {
-            suffix += 1
-            backupURL = backupsDirectory.appendingPathComponent(
-                backupName(for: url, at: date, suffix: suffix)
-            )
-        }
+        // Never remove or overwrite a collision. This should be unreachable
+        // under the target lock, but copyItem's exclusive failure is fail-safe.
         try FileManager.default.copyItem(at: url, to: backupURL)
     }
 
@@ -343,29 +342,72 @@ public struct AtomicWriter: Sendable {
             FileManager.default.fileExists(atPath: backupsDirectory.path)
         else { return [] }
 
-        let prefix = "\(url.deletingPathExtension().lastPathComponent)."
-        let ext = "." + url.pathExtension
-        let entries = try fileOperations.listDirectory(backupsDirectory)
-        return entries
-            .filter { entry in
-                let name = entry.lastPathComponent
-                return name.hasPrefix(prefix) && name.hasSuffix(ext)
+        return try backupEntries(for: url).sorted { lhs, rhs in
+            switch (lhs.generation, rhs.generation) {
+            case let (l?, r?): return l == r ? lhs.url.lastPathComponent > rhs.url.lastPathComponent : l > r
+            case (_?, nil): return true       // every new generation follows legacy history
+            case (nil, _?): return false
+            case (nil, nil): return lhs.url.lastPathComponent > rhs.url.lastPathComponent
             }
-            // Backup names embed an ISO 8601 timestamp + millis + monotonic
-            // tiebreaker (see backupName), so lexicographic descending order
-            // is newest-first.
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        }.map(\.url)
     }
 
-    private func backupName(for url: URL, at date: Date, suffix: UInt64) -> String {
-        let stem = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
+    private struct BackupEntry {
+        let url: URL
+        let generation: UInt64?
+    }
+
+    private func backupEntries(for url: URL) throws -> [BackupEntry] {
+        guard let backupsDirectory else { return [] }
+        let entries = try fileOperations.listDirectory(backupsDirectory)
+        return backupEntries(for: url, entries: entries)
+    }
+
+    private func backupEntries(for url: URL, entries: [URL]) -> [BackupEntry] {
+        let targetName = url.lastPathComponent
+        let identity = Data(targetName.utf8).map { String(format: "%02x", $0) }.joined()
+        let newPrefix = "array-backup-v2-\(identity)-"
+        let legacyStem = url.deletingPathExtension().lastPathComponent
+        let legacyPrefix = "\(legacyStem)."
+        let legacySuffix = ".\(url.pathExtension)"
+        return entries.compactMap { entry in
+            let name = entry.lastPathComponent
+            if name.hasPrefix(newPrefix) {
+                let remainder = name.dropFirst(newPrefix.count)
+                guard remainder.count >= 21 else { return nil }
+                let token = remainder.prefix(20)
+                guard remainder.dropFirst(20).first == "-", token.allSatisfy(\.isNumber),
+                      let generation = UInt64(token) else { return nil }
+                return BackupEntry(url: entry, generation: generation)
+            }
+            // Legacy: exact stem/extension plus a parseable ISO-8601 timestamp
+            // and the historical 6- or 12-digit suffix. This rejects similarly
+            // prefixed and dotted target names sharing one backup directory.
+            guard name.hasPrefix(legacyPrefix), name.hasSuffix(legacySuffix) else { return nil }
+            let body = name.dropFirst(legacyPrefix.count).dropLast(legacySuffix.count)
+            guard let separator = body.lastIndex(of: ".") else { return nil }
+            var timestamp = String(body[..<separator])
+            guard timestamp.count > 16 else { return nil }
+            for offset in [16, 13] {
+                let index = timestamp.index(timestamp.startIndex, offsetBy: offset)
+                guard timestamp[index] == "-" else { return nil }
+                timestamp.replaceSubrange(index...index, with: ":")
+            }
+            let suffix = body[body.index(after: separator)...]
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            guard (suffix.count == 6 || suffix.count == 12), suffix.allSatisfy(\.isNumber),
+                  formatter.date(from: timestamp) != nil else { return nil }
+            return BackupEntry(url: entry, generation: nil)
+        }
+    }
+
+    private func backupName(for url: URL, at date: Date, generation: UInt64) -> String {
+        let identity = Data(url.lastPathComponent.utf8).map { String(format: "%02x", $0) }.joined()
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let iso = formatter.string(from: date).replacingOccurrences(of: ":", with: "-")
-        // The suffix is selected against on-disk names while holding the
-        // cross-process target lock, so it also encodes same-timestamp order.
-        return "\(stem).\(iso).\(String(format: "%012llu", suffix)).\(ext)"
+        return "array-backup-v2-\(identity)-\(String(format: "%020llu", generation))-\(iso)"
     }
 }
 

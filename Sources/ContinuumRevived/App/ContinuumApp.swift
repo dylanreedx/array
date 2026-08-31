@@ -23952,8 +23952,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let root = URL(fileURLWithPath: try argument("--support"), isDirectory: true)
         let workspaceId = UUID(uuidString: try argument("--workspace-id"))!
-        let fixedBackupDate = CommandLine.arguments.contains("--fixed-backup-date")
-            ? Date(timeIntervalSince1970: 1_900_000_000.123) : nil
+        let fixedBackupDate: Date? = {
+            if let epoch = try? argument("--backup-epoch"), let seconds = Double(epoch) {
+                return Date(timeIntervalSince1970: seconds)
+            }
+            return CommandLine.arguments.contains("--fixed-backup-date")
+                ? Date(timeIntervalSince1970: 1_900_000_000.123) : nil
+        }()
         let generation = Int((try? argument("--generation")) ?? "177") ?? 177
         let document = WorkspaceDocument(
             viewport: .init(x: Double(generation), y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
@@ -24409,7 +24414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 retainedBackups: 4, backupDate: { fixedDate })
             try store.save(valid)
             try store.save(replacement) // process-local suffix 1
-            for childGeneration in [201, 202] {
+            for childGeneration in [201, 202, 203] {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
                 process.arguments = ["--atomic-writer-lock-child", "--support", root.path,
@@ -24420,21 +24425,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             let backups = try FileManager.default.contentsOfDirectory(
                 at: store.layout.backupsDirectory, includingPropertiesForKeys: nil)
-                .filter { $0.lastPathComponent.hasPrefix("canvas.") }
+                .filter { $0.lastPathComponent.hasPrefix("array-backup-v2-") }
                 .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            try expect(backups.count == 3, "same-timestamp backup collision lost or overwrote history")
+            try expect(backups.count == 4, "same-timestamp backup collision lost or overwrote history")
             let backupDocuments: [WorkspaceDocument] = try backups.map {
                 try JSONDecoder().decode(WorkspaceDocument.self, from: Data(contentsOf: $0))
             }
-            try expect(backupDocuments.map(\.viewport.x) == [201, -9, 1],
+            try expect(backupDocuments.map(\.viewport.x) == [202, 201, -9, 1],
                 "same-timestamp backup retention/order was not newest-first and byte-distinct")
             let collisionReload = try store.load()
-            try expect(collisionReload.viewport.x == 202,
+            try expect(collisionReload.viewport.x == 203,
                 "latest cross-process collision writer was not durable truth")
             faultResults.append(["seam": "cross-process-same-timestamp-backups",
                 "successReported": true, "backupCount": backups.count,
                 "orderedViewportX": backupDocuments.map(\.viewport.x),
                 "existingBackupNeverOverwritten": true])
+        }
+
+        // Identical predecessor/candidate witness: T3 -> T1 -> T2 must order by
+        // durable on-disk generation, not timestamp. With retention two, corrupt
+        // primary D3 recovers D2, the newest prior generation.
+        do {
+            let root = support.appendingPathComponent("fault-backward-clock", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000018")!
+            let dates = [1_900_000_300.0, 1_900_000_100.0, 1_900_000_200.0]
+            let documents = [valid,
+                WorkspaceDocument(viewport: .init(x: 301, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil),
+                WorkspaceDocument(viewport: .init(x: 302, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil),
+                WorkspaceDocument(viewport: .init(x: 303, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil)]
+            try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 2).save(documents[0])
+            for index in 0..<3 {
+                let writer = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                    retainedBackups: 2, backupDate: { Date(timeIntervalSince1970: dates[index]) })
+                try writer.save(documents[index + 1])
+            }
+            let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
+            let names = try FileManager.default.contentsOfDirectory(atPath: layout.backupsDirectory.path).sorted()
+            try expect(names.count == 2 && names.contains { $0.contains("00000000000000000002") }
+                && names.contains { $0.contains("00000000000000000003") },
+                "backward clock did not retain exact generations 2 and 3")
+            try Data("corrupt".utf8).write(to: layout.canvasFile)
+            let recovered: WorkspaceDocument = try AtomicWriter(
+                backupsDirectory: layout.backupsDirectory, retainedBackups: 2).read(at: layout.canvasFile)
+            try expect(recovered == documents[2], "backward clock recovery did not choose D2")
+            faultResults.append(["seam":"backward-clock-generations", "dates":dates,
+                "writeBytesX":[301,302,303], "retainedGenerations":[3,2],
+                "primaryBeforeCorruption":303, "recoveryChoice":302, "filenames":names])
+        }
+
+        // Legacy names remain behind all v2 generations, while malformed and
+        // similarly-prefixed targets are excluded exactly.
+        do {
+            let root = support.appendingPathComponent("fault-legacy-target-isolation", isDirectory: true)
+            let backups = root.appendingPathComponent("shared-backups", isDirectory: true)
+            try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+            let target = root.appendingPathComponent("canvas.prod.json")
+            let other = root.appendingPathComponent("canvas.prod.extra.json")
+            let dLegacy1 = WorkspaceDocument(viewport:.init(x:401,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let dLegacy2 = WorkspaceDocument(viewport:.init(x:402,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let encoder = JSONCodec.makeEncoder(prettyPrinted: true)
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("canvas.prod.2030-01-01T00-00-00.000Z.000001.json"))
+            try encoder.encode(dLegacy2).write(to: backups.appendingPathComponent("canvas.prod.2031-01-01T00-00-00.000Z.000002.json"))
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("canvas.prod.extra.2099-01-01T00-00-00.000Z.000999.json"))
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("array-backup-v2-00-malformed"))
+            let writer = AtomicWriter(backupsDirectory: backups, retainedBackups: 3,
+                backupDate: { Date(timeIntervalSince1970: 1_000) })
+            try encoder.encode(valid).write(to: target)
+            try writer.write(replacement, to: target)
+            try encoder.encode(valid).write(to: other)
+            try AtomicWriter(backupsDirectory: backups, retainedBackups: 3).write(dLegacy1, to: other)
+            try Data("corrupt".utf8).write(to: target)
+            let recovered: WorkspaceDocument = try writer.read(at: target)
+            try expect(recovered == valid, "new generation did not sort ahead of legacy corpus")
+            let targetRecovery: WorkspaceDocument = try AtomicWriter(backupsDirectory: backups).read(at: target)
+            try expect(targetRecovery == valid, "similarly-prefixed target entered recovery")
+            let legacyOnly = root.appendingPathComponent("archive.json")
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("archive.2030-01-01T00-00-00.000Z.000001.json"))
+            try encoder.encode(dLegacy2).write(to: backups.appendingPathComponent("archive.2031-01-01T00-00-00.000Z.000002.json"))
+            try Data("corrupt".utf8).write(to: legacyOnly)
+            let legacyRecovered: WorkspaceDocument = try AtomicWriter(
+                backupsDirectory: backups, retainedBackups: 2).read(at: legacyOnly)
+            try expect(legacyRecovered == dLegacy2, "legacy newest-first recovery changed")
+            try encoder.encode(valid).write(to: legacyOnly)
+            let legacyAger = AtomicWriter(backupsDirectory: backups, retainedBackups: 2)
+            try legacyAger.write(dLegacy1, to: legacyOnly)
+            try legacyAger.write(dLegacy2, to: legacyOnly)
+            let archiveEntries = try FileManager.default.contentsOfDirectory(atPath: backups.path)
+                .filter { $0.hasPrefix("archive.") }
+            try expect(archiveEntries.isEmpty, "legacy entries did not age out under normal retention")
+            faultResults.append(["seam":"legacy-and-target-isolation", "legacyRecoverable":true,
+                "newAheadOfLegacy":true, "legacyNewestChoice":402, "legacyAgedOut":true,
+                "dottedTargetExact":true, "malformedExcluded":true])
+        }
+
+        // Alternating extreme clock jumps cannot perturb generation retention.
+        do {
+            let root = support.appendingPathComponent("fault-alternating-clock", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000019")!
+            let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
+            let identity = Data(layout.canvasFile.lastPathComponent.utf8).map { String(format:"%02x",$0) }.joined()
+            let prefix = "array-backup-v2-\(identity)-"
+            try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 3).save(valid)
+            let dates = [4_000_000_000.0, 10.0, 3_900_000_000.0, 20.0, 3_800_000_000.0, 30.0]
+            var states: [[String:Any]] = []
+            for (index, epoch) in dates.enumerated() {
+                let document = WorkspaceDocument(viewport:.init(x:Double(500 + index),y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+                try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                    retainedBackups: 3, backupDate: { Date(timeIntervalSince1970:epoch) }).save(document)
+                let names = try FileManager.default.contentsOfDirectory(atPath: layout.backupsDirectory.path).sorted()
+                let generations = names.compactMap { name -> Int? in
+                    guard name.hasPrefix(prefix) else { return nil }
+                    return Int(name.dropFirst(prefix.count).prefix(20))
+                }.sorted()
+                let expectedGenerations = Array(max(1, index - 1)...(index + 1))
+                try expect(generations == expectedGenerations,
+                    "alternating clock retained wrong generations \(generations), expected \(expectedGenerations)")
+                states.append(["write":index+1,"epoch":epoch,"retainedCount":names.count,
+                    "primaryX":500+index,"retainedGenerations":generations])
+            }
+            faultResults.append(["seam":"alternating-clock-retention", "states":states,
+                "retention":3, "generationAuthoritative":true])
+        }
+
+        // Generation overflow fails before replacement. Malformed tokens do not
+        // inflate the sequence; a committed primary remains exact.
+        do {
+            let root = support.appendingPathComponent("fault-generation-overflow", isDirectory: true)
+            let backups = root.appendingPathComponent("backups", isDirectory: true)
+            let target = root.appendingPathComponent("overflow.json")
+            try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+            try JSONCodec.makeEncoder(prettyPrinted:true).encode(valid).write(to: target)
+            let identity = Data(target.lastPathComponent.utf8).map { String(format:"%02x",$0) }.joined()
+            let maxName = "array-backup-v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z"
+            try Data("sentinel".utf8).write(to: backups.appendingPathComponent(maxName))
+            var overflowed = false
+            do { try AtomicWriter(backupsDirectory: backups).write(replacement, to: target) }
+            catch { overflowed = true }
+            let primary: WorkspaceDocument = try JSONCodec.makeDecoder().decode(
+                WorkspaceDocument.self, from: Data(contentsOf: target))
+            try expect(overflowed && primary == valid, "generation overflow did not fail closed")
+            faultResults.append(["seam":"generation-overflow", "successReported":false,
+                "primaryByteTruth":"valid", "existingBackupPreserved":true])
         }
 
         // An unreadable existing target is not the same state as ENOENT. It is
@@ -24651,7 +24784,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ) else { return 0 }
             return entries.filter { entry in
                 let name = entry.lastPathComponent
-                return name.hasPrefix("canvas.") && name.hasSuffix(".json")
+                return name.hasPrefix("canvas.") || name.hasPrefix("array-backup-v2-")
             }.count
         }
 
