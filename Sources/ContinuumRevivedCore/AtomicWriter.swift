@@ -3,6 +3,8 @@ import Foundation
 
 public enum AtomicWriterError: Error, Equatable, CustomStringConvertible {
     case noValidBackup(path: String)
+    case priorTargetUnreadable
+    case rollbackIndeterminate
 
     /// The associated path is retained for local recovery code only. Never let
     /// the filesystem location cross a warning/UI/diagnostic boundary.
@@ -10,6 +12,10 @@ public enum AtomicWriterError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .noValidBackup:
             return "no valid backup"
+        case .priorTargetUnreadable:
+            return "existing document is unreadable"
+        case .rollbackIndeterminate:
+            return "document rollback durability is indeterminate"
         }
     }
 }
@@ -38,6 +44,9 @@ public struct AtomicWriterDescriptorOperations: Sendable {
 public struct AtomicWriterFileOperations: Sendable {
     public var writeTemporary: @Sendable (Data, URL) throws -> Void
     public var replace: @Sendable (URL, URL) throws -> Void
+    public var remove: @Sendable (URL) throws -> Void
+    public var listDirectory: @Sendable (URL) throws -> [URL]
+    public var readExisting: @Sendable (URL) throws -> Data
 
     public init(
         writeTemporary: @escaping @Sendable (Data, URL) throws -> Void = { data, url in
@@ -47,10 +56,18 @@ public struct AtomicWriterFileOperations: Sendable {
             if Darwin.rename(source.path, destination.path) != 0 {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-        }
+        },
+        remove: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
+        listDirectory: @escaping @Sendable (URL) throws -> [URL] = {
+            try FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        },
+        readExisting: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) }
     ) {
         self.writeTemporary = writeTemporary
         self.replace = replace
+        self.remove = remove
+        self.listDirectory = listDirectory
+        self.readExisting = readExisting
     }
 
     public static let live = AtomicWriterFileOperations()
@@ -93,14 +110,24 @@ public struct AtomicWriter: Sendable {
             withIntermediateDirectories: true
         )
 
-        // Backup the existing file before overwriting.
-        try backupExistingFile(at: url)
-
-        // Durable atomic write: temp in same dir → fsync temp fd → rename(2) → fsync dir fd.
-        try atomicDurableWrite(data, to: url)
-
-        // Trim old backups for this file.
-        try pruneOldBackups(for: url)
+        try withTargetLock(url) {
+            // The entire prior-read/backup/replace/rollback transaction is one
+            // cross-process critical section. A failed writer can therefore
+            // never roll an acknowledged later writer back out of existence.
+            let priorBytes = try existingBytes(at: url)
+            try backupExistingFile(at: url)
+            try atomicDurableWrite(data, to: url, priorBytes: priorBytes)
+            // Replacement + directory fsync is the commit point. Backup
+            // maintenance is deliberately non-transactional and must not turn
+            // an already durable generation into a reported save failure.
+            do {
+                try pruneOldBackups(for: url)
+            } catch {
+                // The replacement is already durable. Report maintenance
+                // separately without lying to the caller about its commit.
+                fputs("AtomicWriter: post-commit backup maintenance failed\n", stderr)
+            }
+        }
     }
 
     /// Read JSON from `url`. If the main file is missing or corrupt, fall back
@@ -129,16 +156,51 @@ public struct AtomicWriter: Sendable {
 
     // MARK: - Internal helpers
 
+    private func withTargetLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
+        let canonicalParent = url.deletingLastPathComponent()
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let canonical = canonicalParent.appendingPathComponent(url.lastPathComponent)
+        // Resolving the parent collapses relative and symlink aliases before
+        // choosing both locks. Workspace documents are owned canonical paths;
+        // callers must not address one document through distinct hardlinks.
+        let processLease = AtomicWriterTargetLocks.acquire(for: canonical.path)
+        processLease.lock.lock()
+        defer {
+            processLease.lock.unlock()
+            AtomicWriterTargetLocks.release(processLease, for: canonical.path)
+        }
+        let lockURL = canonical.deletingLastPathComponent()
+            .appendingPathComponent(".\(canonical.lastPathComponent).array-write.lock")
+        let fd = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        var lock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_WRLCK), l_whence: Int16(SEEK_SET))
+        guard Darwin.fcntl(fd, F_SETLKW, &lock) == 0 else {
+            _ = Darwin.close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer {
+            var unlock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_UNLCK), l_whence: Int16(SEEK_SET))
+            _ = Darwin.fcntl(fd, F_SETLK, &unlock)
+            _ = Darwin.close(fd)
+        }
+        return try body()
+    }
+
     /// Write `data` to `url` durably:
     ///   1. Write bytes to a dot-prefixed sibling temp in the **same directory** (same volume → rename is atomic).
     ///   2. fsync the temp's file descriptor so bytes are on stable storage before the rename.
     ///   3. rename(2) the temp into place atomically.
     ///   4. fsync the parent directory fd so the rename itself is durable.
     /// If any step fails, the temp is removed and `url` is untouched.
-    private func atomicDurableWrite(_ data: Data, to url: URL) throws {
+    private func existingBytes(at url: URL) throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do { return try fileOperations.readExisting(url) }
+        catch { throw AtomicWriterError.priorTargetUnreadable }
+    }
+
+    private func atomicDurableWrite(_ data: Data, to url: URL, priorBytes: Data?) throws {
         let dir = url.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
-        let priorBytes = try? Data(contentsOf: url)
         // Write bytes to the temp (not atomic — it's throwaway; atomicity comes from rename).
         do {
             try fileOperations.writeTemporary(data, tmp)
@@ -174,17 +236,20 @@ public struct AtomicWriter: Sendable {
         // fsync the parent directory so the directory entry (rename) is durable.
         let dfd = descriptorOperations.open(dir.path, O_RDONLY)
         guard dfd >= 0 else {
-            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
+            do { try rollbackCommittedWrite(at: url, priorBytes: priorBytes) }
+            catch { throw AtomicWriterError.rollbackIndeterminate }
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         if descriptorOperations.fsync(dfd) != 0 {
             let err = errno
             _ = descriptorOperations.close(dfd)
-            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
+            do { try rollbackCommittedWrite(at: url, priorBytes: priorBytes) }
+            catch { throw AtomicWriterError.rollbackIndeterminate }
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
         if descriptorOperations.close(dfd) != 0 {
-            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
+            do { try rollbackCommittedWrite(at: url, priorBytes: priorBytes) }
+            catch { throw AtomicWriterError.rollbackIndeterminate }
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
@@ -194,7 +259,8 @@ public struct AtomicWriter: Sendable {
     /// retained prior bytes with live operations, then durably sync the directory.
     private func rollbackCommittedWrite(at url: URL, priorBytes: Data?) throws {
         guard let priorBytes else {
-            try FileManager.default.removeItem(at: url)
+            try fileOperations.remove(url)
+            try syncDirectory(url.deletingLastPathComponent())
             return
         }
         let dir = url.deletingLastPathComponent()
@@ -214,6 +280,13 @@ public struct AtomicWriter: Sendable {
             try? FileManager.default.removeItem(at: rollback)
             throw error
         }
+    }
+
+    private func syncDirectory(_ dir: URL) throws {
+        let dfd = Darwin.open(dir.path, O_RDONLY)
+        guard dfd >= 0 else { throw POSIXError(.EIO) }
+        defer { _ = Darwin.close(dfd) }
+        guard Darwin.fsync(dfd) == 0 else { throw POSIXError(.EIO) }
     }
 
     private func backupExistingFile(at url: URL) throws {
@@ -251,11 +324,7 @@ public struct AtomicWriter: Sendable {
 
         let prefix = "\(url.deletingPathExtension().lastPathComponent)."
         let ext = "." + url.pathExtension
-        let entries = try FileManager.default.contentsOfDirectory(
-            at: backupsDirectory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
+        let entries = try fileOperations.listDirectory(backupsDirectory)
         return entries
             .filter { entry in
                 let name = entry.lastPathComponent
@@ -279,6 +348,43 @@ public struct AtomicWriter: Sendable {
         // the same millisecond on a fast machine.
         let n = Self.backupCounter.next()
         return "\(stem).\(iso).\(String(format: "%06d", n)).\(ext)"
+    }
+}
+
+/// POSIX record locks are process-associated on Darwin, so they do not exclude
+/// two threads in this process. Pair the cross-process fcntl lock with this
+/// canonical-target mutex; both cover the identical complete transaction.
+private final class AtomicWriterTargetLocks: @unchecked Sendable {
+    static let shared = AtomicWriterTargetLocks()
+    final class Entry {
+        let lock = NSLock()
+        var leases = 0
+    }
+    private let registryLock = NSLock()
+    private var locks: [String: Entry] = [:]
+
+    static func acquire(for path: String) -> Entry { shared.acquire(for: path) }
+    static func release(_ entry: Entry, for path: String) { shared.release(entry, for: path) }
+
+    private func acquire(for path: String) -> Entry {
+        registryLock.lock()
+        defer { registryLock.unlock() }
+        if let existing = locks[path] {
+            existing.leases += 1
+            return existing
+        }
+        let created = Entry()
+        created.leases = 1
+        locks[path] = created
+        return created
+    }
+
+    private func release(_ entry: Entry, for path: String) {
+        registryLock.lock()
+        defer { registryLock.unlock() }
+        precondition(entry.leases > 0)
+        entry.leases -= 1
+        if entry.leases == 0, locks[path] === entry { locks.removeValue(forKey: path) }
     }
 }
 

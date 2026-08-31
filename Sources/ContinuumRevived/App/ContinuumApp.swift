@@ -2295,6 +2295,16 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--atomic-writer-lock-child") {
+            do {
+                try AppDelegate.runAtomicWriterLockChild()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-move-unified-check") {
             do {
                 _ = NSApplication.shared
@@ -3892,6 +3902,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
     private var suppressTerminateOnWindowCloseForQA = false
+    /// Set only by the vetoable NSWindowDelegate close decision. `willClose`
+    /// consumes it so a successful save is acknowledged exactly once.
+    private weak var closeFlushAcknowledgedWindow: NSWindow?
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
     private lazy var agentTranscriptStore = AgentTranscriptStore(
@@ -15007,6 +15020,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         Task { await agentComposerDraftStore.flushAll() }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        do {
+            try workspaceRuntime?.flushMountedWorkspaceState()
+            closeFlushAcknowledgedWindow = window
+            return .terminateNow
+        } catch {
+            fputs("workspace termination flush failed; termination cancelled\n", stderr)
+            return .terminateCancel
+        }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
@@ -15023,7 +15047,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshAgentSurfaces()
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        do {
+            try workspaceRuntime?.flushMountedWorkspaceState()
+            closeFlushAcknowledgedWindow = sender
+            return true
+        } catch {
+            closeFlushAcknowledgedWindow = nil
+            fputs("workspace close flush failed; close cancelled\n", stderr)
+            return false
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        // Direct/programmatic notification paths which did not ask the delegate
+        // first retain the old save-before-teardown guarantee. A real user close
+        // was already flushed in windowShouldClose and must not save twice.
+        let closingWindow = notification.object as? NSWindow
+        guard closingWindow == nil || closingWindow === window else { return }
+        if closeFlushAcknowledgedWindow !== closingWindow || closingWindow == nil {
+            do {
+                try workspaceRuntime?.flushMountedWorkspaceState()
+            } catch {
+                fputs("workspace close flush failed before teardown\n", stderr)
+                return
+            }
+        }
+        closeFlushAcknowledgedWindow = nil
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
             hotkeyMonitor = nil
@@ -15046,16 +15097,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         settingsPanel = nil
         localPairingListener?.stop()
         localPairingListener = nil
-
-        // Capture and synchronously acknowledge the mounted scene before any
-        // runtime teardown. On failure the scene remains coherent and mounted;
-        // reporting "Saved" or continuing teardown would lose acknowledged UI.
-        do {
-            try workspaceRuntime?.flushMountedWorkspaceState()
-        } catch {
-            fputs("workspace close flush failed: \(error)\n", stderr)
-            return
-        }
 
         // Browsers tear down first: WKWebView's process pool teardown is
         // independent of GhosttyKit's. Inverting the order risks WebKit KVO
@@ -23901,6 +23942,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     // MARK: - Persistence Crash-Safe Check
 
+    static func runAtomicWriterLockChild() throws {
+        func argument(_ name: String) throws -> String {
+            guard let index = CommandLine.arguments.firstIndex(of: name),
+                  CommandLine.arguments.indices.contains(index + 1) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return CommandLine.arguments[index + 1]
+        }
+        let root = URL(fileURLWithPath: try argument("--support"), isDirectory: true)
+        let workspaceId = UUID(uuidString: try argument("--workspace-id"))!
+        let document = WorkspaceDocument(
+            viewport: .init(x: 177, y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root).save(document)
+    }
+
     static func runWorkspaceRestartFaultChild() throws {
         enum Failure: Error { case message(String) }
         func argument(_ name: String) throws -> String {
@@ -24029,6 +24085,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
                 if let persisted = try projectStore.tryLoadCanvas() {
                     for t in persisted.tiles where !seen.contains(t.id) {
+                        // The fixture declares exactly one intentionally
+                        // unhydrated lower-tier member. Every other automatic,
+                        // mounted project member is required to come from the
+                        // live CanvasNSView; retained state may not conceal a
+                        // failed layer install.
+                        guard projectId == pa, t.id == ta2, t.zoneId == za2 else {
+                            throw Failure.message("hydrated project tile missing from live canvas: \(t.id)")
+                        }
                         tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
                             "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": "retained"])
                     }
@@ -24089,6 +24153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var switchSnapshots: [[String: Any]] = []
         var settled = try snapshot("settled")
         var mountedSceneContinuity = false
+        var closeWitness: [String: Bool] = [:]
         if mode == "seed-mutate-close" {
             var placement = canvas.zonePlacement(for: za1)!
             placement.origin = .init(x: -1001.375, y: 333.625)
@@ -24120,11 +24185,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switchSnapshots.append(try snapshot("A-after-return"))
             settled = try snapshot("settled")
             if closeOffset > 0 { usleep(closeOffset * 1_000) }
-            delegate.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+            let closeWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            closeWindow.isReleasedWhenClosed = false
+            closeWindow.delegate = delegate
+            delegate.window = closeWindow
+            closeWindow.orderFront(nil)
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected close save") }
+            closeWindow.performClose(nil)
+            let failedCloseVetoed = delegate.workspaceRuntime === runtime
+                && closeWindow.delegate === delegate && closeWindow.isVisible
+            guard failedCloseVetoed else {
+                throw Failure.message("failed close attempt tore down the mounted scene")
+            }
+            runtime._workspaceDocumentSaver = nil
+            closeWindow.performClose(nil)
+            let recoveredCloseCompleted = delegate.workspaceRuntime == nil && !closeWindow.isVisible
+            guard recoveredCloseCompleted else {
+                throw Failure.message("recovered close did not tear down exactly once")
+            }
+            closeWitness = ["failedCloseVetoed": failedCloseVetoed,
+                "recoveredCloseCompleted": recoveredCloseCompleted]
         }
         let payload: [String: Any] = ["mode": mode, "closeOffsetMs": closeOffset, "readiness": readiness,
             "firstHydrated": firstHydrated, "bootSettled": bootSettled, "settled": settled,
-            "mountedSceneContinuityOnSaveFailure": mountedSceneContinuity, "switchSnapshots": switchSnapshots]
+            "mountedSceneContinuityOnSaveFailure": mountedSceneContinuity, "switchSnapshots": switchSnapshots,
+            "closeWitness": closeWitness]
         try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: output)
         print("WS2_ACK \(mode) \(output.path)")
     }
@@ -24197,8 +24284,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect(lhsData == rhsData, "iteration \(iteration) canonical cold diff")
             let expectedAIds = Set(["71000000-0000-0000-0000-000000000031", "71000000-0000-0000-0000-000000000032", "71000000-0000-0000-0000-000000000034"])
             for phase in [switched[0], switched[2], cold] {
-                let ids = Set((phase["tiles"] as! [[String: Any]]).map { $0["id"] as! String })
+                let phaseTiles = phase["tiles"] as! [[String: Any]]
+                let ids = Set(phaseTiles.map { $0["id"] as! String })
                 try expect(ids == expectedAIds, "iteration \(iteration) phase tile inventory mismatch: \(ids)")
+                let sourceByID = Dictionary(uniqueKeysWithValues: phaseTiles.map {
+                    ($0["id"] as! String, $0["source"] as! String)
+                })
+                try expect(sourceByID["71000000-0000-0000-0000-000000000031"] == "live",
+                    "iteration \(iteration) hydrated sentinel was not observed live")
+                try expect(sourceByID["71000000-0000-0000-0000-000000000032"] == "retained",
+                    "iteration \(iteration) lower-tier retained contract changed")
+                try expect(sourceByID["71000000-0000-0000-0000-000000000034"] == "live",
+                    "iteration \(iteration) hydrated ambient tile was not observed live")
             }
             repetitions.append(["iteration": iteration, "closeOffsetMs": closeOffset,
                 "children": childResults, "canonicalDiff": [], "inputSha256": try sha256(root.appendingPathComponent("seed-mutate-close.json")),
@@ -24212,7 +24309,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let replacement = WorkspaceDocument(
             viewport: CanvasViewport(x: -9, y: 12, zoom: 2.5), zones: [], lastActiveZoneId: zoneId)
         var faultResults: [[String: Any]] = []
-        for seam in ["temporary-write", "temp-fsync", "atomic-rename", "directory-fsync", "permission-denied"] {
+        for seam in ["temporary-write", "temp-fsync", "temp-close", "atomic-rename",
+                     "directory-open", "directory-fsync", "directory-close", "permission-denied"] {
             let root = support.appendingPathComponent("fault-\(seam)", isDirectory: true)
             let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000001")!
             let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
@@ -24220,10 +24318,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = try Data(contentsOf: normal.layout.canvasFile)
             final class Counter: @unchecked Sendable { var opens = 0 }
             let counter = Counter()
-            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in counter.opens += 1; return Darwin.open(path, flags) }, fsync: { fd in
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                counter.opens += 1
+                if seam == "directory-open" && counter.opens == 2 { errno = EIO; return -1 }
+                return Darwin.open(path, flags)
+            }, fsync: { fd in
                 if seam == "temp-fsync" && counter.opens == 1 { errno = EIO; return -1 }
                 if seam == "directory-fsync" && counter.opens == 2 { errno = EIO; return -1 }
                 return Darwin.fsync(fd)
+            }, close: { fd in
+                if seam == "temp-close" && counter.opens == 1 { errno = EIO; _ = Darwin.close(fd); return -1 }
+                if seam == "directory-close" && counter.opens == 2 { errno = EIO; _ = Darwin.close(fd); return -1 }
+                return Darwin.close(fd)
             })
             let files = AtomicWriterFileOperations(writeTemporary: { data, url in
                 if seam == "temporary-write" { throw POSIXError(.EIO) }
@@ -24256,6 +24362,188 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 "loadable": true, "successReported": false, "failedGeneration": generation,
                 "acknowledgedGeneration": controller.acknowledgedGeneration, "recoveryGeneration": recoveryGeneration,
                 "mountedSceneUnchanged": true])
+        }
+
+        // Post-commit maintenance is not part of acknowledgement. Enumeration
+        // failure after the target rename+directory fsync must leave the new
+        // durable document loadable and report success.
+        do {
+            let root = support.appendingPathComponent("fault-post-commit-prune", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000011")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let files = AtomicWriterFileOperations(listDirectory: { _ in throw POSIXError(.EIO) })
+            let maintenanceFault = WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: root, fileOperations: files)
+            try maintenanceFault.save(replacement)
+            let maintenanceReload = try normal.load()
+            try expect(maintenanceReload == replacement, "post-commit prune failure changed acknowledgement truth")
+            faultResults.append(["seam": "post-commit-prune", "successReported": true,
+                "loadable": true, "maintenanceFailureNonTransactional": true])
+        }
+
+        // An unreadable existing target is not the same state as ENOENT. It is
+        // rejected before replacement, leaving the prior bytes exact.
+        do {
+            let root = support.appendingPathComponent("fault-unreadable-prior", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000012")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let before = try Data(contentsOf: normal.layout.canvasFile)
+            let files = AtomicWriterFileOperations(readExisting: { _ in throw POSIXError(.EACCES) })
+            let unreadable = WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: root, fileOperations: files)
+            do { try unreadable.save(replacement); throw RestartFaultError(message: "unreadable prior unexpectedly saved") }
+            catch AtomicWriterError.priorTargetUnreadable {}
+            let unreadableAfter = try Data(contentsOf: normal.layout.canvasFile)
+            try expect(unreadableAfter == before,
+                "unreadable prior target was mutated")
+            faultResults.append(["seam": "unreadable-prior", "successReported": false,
+                "priorValidByteExact": true, "loadable": true])
+        }
+
+        // No-prior rollback removes the unacknowledged rename and durably syncs
+        // that removal. A physical rollback failure is surfaced distinctly as
+        // indeterminate rather than claiming ordinary byte-exact failure.
+        for rollbackRemovalFails in [false, true] {
+            let root = support.appendingPathComponent(
+                rollbackRemovalFails ? "fault-rollback-removal" : "fault-no-prior-rollback", isDirectory: true)
+            let workspaceId = UUID(uuidString: rollbackRemovalFails
+                ? "72000000-0000-0000-0000-000000000013"
+                : "72000000-0000-0000-0000-000000000014")!
+            final class OpenCounter: @unchecked Sendable { var value = 0 }
+            let opens = OpenCounter()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                opens.value += 1; return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if opens.value == 2 { errno = EIO; return -1 }
+                return Darwin.fsync(fd)
+            })
+            let files = AtomicWriterFileOperations(remove: { url in
+                if rollbackRemovalFails { throw POSIXError(.EACCES) }
+                try FileManager.default.removeItem(at: url)
+            })
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors, fileOperations: files)
+            var caught: Error?
+            do { try store.save(replacement) } catch { caught = error }
+            if rollbackRemovalFails {
+                try expect(caught as? AtomicWriterError == .rollbackIndeterminate,
+                    "rollback operation failure was not classified indeterminate")
+            } else {
+                try expect(caught != nil && !FileManager.default.fileExists(atPath: store.layout.canvasFile.path),
+                    "no-prior rollback did not remove the unacknowledged target")
+            }
+            faultResults.append(["seam": rollbackRemovalFails ? "rollback-removal" : "no-prior-rollback",
+                "successReported": false, "indeterminate": rollbackRemovalFails])
+        }
+
+        // Cross-process semantics are provided by the same-volume flock. This
+        // deterministic two-writer schedule proves B cannot enter while A is
+        // paused after rename, and that B's later acknowledged bytes win after
+        // A rolls back and releases the target lock.
+        do {
+            let root = support.appendingPathComponent("fault-concurrent-writers", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000015")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let aAtDirectorySync = DispatchSemaphore(value: 0)
+            let releaseA = DispatchSemaphore(value: 0)
+            let bFinished = DispatchSemaphore(value: 0)
+            final class ConcurrentOutcome: @unchecked Sendable {
+                let lock = NSLock(); var aFailed = false; var bSucceeded = false; var opens = 0; var events: [String] = []
+                func nextOpen() -> Int { lock.lock(); defer { lock.unlock() }; opens += 1; return opens }
+                func openCount() -> Int { lock.lock(); defer { lock.unlock() }; return opens }
+                func mark(_ event: String) { lock.lock(); events.append(event); lock.unlock() }
+                func setA() { lock.lock(); aFailed = true; events.append("A-failed-after-rollback"); lock.unlock() }
+                func setB() { lock.lock(); bSucceeded = true; events.append("B-acknowledged"); lock.unlock() }
+                func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return events }
+            }
+            let outcome = ConcurrentOutcome()
+            let aDescriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                _ = outcome.nextOpen(); return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if outcome.openCount() == 2 {
+                    outcome.mark("A-post-rename")
+                    aAtDirectorySync.signal(); _ = releaseA.wait(timeout: .now() + 5)
+                    errno = EIO; return -1
+                }
+                return Darwin.fsync(fd)
+            })
+            let writerA = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: aDescriptors)
+            let writerB = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            DispatchQueue.global().async {
+                do { try writerA.save(replacement) } catch { outcome.setA() }
+            }
+            try expect(aAtDirectorySync.wait(timeout: .now() + 5) == .success,
+                "writer A never reached post-rename directory sync")
+            outcome.mark("B-attempted")
+            let finalB = WorkspaceDocument(
+                viewport: .init(x: 77, y: 88, zoom: 1.1), zones: [], lastActiveZoneId: nil)
+            DispatchQueue.global().async {
+                do { try writerB.save(finalB); outcome.setB() } catch {}
+                bFinished.signal()
+            }
+            try expect(bFinished.wait(timeout: .now() + 0.05) == .timedOut,
+                "writer B entered the same-target transaction while writer A held the lock")
+            releaseA.signal()
+            try expect(bFinished.wait(timeout: .now() + 5) == .success,
+                "writer B did not finish after writer A released the lock")
+            let concurrentReload = try normal.load()
+            try expect(outcome.aFailed && outcome.bSucceeded && concurrentReload == finalB,
+                "concurrent writer acknowledgement was clobbered by rollback")
+            faultResults.append(["seam": "concurrent-writers", "writerAFailed": true,
+                "writerBSucceeded": true, "acknowledgedWinnerReloaded": true,
+                "orderedEvents": outcome.snapshot()])
+        }
+
+        // Repeat the lock contention with a separate process. The child cannot
+        // pass the fcntl lock while this process is paused post-rename.
+        do {
+            let root = support.appendingPathComponent("fault-cross-process-writers", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000016")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let atSync = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+            final class CrossState: @unchecked Sendable {
+                let lock = NSLock(); var opens = 0; var failed = false
+                func next() -> Int { lock.lock(); defer { lock.unlock() }; opens += 1; return opens }
+                func count() -> Int { lock.lock(); defer { lock.unlock() }; return opens }
+                func markFailed() { lock.lock(); failed = true; lock.unlock() }
+            }
+            let state = CrossState()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                _ = state.next(); return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if state.count() == 2 {
+                    atSync.signal(); _ = release.wait(timeout: .now() + 5); errno = EIO; return -1
+                }
+                return Darwin.fsync(fd)
+            })
+            let writerA = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors)
+            DispatchQueue.global().async { do { try writerA.save(replacement) } catch { state.markFailed() } }
+            try expect(atSync.wait(timeout: .now() + 5) == .success, "cross-process A did not reach barrier")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            process.arguments = ["--atomic-writer-lock-child", "--support", root.path,
+                "--workspace-id", workspaceId.uuidString]
+            try process.run()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            try expect(process.isRunning, "child writer bypassed cross-process target lock")
+            release.signal()
+            process.waitUntilExit()
+            try expect(process.terminationStatus == 0 && state.failed,
+                "cross-process writer schedule did not complete A-fail/B-success")
+            let expectedChild = WorkspaceDocument(
+                viewport: .init(x: 177, y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
+            let childReload = try normal.load()
+            try expect(childReload == expectedChild,
+                "cross-process acknowledged child bytes were not reload truth")
+            faultResults.append(["seam": "cross-process-writers", "writerAFailed": true,
+                "childExit": process.terminationStatus, "acknowledgedWinnerReloaded": true,
+                "orderedEvents": ["A-post-rename", "child-attempted-and-blocked", "A-rollback", "child-acknowledged"]])
         }
         let artifact = support.appendingPathComponent("manifest.json")
         let payload: [String: Any] = [

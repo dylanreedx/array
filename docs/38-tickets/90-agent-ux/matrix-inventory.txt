@@ -144,6 +144,7 @@ check --unified-model-boot-check
 check --viewport-sanitize-check
 check --workspace-boot-persistence-check
 check --workspace-profile-check
+check --workspace-restart-fault-check
 check --workspace-runtime-install-check
 check --workspace-scene-owner-check
 check --workspace-sidebar-actions-check
@@ -326,6 +327,7 @@ leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-profile-check
+leg run_app_check .build/debug/Array --workspace-restart-fault-check
 leg run_app_check .build/debug/Array --workspace-runtime-install-check
 leg run_app_check .build/debug/Array --workspace-scene-owner-check
 leg run_app_check .build/debug/Array --workspace-sidebar-actions-check
