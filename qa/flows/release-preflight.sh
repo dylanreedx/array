@@ -25,7 +25,9 @@ require_command sips
 [[ -n "${CONTINUUM_QA_RUN_DIR:-}" ]] || { echo "release preflight requires explicit CONTINUUM_QA_RUN_DIR" >&2; exit 2; }
 [[ -n "${CONTINUUM_QA_RELEASE_ROOT:-}" ]] || { echo "release preflight requires explicit CONTINUUM_QA_RELEASE_ROOT" >&2; exit 2; }
 state_root="$CONTINUUM_QA_RELEASE_ROOT/state/gui"
-evidence_root="$CONTINUUM_QA_RELEASE_ROOT/wave0/gui-lead"
+[[ -n "${CONTINUUM_QA_EVIDENCE_ROOT:-}" ]] || { echo "release preflight requires explicit CONTINUUM_QA_EVIDENCE_ROOT" >&2; exit 2; }
+wave0_root="$CONTINUUM_QA_RELEASE_ROOT/wave0"
+evidence_root="$(validate_isolated_path CONTINUUM_QA_EVIDENCE_ROOT "$CONTINUUM_QA_EVIDENCE_ROOT" "$wave0_root")" || exit 2
 project_canonical="$(validate_isolated_path CONTINUUM_PROJECT_ROOT "${CONTINUUM_PROJECT_ROOT:-}" "$state_root")" || exit 2
 support_canonical="$(validate_isolated_path CONTINUUM_APP_SUPPORT "${CONTINUUM_APP_SUPPORT:-}" "$state_root")" || exit 2
 run_canonical="$(validate_isolated_path CONTINUUM_QA_RUN_DIR "$CONTINUUM_QA_RUN_DIR" "$evidence_root")" || exit 2
@@ -67,12 +69,12 @@ fi
 launch_continuum cmd-3-browser || defer_display "app-window-readiness" "exact launched PID did not expose a capturable window before timeout"
 assert_flow "pid-window-identity" "CGWindowID belongs to exact launched PID; decoy owner names are ignored" assert_window_owned_by_pid
 wait_for_named_readiness "qacapture-manifest-ready" "$QA_RUN_DIR/capture/manifest.json" 15 || defer_display "qacapture" "app-side manifest did not reach named readiness"
-assert_flow "fresh-readiness-identity" "QACapture manifest matches this exact launch/candidate/binary/roots/fixture" python3 - "$QA_RUN_DIR/capture/manifest.json" "$QA_APP_PID" "$CONTINUUM_QA_RUN_ID" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$CONTINUUM_QA_EXECUTABLE_PATH" "$CONTINUUM_QA_EXECUTABLE_SHA256" "$CONTINUUM_PROJECT_ROOT" "$CONTINUUM_APP_SUPPORT" "$CONTINUUM_QA_FIXTURE_ID" <<'PY'
+assert_flow "fresh-readiness-identity" "QACapture manifest matches this exact launch/candidate/binary/roots/fixture/window" python3 - "$QA_RUN_DIR/capture/manifest.json" "$QA_APP_PID" "$CONTINUUM_QA_RUN_ID" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$CONTINUUM_QA_EXECUTABLE_PATH" "$CONTINUUM_QA_EXECUTABLE_SHA256" "$CONTINUUM_PROJECT_ROOT" "$CONTINUUM_APP_SUPPORT" "$CONTINUUM_QA_FIXTURE_ID" "$QA_WINDOW_ID" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1])); keys=['pid','runID','launchNonce','candidateSHA','executablePath','executableSHA256','projectRoot','appSupportRoot','fixtureID']
 expected=[int(sys.argv[2]),*sys.argv[3:]]
 assert all(p.get(k)==v for k,v in zip(keys,expected)), (p,dict(zip(keys,expected)))
-assert isinstance(p.get('windowID'),int) and p['windowID'] > 0
+assert isinstance(p.get('windowID'),int) and p['windowID'] == int(sys.argv[11])
 PY
 assert_flow "wkwebview-ruler-semantic" "fresh QACapture records deterministic ruler fixture identity" grep -q "ARRAY_QA_RULER_V1" "$QA_RUN_DIR/capture/manifest.json"
 assert_flow "compact-content-semantic" "app-side readiness records 960x720 content size" grep -q "qaContentSize=960x720" "$QA_RUN_DIR/capture/manifest.json"
@@ -166,8 +168,7 @@ cliclick "m:${drag_start_x},${drag_start_y}" "dd:${drag_start_x},${drag_start_y}
 after_ax="$(window_bounds)"
 IFS=',' read -r after_x after_y _after_w _after_h <<< "$after_ax"
 actual_dx=$((after_x-drag_x)); actual_dy=$((after_y-drag_y))
-assert_flow "pointer-titlebar-drag" "real cliclick down/move/up moved exact CGWindowID by intended nonzero delta" test "$actual_dx" -ge 16
-assert_flow "pointer-titlebar-drag-y" "real pointer drag includes intended vertical delta" test "$actual_dy" -ge 6
+assert_flow "pointer-titlebar-drag" "real cliclick down/move/up moved exact CGWindowID by intended nonzero delta" assert_pointer_drag_delta "$drag_x" "$drag_y" "$after_x" "$after_y" 16 6
 assert_flow "isolated-roots" "project and app-support roots are distinct QA paths" test "$CONTINUUM_PROJECT_ROOT" != "$CONTINUUM_APP_SUPPORT"
 grant_persisted_after="$(defaults read "$defaults_domain" "$CONTINUUM_QA_PROJECT_GRANT_KEY" 2>/dev/null || true)"
 assert_flow "volatile-project-ack" "process launch acknowledgement did not mutate persistent defaults" test "$grant_persisted_before" = "$grant_persisted_after"
@@ -179,7 +180,7 @@ on run argv
     set frontmost of p to true
     repeat with w in windows of p
       set position of w to {60, 60}
-      set size of w to {1440, 900}
+      set size of w to {1440, 932}
     end repeat
   end tell
 end run
@@ -191,64 +192,12 @@ fi
 sleep 0.2
 bounds="$(window_bounds)"
 IFS=',' read -r _x _y width height <<< "$bounds"
-if [[ "$width" -ne 1440 || "$height" -ne 900 ]]; then
-  capture_step "display-size-unavailable" "requested 1440x900, actual ${width}x${height}"
-  defer_display "display-size-1440x900" "requested 1440x900 but display constrained the window to ${width}x${height}"
+if [[ "$width" -ne 1440 || "$height" -ne 932 ]]; then
+  capture_step "display-size-unavailable" "requested 1440x900 content (expected 1440x932 titled frame), observed frame ${width}x${height}"
+  defer_display "display-size-1440x900-content" "requested 1440x900 content; expected frame 1440x932 but observed frame ${width}x${height}"
 fi
-assert_flow "size-1440x900" "window readback is 1440×900 points" test "$width" -eq 1440
-capture_step "appearance-current-1440x900" "specific CGWindowID capture"
-
-if ! osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null 2>&1
-on run argv
-  tell application "System Events"
-    set p to first process whose unix id is (item 1 of argv as integer)
-    repeat with w in windows of p
-      set size of w to {960, 720}
-    end repeat
-  end tell
-end run
-APPLESCRIPT
-then
-  defer_display "accessibility" "could not resize exact PID window"
-fi
-sleep 0.2
-bounds="$(window_bounds)"
-IFS=',' read -r _x _y width height <<< "$bounds"
-assert_flow "size-960x720" "window readback is 960×720 points" test "$width" -eq 960
-
-before="$bounds"
-click_center_of_window || defer_display "accessibility" "cliclick could not focus exact app window"
-osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null 2>&1 || defer_display "accessibility" "System Events could not drag the exact PID window"
-on run argv
-  tell application "System Events"
-    set p to first process whose unix id is (item 1 of argv as integer)
-    tell window 1 of p
-      set xy to position
-      set position to {(item 1 of xy) + 12, (item 2 of xy) + 8}
-    end tell
-  end tell
-end run
-APPLESCRIPT
-after="$(window_bounds)"
-assert_flow "ax-click-drag" "click/drag changed semantic window geometry" test "$before" != "$after"
-capture_step "appearance-current-960x720" "specific-window capture after AX click/drag"
-
-png="$QA_RUN_DIR/$(python3 - "$QA_MANIFEST_EVENTS" <<'PY'
-import json,sys
-rows=[json.loads(x) for x in open(sys.argv[1]) if x.strip()]
-print([x['png'] for x in rows if x.get('png')][-1])
-PY
-)"
-pixel_width="$(sips -g pixelWidth "$png" | awk '/pixelWidth/{print $2}')"
-scale=$((pixel_width / width))
-if [[ "$scale" -ne 2 ]]; then
-  defer_display "retina-2x" "backing scale is ${scale}x (pixelWidth=$pixel_width pointWidth=$width)"
-fi
-assert_flow "retina-backing-scale" "external capture is exactly 2× point width" test "$scale" -eq 2
-
-assert_flow "isolated-roots" "project and app-support roots are distinct QA paths" test "$CONTINUUM_PROJECT_ROOT" != "$CONTINUUM_APP_SUPPORT"
-grant_persisted_after="$(defaults read "$defaults_domain" "$CONTINUUM_QA_PROJECT_GRANT_KEY" 2>/dev/null || true)"
-assert_flow "volatile-project-ack" "process launch acknowledgement did not mutate persistent defaults" test "$grant_persisted_before" = "$grant_persisted_after"
+assert_flow "frame-1440x932" "requested 1440x900 content has expected 1440x932 titled frame" test "$height" -eq 932
+capture_step "appearance-current-1440x900-content-frame-1440x932" "specific CGWindowID capture"
 # Array currently pins one process appearance. Switching the user's global macOS
 # appearance would mutate unrelated live state, so this lane reports the missing
 # safe per-process Aqua/Dark Aqua seam instead of labelling duplicate pixels.

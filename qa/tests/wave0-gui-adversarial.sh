@@ -13,4 +13,9 @@ stale="$tmp/stale.json"; printf '{}\n' > "$stale"
 QA_FLOW_NAME=test; QA_STARTED_AT=x; QA_RUN_DIR="$tmp"; QA_MANIFEST_EVENTS="$tmp/events"; : > "$QA_MANIFEST_EVENTS"
 QA_LAUNCHED_AT_EPOCH=$(( $(date +%s) + 60 ))
 if wait_for_named_readiness stale "$stale" 1; then exit 1; fi
+# A cliclick shim that returns success without input leaves geometry unchanged;
+# the same predicate used by the live flow must reject it.
+cliclick() { return 0; }
+cliclick c:10,10
+if assert_pointer_drag_delta 10 10 10 10 16 6; then exit 1; fi
 echo "Wave0 GUI adversarial checks passed"

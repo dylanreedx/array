@@ -40,6 +40,11 @@ validate_isolated_path() {
   printf '%s\n' "$canonical"
 }
 
+assert_pointer_drag_delta() {
+  local before_x="$1" before_y="$2" after_x="$3" after_y="$4" min_dx="$5" min_dy="$6"
+  (( after_x - before_x >= min_dx && after_y - before_y >= min_dy ))
+}
+
 require_command() {
   local command_name="$1"
   if ! command -v "$command_name" >/dev/null 2>&1; then
