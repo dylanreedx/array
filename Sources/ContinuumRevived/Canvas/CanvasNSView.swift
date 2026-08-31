@@ -177,31 +177,59 @@ final class CanvasNSView: NSView, TokenThemed {
         return sameIDTopology(for: target.zoneId) == target.initialSameIDTopology
     }
     private func cancelCanonicalLayerGesture(_ target: ZoneGestureTarget) {
-        guard let layer = mountedLayer(for: target) else {
-            abandonConcreteGestureTransaction()
-            return
+        // The object captured at mouse-down is the only occurrence cancellation
+        // may restore. A UUID lookup is unsafe once corrupt same-ID siblings have
+        // appeared, disappeared, or changed order.
+        if let layer = mountedLayer(for: target) {
+            layer.placement = target.initialPlacement
+            layer.renderModel.placement = target.initialPlacement
+            if layer.tiles.count == target.initialTileFrames.count {
+                for index in layer.tiles.indices { layer.tiles[index].frame = target.initialTileFrames[index] }
+            }
         }
-        layer.placement = target.initialPlacement
-        layer.renderModel.placement = target.initialPlacement
-        if layer.tiles.count == target.initialTileFrames.count {
-            for index in layer.tiles.indices { layer.tiles[index].frame = target.initialTileFrames[index] }
+        rebuildLayerDerivedProjections()
+        abandonConcreteGestureTransaction()
+    }
+
+    /// Rebuild Model B and its first-wins UUID chrome from the concrete mounted
+    /// occurrences. This is deliberately one O(n) cancellation operation, never
+    /// a per-drag operation. It preserves layer identity and order verbatim.
+    private func rebuildLayerDerivedProjections() {
+        liveZones = zoneLayers.map(\.placement)
+        zoneRenderModels = zoneLayers.map { layer in
+            layer.renderModel.placement = layer.placement
+            return layer.renderModel
         }
-        // These UUID-keyed mirrors described the sole captured occurrence when
-        // the gesture began. Restore them directly; never choose a layer by UUID.
-        if let index = liveZones.firstIndex(where: { $0.zoneId == target.zoneId }) {
-            liveZones[index] = target.initialPlacement
+        zoneDisplayByZoneId = Dictionary(
+            zoneRenderModels.map { ($0.placement.zoneId, $0) },
+            uniquingKeysWith: { first, _ in first })
+
+        let liveIDs = Set(zoneDisplayByZoneId.keys)
+        for (zoneId, chrome) in zoneChromeViews where !liveIDs.contains(zoneId) {
+            chrome.removeFromSuperview()
+            zoneChromeViews.removeValue(forKey: zoneId)
         }
-        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == target.zoneId }) {
-            zoneRenderModels[index].placement = target.initialPlacement
+        if showsZoneChrome {
+            for (zoneId, model) in zoneDisplayByZoneId {
+                if let chrome = zoneChromeViews[zoneId] {
+                    chrome.update(model: model)
+                } else {
+                    let chrome = ZoneChromeNSView(model: model)
+                    zoneChromeViews[zoneId] = chrome
+                    worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
+                }
+            }
         }
-        if var model = zoneDisplayByZoneId[target.zoneId] {
-            model.placement = target.initialPlacement
-            zoneDisplayByZoneId[target.zoneId] = model
-            zoneChromeViews[target.zoneId]?.update(model: model)
-        }
+
+        tileZoneMembership = Dictionary(
+            zoneLayers.flatMap { layer in layer.tiles.map { ($0.id, layer.placement.zoneId) } },
+            uniquingKeysWith: { first, _ in first })
         layoutAllTiles()
         layoutZoneChromeViews()
-        abandonConcreteGestureTransaction()
+        applyArmedZoneChrome()
+        reorderTileSubviewsByZIndex()
+        updateDocumentRelationshipOverlay()
+        updateContextualAgentLineageGeometry()
     }
     private func applyConcreteZonePlacement(_ placement: ZonePlacement, to layer: ZoneLayer, registerUndo: Bool) {
         let previous = layer.placement
@@ -1596,7 +1624,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // and makes the visible chrome coincide with the move-grab header rect
         // (zoneHeaderScreenRect also reads placement) so the zone is movable.
         // The frame only changes via create / move / grow-on-tile-resize.
-        for placement in liveZones {
+        var laidOutZoneIDs: Set<UUID> = []
+        for placement in liveZones where laidOutZoneIDs.insert(placement.zoneId).inserted {
             guard let view = zoneChromeViews[placement.zoneId] else { continue }
             // A WORLD frame: zone chrome is a child of the world plane, so the
             // camera reaches it through the plane's bounds, not through this write.
@@ -8213,13 +8242,47 @@ final class CanvasNSView: NSView, TokenThemed {
         // A gesture that began while its layer UUID was unique must never become
         // UUID-first when a corrupt sibling appears. Topology change atomically
         // cancels both move and resize, restoring the exact captured occurrence.
+        func expectCancellationProjections(
+            _ orderedLayers: [ZoneLayer], _ label: String
+        ) throws {
+            let placements = orderedLayers.map(\.placement)
+            try expect(sameCanvas.liveZones == placements,
+                       "\(label): liveZones must mirror concrete occurrence order")
+            try expect(sameCanvas.zoneRenderModels.map(\.placement) == placements,
+                       "\(label): render models must mirror concrete occurrence order")
+            guard let first = orderedLayers.first else {
+                throw CheckError.failed("\(label): fixture unexpectedly has no surviving layer")
+            }
+            try expect(sameCanvas.zoneDisplayByZoneId[sameZoneId]?.placement == first.placement,
+                       "\(label): shared display model must describe the first concrete occurrence")
+            let expectedChrome = Self.worldRect(CanvasEngine.zoneWorldFrame(first.placement))
+            try expect(sameCanvas.zoneLayerChromeFrame(for: sameZoneId) == expectedChrome,
+                       "\(label): shared chrome must describe the first concrete occurrence; expected=\(expectedChrome), actual=\(String(describing: sameCanvas.zoneLayerChromeFrame(for: sameZoneId)))")
+            for layer in orderedLayers {
+                for tile in layer.tiles {
+                    let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                    try expect(layer.tileViews[tile.id]?.frame == CanvasEngine.tileScreenFrame(
+                        world, viewport: sameCanvas.canvasState.viewport),
+                               "\(label): installed view must mirror its concrete local/world frame")
+                }
+            }
+            if case .none = sameCanvas.zoneGesture {} else {
+                throw CheckError.failed("\(label): cancellation must clear gesture state")
+            }
+            try expect(!sameCanvas.qaResizeHUDVisible, "\(label): cancellation must clear resize HUD")
+        }
+
         sameCanvas.setZones([sameLayerB])
         let uniqueMoveB0 = sameLayerB.placement
         let uniqueMoveLocal0 = sameLayerB.tiles.map(\.frame)
         let uniqueMovePersist0 = samePersisted.count
         let uniqueMoveStart = win(CGFloat(uniqueMoveB0.origin.x + 80), CGFloat(uniqueMoveB0.origin.y + 16))
         sameCanvas.mouseDown(with: try event(.leftMouseDown, uniqueMoveStart, window: sameWindow))
-        sameCanvas.setZones([sameLayerA, sameLayerB]) // insert before captured target
+        sameCanvas.mouseDragged(with: try event(
+            .leftMouseDragged, NSPoint(x: uniqueMoveStart.x + 21.5, y: uniqueMoveStart.y - 8.75), window: sameWindow))
+        try expect(sameLayerB.placement != uniqueMoveB0,
+                   "unique-to-duplicate move fixture must perform a live exact-target update")
+        sameCanvas.setZones([sameLayerA, sameLayerB]) // insert before captured target after live delta
         let insertedMoveA0 = sameLayerA.placement
         sameCanvas.mouseDragged(with: try event(
             .leftMouseDragged, NSPoint(x: uniqueMoveStart.x + 42.75, y: uniqueMoveStart.y - 17.25), window: sameWindow))
@@ -8229,6 +8292,7 @@ final class CanvasNSView: NSView, TokenThemed {
                    "unique-to-duplicate move must cancel against the exact captured occurrence")
         try expect(sameLayerA.placement == insertedMoveA0 && samePersisted.count == uniqueMovePersist0,
                    "unique-to-duplicate move must not mutate or persist the inserted same-ID sibling")
+        try expectCancellationProjections([sameLayerA, sameLayerB], "unique-to-duplicate move")
 
         sameCanvas.setZones([sameLayerB])
         let uniqueResizeB0 = sameLayerB.placement
@@ -8238,6 +8302,10 @@ final class CanvasNSView: NSView, TokenThemed {
         let uniqueResizeStart = win(CGFloat(uniqueResizeB0.origin.x + uniqueResizeB0.size.width),
                                     CGFloat(uniqueResizeB0.origin.y + uniqueResizeB0.size.height / 2))
         sameCanvas.mouseDown(with: try event(.leftMouseDown, uniqueResizeStart, window: sameWindow))
+        sameCanvas.mouseDragged(with: try event(
+            .leftMouseDragged, NSPoint(x: uniqueResizeStart.x + 19.25, y: uniqueResizeStart.y), window: sameWindow))
+        try expect(sameLayerB.placement != uniqueResizeB0,
+                   "unique-to-duplicate resize fixture must perform a live exact-target update")
         sameCanvas.setZones([sameLayerB, sameLayerA]) // insert after, then reorder
         sameCanvas.setZones([sameLayerA, sameLayerB])
         let insertedResizeA0 = sameLayerA.placement
@@ -8251,6 +8319,7 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(sameLayerA.placement == insertedResizeA0 && samePersisted.count == uniqueResizePersist0
                        && !sameCanvas.qaResizeHUDVisible,
                    "unique-to-duplicate resize must preserve sibling, suppress persistence, and clear HUD")
+        try expectCancellationProjections([sameLayerA, sameLayerB], "unique-to-duplicate resize")
 
         // Finish validates the same token too: insertion after a valid live
         // update but before mouse-up must roll the captured occurrence back.
