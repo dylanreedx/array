@@ -23952,9 +23952,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let root = URL(fileURLWithPath: try argument("--support"), isDirectory: true)
         let workspaceId = UUID(uuidString: try argument("--workspace-id"))!
+        let fixedBackupDate = CommandLine.arguments.contains("--fixed-backup-date")
+            ? Date(timeIntervalSince1970: 1_900_000_000.123) : nil
+        let generation = Int((try? argument("--generation")) ?? "177") ?? 177
         let document = WorkspaceDocument(
-            viewport: .init(x: 177, y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
-        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root).save(document)
+            viewport: .init(x: Double(generation), y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+            retainedBackups: 4, backupDate: { fixedBackupDate ?? Date() }).save(document)
     }
 
     static func runWorkspaceRestartFaultChild() throws {
@@ -24316,7 +24320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
             try normal.save(valid)
             let before = try Data(contentsOf: normal.layout.canvasFile)
-            final class Counter: @unchecked Sendable { var opens = 0 }
+            final class Counter: @unchecked Sendable { var opens = 0; var closes = 0 }
             let counter = Counter()
             let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
                 counter.opens += 1
@@ -24327,7 +24331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if seam == "directory-fsync" && counter.opens == 2 { errno = EIO; return -1 }
                 return Darwin.fsync(fd)
             }, close: { fd in
-                if seam == "temp-close" && counter.opens == 1 { errno = EIO; _ = Darwin.close(fd); return -1 }
+                counter.closes += 1
+                if seam == "temp-close" && counter.opens == 1 { errno = EINTR; _ = Darwin.close(fd); return -1 }
                 if seam == "directory-close" && counter.opens == 2 { errno = EIO; _ = Darwin.close(fd); return -1 }
                 return Darwin.close(fd)
             })
@@ -24345,23 +24350,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let generation = controller.scheduleZoneLayoutSave(replacement)
             var failed = false
             do { try controller.flush(through: generation) } catch { failed = true }
-            try expect(failed, "\(seam) did not fail")
-            try expect(controller.state == .saveFailed, "\(seam) did not expose failure")
-            try expect(controller.acknowledgedGeneration < generation, "\(seam) falsely advanced generation")
             let after = try Data(contentsOf: normal.layout.canvasFile)
-            // Even the post-rename directory-fsync failure rolls back through
-            // AtomicWriter, so no unacknowledged generation becomes reload truth.
-            try expect(after == before, "\(seam) changed prior bytes")
-            _ = try normal.load()
+            if seam == "directory-close" {
+                let closeFaultReload = try normal.load()
+                try expect(!failed && controller.state == .saved,
+                    "post-commit directory close noise became save failure")
+                try expect(controller.acknowledgedGeneration == generation,
+                    "post-commit directory close did not acknowledge generation")
+                try expect(after != before && closeFaultReload == replacement,
+                    "post-commit directory close did not preserve cold truth")
+            } else {
+                try expect(failed, "\(seam) did not fail")
+                try expect(controller.state == .saveFailed, "\(seam) did not expose failure")
+                try expect(controller.acknowledgedGeneration < generation, "\(seam) falsely advanced generation")
+                try expect(after == before, "\(seam) changed prior bytes")
+                _ = try normal.load()
+            }
+            if seam == "temp-close" {
+                try expect(counter.closes == 1, "close EINTR was blindly retried")
+            }
             let recovery = WorkspaceDocumentSaveController(store: normal)
             let recoveryGeneration = recovery.scheduleZoneLayoutSave(replacement)
             try recovery.flush(through: recoveryGeneration)
             let recoveredDocument = try normal.load()
             try expect(recoveredDocument == replacement, "\(seam) recovery failed")
-            faultResults.append(["seam": seam, "priorValidByteExact": true,
-                "loadable": true, "successReported": false, "failedGeneration": generation,
+            faultResults.append(["seam": seam, "priorValidByteExact": seam != "directory-close",
+                "loadable": true, "successReported": seam == "directory-close", "failedGeneration": generation,
                 "acknowledgedGeneration": controller.acknowledgedGeneration, "recoveryGeneration": recoveryGeneration,
-                "mountedSceneUnchanged": true])
+                "mountedSceneUnchanged": seam != "directory-close", "closeAttempts": counter.closes])
         }
 
         // Post-commit maintenance is not part of acknowledgement. Enumeration
@@ -24380,6 +24396,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect(maintenanceReload == replacement, "post-commit prune failure changed acknowledgement truth")
             faultResults.append(["seam": "post-commit-prune", "successReported": true,
                 "loadable": true, "maintenanceFailureNonTransactional": true])
+        }
+
+        // True cross-process writers have independent in-memory counters. Pin
+        // their backup clocks to the same millisecond and prove a collision is
+        // preserved with distinct history and newest-first retention ordering.
+        do {
+            let root = support.appendingPathComponent("fault-backup-name-collision", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000017")!
+            let fixedDate = Date(timeIntervalSince1970: 1_900_000_000.123)
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 4, backupDate: { fixedDate })
+            try store.save(valid)
+            try store.save(replacement) // process-local suffix 1
+            for childGeneration in [201, 202] {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                process.arguments = ["--atomic-writer-lock-child", "--support", root.path,
+                    "--workspace-id", workspaceId.uuidString, "--fixed-backup-date",
+                    "--generation", String(childGeneration)]
+                try process.run(); process.waitUntilExit()
+                try expect(process.terminationStatus == 0, "backup collision child failed")
+            }
+            let backups = try FileManager.default.contentsOfDirectory(
+                at: store.layout.backupsDirectory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("canvas.") }
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            try expect(backups.count == 3, "same-timestamp backup collision lost or overwrote history")
+            let backupDocuments: [WorkspaceDocument] = try backups.map {
+                try JSONDecoder().decode(WorkspaceDocument.self, from: Data(contentsOf: $0))
+            }
+            try expect(backupDocuments.map(\.viewport.x) == [201, -9, 1],
+                "same-timestamp backup retention/order was not newest-first and byte-distinct")
+            let collisionReload = try store.load()
+            try expect(collisionReload.viewport.x == 202,
+                "latest cross-process collision writer was not durable truth")
+            faultResults.append(["seam": "cross-process-same-timestamp-backups",
+                "successReported": true, "backupCount": backups.count,
+                "orderedViewportX": backupDocuments.map(\.viewport.x),
+                "existingBackupNeverOverwritten": true])
         }
 
         // An unreadable existing target is not the same state as ENOENT. It is

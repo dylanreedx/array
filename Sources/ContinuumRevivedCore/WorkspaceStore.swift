@@ -35,7 +35,8 @@ public struct WorkspaceStore: Sendable {
         applicationSupportDirectory: URL? = nil,
         retainedBackups: Int = 3,
         descriptorOperations: AtomicWriterDescriptorOperations = .live,
-        fileOperations: AtomicWriterFileOperations = .live
+        fileOperations: AtomicWriterFileOperations = .live,
+        backupDate: @escaping @Sendable () -> Date = { Date() }
     ) {
         let baseDir = applicationSupportDirectory ?? Self.defaultApplicationSupportDirectory()
         let layout = WorkspaceStoreLayout(applicationSupportDirectory: baseDir, workspaceId: workspaceId)
@@ -44,7 +45,8 @@ public struct WorkspaceStore: Sendable {
             backupsDirectory: layout.backupsDirectory,
             retainedBackups: retainedBackups,
             descriptorOperations: descriptorOperations,
-            fileOperations: fileOperations
+            fileOperations: fileOperations,
+            backupDate: backupDate
         )
     }
 

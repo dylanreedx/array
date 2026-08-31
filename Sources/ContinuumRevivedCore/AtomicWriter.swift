@@ -79,19 +79,22 @@ public struct AtomicWriter: Sendable {
     public let prettyPrint: Bool
     public let descriptorOperations: AtomicWriterDescriptorOperations
     public let fileOperations: AtomicWriterFileOperations
+    public let backupDate: @Sendable () -> Date
 
     public init(
         backupsDirectory: URL? = nil,
         retainedBackups: Int = 3,
         prettyPrint: Bool = true,
         descriptorOperations: AtomicWriterDescriptorOperations = .live,
-        fileOperations: AtomicWriterFileOperations = .live
+        fileOperations: AtomicWriterFileOperations = .live,
+        backupDate: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.backupsDirectory = backupsDirectory
         self.retainedBackups = max(0, retainedBackups)
         self.prettyPrint = prettyPrint
         self.descriptorOperations = descriptorOperations
         self.fileOperations = fileOperations
+        self.backupDate = backupDate
     }
 
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
@@ -174,12 +177,19 @@ public struct AtomicWriter: Sendable {
         let fd = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         var lock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_WRLCK), l_whence: Int16(SEEK_SET))
-        guard Darwin.fcntl(fd, F_SETLKW, &lock) == 0 else {
+        while Darwin.fcntl(fd, F_SETLKW, &lock) != 0 {
+            let lockError = errno
+            if lockError == EINTR { continue }
+            // close(2) is cleanup only and is deliberately attempted once: on
+            // EINTR/EIO Darwin does not promise that the descriptor is still
+            // ours, so retrying could close a subsequently reused descriptor.
             _ = Darwin.close(fd)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            throw POSIXError(POSIXErrorCode(rawValue: lockError) ?? .EIO)
         }
         defer {
             var unlock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_UNLCK), l_whence: Int16(SEEK_SET))
+            // Unlock is best-effort cleanup. Closing the descriptor releases
+            // any surviving process lock; neither result changes body truth.
             _ = Darwin.fcntl(fd, F_SETLK, &unlock)
             _ = Darwin.close(fd)
         }
@@ -221,6 +231,8 @@ public struct AtomicWriter: Sendable {
             try? FileManager.default.removeItem(at: tmp)
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
+        // This is pre-commit cleanup. A close failure is reported, but never
+        // retried because descriptor identity after close error is unspecified.
         if descriptorOperations.close(fd) != 0 {
             let err = errno
             try? FileManager.default.removeItem(at: tmp)
@@ -247,11 +259,10 @@ public struct AtomicWriter: Sendable {
             catch { throw AtomicWriterError.rollbackIndeterminate }
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
-        if descriptorOperations.close(dfd) != 0 {
-            do { try rollbackCommittedWrite(at: url, priorBytes: priorBytes) }
-            catch { throw AtomicWriterError.rollbackIndeterminate }
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        // Successful parent-directory fsync is the transaction commit point.
+        // close is cleanup only: attempt it exactly once, and never turn its
+        // ambiguous result into rollback or a false save failure.
+        _ = descriptorOperations.close(dfd)
     }
 
     /// A directory durability failure happens after rename. Do not expose those
@@ -300,10 +311,20 @@ public struct AtomicWriter: Sendable {
             withIntermediateDirectories: true
         )
 
-        let backupURL = backupsDirectory.appendingPathComponent(
-            backupName(for: url, at: Date())
+        // Writers for one canonical target hold the cross-process target lock,
+        // so probing for the first free monotonic suffix is race-free. Never
+        // delete a collision: it is retained history from another process.
+        let date = backupDate()
+        var suffix: UInt64 = 1
+        var backupURL = backupsDirectory.appendingPathComponent(
+            backupName(for: url, at: date, suffix: suffix)
         )
-        try? FileManager.default.removeItem(at: backupURL)
+        while FileManager.default.fileExists(atPath: backupURL.path) {
+            suffix += 1
+            backupURL = backupsDirectory.appendingPathComponent(
+                backupName(for: url, at: date, suffix: suffix)
+            )
+        }
         try FileManager.default.copyItem(at: url, to: backupURL)
     }
 
@@ -336,18 +357,15 @@ public struct AtomicWriter: Sendable {
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 
-    private static let backupCounter = AtomicCounter()
-
-    private func backupName(for url: URL, at date: Date) -> String {
+    private func backupName(for url: URL, at date: Date, suffix: UInt64) -> String {
         let stem = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let iso = formatter.string(from: date).replacingOccurrences(of: ":", with: "-")
-        // Monotonic suffix prevents collisions when multiple writes land in
-        // the same millisecond on a fast machine.
-        let n = Self.backupCounter.next()
-        return "\(stem).\(iso).\(String(format: "%06d", n)).\(ext)"
+        // The suffix is selected against on-disk names while holding the
+        // cross-process target lock, so it also encodes same-timestamp order.
+        return "\(stem).\(iso).\(String(format: "%012llu", suffix)).\(ext)"
     }
 }
 
