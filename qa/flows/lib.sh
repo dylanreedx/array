@@ -20,6 +20,25 @@ QA_MANIFEST_EVENTS=""
 QA_STARTED_AT=""
 QA_FINISHED=0
 QA_ASSERTIONS=0
+QA_LAUNCHED_AT_EPOCH=""
+
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os,sys
+print(os.path.realpath(os.path.abspath(sys.argv[1])))
+PY
+}
+
+validate_isolated_path() {
+  local label="$1" raw="$2" allowed_root="$3" canonical allowed
+  [[ "$raw" == /* && "$allowed_root" == /* ]] || { echo "$label must be absolute" >&2; return 1; }
+  canonical="$(canonical_path "$raw")"
+  allowed="$(canonical_path "$allowed_root")"
+  [[ "$canonical" != "/" && "$canonical" != "$allowed" && "$canonical" == "$allowed/"* ]] || {
+    echo "$label escapes allowed root: $canonical (allowed $allowed)" >&2; return 1;
+  }
+  printf '%s\n' "$canonical"
+}
 
 require_command() {
   local command_name="$1"
@@ -209,6 +228,8 @@ launch_continuum() {
     return 1
   fi
   mkdir -p "$QA_RUN_DIR/capture"
+  rm -f "$QA_RUN_DIR/capture/manifest.json"
+  QA_LAUNCHED_AT_EPOCH="$(date +%s)"
   local app_args=()
   if [[ -n "${CONTINUUM_QA_PROJECT_GRANT_KEY:-}" ]]; then
     app_args+=("-${CONTINUUM_QA_PROJECT_GRANT_KEY}" YES)
@@ -270,7 +291,7 @@ wait_for_named_readiness() {
   local name="$1" path="$2" timeout="${3:-20}" deadline
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if [[ -s "$path" ]]; then
+    if [[ -f "$path" && ! -L "$path" && "$(stat -f %m "$path")" -ge "${QA_LAUNCHED_AT_EPOCH:-0}" ]]; then
       append_event "$name" "pass" "" "named readiness file: $path"
       return 0
     fi

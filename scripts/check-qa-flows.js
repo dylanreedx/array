@@ -14,6 +14,7 @@ const requiredExecutables = [
   "qa/flows/window-resize-stress.sh",
   "qa/flows/quit-during-load.sh"
   ,"qa/flows/release-preflight.sh"
+  ,"qa/tests/wave0-gui-adversarial.sh"
 ];
 
 const markerChecks = new Map([

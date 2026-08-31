@@ -9,6 +9,16 @@ final class QACapture {
     struct Manifest: Codable {
         var flow: String
         var generatedAt: Date
+        var runID: String?
+        var launchNonce: String?
+        var candidateSHA: String?
+        var executablePath: String?
+        var executableSHA256: String?
+        var projectRoot: String?
+        var appSupportRoot: String?
+        var fixtureID: String?
+        var pid: Int32
+        var windowID: UInt32?
         var entries: [Entry]
     }
 
@@ -83,7 +93,16 @@ final class QACapture {
     }
 
     func writeManifest() {
-        let manifest = Manifest(flow: flowName, generatedAt: Date(), entries: entries)
+        let env = ProcessInfo.processInfo.environment
+        let manifest = Manifest(
+            flow: flowName, generatedAt: Date(), runID: env["CONTINUUM_QA_RUN_ID"],
+            launchNonce: env["CONTINUUM_QA_LAUNCH_NONCE"], candidateSHA: env["CONTINUUM_QA_CANDIDATE_SHA"],
+            executablePath: env["CONTINUUM_QA_EXECUTABLE_PATH"], executableSHA256: env["CONTINUUM_QA_EXECUTABLE_SHA256"],
+            projectRoot: env["CONTINUUM_PROJECT_ROOT"], appSupportRoot: env["CONTINUUM_APP_SUPPORT"],
+            fixtureID: env["CONTINUUM_QA_FIXTURE_ID"], pid: ProcessInfo.processInfo.processIdentifier,
+            windowID: entries.isEmpty ? nil : UInt32(NSApp.keyWindow?.windowNumber ?? NSApp.mainWindow?.windowNumber ?? 0),
+            entries: entries
+        )
         let manifestURL = outputDirectory.appendingPathComponent("manifest.json", isDirectory: false)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
