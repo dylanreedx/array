@@ -3,12 +3,15 @@ set -euo pipefail
 [[ $# -eq 3 ]] || { echo "usage: $0 READY DONE LOG" >&2; exit 2; }
 ready="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1")"; done_path="$2"; log="$3"
 driver="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$0")"; driver_sha="$(shasum -a 256 "$driver"|awk '{print $1}')"; ready_sha="$(shasum -a 256 "$ready"|awk '{print $1}')"
-eval "$(python3 - "$ready" <<'PY'
-import json,shlex,sys
-p=json.load(open(sys.argv[1]))
-for k in ['pid','windowID','title','executablePath','executableSHA256','beforeBounds','requestedDelta']: print(f"{k}={shlex.quote(json.dumps(p[k],separators=(',',':')) if isinstance(p[k],list) else str(p[k]))}")
+read_field() { python3 - "$ready" "$1" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))[sys.argv[2]]
+print(','.join(map(str,v)) if isinstance(v,list) else v)
 PY
-)"
+}
+pid="$(read_field pid)"; windowID="$(read_field windowID)"; title="$(read_field title)"
+executablePath="$(read_field executablePath)"; executableSHA256="$(read_field executableSHA256)"
+beforeBounds="$(read_field beforeBounds)"; requestedDelta="$(read_field requestedDelta)"
 actual_exe="$(ps -p "$pid" -o comm= | xargs)"; [[ "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$actual_exe")" == "$executablePath" ]]
 [[ "$(shasum -a 256 "$executablePath"|awk '{print $1}')" == "$executableSHA256" ]]
 query_window() { swift - "$pid" "$windowID" "$title" <<'SWIFT'
@@ -19,13 +22,13 @@ guard let w=ws.first(where:{($0[kCGWindowNumber as String] as? UInt32)==id}), ($
 print("\(b[\"X\"]!),\(b[\"Y\"]!),\(b[\"Width\"]!),\(b[\"Height\"]!)")
 SWIFT
 }
-observed_before="$(query_window)"; expected_before="$(python3 -c 'import json,sys;print(",".join(map(str,json.loads(sys.argv[1]))))' "$beforeBounds")"; [[ "$observed_before" == "$expected_before" ]]
+observed_before="$(query_window)"; [[ "$observed_before" == "$beforeBounds" ]]
 osascript - "$pid" <<'APPLESCRIPT' >/dev/null
 on run argv
  tell application "System Events" to perform action "AXRaise" of window 1 of (first process whose unix id is (item 1 of argv as integer))
 end run
 APPLESCRIPT
-IFS=',' read -r x y w h <<< "$observed_before"; IFS=',' read -r dx dy <<< "$(python3 -c 'import json,sys;print(*json.loads(sys.argv[1]),sep=",")' "$requestedDelta")"
+IFS=',' read -r x y w h <<< "$observed_before"; IFS=',' read -r dx dy <<< "$requestedDelta"
 sx=$((x+w/2)); sy=$((y+14)); args=("m:${sx},${sy}" "dd:${sx},${sy}" "dm:$((sx+dx)),$((sy+dy))" "du:$((sx+dx)),$((sy+dy))")
 started="$(python3 -c 'import time;print(time.time_ns())')"; cliclick "${args[@]}"; finished="$(python3 -c 'import time;print(time.time_ns())')"; after="$(query_window)"
 python3 - "$ready" "$done_path" "$ready_sha" "$driver" "$driver_sha" "$after" "$started" "$finished" "${args[*]}" <<'PY'
