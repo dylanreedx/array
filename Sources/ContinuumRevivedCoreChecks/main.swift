@@ -16,6 +16,29 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--exact-rebase-performance-check") {
+    let oldOrigin = -0.000_976_562_5
+    let proposed = -0.334_309_895_833_333_3
+    let frames = (0..<8).map { index in
+        let coordinate = oldOrigin + Double((index * 37 + 83_647 * 11) % 16_000) / 4
+        return TileFrame(x: coordinate, y: coordinate, width: 120, height: 90)
+    }
+    let iterations = 2_000
+    let started = ContinuousClock.now
+    var checksum = 0.0
+    for _ in 0..<iterations {
+        guard let origin = CanvasEngine.exactRebaseOriginIfPossible(
+            near: ZonePoint(x: proposed, y: proposed), preserving: frames) else {
+            fputs("FAIL: worst supported exact rebase rejected\n", stderr)
+            Foundation.exit(1)
+        }
+        checksum += origin.x + origin.y
+    }
+    let elapsed = ContinuousClock.now - started
+    print("ExactRebasePerformance iterations=\(iterations) frames=8 candidateBound=2049 localBound=9 worstDistanceULP=683 elapsed=\(elapsed) checksum=\(checksum)")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-appserver-parity-check") {
     runCodexAppServerParityChecks()
     print("CodexAppServerParityChecks passed")
@@ -4714,6 +4737,244 @@ do {
     let worldPoint = CanvasEngine.zoneLocalToWorld(localPoint, zoneOrigin: origin)
     expect(approximatelyEqual(worldPoint, CGPoint(x: -8, y: -2.5)), "Zone transform supports negative/fractional origins, got \(worldPoint)")
     expect(approximatelyEqual(CanvasEngine.worldToZoneLocal(worldPoint, zoneOrigin: origin), localPoint), "Negative/fractional zone transform round-trips")
+}
+
+do {
+    // Exact passive-frame rebasing is a stronger contract than the general
+    // conversion above: a captured world value must survive a changed origin
+    // byte-for-byte. Exercise thousands of deterministic production-shaped
+    // pairs, including test-X's minimized 60.25 failure coordinate.
+    let worlds: [Double] = [
+        -999_999.75, -40_000.125, -512.5, -0.000_976_562_5, 0,
+        0.000_976_562_5, 35.249999999999964, 60.25,
+        276.5, 368.5, 8_192.125, 999_999.75,
+    ]
+    let origins: [Double] = [
+        -999_936, -39_936, -448, -0.000_488_281_25, 0,
+        0.000_488_281_25, 32, 64, 256, 384, 8_128, 999_936,
+    ]
+    var checked = 0
+    for iteration in 0..<4_096 {
+        let worldX = worlds[iteration % worlds.count]
+        let worldY = worlds[(iteration &* 7 &+ 3) % worlds.count]
+        let origin = ZonePoint(
+            x: origins[iteration % origins.count],
+            y: origins[(iteration &* 7 &+ 3) % origins.count]
+        )
+        let worldFrame = TileFrame(
+            x: worldX, y: worldY,
+            width: 80 + Double(iteration % 19) * 17.25,
+            height: 60 + Double(iteration % 23) * 11.125
+        )
+        guard let local = CanvasEngine.worldToZoneLocalPreservingWorld(worldFrame, zoneOrigin: origin) else {
+            expect(false, "Exact zone rebase represents supported case \(iteration)")
+            continue
+        }
+        expect(local.x.isFinite && local.y.isFinite, "Exact zone rebase remains finite at case \(iteration)")
+        expect(CanvasEngine.zoneLocalToWorld(local, zoneOrigin: origin) == worldFrame,
+               "Exact zone rebase round-trips full frame at case \(iteration): world=\(worldFrame), local=\(local), origin=\(origin)")
+        checked += 1
+    }
+    expect(checked == 4_096, "Exact zone rebase property table executed every case")
+
+    let minimizedWorld = TileFrame(x: 276.5, y: 60.25, width: 360, height: 300)
+    let impossibleProposed = ZonePoint(x: 0, y: -77.08333333333336)
+    let corrected = CanvasEngine.exactRebaseOriginIfPossible(
+        near: impossibleProposed, preserving: [minimizedWorld])!
+    expect(corrected.x == impossibleProposed.x
+               && (corrected.y == impossibleProposed.y.nextDown
+                   || corrected.y == impossibleProposed.y.nextUp),
+           "Minimized test-X origin correction is bounded to one adjacent Double")
+    let minimizedLocal = CanvasEngine.worldToZoneLocalPreservingWorld(
+        minimizedWorld, zoneOrigin: corrected)
+    expect(minimizedLocal != nil,
+           "Minimized test-X coordinate has an exact local after bounded origin correction")
+    expect(minimizedLocal.map { CanvasEngine.zoneLocalToWorld($0, zoneOrigin: corrected) } == minimizedWorld,
+           "Minimized 60.25 test-X coordinate round-trips exactly after bounded origin correction")
+
+    // Unvetted-origin policy. `applyLayoutTransaction` vets origins only for
+    // zones the transaction MOVES, so a tile resized inside an unmoved zone
+    // reaches the rebase with an origin nobody corrected. Measured ~1.8% of
+    // such coordinates have no exact local. Rejecting them dropped the whole
+    // layout transaction (and its relayout) for ~1 drag frame in 30, which is
+    // strictly worse than landing the moving tile a sub-ULP away. This witness
+    // pins the fallback policy: the conversion ALWAYS yields a usable local,
+    // and that local reconstructs the world coordinate to within one ULP.
+    var unvettedRejects = 0
+    var unvettedFallbacks = 0
+    var worstUnvettedError = 0.0
+    for caseIndex in 0..<20_000 {
+        let world = TileFrame(
+            x: Double(caseIndex % 977) * 60.25 - 12_000,
+            y: Double((caseIndex &* 13) % 991) / 3 - 8_000,
+            width: 120 + Double(caseIndex % 17) * 11.5,
+            height: 90 + Double(caseIndex % 11) * 7.25)
+        let origin = ZonePoint(
+            x: Double((caseIndex &* 7) % 883) / 1.5 - 5_000,
+            y: Double((caseIndex &* 29) % 811) / 3 - 4_000)
+        let exact = CanvasEngine.worldToZoneLocalPreservingWorld(world, zoneOrigin: origin)
+        if exact == nil { unvettedRejects += 1 }
+        let local = exact ?? CanvasEngine.worldToZoneLocal(world, zoneOrigin: origin)
+        if exact == nil { unvettedFallbacks += 1 }
+        expect(local.x.isFinite && local.y.isFinite,
+               "Unvetted-origin fallback yields finite local at case \(caseIndex)")
+        let round = CanvasEngine.zoneLocalToWorld(local, zoneOrigin: origin)
+        // `(w - o) + o` rounds at the magnitude of the larger operand, so the
+        // bound is an ULP of that, not of the result.
+        for (got, want, org) in [(round.x, world.x, origin.x), (round.y, world.y, origin.y)] {
+            let error = abs(got - want)
+            worstUnvettedError = max(worstUnvettedError, error)
+            expect(error <= 2 * Swift.max(abs(want), abs(org)).ulp,
+                   "Unvetted-origin fallback stays within rounding at case \(caseIndex): got \(got) want \(want) origin \(org)")
+        }
+        expect(round.width == world.width && round.height == world.height,
+               "Unvetted-origin fallback never changes tile size at case \(caseIndex)")
+    }
+    expect(unvettedFallbacks == unvettedRejects,
+           "Every unvetted rejection took the plain-subtraction fallback")
+    FileHandle.standardError.write(
+        "UnvettedOriginFallback cases=20000 exactRejections=\(unvettedRejects) worstError=\(worstUnvettedError)\n"
+            .data(using: .utf8)!)
+
+    // Permanent reproducer for the EXC_BREAKPOINT captured at
+    // ~/Library/Logs/DiagnosticReports/Array-2026-08-31-072842.ips. The
+    // crashing process was `--jelly-auto-layout-check` driving synthetic
+    // gestures, not a user's live resize -- but it reached the helper through
+    // the production `applyLayoutTransaction` path with an origin no caller
+    // had vetted, and the trapping implementation called `preconditionFailure`
+    // there. Persisted and gesture geometry is data, so an unsupported pair
+    // must be reported, never trapped.
+    expect(CanvasEngine.worldToZoneLocalPreservingWorld(
+        minimizedWorld, zoneOrigin: impossibleProposed) == nil,
+           "Unvetted origin that cannot represent 60.25 rejects instead of trapping")
+    expect(CanvasEngine.worldToZoneLocalPreservingWorld(
+        TileFrame(x: .nan, y: 0, width: 10, height: 10),
+        zoneOrigin: ZonePoint(x: 0, y: 0)) == nil,
+           "Non-finite world frame rejects instead of trapping")
+    expect(CanvasEngine.worldToZoneLocalPreservingWorld(
+        TileFrame(x: 0, y: 0, width: 10, height: 10),
+        zoneOrigin: ZonePoint(x: .infinity, y: 0)) == nil,
+           "Non-finite zone origin rejects instead of trapping")
+
+    // Supported canvas domain: persisted/gesture world values within ±1M,
+    // local member coordinates within a 4K zone, and 1...20 simultaneous
+    // occurrences sharing a proposed origin produced by 0.5/1/1.5 zoom math.
+    let domainOrigins = [
+        -999_999.75, -40_000.125, -512.5, -0.000_976_562_5, 0,
+        0.000_976_562_5, 35.25, 60.25, 276.5, 8_192.125, 999_999.75,
+    ]
+    var rejectedSupportedRebases = 0
+    for caseIndex in 0..<16_384 {
+        let oldOrigin = domainOrigins[caseIndex % domainOrigins.count]
+        let proposed = ZonePoint(
+            x: oldOrigin + Double(caseIndex % 17 - 8) / 3,
+            y: oldOrigin - Double(caseIndex % 13 - 6) / 2)
+        var frames: [TileFrame] = []
+        for occurrence in 0..<(1 + caseIndex % 20) {
+            let xIndex = (occurrence * 37 + caseIndex * 11) % 16_000
+            let yIndex = (occurrence * 53 + caseIndex * 7) % 16_000
+            let width = 80 + Double(occurrence % 11) * 17.25
+            let height = 60 + Double(occurrence % 13) * 11.125
+            frames.append(TileFrame(
+                x: oldOrigin + Double(xIndex) / 4,
+                y: oldOrigin + Double(yIndex) / 4,
+                width: width, height: height))
+        }
+        guard let origin = CanvasEngine.exactRebaseOriginIfPossible(
+            near: proposed, preserving: frames) else {
+            rejectedSupportedRebases += 1
+            continue
+        }
+        for frame in frames {
+            let local = CanvasEngine.worldToZoneLocalPreservingWorld(frame, zoneOrigin: origin)
+            expect(local.map { CanvasEngine.zoneLocalToWorld($0, zoneOrigin: origin) } == frame,
+                   "Supported common-origin corpus exact frame \(caseIndex)")
+        }
+    }
+    expect(rejectedSupportedRebases == 0,
+           "Supported common-origin corpus rejected \(rejectedSupportedRebases) gesture steps")
+
+    // Broad transaction-shaped topology inventory. Core owns no AppKit views,
+    // so this models the exact occurrence routing inputs while the Jelly lane
+    // below exercises representative NSEvent commit/cancel/lost-capture paths.
+    // UUID strings intentionally repeat across zones and within a zone; array
+    // position remains the occurrence identity and must never be reordered.
+    var topologyCases = 0
+    var topologyOccurrences = 0
+    var topologyRejected = 0
+    for sceneIndex in 0..<1_536 {
+        let zoneCount = 1 + sceneIndex % 12
+        let zoom = [0.5, 1.0, 1.5][sceneIndex % 3]
+        for zoneIndex in 0..<zoneCount {
+            let tileCount = (sceneIndex * 7 + zoneIndex * 11) % 21
+            let oldOrigin = domainOrigins[(sceneIndex + zoneIndex) % domainOrigins.count]
+            let proposed = ZonePoint(
+                x: oldOrigin + Double((sceneIndex + zoneIndex) % 9 - 4) / zoom,
+                y: oldOrigin + Double((sceneIndex * 3 + zoneIndex) % 9 - 4) / zoom)
+            var occurrenceFrames: [TileFrame] = []
+            var occurrenceKeys: [String] = []
+            var memberships: [Int] = []
+            for tileIndex in 0..<tileCount {
+                let duplicateKey = (tileIndex % 5 == 4) ? tileIndex - 1 : tileIndex
+                occurrenceKeys.append("z\(zoneIndex % 4)-t\(duplicateKey)")
+                memberships.append(zoneIndex)
+                occurrenceFrames.append(TileFrame(
+                    x: oldOrigin + Double((tileIndex * 31 + sceneIndex * 5) % 12_000) / 4,
+                    y: oldOrigin + Double((tileIndex * 47 + sceneIndex * 3) % 12_000) / 4,
+                    width: 80 + Double(tileIndex % 9) * 19.25,
+                    height: 60 + Double(tileIndex % 7) * 13.5))
+            }
+            let orderBefore = occurrenceKeys
+            let membershipBefore = memberships
+            if let exactOrigin = CanvasEngine.exactRebaseOriginIfPossible(
+                near: proposed, preserving: occurrenceFrames) {
+                for frame in occurrenceFrames {
+                    let local = CanvasEngine.worldToZoneLocalPreservingWorld(
+                        frame, zoneOrigin: exactOrigin)
+                    expect(local.map { CanvasEngine.zoneLocalToWorld($0, zoneOrigin: exactOrigin) } == frame,
+                           "Topology corpus full passive frame \(sceneIndex)/\(zoneIndex)")
+                }
+            } else if !occurrenceFrames.isEmpty {
+                topologyRejected += 1
+            }
+            expect(occurrenceKeys == orderBefore && memberships == membershipBefore,
+                   "Topology corpus occurrence order/membership \(sceneIndex)/\(zoneIndex)")
+            topologyCases += 1
+            topologyOccurrences += tileCount
+        }
+    }
+    expect(topologyRejected == 0,
+           "Topology corpus rejected \(topologyRejected) supported zone transactions")
+    expect(topologyCases == 9_984 && topologyOccurrences == 98_048,
+           "Topology corpus inventory changed: zones=\(topologyCases), occurrences=\(topologyOccurrences)")
+
+    let worstOldOrigin = -0.000_976_562_5
+    let worstProposedScalar = -0.334_309_895_833_333_3
+    let worstFrames = (0..<8).map { index in
+        let coordinate = worstOldOrigin + Double((index * 37 + 83_647 * 11) % 16_000) / 4
+        return TileFrame(x: coordinate, y: coordinate, width: 120, height: 90)
+    }
+    let worstOrigin = CanvasEngine.exactRebaseOriginIfPossible(
+        near: ZonePoint(x: worstProposedScalar, y: worstProposedScalar),
+        preserving: worstFrames)!
+    func adjacentDistance(from start: Double, to target: Double, limit: Int) -> Int? {
+        if start == target { return 0 }
+        var lower = start
+        var upper = start
+        for distance in 1...limit {
+            lower = lower.nextDown
+            upper = upper.nextUp
+            if lower == target || upper == target { return distance }
+        }
+        return nil
+    }
+    expect(adjacentDistance(from: worstProposedScalar, to: worstOrigin.x, limit: 1_024) == 683,
+           "Worst supported common-origin witness must require exactly 683 ULPs")
+    var beyondBound = worstProposedScalar
+    for _ in 0..<342 { beyondBound = beyondBound.nextUp }
+    expect(CanvasEngine.exactRebaseOriginIfPossible(
+        near: ZonePoint(x: beyondBound, y: beyondBound), preserving: worstFrames) == nil,
+           "A witness whose nearest common origin is bound+1 must reject")
 }
 
 do {
