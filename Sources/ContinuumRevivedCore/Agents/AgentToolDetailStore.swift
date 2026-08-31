@@ -426,11 +426,9 @@ public struct AgentToolDetailSanitizer: Sendable {
 
     func sanitizeFileChanges(_ changes: [AgentToolDetailObservation.FileChange], explicitSecrets: [String]) -> [AgentToolDetailObservation.FileChange] {
         changes.prefix(24).compactMap { change in
-            guard SecretRedactor.redact(change.path, explicitSecrets: explicitSecrets) == change.path,
-                  let path = AgentToolDetailDisplaySanitizer.path(change.path) else { return nil }
+            guard let path = AgentToolDetailDisplaySanitizer.path(change.path, explicitSecrets: explicitSecrets) else { return nil }
             let rename = change.renamePath.flatMap { candidate -> String? in
-                guard SecretRedactor.redact(candidate, explicitSecrets: explicitSecrets) == candidate else { return nil }
-                return AgentToolDetailDisplaySanitizer.path(candidate)
+                AgentToolDetailDisplaySanitizer.path(candidate, explicitSecrets: explicitSecrets)
             }
             guard change.renamePath == nil || rename != nil else { return nil }
             let diff = AgentToolDetailDisplaySanitizer.diffPreview(change.diffPreview, explicitSecrets: explicitSecrets,
@@ -744,8 +742,7 @@ public actor AgentToolDetailStore {
             !sanitizer.containsSensitiveFingerprint([$0], fingerprints: record.sensitiveStartFingerprints)
         })
         if !record.observedParentConflict,
-           let parent = AgentToolDetailDisplaySanitizer.parentItemID(start.parentItemID),
-           SecretRedactor.redact(parent, explicitSecrets: eventSecrets) == parent,
+           let parent = AgentToolDetailDisplaySanitizer.parentItemID(start.parentItemID, explicitSecrets: eventSecrets),
            !sanitizer.containsSensitiveFingerprint([parent], fingerprints: record.sensitiveStartFingerprints) {
             if let existingParent = record.observedParentItemIDs.first, existingParent != parent {
                 record.observedParentItemIDs = []

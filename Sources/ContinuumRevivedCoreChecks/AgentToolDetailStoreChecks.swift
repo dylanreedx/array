@@ -81,12 +81,20 @@ private func runAgentToolDetailSemanticFileChecks() async throws {
 
     // A direct provider closure bypasses the store; presenter defense-in-depth
     // must enforce the identical policy for disclosure and accessibility.
-    let direct = AgentToolDetailRecord(identity: hostileIdentity, toolName: "Edit", updatedAt: Date(),
+    var direct = AgentToolDetailRecord(identity: hostileIdentity, toolName: "Edit", updatedAt: Date(),
         fileChanges: [
             .init(action: .edit, path: #"C:\Users\Alice\Secrets\direct.swift"#,
                   diffPreview: "+ token=direct-secret\n+ /Users/alice/private"),
             .init(action: .write, path: "Sources/DirectSafe.swift", diffPreview: "+safe")
         ], parentItemID: #"\\server\private\parent"#)
+    // Model a provider-owned mutable record that did not cross construction's
+    // sanitizer. The final presenter boundary must independently neutralize it.
+    direct.fileChanges = [
+        .init(action: .edit, path: #"C:\Users\Alice\Secrets\direct.swift"#,
+              diffPreview: "+ token%3Ddirect-secret\n+ %2FUsers%2Falice%2Fprivate"),
+        .init(action: .write, path: "Sources/DirectSafe.swift", diffPreview: "+safe")
+    ]
+    direct.parentItemID = "token%3Ddirect-secret"
     let safeDirect = AgentToolDetailPresenter.sanitizedProviderRecord(direct)
     let directDisclosure = safeDirect.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
     let directAX = safeDirect.map { AgentToolDetailPresenter.expanded($0).accessibilitySummary } ?? ""
@@ -125,6 +133,83 @@ private func runAgentToolDetailSemanticFileChecks() async throws {
     let benignPercent = "+ progress 50%\n+ literal %zz and user@host\n+ trailing %"
     expect(AgentToolDetailDisplaySanitizer.diffPreview(benignPercent) == benignPercent,
            "ordinary percent text, malformed escapes and @ must retain authored diff bytes")
+    let encodedCredential = "token%3Dsupersecretvalue"
+    expect(AgentToolDetailDisplaySanitizer.parentItemID(encodedCredential) == nil,
+           "percent-decoded parent credentials must fail closed")
+    expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(encodedCredential)") == "[REDACTED]",
+           "percent-decoded diff credentials must fail closed")
+    for encodedControl in ["%00", "%2500", "%E2%80%AE", "%25E2%2580%25AE"] {
+        expect(AgentToolDetailDisplaySanitizer.parentItemID(encodedControl) == nil,
+               "decoded parent controls/bidi must fail closed: \(encodedControl)")
+        expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(encodedControl)") == "[REDACTED]",
+               "decoded diff controls/bidi must fail closed: \(encodedControl)")
+    }
+    func percentEncode(_ value: String) -> String {
+        value.utf8.map { String(format: "%%%02X", $0) }.joined()
+    }
+    func encodedLayers(_ value: String) -> [String] {
+        var result = [value]
+        for _ in 0..<3 { result.append(percentEncode(result.last!)) }
+        return result
+    }
+    let secretShapes = [
+        "token=supersecretvalue", "api_key=sk-live-12345678",
+        "Authorization: Bearer abc.def.ghi", "password=hunter-two"
+    ]
+    for secret in secretShapes {
+        for variant in encodedLayers(secret) {
+            expect(AgentToolDetailDisplaySanitizer.parentItemID(variant) == nil,
+                   "raw/nested credential parent must fail closed: \(variant)")
+            expect(AgentToolDetailDisplaySanitizer.path("Sources/\(variant).swift") == nil,
+                   "raw/nested credential path must fail closed: \(variant)")
+            expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(variant)") == "[REDACTED]",
+                   "raw/nested credential diff must fail closed: \(variant)")
+        }
+    }
+    let explicitRaw = "opaque-explicit-secret"
+    let explicitEncoded = percentEncode(explicitRaw)
+    for (secretCandidate, disclosedCandidate) in [
+        (explicitRaw, percentEncode(explicitRaw)),
+        (explicitRaw, percentEncode(percentEncode(explicitRaw))),
+        (explicitEncoded, explicitRaw),
+        (explicitEncoded, "prefix-\(percentEncode(explicitRaw))-suffix")
+    ] {
+        expect(AgentToolDetailDisplaySanitizer.parentItemID(disclosedCandidate, explicitSecrets: [secretCandidate]) == nil,
+               "decoded/encoded explicit parent secret must fail closed")
+        expect(AgentToolDetailDisplaySanitizer.path("Sources/\(disclosedCandidate).swift", explicitSecrets: [secretCandidate]) == nil,
+               "decoded/encoded explicit path secret must fail closed")
+        expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(disclosedCandidate)", explicitSecrets: [secretCandidate]) == "[REDACTED]",
+               "decoded/encoded explicit diff secret must fail closed")
+    }
+    let bidiValues = [0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069]
+    let unsafeEncodedScalars = ["%00", "%01", "%1F", "%7F", "%C2%80", "%C2%9F", "%0D", "%FF"]
+        + bidiValues.map { scalar -> String in percentEncode(String(UnicodeScalar(scalar)!)) }
+    for value in unsafeEncodedScalars.flatMap(encodedLayers) {
+        expect(AgentToolDetailDisplaySanitizer.parentItemID(value) == nil,
+               "encoded invalid/control/bidi parent must fail closed: \(value)")
+        expect(AgentToolDetailDisplaySanitizer.path("Sources/\(value).swift") == nil,
+               "encoded invalid/control/bidi path must fail closed: \(value)")
+        expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(value)") == "[REDACTED]",
+               "encoded invalid/control/bidi diff must fail closed: \(value)")
+    }
+    for allowed in ["%0A", "%09", "%250A", "%2509"] {
+        expect(AgentToolDetailDisplaySanitizer.parentItemID(allowed) == nil,
+               "decoded LF/tab remains forbidden in a single-line parent")
+        expect(AgentToolDetailDisplaySanitizer.diffPreview("+ \(allowed)") != "[REDACTED]",
+               "decoded LF/tab obeys the existing diff allowance")
+    }
+    let fourthLayer = percentEncode(percentEncode(percentEncode(percentEncode("/Users/alice/private"))))
+    expect(AgentToolDetailDisplaySanitizer.parentItemID(fourthLayer) == nil
+        && AgentToolDetailDisplaySanitizer.diffPreview("+ \(fourthLayer)") == "[REDACTED]",
+        "residual fourth-layer escapes must fail closed")
+    let safeControls = ["Sources/Safe.swift", "Sources/user@host.swift", "100%", "%zz", "trailing%", "opaque-id", "日本語-prose"]
+    for value in safeControls {
+        expect(AgentToolDetailDisplaySanitizer.path(value) == value, "safe path control must retain authored bytes: \(value)")
+    }
+    expect(AgentToolDetailDisplaySanitizer.parentItemID("opaque-id_日本語@host%") == "opaque-id_日本語@host%",
+           "safe opaque Unicode parent ID must survive")
+    expect(AgentToolDetailDisplaySanitizer.diffPreview("+ percent = 50%\n+ Unicode 日本語") == "+ percent = 50%\n+ Unicode 日本語",
+           "safe percent and Unicode diff must survive")
     let encodedPayload = String(repeating: "%25252Fprivate%25252Fsecret ", count: 500)
     let encodedStart = Date()
     let encodedBounded = AgentToolDetailDisplaySanitizer.diffPreview(encodedPayload, maxBytes: 16_384, maxLines: 200)

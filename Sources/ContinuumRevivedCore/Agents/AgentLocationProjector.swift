@@ -50,16 +50,30 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
 /// locations: ordinary repository-relative paths survive, while every private
 /// or ambiguous syntax is reduced to a non-secret basename (or dropped).
 public enum AgentToolDetailDisplaySanitizer {
+    private enum ScalarPolicy { case singleLine, diff }
+    private struct PolicyViews {
+        let authored: String
+        let classified: String
+        let authoredHostile: Bool
+        let classifiedHostile: Bool
+
+        var hasHostileDisclosureShape: Bool { authoredHostile || classifiedHostile }
+    }
+
+    // Explicit-secret transformations share the same strict work window as the
+    // store's substring fingerprint witness. This prevents an attacker from
+    // turning nested encodings into an unbounded candidate cross-product.
+    private static let explicitSecretWorkBudget = 1_024
     private static let bidiScalars: Set<UInt32> = [
         0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
         0x2066, 0x2067, 0x2068, 0x2069
     ]
 
-    public static func path(_ raw: String, maxBytes: Int = AgentToolDetailObservation.FileChange.maxPathCharacters) -> String? {
+    public static func path(_ raw: String, explicitSecrets: [String] = [], maxBytes: Int = AgentToolDetailObservation.FileChange.maxPathCharacters) -> String? {
         let authored = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !authored.isEmpty, isScalarSafe(authored), SecretRedactor.redact(authored) == authored,
-              let value = classificationView(authored) else { return nil }
-        guard isScalarSafe(value), SecretRedactor.redact(value) == value else { return nil }
+        guard let views = policyViews(authored, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: max(4_096, maxBytes), scalarPolicy: .singleLine) else { return nil }
+        let value = views.classified
 
         let slashPath = value.replacingOccurrences(of: "\\", with: "/")
         let lower = slashPath.lowercased()
@@ -80,29 +94,70 @@ public enum AgentToolDetailDisplaySanitizer {
             candidate = slashPath
         }
         guard !candidate.isEmpty, candidate != ".", candidate != "..", !candidate.contains(":"),
-              isScalarSafe(candidate), SecretRedactor.redact(candidate) == candidate else { return nil }
+              policyViews(candidate, explicitSecrets: explicitSecrets,
+                          maxInputBytes: max(4_096, maxBytes), scalarPolicy: .singleLine) != nil else { return nil }
         return boundedUTF8(candidate, maxBytes: maxBytes)
     }
 
-    public static func parentItemID(_ raw: String?) -> String? {
+    public static func parentItemID(_ raw: String?, explicitSecrets: [String] = []) -> String? {
         guard let raw else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 200, isScalarSafe(value),
-              SecretRedactor.redact(value) == value, let classified = classificationView(value, maxInputBytes: 200),
-              !classified.contains("/"), !classified.contains("\\"), !classified.contains(":"), !classified.contains("~"),
-              !containsHostileDisclosureShape(classified) else { return nil }
+        guard let views = policyViews(value, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: 200, scalarPolicy: .singleLine),
+              !views.authored.contains("/"), !views.authored.contains("\\"), !views.authored.contains(":"), !views.authored.contains("~"),
+              !views.classified.contains("/"), !views.classified.contains("\\"), !views.classified.contains(":"), !views.classified.contains("~"),
+              !views.hasHostileDisclosureShape else { return nil }
         return value
     }
 
     public static func diffPreview(_ raw: String?, explicitSecrets: [String] = [], maxBytes: Int = 16_384, maxLines: Int = 200) -> String? {
         guard let raw else { return nil }
-        let redacted = SecretRedactor.redact(raw, explicitSecrets: explicitSecrets)
-        guard isDiffScalarSafe(redacted),
-              let classified = classificationView(redacted, maxInputBytes: maxBytes),
-              !containsHostileDisclosureShape(classified) else { return "[REDACTED]" }
-        let lines = redacted.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
+        guard let views = policyViews(raw, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: maxBytes, scalarPolicy: .diff),
+              !views.hasHostileDisclosureShape else { return "[REDACTED]" }
+        let lines = views.authored.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
         let bounded = boundedUTF8(lines.joined(separator: "\n"), maxBytes: maxBytes)
         return bounded.isEmpty ? nil : bounded
+    }
+
+    private static func policyViews(
+        _ authored: String,
+        explicitSecrets: [String],
+        maxInputBytes: Int,
+        scalarPolicy: ScalarPolicy
+    ) -> PolicyViews? {
+        guard !authored.isEmpty, authored.utf8.count <= maxInputBytes,
+              let classified = classificationView(authored, maxInputBytes: maxInputBytes),
+              let secrets = classifiedExplicitSecrets(explicitSecrets) else { return nil }
+        let scalarSafe: (String) -> Bool
+        switch scalarPolicy {
+        case .singleLine: scalarSafe = isScalarSafe
+        case .diff: scalarSafe = isDiffScalarSafe
+        }
+        guard scalarSafe(authored), scalarSafe(classified),
+              SecretRedactor.redact(authored, explicitSecrets: secrets) == authored,
+              SecretRedactor.redact(classified, explicitSecrets: secrets) == classified else { return nil }
+        return PolicyViews(
+            authored: authored,
+            classified: classified,
+            authoredHostile: containsHostileDisclosureShape(authored),
+            classifiedHostile: containsHostileDisclosureShape(classified)
+        )
+    }
+
+    private static func classifiedExplicitSecrets(_ candidates: [String]) -> [String]? {
+        var result: [String] = []
+        var seen = Set<String>()
+        var work = 0
+        for candidate in candidates {
+            guard !candidate.isEmpty else { continue }
+            work += candidate.utf8.count
+            guard work <= explicitSecretWorkBudget else { return nil }
+            for value in [candidate, classificationView(candidate, maxInputBytes: explicitSecretWorkBudget)].compactMap({ $0 }) {
+                if seen.insert(value).inserted { result.append(value) }
+            }
+        }
+        return result
     }
 
     /// A single bounded decoder used only for classification. Authored display
