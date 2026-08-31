@@ -13,9 +13,33 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailConcurrencyChecks()
     try await runAgentToolDetailPresentationChecks()
     try await runAgentToolDetailDisclosureCollisionChecks()
+    try await runAgentToolDetailSemanticFileChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
     print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
+}
+
+private func runAgentToolDetailSemanticFileChecks() async throws {
+    let store = AgentToolDetailStore(limits: AgentToolDetailLimits(maxOutputBytes: 128, maxOutputLines: 4))
+    let identity = testToolDetailKey("semantic-files")
+    _ = await store.recordStart(.init(
+        identity: identity,
+        toolName: "Edit",
+        fileChanges: [
+            .init(action: .rename, path: "Sources/Before.swift", renamePath: "Sources/After.swift", diffPreview: "-before\n+after"),
+            .init(action: .unknown, path: "/Users/private/secret.txt")
+        ],
+        parentItemID: "parent-explicit"
+    ))
+    let record = await store.detail(for: identity)
+    expect(record?.fileChanges.map(\.action) == [.rename, .unknown], "typed file actions must survive the host-local store")
+    expect(record?.fileChanges.first?.renamePath == "Sources/After.swift" && record?.fileChanges.first?.diffPreview == "-before\n+after",
+           "explicit rename endpoints and bounded diff must survive the host-local store")
+    expect(record?.fileChanges.last?.path == "secret.txt", "absolute private paths must be reduced before retention")
+    expect(record?.parentItemID == "parent-explicit", "explicit parent linkage must survive; absent linkage remains nil")
+    let disclosure = record.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
+    expect(disclosure.contains("Rename: Sources/Before.swift → Sources/After.swift") && disclosure.contains("-before"),
+           "the shipped transcript presenter must expose stored semantic detail")
 }
 
 private func runAgentToolDetailPrivacyChecks() async throws {
