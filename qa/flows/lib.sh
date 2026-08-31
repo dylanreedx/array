@@ -225,6 +225,16 @@ finish_flow() {
   fi
 }
 
+# DISPLAY_DEFERRED is reserved for physical host capabilities that this flow
+# cannot safely synthesize. Every compact-lane precondition or behavior failure
+# is an ordinary failure, even when its most useful diagnostic is a screenshot.
+qa_capability_status() {
+  case "$1" in
+    display-size-1440x900-content|appearance-switching) printf '%s\n' DISPLAY_DEFERRED ;;
+    *) printf '%s\n' fail ;;
+  esac
+}
+
 launch_continuum() {
   local in_process_flow="${1:-}"
   if [[ ! -x "$QA_APP" ]]; then

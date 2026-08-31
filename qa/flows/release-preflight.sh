@@ -4,19 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=qa/flows/lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# DISPLAY_DEFERRED is emitted only through qa_capability_status for the
+# 1440x900-content and appearance-switching physical capability probes.
 # capture_step delegates to capture_app_window, which enforces the resolved
 # CGWindowID rather than taking a whole-screen image.
 
-defer_display() {
+finish_capability() {
   local capability="$1" detail="$2"
+  local status
+  status="$(qa_capability_status "$capability")"
   if [[ -n "$QA_WINDOW_ID" ]]; then
     local failure_png="$QA_RUN_DIR/failure-$(slug "$capability").png"
     if capture_app_window "$failure_png"; then
       append_event "failure-capture" "fail" "$(basename "$failure_png")" "$detail"
     fi
   fi
-  append_event "capture_unavailable" "DISPLAY_DEFERRED" "" "capability=$capability; $detail"
-  finish_flow DISPLAY_DEFERRED
+  append_event "capture_unavailable" "$status" "" "capability=$capability; $detail"
+  finish_flow "$status"
 }
 
 require_external_drivers
@@ -68,9 +72,9 @@ if [[ -d "$CONTINUUM_APP_SUPPORT" ]]; then
   append_event "isolated-app-support-reset" "pass" "" "paired app-support state moved into this evidence run"
 fi
 
-launch_continuum cmd-3-browser || defer_display "app-window-readiness" "exact launched PID did not expose a capturable window before timeout"
+launch_continuum cmd-3-browser || finish_capability "app-window-readiness" "exact launched PID did not expose a capturable window before timeout"
 assert_flow "pid-window-identity" "CGWindowID belongs to exact launched PID; decoy owner names are ignored" assert_window_owned_by_pid
-wait_for_named_readiness "qacapture-manifest-ready" "$QA_RUN_DIR/capture/manifest.json" 15 || defer_display "qacapture" "app-side manifest did not reach named readiness"
+wait_for_named_readiness "qacapture-manifest-ready" "$QA_RUN_DIR/capture/manifest.json" 15 || finish_capability "qacapture" "app-side manifest did not reach named readiness"
 assert_flow "fresh-readiness-identity" "QACapture manifest matches this exact launch/candidate/binary/roots/fixture/window" python3 - "$QA_RUN_DIR/capture/manifest.json" "$QA_APP_PID" "$CONTINUUM_QA_RUN_ID" "$CONTINUUM_QA_LAUNCH_NONCE" "$CONTINUUM_QA_CANDIDATE_SHA" "$CONTINUUM_QA_EXECUTABLE_PATH" "$CONTINUUM_QA_EXECUTABLE_SHA256" "$CONTINUUM_PROJECT_ROOT" "$CONTINUUM_APP_SUPPORT" "$CONTINUUM_QA_FIXTURE_ID" "$QA_WINDOW_ID" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1])); keys=['pid','runID','launchNonce','candidateSHA','executablePath','executableSHA256','projectRoot','appSupportRoot','fixtureID']
@@ -85,11 +89,11 @@ initial_bounds="$(window_bounds)"
 IFS=',' read -r _initial_x _initial_y initial_width initial_height <<< "$initial_bounds"
 if [[ "$initial_width" -lt 640 || "$initial_height" -lt 480 ]]; then
   capture_step "project-folder-access-blocker" "exact PID presented ${initial_width}x${initial_height} instead of the main canvas"
-  defer_display "project-folder-access" "isolated project is under Documents and the app presented a folder-access blocker; permissions were not altered"
+  finish_capability "project-folder-access" "isolated project is under Documents and the app presented a folder-access blocker; permissions were not altered"
 fi
 
 # Prove the compact lane before attempting a size this display may not contain.
-osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null 2>&1 || defer_display "accessibility" "could not set compact exact-PID window size"
+osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null 2>&1 || finish_capability "accessibility" "could not set compact exact-PID window size"
 on run argv
   tell application "System Events"
     set p to first process whose unix id is (item 1 of argv as integer)
@@ -168,7 +172,7 @@ out=sys.argv[1]; payload=dict(schemaVersion='external-input-v1',runID=sys.argv[2
 fd,tmp=tempfile.mkstemp(dir=os.path.dirname(out)); os.write(fd,json.dumps(payload,sort_keys=True,indent=2).encode()+b'\n'); os.close(fd); os.replace(tmp,out)
 PY
   append_event "external-input-ready" "pass" "" "nonce-bound scratch title=$input_title; waiting for authorized pointer input"
-  wait_for_named_readiness "external-input-done-ready" "$done_marker" 60 || defer_display "external-input-timeout" "authorized external input did not produce a fresh done marker"
+  wait_for_named_readiness "external-input-done-ready" "$done_marker" 60 || finish_capability "external-input-timeout" "authorized external input did not produce a fresh done marker"
   assert_flow "external-input-done-identity" "done marker completely matches ready identity, digest, driver and ordering" python3 - "$ready" "$done_marker" "$QA_ROOT/qa/external-input-driver.sh" <<'PY'
 import hashlib,json,os,sys
 r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2])); digest=hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()
@@ -206,7 +210,7 @@ assert abs(gd[0]['x']-td[0]['x'])<=3 and abs(gd[0]['y']-td[0]['y'])<=3 and abs(g
 assert r['readyPublishedAtNs'] < down['wallTimeNs'] <= up['wallTimeNs'] < d['doneAtNs'] and r['readyPublishedAtNs'] < tdown['wallTimeNs'] <= tup['wallTimeNs'] < d['doneAtNs']
 assert d['startedAtNs'] <= d['finishedAtNs'] <= d['doneAtNs']
 PY
-  assert_window_owned_by_pid || defer_display "external-input-window-identity" "exact window ownership changed during external input"
+  assert_window_owned_by_pid || finish_capability "external-input-window-identity" "exact window ownership changed during external input"
   after_ax="$(window_bounds)"
   IFS=',' read -r after_x after_y _after_w _after_h <<< "$after_ax"
   assert_flow "pointer-titlebar-drag" "authorized external pointer drag moved exact CGWindowID by intended nonzero delta" assert_pointer_drag_delta "$drag_x" "$drag_y" "$after_x" "$after_y" 16 6
@@ -238,7 +242,7 @@ on run argv
 end run
 APPLESCRIPT
 then
-  defer_display "accessibility-frontmost-focus" "exact scratch PID/window could not become frontmost/main on this self-hosting runner; pointer drag was not attempted or claimed"
+  finish_capability "accessibility-frontmost-focus" "exact scratch PID/window could not become frontmost/main on this self-hosting runner; pointer drag was not attempted or claimed"
 fi
 append_event "pointer-drag-focus-precondition" "pass" "" "exact candidate PID/window is frontmost and main before genuine pointer drag"
 cliclick "m:${drag_start_x},${drag_start_y}" "dd:${drag_start_x},${drag_start_y}" "dm:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))" "du:$((drag_start_x+drag_dx)),$((drag_start_y+drag_dy))"
@@ -264,7 +268,7 @@ on run argv
 end run
 APPLESCRIPT
 then
-  defer_display "accessibility" "System Events could not focus/resize PID $QA_APP_PID; grant Accessibility to the runner"
+  finish_capability "accessibility" "System Events could not focus/resize PID $QA_APP_PID; grant Accessibility to the runner"
 fi
 
 sleep 0.2
@@ -272,11 +276,11 @@ bounds="$(window_bounds)"
 IFS=',' read -r _x _y width height <<< "$bounds"
 if [[ "$width" -ne 1440 || "$height" -ne 932 ]]; then
   capture_step "display-size-unavailable" "requested 1440x900 content (expected 1440x932 titled frame), observed frame ${width}x${height}"
-  defer_display "display-size-1440x900-content" "requested 1440x900 content; expected frame 1440x932 but observed frame ${width}x${height}"
+  finish_capability "display-size-1440x900-content" "requested 1440x900 content; expected frame 1440x932 but observed frame ${width}x${height}"
 fi
 assert_flow "frame-1440x932" "requested 1440x900 content has expected 1440x932 titled frame" test "$height" -eq 932
 capture_step "appearance-current-1440x900-content-frame-1440x932" "specific CGWindowID capture"
 # Array currently pins one process appearance. Switching the user's global macOS
 # appearance would mutate unrelated live state, so this lane reports the missing
 # safe per-process Aqua/Dark Aqua seam instead of labelling duplicate pixels.
-defer_display "appearance-switching" "safe per-process Aqua/Dark Aqua switching is unavailable; global appearance was not modified"
+finish_capability "appearance-switching" "safe per-process Aqua/Dark Aqua switching is unavailable; global appearance was not modified"

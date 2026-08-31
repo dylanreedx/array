@@ -3,6 +3,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=qa/flows/lib.sh
 source "$ROOT/qa/flows/lib.sh"
+# Compact functional failures must never share the physical-capability defer
+# status. These direct cases cover readiness, accessibility, timeout, ownership,
+# and the two narrowly permitted physical defer capabilities.
+for capability in app-window-readiness qacapture project-folder-access accessibility accessibility-frontmost-focus external-input-timeout external-input-window-identity pointer-titlebar-drag cleanup; do
+  [[ "$(qa_capability_status "$capability")" == "fail" ]]
+done
+[[ "$(qa_capability_status display-size-1440x900-content)" == "DISPLAY_DEFERRED" ]]
+[[ "$(qa_capability_status appearance-switching)" == "DISPLAY_DEFERRED" ]]
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 allowed="$tmp/qa-runs/run/state/gui"; mkdir -p "$allowed/project" "$tmp/victim"
 printf 'DO_NOT_MOVE\n' > "$tmp/victim/sentinel"
