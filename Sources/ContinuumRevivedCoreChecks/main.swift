@@ -54,6 +54,8 @@ private final class AtomicWriterOpenFaultState: @unchecked Sendable {
     var failDirectoryFsync = false
     var failTempClose = false
     var failDirectoryClose = false
+    var directoryCloseAttempts = 0
+    var failedDirectoryCloseFD: Int32?
     var pathsByFD: [Int32: String] = [:]
 }
 
@@ -631,7 +633,10 @@ do {
                     errno = EIO
                     return -1
                 }
-                if atomicFaultState.failDirectoryClose && path == atomicFaultRoot.path {
+                if atomicFaultState.failDirectoryClose
+                    && (path == atomicFaultRoot.path || fd == atomicFaultState.failedDirectoryCloseFD) {
+                    atomicFaultState.directoryCloseAttempts += 1
+                    atomicFaultState.failedDirectoryCloseFD = fd
                     _ = Darwin.close(fd)
                     errno = EIO
                     return -1
@@ -659,8 +664,13 @@ do {
            "AtomicWriter must throw when temp descriptor close fails")
     atomicFaultState.failTempClose = false
     atomicFaultState.failDirectoryClose = true
-    expect((try? atomicFaultWriter.write(["value": "dir-close"], to: atomicFaultFile)) == nil,
-           "AtomicWriter must throw when parent directory descriptor close fails")
+    try atomicFaultWriter.write(["value": "dir-close"], to: atomicFaultFile)
+    let liveDirectoryCloseReader = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
+    let directoryCloseDecoded: [String: String] = try liveDirectoryCloseReader.read(at: atomicFaultFile)
+    expect(directoryCloseDecoded["value"] == "dir-close",
+           "post-fsync directory close failure must report success with requested durable bytes")
+    expect(atomicFaultState.directoryCloseAttempts == 1,
+           "post-fsync directory close must be attempted exactly once")
     atomicFaultState.failDirectoryClose = false
     try atomicFaultWriter.write(["value": "ok"], to: atomicFaultFile)
     let atomicFaultDecoded: [String: String] = try atomicFaultWriter.read(at: atomicFaultFile)
@@ -3850,13 +3860,13 @@ do {
     try writer.write(makeProject(name: "v2"), to: url)
     let v2Read: Project = try writer.read(at: url)
     expect(v2Read.name == "v2", "AtomicWriter advances to v2")
-    let backupsAfter2 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    let backupsAfter2 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("array-backup-v2-") }
     expect(backupsAfter2.count == 1, "After 2 writes there is 1 backup, got \(backupsAfter2)")
 
     // Third and fourth writes: backup count capped at retainedBackups (2).
     try writer.write(makeProject(name: "v3"), to: url)
     try writer.write(makeProject(name: "v4"), to: url)
-    let backupsAfter4 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    let backupsAfter4 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("array-backup-v2-") }
     expect(backupsAfter4.count == 2, "Backup retention caps at 2, got \(backupsAfter4)")
 
     // Corrupt the main file; reader must fall back to the most recent backup.
@@ -4037,9 +4047,10 @@ do {
         editorPreference: project.editorPreference,
         settings: project.settings
     )
+    let backupsBeforeProjectResave = Set(try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path))
     try store.saveProject(updated)
     let backupContents = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path)
-    let projectBackups = backupContents.filter { $0.hasPrefix("project.") }
+    let projectBackups = Array(Set(backupContents).subtracting(backupsBeforeProjectResave))
     expect(!projectBackups.isEmpty, "Resaving project leaves a backup in backups/, got \(backupContents)")
 
     // loadProject when nothing is on disk returns nil via tryLoad.

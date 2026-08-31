@@ -428,9 +428,15 @@ public struct AtomicWriter: Sendable {
         return UInt64(token)
     }
 
+    /// Audit seam shared by production checks and backup discovery so callers do
+    /// not duplicate the exact identity/grammar parser.
+    public func validBackupGeneration(named name: String, for target: URL) -> UInt64? {
+        v2Generation(in: name, identity: targetNamespace(for: target))
+    }
+
 #if DEBUG
     public func debugBackupGeneration(named name: String, for target: URL) -> UInt64? {
-        v2Generation(in: name, identity: targetNamespace(for: target))
+        validBackupGeneration(named: name, for: target)
     }
 #endif
 

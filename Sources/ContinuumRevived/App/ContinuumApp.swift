@@ -24585,7 +24585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect(FileManager.default.fileExists(atPath: backups.appendingPathComponent(maxName).path)
                 && maxName.contains(identity), "valid exact-ID max fixture was not constructed")
             let overflowWriter = AtomicWriter(backupsDirectory: backups)
-            try expect(overflowWriter.debugBackupGeneration(named: maxName, for: target) == UInt64.max,
+            try expect(overflowWriter.validBackupGeneration(named: maxName, for: target) == UInt64.max,
                 "production parser did not classify the derived valid-max fixture")
             var overflowed = false
             do { try overflowWriter.write(replacement, to: target) }
@@ -24836,6 +24836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let appSupport: URL
         if let env = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"], !env.isEmpty {
             appSupport = URL(fileURLWithPath: env, isDirectory: true)
+                .appendingPathComponent("persistence-crash-safe-\(UUID().uuidString)", isDirectory: true)
         } else {
             appSupport = fm.temporaryDirectory
                 .appendingPathComponent("continuum-persistence-crash-safe-\(UUID().uuidString)", isDirectory: true)
@@ -24854,16 +24855,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             retainedBackups: 64
         )
 
-        func backupFileCount() -> Int {
+        func exactBackupGenerationNames() -> [String] {
             guard let entries = try? fm.contentsOfDirectory(
                 at: store.layout.backupsDirectory,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
-            ) else { return 0 }
-            return entries.filter { entry in
+            ) else { return [] }
+            let productionParser = AtomicWriter(backupsDirectory: store.layout.backupsDirectory)
+            return entries.compactMap { entry in
                 let name = entry.lastPathComponent
-                return name.hasPrefix("canvas.") || name.hasPrefix("array-backup-v2-")
-            }.count
+                return productionParser.validBackupGeneration(named: name, for: store.layout.canvasFile) != nil ? name : nil
+            }.sorted()
         }
 
         // Build D1: viewport (5, 7, 1.5), one project zone + one group zone.
@@ -24945,11 +24947,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         suite.set("10", forKey: AutosaveConfig.debounceMsKey)  // 10 ms window (post-fix)
 
         let saveController = WorkspaceDocumentSaveController(store: store, defaults: suite)
-        let nBackupsBefore = backupFileCount()
+        let backupsBefore = exactBackupGenerationNames()
+        let malformedForeignBackup = store.layout.backupsDirectory
+            .appendingPathComponent("array-backup-v2-foreign-invalid-timestamp")
+        try Data("foreign".utf8).write(to: malformedForeignBackup)
 
         // Schedule 5 documents without flushing.
+        var scheduledGeneration: UInt64 = 0
         for x in [10.0, 11.0, 12.0, 13.0, 14.0] {
-            saveController.scheduleZoneLayoutSave(
+            scheduledGeneration = saveController.scheduleZoneLayoutSave(
                 WorkspaceDocument(
                     viewport: CanvasViewport(x: x, y: 0, zoom: 1.0),
                     zones: [],
@@ -24963,9 +24969,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // (Pre-fix: controller ignores suite, uses 0.2s; 0.3s covers it. Post-fix: 10ms fires sooner.)
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.30))
 
-        let nBackupsAfter = backupFileCount()
-        let delta = nBackupsAfter - nBackupsBefore
+        let backupsAfter = exactBackupGenerationNames()
+        let delta = backupsAfter.count - backupsBefore.count
         try expect(delta == 1, "D10: coalesced N=5 schedules must create exactly 1 backup (got delta=\(delta))")
+        try expect(saveController.acknowledgedGeneration == scheduledGeneration,
+                   "D10: coalesced generation must be acknowledged exactly")
         let afterCoalesce = try store.load()
         try expect(afterCoalesce.viewport.x == 14.0, "D10: primary must hold last-scheduled doc (x=14), got \(afterCoalesce.viewport.x)")
 
@@ -25040,6 +25048,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "recoveredViewportZoom": recovered.viewport.zoom,
             "backupDelta": delta,
             "coalesceCount": delta,
+            "fixtureRoot": appSupport.path,
+            "backupGenerationsBefore": backupsBefore,
+            "backupGenerationsAfter": backupsAfter,
+            "coalescedGenerationNames": Array(Set(backupsAfter).subtracting(backupsBefore)).sorted(),
+            "scheduledGeneration": scheduledGeneration,
+            "acknowledgedGeneration": saveController.acknowledgedGeneration,
+            "coalescedGenerationAcknowledged": saveController.acknowledgedGeneration == scheduledGeneration,
             "postCoalesceViewportX": afterCoalesce.viewport.x,
             "flushViewportX": afterFlush.viewport.x,
             "status": "passed",
