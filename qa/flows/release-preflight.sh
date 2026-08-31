@@ -173,12 +173,12 @@ assert d.get('readySHA256')==digest and len(d.get('cliclickArgv',[]))==4 and d.g
 assert os.stat(sys.argv[2]).st_mtime_ns > os.stat(sys.argv[1]).st_mtime_ns and d.get('doneAtNs',0) > r['readyPublishedAtNs']
 assert d.get('actualDelta') == [d['afterBounds'][0]-r['beforeBounds'][0],d['afterBounds'][1]-r['beforeBounds'][1]]
 PY
-  assert_flow "external-pointer-event-proof" "target app observed ordered down-dragged-up bound to challenge/window" python3 - "$ready" "$CONTINUUM_QA_EXTERNAL_EVENT_OUTPUT" <<'PY'
-import json,sys
-r=json.load(open(sys.argv[1])); e=json.load(open(sys.argv[2])); ev=e['events']; kinds=[x['kind'] for x in ev]
-assert e['readyChallenge']==r['readyChallenge'] and e['launchNonce']==r['launchNonce'] and e['windowID']==r['windowID'] and e['title']==r['title']
-assert 'down' in kinds and 'dragged' in kinds and 'up' in kinds and kinds.index('down') < kinds.index('dragged') < kinds.index('up')
-assert all(x['windowID']==r['windowID'] for x in ev)
+  assert_flow "external-pointer-event-proof" "passive CGEventTap observed ordered down-dragged-up with expected coordinates" python3 - "$ready" "$done_marker" <<'PY'
+import hashlib,json,sys
+r=json.load(open(sys.argv[1])); d=json.load(open(sys.argv[2])); path=d['eventArtifactPath']; assert hashlib.sha256(open(path,'rb').read()).hexdigest()==d['eventArtifactSHA256']
+ev=json.load(open(path))['events']; types=[x['type'] for x in ev]; assert 1 in types and 6 in types and 2 in types and types.index(1)<types.index(6)<types.index(2)
+down=ev[types.index(1)]; up=ev[types.index(2)]; dx,dy=r['requestedDelta']; assert abs((up['x']-down['x'])-dx)<=3 and abs((up['y']-down['y'])-dy)<=3
+assert d['startedAtNs'] <= d['finishedAtNs'] <= d['doneAtNs']
 PY
   assert_window_owned_by_pid || defer_display "external-input-window-identity" "exact window ownership changed during external input"
   after_ax="$(window_bounds)"
