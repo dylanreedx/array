@@ -171,9 +171,13 @@ final class CanvasNSView: NSView, TokenThemed {
             canvas.applyConcreteZonePlacement(previous, to: layer, registerUndo: true)
         }
     }
-    private func registerConcreteGestureUndo(_ target: ZoneGestureTarget) {
+    private func registerConcreteGestureUndo(_ target: ZoneGestureTarget, actionName: String) {
         guard let layer = mountedLayer(for: target), layer.placement != target.initialPlacement else { return }
+        guard let undoManager = activeCanvasUndoManager else { return }
+        undoManager.beginUndoGrouping()
         registerConcreteUndo(layer: layer, placement: target.initialPlacement, tileFrames: target.initialTileFrames)
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
     }
     private func registerConcreteUndo(layer: ZoneLayer, placement: ZonePlacement, tileFrames: [TileFrame]) {
         activeCanvasUndoManager?.registerUndo(withTarget: self) { canvas in
@@ -5536,14 +5540,14 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         case .movingZone(let target, _):
             hideDragGhost()
-            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target); cancelGeometryEdit() }
+            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target, actionName: "Move Zone"); cancelGeometryEdit() }
             else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
         case .resizingZone(let target, _, _):
             hideDragGhost()
             hideResizeDimensions()
-            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target); cancelGeometryEdit() }
+            if isDuplicateLayerTarget(target) { registerConcreteGestureUndo(target, actionName: "Resize Zone"); cancelGeometryEdit() }
             else { if isAutoLayoutEnabled { _ = finishAutoLayoutGesture() }; _ = commitGeometryEdit() }
             pendingMovedPlacement = nil
             return
@@ -8013,7 +8017,7 @@ final class CanvasNSView: NSView, TokenThemed {
             zPosition: duplicatePlacementA.zPosition)
         let samePlacementB = ZonePlacement(
             zoneId: sameZoneId, projectId: duplicatePlacementB.projectId,
-            origin: duplicatePlacementB.origin, size: duplicatePlacementB.size,
+            origin: ZonePoint(x: 340.125, y: 180.75), size: duplicatePlacementB.size,
             color: duplicatePlacementB.color, collapsed: duplicatePlacementB.collapsed,
             hydrationPolicy: duplicatePlacementB.hydrationPolicy,
             autoLayoutMode: duplicatePlacementB.autoLayoutMode,
@@ -8033,6 +8037,9 @@ final class CanvasNSView: NSView, TokenThemed {
             showsZoneChrome: true)
         sameCanvas.autoLayoutDefaults = defaults
         sameCanvas.autoLayoutReduceMotionProvider = { true }
+        sameCanvas.frame = NSRect(x: 0, y: 0, width: 1_300, height: 700)
+        let sameWindow = NSWindow(contentRect: sameCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        sameWindow.contentView = sameCanvas
         sameCanvas.upsertZoneLayer(sameLayerA)
         sameCanvas.setZones([sameLayerA, sameLayerB])
         for _ in 0..<16 {
@@ -8044,6 +8051,54 @@ final class CanvasNSView: NSView, TokenThemed {
         var samePersisted: [CanvasLayoutTransaction] = []
         sameCanvas.onLayoutCommitted = { samePersisted.append($0); return true }
         sameCanvas.activateUndoWorkspace(UUID(uuidString: "A1300000-0000-4000-8000-000000000052")!)
+        let sameA0 = sameLayerA.placement
+        let sameB0 = sameLayerB.placement
+        let sameBLocal0 = sameLayerB.tiles.map(\.frame)
+        let sameOrder0 = sameCanvas.zoneLayers.map(ObjectIdentifier.init)
+        try drag(sameCanvas,
+                 from: win(CGFloat(sameB0.origin.x + 80), CGFloat(sameB0.origin.y + 16)),
+                 to: win(CGFloat(sameB0.origin.x + 117.5), CGFloat(sameB0.origin.y + 40.25)),
+                 window: sameWindow)
+        let sameBAfterMove = sameLayerB.placement
+        try expect(sameLayerA.placement == sameA0 && sameBAfterMove != sameB0,
+                   "real same-zone header drag must mutate only the later concrete layer")
+        try expect(sameLayerB.tiles.map(\.frame) == sameBLocal0,
+                   "concrete zone move must carry members rigidly in local coordinates")
+        try expect(sameCanvas.zoneLayers.map(ObjectIdentifier.init) == sameOrder0 && samePersisted.isEmpty,
+                   "noncanonical move must neither reorder layers nor claim UUID-keyed persistence")
+        sameCanvas.activeCanvasUndoManager?.undo()
+        try expect(sameLayerB.placement == sameB0 && sameLayerB.tiles.map(\.frame) == sameBLocal0,
+                   "concrete move undo must restore placement and local frames exactly")
+        sameCanvas.activeCanvasUndoManager?.redo()
+        try expect(sameLayerB.placement == sameBAfterMove && sameLayerB.tiles.map(\.frame) == sameBLocal0,
+                   "concrete move redo must reapply placement and local frames exactly")
+        sameCanvas.activeCanvasUndoManager?.undo()
+        let resizeAWorld0 = CanvasEngine.worldFrame(tile: sameLayerA.tiles[0], in: sameLayerA.placement)
+        let resizeBWorld0 = CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement)
+        let resizeBLocal0 = sameLayerB.tiles.map(\.frame)
+        let resizeBView0 = sameLayerB.tileViews[duplicateTileId]?.frame
+        let edgeStart = win(CGFloat(sameB0.origin.x + sameB0.size.width), CGFloat(sameB0.origin.y + sameB0.size.height / 2))
+        try drag(sameCanvas, from: edgeStart,
+                 to: NSPoint(x: edgeStart.x + 44.5, y: edgeStart.y), window: sameWindow)
+        let sameBAfterResize = sameLayerB.placement
+        let resizeBLocal1 = sameLayerB.tiles.map(\.frame)
+        let resizeBView1 = sameLayerB.tileViews[duplicateTileId]?.frame
+        try expect(sameBAfterResize.size.width > sameB0.size.width && sameLayerA.placement == sameA0,
+                   "real duplicate edge resize must change only the selected later layer")
+        try expect(CanvasEngine.worldFrame(tile: sameLayerA.tiles[0], in: sameLayerA.placement) == resizeAWorld0
+                       && CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == resizeBWorld0,
+                   "duplicate edge resize must preserve both concrete member world frames")
+        try expect(!sameCanvas.qaResizeHUDVisible && samePersisted.isEmpty,
+                   "duplicate resize HUD must terminate and UUID persistence must not falsely claim the occurrence")
+        sameCanvas.activeCanvasUndoManager?.undo()
+        try expect(sameLayerB.placement == sameB0 && sameLayerB.tiles.map(\.frame) == resizeBLocal0
+                       && sameLayerB.tileViews[duplicateTileId]?.frame == resizeBView0,
+                   "duplicate resize undo must restore placement, local model and installed view exactly")
+        sameCanvas.activeCanvasUndoManager?.redo()
+        try expect(sameLayerB.placement == sameBAfterResize && sameLayerB.tiles.map(\.frame) == resizeBLocal1
+                       && sameLayerB.tileViews[duplicateTileId]?.frame == resizeBView1,
+                   "duplicate resize redo must reapply placement, local model and installed view exactly")
+        sameCanvas.activeCanvasUndoManager?.undo()
         sameCanvas.arrangeAutoLayoutAfterSpawn(zoneId: sameZoneId)
         try expect(!samePersisted.isEmpty, "corrupt same-zone arrange must reach the persistence callback")
         try expect(CanvasEngine.worldFrame(tile: sameLayerB.tiles[0], in: sameLayerB.placement) == samePeerWorldBefore,
