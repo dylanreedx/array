@@ -95,6 +95,43 @@ private func runAgentToolDetailSemanticFileChecks() async throws {
         && !directSurface.contains("/Users/") && directSurface.contains("DirectSafe.swift"),
         "direct provider record must be safe in visible disclosure and accessibility: \(directSurface)")
     expect(safeDirect?.parentItemID == nil, "direct provider hostile parent must be dropped")
+
+    let encodedHostile = [
+        "%2FUsers%2Falice%2Fsecret", "%252FUsers%252Falice%252Fsecret",
+        "%25252fUsers%25252falice%25252fsecret", "%2e%2e%2fsecret",
+        "%2525252FUsers%2525252Falice%2525252Fsecret",
+        "%252e%252e%255csecret", "file%3A%2F%2F%2Fprivate%2Fsecret",
+        "%252Fvar%252Ffolders%252Fsecret", "C%3A%5cUsers%5cAlice%5csecret",
+        "%255c%255cserver%255cprivate%255csecret",
+        "https%3a%2F%2fuser%3Apassword%40host%2fsecret",
+        "%2566%2569%256c%2565%253A%252F%252F%252Fhome%252Falice%252Fsecret"
+    ]
+    for (index, hostile) in encodedHostile.enumerated() {
+        let encodedIdentity = testToolDetailKey(AgentToolDetailID("encoded-hostile-\(index)")!)
+        _ = await store.recordStart(.init(identity: encodedIdentity, toolName: "Edit", fileChanges: [
+            .init(action: .rename, path: "Sources/Safe.swift", renamePath: hostile,
+                  diffPreview: "+ plausible \(hostile)")
+        ], parentItemID: hostile))
+        let encodedRecord = await store.detail(for: encodedIdentity)
+        let visible = encodedRecord.map(AgentToolDetailPresenter.observableDisclosureText) ?? ""
+        let ax = encodedRecord.map { AgentToolDetailPresenter.expanded($0).accessibilitySummary } ?? ""
+        let surface = visible + "\n" + ax
+        expect(encodedRecord?.parentItemID == nil && encodedRecord?.fileChanges.first?.diffPreview == "[REDACTED]"
+            && !surface.contains(hostile) && !surface.lowercased().contains("password@host")
+            && !surface.lowercased().contains("/users/") && !surface.lowercased().contains("/private/")
+            && !surface.lowercased().contains("/var/folders/"),
+            "encoded hostile parent/diff/rename must not survive storage, disclosure, or AX: \(hostile) => \(surface)")
+    }
+    let benignPercent = "+ progress 50%\n+ literal %zz and user@host\n+ trailing %"
+    expect(AgentToolDetailDisplaySanitizer.diffPreview(benignPercent) == benignPercent,
+           "ordinary percent text, malformed escapes and @ must retain authored diff bytes")
+    let encodedPayload = String(repeating: "%25252Fprivate%25252Fsecret ", count: 500)
+    let encodedStart = Date()
+    let encodedBounded = AgentToolDetailDisplaySanitizer.diffPreview(encodedPayload, maxBytes: 16_384, maxLines: 200)
+    let encodedElapsed = Date().timeIntervalSince(encodedStart)
+    expect(encodedBounded == "[REDACTED]" && encodedElapsed < 0.1,
+           "maximum adversarial encoded payload must fail closed in bounded linear work: \(encodedElapsed)s")
+    print(String(format: "AgentToolDetail encoded disclosure bound: %.6fs (budget 0.100000s)", encodedElapsed))
 }
 
 private func runAgentToolDetailPrivacyChecks() async throws {

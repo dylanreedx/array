@@ -56,14 +56,9 @@ public enum AgentToolDetailDisplaySanitizer {
     ]
 
     public static func path(_ raw: String, maxBytes: Int = AgentToolDetailObservation.FileChange.maxPathCharacters) -> String? {
-        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, isScalarSafe(value), SecretRedactor.redact(value) == value else { return nil }
-        // Decode encoded separators before classifying. A small fixed point is
-        // sufficient for double-encoded provider payloads without unbounded work.
-        for _ in 0..<3 {
-            guard let decoded = value.removingPercentEncoding, decoded != value else { break }
-            value = decoded
-        }
+        let authored = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !authored.isEmpty, isScalarSafe(authored), SecretRedactor.redact(authored) == authored,
+              let value = classificationView(authored) else { return nil }
         guard isScalarSafe(value), SecretRedactor.redact(value) == value else { return nil }
 
         let slashPath = value.replacingOccurrences(of: "\\", with: "/")
@@ -93,25 +88,69 @@ public enum AgentToolDetailDisplaySanitizer {
         guard let raw else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value.utf8.count <= 200, isScalarSafe(value),
-              SecretRedactor.redact(value) == value,
-              !value.contains("/"), !value.contains("\\"), !value.contains(":"), !value.contains("~") else { return nil }
+              SecretRedactor.redact(value) == value, let classified = classificationView(value, maxInputBytes: 200),
+              !classified.contains("/"), !classified.contains("\\"), !classified.contains(":"), !classified.contains("~"),
+              !containsHostileDisclosureShape(classified) else { return nil }
         return value
     }
 
     public static func diffPreview(_ raw: String?, explicitSecrets: [String] = [], maxBytes: Int = 16_384, maxLines: Int = 200) -> String? {
         guard let raw else { return nil }
         let redacted = SecretRedactor.redact(raw, explicitSecrets: explicitSecrets)
-        let lower = redacted.lowercased()
-        let hostilePath = lower.contains("/users/") || lower.contains("/home/")
-            || lower.contains("/private/") || lower.contains("/var/folders/")
-            || lower.contains("file://") || redacted.contains("\\\\")
-            || redacted.contains("../") || redacted.contains("..\\")
-            || redacted.range(of: #"(?i)(^|[\s\"'])[a-z]:[/\\]"#, options: .regularExpression) != nil
-            || redacted.range(of: #"(?i)https?://[^\s/@]+:[^\s/@]+@"#, options: .regularExpression) != nil
-        guard isDiffScalarSafe(redacted), !hostilePath else { return "[REDACTED]" }
+        guard isDiffScalarSafe(redacted),
+              let classified = classificationView(redacted, maxInputBytes: maxBytes),
+              !containsHostileDisclosureShape(classified) else { return "[REDACTED]" }
         let lines = redacted.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
         let bounded = boundedUTF8(lines.joined(separator: "\n"), maxBytes: maxBytes)
         return bounded.isEmpty ? nil : bounded
+    }
+
+    /// A single bounded decoder used only for classification. Authored display
+    /// bytes are retained by callers. Three layers cover provider nesting; a
+    /// fourth still-valid escape fails closed instead of changing meaning later.
+    private static func classificationView(_ raw: String, maxInputBytes: Int = 16_384) -> String? {
+        guard raw.utf8.count <= maxInputBytes else { return nil }
+        var bytes = Array(raw.utf8)
+        for _ in 0..<3 {
+            var output: [UInt8] = []; output.reserveCapacity(bytes.count)
+            var changed = false; var index = 0
+            while index < bytes.count {
+                if bytes[index] == 0x25, index + 2 < bytes.count,
+                   let high = hex(bytes[index + 1]), let low = hex(bytes[index + 2]) {
+                    output.append(high << 4 | low); index += 3; changed = true
+                } else {
+                    output.append(bytes[index]); index += 1
+                }
+            }
+            guard let decoded = String(bytes: output, encoding: .utf8) else { return nil }
+            bytes = output
+            if !changed { return decoded }
+        }
+        // Remaining syntactically valid escapes could alter classification.
+        if bytes.indices.contains(where: { i in
+            bytes[i] == 0x25 && i + 2 < bytes.count && hex(bytes[i + 1]) != nil && hex(bytes[i + 2]) != nil
+        }) { return nil }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    private static func hex(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: return byte - 48
+        case 65...70: return byte - 55
+        case 97...102: return byte - 87
+        default: return nil
+        }
+    }
+
+    private static func containsHostileDisclosureShape(_ value: String) -> Bool {
+        let slash = value.replacingOccurrences(of: "\\", with: "/")
+        let lower = slash.lowercased()
+        return lower.contains("/users/") || lower.contains("/home/")
+            || lower.contains("/private/") || lower.contains("/var/folders/")
+            || lower.contains("file://") || value.contains("\\\\")
+            || slash.contains("../")
+            || value.range(of: #"(?i)(^|[\s\"'])[a-z]:[/\\]"#, options: .regularExpression) != nil
+            || value.range(of: #"(?i)https?://[^\s/@]+:[^\s/@]+@"#, options: .regularExpression) != nil
     }
 
     private static func isScalarSafe(_ value: String) -> Bool {
