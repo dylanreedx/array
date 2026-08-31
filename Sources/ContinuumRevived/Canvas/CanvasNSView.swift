@@ -368,7 +368,11 @@ final class CanvasNSView: NSView, TokenThemed {
             isDirectResize = false
         }
         if isDirectResize {
-            applyLayoutTransaction(transaction, activeTileId: activeTileId, activeZoneId: activeZoneId)
+            applyLayoutTransaction(
+                transaction,
+                activeTileId: activeTileId,
+                activeZoneId: activeZoneId,
+                preservingLayerMemberWorldFramesIn: Set(transaction.zonePlacements.keys))
             return
         }
         // The solver reports frames that differ from the SCENE it was given.
@@ -389,7 +393,8 @@ final class CanvasNSView: NSView, TokenThemed {
     private func applyLayoutTransaction(
         _ transaction: CanvasLayoutTransaction,
         activeTileId: UUID? = nil,
-        activeZoneId: UUID? = nil
+        activeZoneId: UUID? = nil,
+        preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = []
     ) {
         let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
             tileView(for: id).map { (id, $0.frame.origin) }
@@ -397,6 +402,20 @@ final class CanvasNSView: NSView, TokenThemed {
         let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
             zoneChromeViews[id].map { (id, $0.frame.origin) }
         })
+        // A ZoneLayer stores members zone-locally. Resizing/clamping a zone can
+        // move its origin while the contract keeps every passive member fixed in
+        // world space. Capture those world frames before changing placement, then
+        // rebase only members for which the transaction has no authoritative
+        // world frame. Ordinary zone moves do not opt into this behavior: their
+        // members intentionally translate as one rigid body with the zone.
+        let preservedLayerWorldFrames: [UUID: TileFrame] = Dictionary(
+            uniqueKeysWithValues: zoneLayers
+                .filter { preservedZoneIds.contains($0.placement.zoneId) }
+                .flatMap { layer in
+                    layer.tiles.map { tile in
+                        (tile.id, CanvasEngine.worldFrame(tile: tile, in: layer.placement))
+                    }
+                })
         // Placements must land first: ZoneLayer stores member frames locally, so
         // converting a solver's world target against the previous origin would
         // apply a zone move twice.
@@ -419,6 +438,13 @@ final class CanvasNSView: NSView, TokenThemed {
                let index = layer.tiles.firstIndex(where: { $0.id == id }) {
                 layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(frame, zoneOrigin: layer.placement.origin)
             }
+        }
+        for (id, worldFrame) in preservedLayerWorldFrames where transaction.tileFrames[id] == nil {
+            guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == id }) }),
+                  let index = layer.tiles.firstIndex(where: { $0.id == id }) else { continue }
+            layer.tiles[index].frame = CanvasEngine.worldToZoneLocal(
+                worldFrame,
+                zoneOrigin: layer.placement.origin)
         }
         layoutAllTiles()
 
@@ -2645,6 +2671,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA: resize HUD visibility + current text, for the real-path self-check.
     var qaResizeHUDVisible: Bool { resizeDimensionsOverlay?.qaVisible ?? false }
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
+    func qaActiveZoneResizeEdge(zoneId: UUID) -> ResizeEdge? {
+        guard case let .resizingZone(activeZoneId, edge, _) = zoneGesture,
+              activeZoneId == zoneId else { return nil }
+        return edge
+    }
 
     /// P1.11: the canvas IS `SurfaceToken.canvas` — the extreme end of the surface
     /// ladder, which is what makes a tile read as an object sitting ON something.
@@ -5268,9 +5299,11 @@ final class CanvasNSView: NSView, TokenThemed {
             if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
                 let newPlacement = clampedManualZoneResize(
                     resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy)))
-                liveZones[idx] = newPlacement
+                applyLayoutTransaction(
+                    CanvasLayoutTransaction(zonePlacements: [zoneId: newPlacement]),
+                    activeZoneId: zoneId,
+                    preservingLayerMemberWorldFramesIn: [zoneId])
                 pendingMovedPlacement = newPlacement
-                layoutAllTiles()
                 showResizeDimensions(
                     widthPx: Int(newPlacement.size.width.rounded()),
                     heightPx: Int(newPlacement.size.height.rounded()),
@@ -7243,6 +7276,18 @@ final class CanvasNSView: NSView, TokenThemed {
             view.mouseDragged(with: try event(.leftMouseDragged, end, window: window))
             view.mouseUp(with: try event(.leftMouseUp, end, window: window))
         }
+        func resizeTile(
+            _ view: TileNSView, from localPoint: NSPoint,
+            windowDX: CGFloat, windowDY: CGFloat, window: NSWindow
+        ) throws {
+            let start = view.convert(localPoint, to: nil)
+            let middle = NSPoint(x: start.x + windowDX / 2, y: start.y + windowDY / 2)
+            let end = NSPoint(x: start.x + windowDX, y: start.y + windowDY)
+            view.mouseDown(with: try event(.leftMouseDown, start, window: window))
+            view.mouseDragged(with: try event(.leftMouseDragged, middle, window: window))
+            view.mouseDragged(with: try event(.leftMouseDragged, end, window: window))
+            view.mouseUp(with: try event(.leftMouseUp, end, window: window))
+        }
 
         let zoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000001")!
         let firstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000011")!
@@ -7358,8 +7403,9 @@ final class CanvasNSView: NSView, TokenThemed {
         let layerZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000021")!
         let layerFirstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000022")!
         let layerSecondId = UUID(uuidString: "A1300000-0000-4000-8000-000000000023")!
+        let layerThirdId = UUID(uuidString: "A1300000-0000-4000-8000-000000000024")!
         let layerPlacement = ZonePlacement(
-            zoneId: layerZoneId, projectId: nil, origin: ZonePoint(x: 100, y: 100),
+            zoneId: layerZoneId, projectId: nil, origin: ZonePoint(x: 20.5, y: 20.25),
             size: ZoneSize(width: 624, height: 440), color: "blue", collapsed: false,
             hydrationPolicy: .automatic, name: "Layer Jelly", navKey: nil)
         let layerFirst = Tile(
@@ -7370,6 +7416,10 @@ final class CanvasNSView: NSView, TokenThemed {
             id: layerSecondId, kind: .note, title: "Layer B",
             frame: TileFrame(x: 256, y: 40, width: 360, height: 300),
             zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let layerThird = Tile(
+            id: layerThirdId, kind: .note, title: "Layer C",
+            frame: TileFrame(x: 112.5, y: 348.25, width: 210.75, height: 82.5),
+            zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         let layerCanvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
             showsZoneChrome: true)
@@ -7382,17 +7432,26 @@ final class CanvasNSView: NSView, TokenThemed {
         layerWindow.orderFrontRegardless()
         let layerFirstView = DescriptorTileNSView(tile: layerFirst)
         let layerSecondView = DescriptorTileNSView(tile: layerSecond)
+        let layerThirdView = DescriptorTileNSView(tile: layerThird)
         let layer = ZoneLayer(
             placement: layerPlacement,
             renderModel: ZoneRenderModel(placement: layerPlacement, displayName: "Layer Jelly"),
-            tiles: [layerFirst, layerSecond])
+            tiles: [layerFirst, layerSecond, layerThird])
         layer.tileViews[layerFirstId] = layerFirstView
         layer.tileViews[layerSecondId] = layerSecondView
+        layer.tileViews[layerThirdId] = layerThirdView
         layerCanvas.upsertZoneLayer(layer)
         layerCanvas.layoutSubtreeIfNeeded()
-        guard let passiveLayerBaseline = layerCanvas.tiles(inZone: layerZoneId)?.first(where: { $0.id == layerSecondId })?.frame else {
+        guard let passiveLayerBaseline = layerCanvas.tiles(inZone: layerZoneId)?.first(where: { $0.id == layerSecondId })?.frame,
+              let layerPlacementBeforeDirectResize = layerCanvas.qaZoneLayerPlacement(for: layerZoneId) else {
             throw CheckError.failed("ZoneLayer passive baseline disappeared")
         }
+        let passiveLayerWorldBaseline = CanvasEngine.worldFrame(
+            tile: Tile(
+                id: layerSecondId, kind: .note, title: "Layer B",
+                frame: passiveLayerBaseline, zPosition: .fromLegacyRank(2),
+                runtimeRef: nil, metadata: TileMetadata()),
+            in: layerPlacementBeforeDirectResize)
         var layerCommits: [CanvasLayoutTransaction] = []
         layerCanvas.onLayoutCommitted = { layerCommits.append($0); return true }
         try resizeTileRight(layerFirstView, worldDX: 120, window: layerWindow)
@@ -7404,12 +7463,169 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         try expect(resizedLayerFirst.width == 360,
                    "direct ZoneLayer resize must preserve the requested tile width; got \(resizedLayerFirst.width)")
-        try expect(resizedLayerSecond == passiveLayerBaseline,
-                   "direct resize must preserve the passive member exactly; before=\(passiveLayerBaseline), after=\(resizedLayerSecond), active=\(resizedLayerFirst)")
+        let resizedLayerSecondWorld = CanvasEngine.worldFrame(
+            tile: Tile(
+                id: layerSecondId, kind: .note, title: "Layer B",
+                frame: resizedLayerSecond, zPosition: .fromLegacyRank(2),
+                runtimeRef: nil, metadata: TileMetadata()),
+            in: resizedLayerZone)
+        try expect(resizedLayerSecondWorld == passiveLayerWorldBaseline,
+                   "direct resize must preserve the passive member's exact world frame; before=\(passiveLayerWorldBaseline), after=\(resizedLayerSecondWorld)")
+        if resizedLayerZone.origin == layerPlacementBeforeDirectResize.origin {
+            try expect(resizedLayerSecond == passiveLayerBaseline,
+                       "direct resize with an unchanged zone origin must preserve the passive local frame exactly; before=\(passiveLayerBaseline), after=\(resizedLayerSecond)")
+        } else {
+            let expectedRebasedFrame = CanvasEngine.worldToZoneLocal(
+                passiveLayerWorldBaseline,
+                zoneOrigin: resizedLayerZone.origin)
+            try expect(resizedLayerSecond == expectedRebasedFrame,
+                       "direct resize with a changed zone origin must precisely rebase the passive local frame; expected=\(expectedRebasedFrame), after=\(resizedLayerSecond)")
+        }
         try expect(resizedLayerZone.size.width == layerPlacement.size.width,
                    "the zone must stay fixed when the resized tile still fits")
         try expect(layerCommits.count == 1,
                    "one ZoneLayer tile resize must produce one final geometry transaction")
+
+        func layerWorldFrames() throws -> [UUID: TileFrame] {
+            guard let placement = layerCanvas.qaZoneLayerPlacement(for: layerZoneId),
+                  let tiles = layerCanvas.tiles(inZone: layerZoneId) else {
+                throw CheckError.failed("ZoneLayer world-frame snapshot lost its live model")
+            }
+            return Dictionary(uniqueKeysWithValues: tiles.map {
+                ($0.id, CanvasEngine.worldFrame(tile: $0, in: placement))
+            })
+        }
+        func expectPassiveLayerWorldFrames(
+            _ before: [UUID: TileFrame], _ label: String
+        ) throws {
+            let after = try layerWorldFrames()
+            for id in [layerSecondId, layerThirdId] {
+                try expect(after[id] == before[id],
+                           "\(label) must preserve passive hydrated member \(id) exactly; before=\(String(describing: before[id])), after=\(String(describing: after[id]))")
+            }
+        }
+
+        // Regression for review-d's hydrated-coordinate finding. Growing a tile
+        // through the left edge changes the owning zone's world origin. A passive
+        // ZoneLayer member is stored zone-locally, so the transaction application
+        // must rebase that local frame to keep its world frame byte-for-byte exact.
+        // Two mouseDragged events prove repeated mid-gesture transactions do not
+        // accumulate the origin delta.
+        let beforeLeftGrowth = try layerWorldFrames()
+        let activeWorldBeforeLeftGrowth = beforeLeftGrowth[layerFirstId]!
+        try resizeTile(
+            layerFirstView,
+            from: NSPoint(x: 1, y: layerFirstView.bounds.midY),
+            windowDX: -40, windowDY: 0,
+            window: layerWindow)
+        guard let leftGrownTiles = layerCanvas.tiles(inZone: layerZoneId),
+              let passiveAfterLeftGrowth = leftGrownTiles.first(where: { $0.id == layerSecondId })?.frame,
+              let leftGrownZone = layerCanvas.qaZoneLayerPlacement(for: layerZoneId) else {
+            throw CheckError.failed("ZoneLayer left-growth resize lost its live model")
+        }
+        let activeWorldAfterLeftGrowth = CanvasEngine.worldFrame(tile: leftGrownTiles.first(where: { $0.id == layerFirstId })!, in: leftGrownZone)
+        try expect(activeWorldAfterLeftGrowth.x < activeWorldBeforeLeftGrowth.x
+                       && activeWorldAfterLeftGrowth.width == activeWorldBeforeLeftGrowth.width + 40,
+                   "left-edge resize must preserve the active tile's dragged world frame; before=\(activeWorldBeforeLeftGrowth), after=\(activeWorldAfterLeftGrowth)")
+        try expect(leftGrownZone.origin.x < layerPlacement.origin.x,
+                   "left-edge pressure must minimally grow the owning zone to the left")
+        _ = passiveAfterLeftGrowth
+        try expectPassiveLayerWorldFrames(beforeLeftGrowth, "left-edge origin growth")
+
+        let beforeTopGrowth = try layerWorldFrames()
+        let zoneBeforeTopGrowth = layerCanvas.qaZoneLayerPlacement(for: layerZoneId)!
+        try resizeTile(
+            layerFirstView,
+            from: NSPoint(x: layerFirstView.bounds.midX, y: 1),
+            windowDX: 0, windowDY: 40,
+            window: layerWindow)
+        let zoneAfterTopGrowth = layerCanvas.qaZoneLayerPlacement(for: layerZoneId)!
+        try expect(zoneAfterTopGrowth.origin.y < zoneBeforeTopGrowth.origin.y,
+                   "top-edge pressure must minimally grow the owning zone upward")
+        try expectPassiveLayerWorldFrames(beforeTopGrowth, "top-edge origin growth")
+
+        let beforeCornerGrowth = try layerWorldFrames()
+        let zoneBeforeCornerGrowth = layerCanvas.qaZoneLayerPlacement(for: layerZoneId)!
+        try resizeTile(
+            layerFirstView,
+            from: NSPoint(x: 1, y: 1),
+            windowDX: -25, windowDY: 25,
+            window: layerWindow)
+        let zoneAfterCornerGrowth = layerCanvas.qaZoneLayerPlacement(for: layerZoneId)!
+        try expect(zoneAfterCornerGrowth.origin.x < zoneBeforeCornerGrowth.origin.x
+                       && zoneAfterCornerGrowth.origin.y < zoneBeforeCornerGrowth.origin.y,
+                   "top-left pressure must minimally grow both owning-zone origins")
+        try expectPassiveLayerWorldFrames(beforeCornerGrowth, "top-left origin growth")
+
+        // Manual layer-zone resize follows the same world-preserving transaction
+        // semantics. Exercise left, top, and top-left chrome drags after switching
+        // the per-zone resolution mode; the global-enabled path must never infer
+        // rigid translation merely because the placement origin changed.
+        layerCanvas.setZoneAutoLayoutMode(.disabled, zoneId: layerZoneId)
+        for (label, expectedEdge, edgePoint, dx, dy) in [
+            ("manual-left", ResizeEdge.left, NSPoint(x: 0, y: 220), CGFloat(-30), CGFloat(0)),
+            // One point outside the header remains inside the 8pt outer-border
+            // affordance, selecting resize rather than the intentional rigid
+            // header move.
+            ("manual-top", ResizeEdge.top, NSPoint(x: 300, y: -1), CGFloat(0), CGFloat(30)),
+            ("manual-top-left", ResizeEdge.topLeft, NSPoint(x: -1, y: -1), CGFloat(-20), CGFloat(20)),
+        ] {
+            let before = try layerWorldFrames()
+            let placement = layerCanvas.qaLiveZonePlacement(layerZoneId)!
+            let start = win(
+                placement.origin.x + edgePoint.x,
+                placement.origin.y + edgePoint.y)
+            layerCanvas.mouseDown(with: try event(.leftMouseDown, start, window: layerWindow))
+            try expect(layerCanvas.qaActiveZoneResizeEdge(zoneId: layerZoneId) == expectedEdge,
+                       "\(label) must enter the intended zone-resize gesture, not rigid zone movement")
+            for fraction in [CGFloat(0.5), CGFloat(1)] {
+                let beforeStep = try layerWorldFrames()
+                let placementBeforeStep = layerCanvas.qaLiveZonePlacement(layerZoneId)!
+                layerCanvas.mouseDragged(with: try event(
+                    .leftMouseDragged,
+                    NSPoint(x: start.x + dx * fraction, y: start.y + dy * fraction),
+                    window: layerWindow))
+                let placementAfterStep = layerCanvas.qaLiveZonePlacement(layerZoneId)!
+                try expect(placementAfterStep != placementBeforeStep,
+                           "\(label) intermediate drag \(fraction) must change zone origin/size")
+                try expectPassiveLayerWorldFrames(
+                    beforeStep,
+                    "\(label) intermediate drag \(fraction), placement \(placementBeforeStep) -> \(placementAfterStep)")
+            }
+            layerCanvas.mouseUp(with: try event(
+                .leftMouseUp,
+                NSPoint(x: start.x + dx, y: start.y + dy),
+                window: layerWindow))
+            try expectPassiveLayerWorldFrames(before, label)
+        }
+
+        defaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        let beforeGlobalOffTile = try layerWorldFrames()
+        try resizeTile(
+            layerFirstView,
+            from: NSPoint(x: 1, y: 1),
+            windowDX: -12.5, windowDY: 12.5,
+            window: layerWindow)
+        try expectPassiveLayerWorldFrames(beforeGlobalOffTile, "global-off top-left tile growth")
+
+        let beforeGlobalOffZone = try layerWorldFrames()
+        let globalOffPlacement = layerCanvas.qaLiveZonePlacement(layerZoneId)!
+        let globalOffStart = win(globalOffPlacement.origin.x, globalOffPlacement.origin.y + 220)
+        layerCanvas.mouseDown(with: try event(.leftMouseDown, globalOffStart, window: layerWindow))
+        layerCanvas.mouseDragged(with: try event(
+            .leftMouseDragged,
+            NSPoint(x: globalOffStart.x - 12.5, y: globalOffStart.y),
+            window: layerWindow))
+        layerCanvas.mouseDragged(with: try event(
+            .leftMouseDragged,
+            NSPoint(x: globalOffStart.x - 25.25, y: globalOffStart.y),
+            window: layerWindow))
+        layerCanvas.mouseUp(with: try event(
+            .leftMouseUp,
+            NSPoint(x: globalOffStart.x - 25.25, y: globalOffStart.y),
+            window: layerWindow))
+        try expectPassiveLayerWorldFrames(beforeGlobalOffZone, "global-off manual left resize")
+        defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
 
         // Spawn a third member beyond the old right edge, then swap the middle
         // member into the left member's slot through a real title-bar drag.
