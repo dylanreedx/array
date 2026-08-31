@@ -244,7 +244,8 @@ SWIFT
 }
 
 wait_for_app_window() {
-  local timeout="$1" deadline=$((SECONDS + timeout))
+  local timeout="$1" deadline
+  deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$QA_APP_PID" 2>/dev/null; then
       echo "launched app PID $QA_APP_PID exited before window readiness" >&2
@@ -262,7 +263,8 @@ wait_for_app_window() {
 }
 
 wait_for_named_readiness() {
-  local name="$1" path="$2" timeout="${3:-20}" deadline=$((SECONDS + timeout))
+  local name="$1" path="$2" timeout="${3:-20}" deadline
+  deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     if [[ -s "$path" ]]; then
       append_event "$name" "pass" "" "named readiness file: $path"

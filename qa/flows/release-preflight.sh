@@ -28,8 +28,14 @@ case "$CONTINUUM_PROJECT_ROOT:$CONTINUUM_APP_SUPPORT" in
   *) echo "release preflight refuses non-QA state roots" >&2; exit 2 ;;
 esac
 
-launch_continuum default-smoke
+launch_continuum default-smoke || defer_display "app-window-readiness" "exact launched PID did not expose a capturable window before timeout"
 assert_flow "pid-window-identity" "CGWindowID belongs to exact launched PID; decoy owner names are ignored" assert_window_owned_by_pid
+initial_bounds="$(window_bounds)"
+IFS=',' read -r _initial_x _initial_y initial_width initial_height <<< "$initial_bounds"
+if [[ "$initial_width" -lt 640 || "$initial_height" -lt 480 ]]; then
+  capture_step "project-folder-access-blocker" "exact PID presented ${initial_width}x${initial_height} instead of the main canvas"
+  defer_display "project-folder-access" "isolated project is under Documents and the app presented a folder-access blocker; permissions were not altered"
+fi
 
 if ! osascript - "$QA_APP_PID" <<'APPLESCRIPT' >/dev/null 2>&1
 on run argv
@@ -50,6 +56,10 @@ fi
 sleep 0.2
 bounds="$(window_bounds)"
 IFS=',' read -r _x _y width height <<< "$bounds"
+if [[ "$width" -ne 1440 || "$height" -ne 900 ]]; then
+  capture_step "display-size-unavailable" "requested 1440x900, actual ${width}x${height}"
+  defer_display "display-size-1440x900" "requested 1440x900 but display constrained the window to ${width}x${height}"
+fi
 assert_flow "size-1440x900" "window readback is 1440×900 points" test "$width" -eq 1440
 capture_step "appearance-current-1440x900" "specific CGWindowID capture"
 

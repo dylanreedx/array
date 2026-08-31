@@ -33,7 +33,7 @@ const markerChecks = new Map([
   ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step", "assert_flow"]],
   ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit", "assert_flow"]],
   ["Sources/ContinuumRevived/App/ContinuumApp.swift", ["palette.onClose", "QAPerf.residentMemoryBytes()", "palette-leak-cycle"]],
-  ["Sources/ContinuumRevived/App/LaunchProfilePalette.swift", ["let search = NSTextField()", "func close()", "searchField?.delegate = nil", "tableView?.dataSource = nil", "paletteView?.removeFromSuperview()"]]
+  ["Sources/ContinuumRevived/App/LaunchProfilePalette.swift", ["let search = NSSearchField()", "func close()", "searchField?.delegate = nil", "tableView?.dataSource = nil", "paletteView?.removeFromSuperview()"]]
 ]);
 
 function fail(message) {
