@@ -32,22 +32,49 @@ public struct AtomicWriterDescriptorOperations: Sendable {
     public static let live = AtomicWriterDescriptorOperations()
 }
 
+/// Injectable boundaries for the filesystem operations that form the atomic
+/// commit. Production always uses `live`; focused persistence checks can fail
+/// one named operation without changing process permissions or global state.
+public struct AtomicWriterFileOperations: Sendable {
+    public var writeTemporary: @Sendable (Data, URL) throws -> Void
+    public var replace: @Sendable (URL, URL) throws -> Void
+
+    public init(
+        writeTemporary: @escaping @Sendable (Data, URL) throws -> Void = { data, url in
+            try data.write(to: url)
+        },
+        replace: @escaping @Sendable (URL, URL) throws -> Void = { source, destination in
+            if Darwin.rename(source.path, destination.path) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
+    ) {
+        self.writeTemporary = writeTemporary
+        self.replace = replace
+    }
+
+    public static let live = AtomicWriterFileOperations()
+}
+
 public struct AtomicWriter: Sendable {
     public let backupsDirectory: URL?
     public let retainedBackups: Int
     public let prettyPrint: Bool
     public let descriptorOperations: AtomicWriterDescriptorOperations
+    public let fileOperations: AtomicWriterFileOperations
 
     public init(
         backupsDirectory: URL? = nil,
         retainedBackups: Int = 3,
         prettyPrint: Bool = true,
-        descriptorOperations: AtomicWriterDescriptorOperations = .live
+        descriptorOperations: AtomicWriterDescriptorOperations = .live,
+        fileOperations: AtomicWriterFileOperations = .live
     ) {
         self.backupsDirectory = backupsDirectory
         self.retainedBackups = max(0, retainedBackups)
         self.prettyPrint = prettyPrint
         self.descriptorOperations = descriptorOperations
+        self.fileOperations = fileOperations
     }
 
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
@@ -111,8 +138,14 @@ public struct AtomicWriter: Sendable {
     private func atomicDurableWrite(_ data: Data, to url: URL) throws {
         let dir = url.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        let priorBytes = try? Data(contentsOf: url)
         // Write bytes to the temp (not atomic — it's throwaway; atomicity comes from rename).
-        try data.write(to: tmp)
+        do {
+            try fileOperations.writeTemporary(data, tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
+        }
         // fsync the temp's data to stable storage before rename.
         let fd = descriptorOperations.open(tmp.path, O_RDONLY)
         guard fd >= 0 else {
@@ -132,23 +165,54 @@ public struct AtomicWriter: Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
         // Atomic, same-volume rename. On failure, clean up the temp and rethrow.
-        if rename(tmp.path, url.path) != 0 {
-            let err = errno
+        do {
+            try fileOperations.replace(tmp, url)
+        } catch {
             try? FileManager.default.removeItem(at: tmp)
-            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+            throw error
         }
         // fsync the parent directory so the directory entry (rename) is durable.
         let dfd = descriptorOperations.open(dir.path, O_RDONLY)
         guard dfd >= 0 else {
+            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         if descriptorOperations.fsync(dfd) != 0 {
             let err = errno
             _ = descriptorOperations.close(dfd)
+            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
             throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
         }
         if descriptorOperations.close(dfd) != 0 {
+            try rollbackCommittedWrite(at: url, priorBytes: priorBytes)
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    /// A directory durability failure happens after rename. Do not expose those
+    /// unacknowledged bytes as the next launch's truth: atomically restore the
+    /// retained prior bytes with live operations, then durably sync the directory.
+    private func rollbackCommittedWrite(at url: URL, priorBytes: Data?) throws {
+        guard let priorBytes else {
+            try FileManager.default.removeItem(at: url)
+            return
+        }
+        let dir = url.deletingLastPathComponent()
+        let rollback = dir.appendingPathComponent(".\(url.lastPathComponent).rollback-\(UUID().uuidString)")
+        do {
+            try priorBytes.write(to: rollback)
+            let fd = Darwin.open(rollback.path, O_RDONLY)
+            guard fd >= 0 else { throw POSIXError(.EIO) }
+            defer { _ = Darwin.close(fd) }
+            guard Darwin.fsync(fd) == 0 else { throw POSIXError(.EIO) }
+            guard Darwin.rename(rollback.path, url.path) == 0 else { throw POSIXError(.EIO) }
+            let dfd = Darwin.open(dir.path, O_RDONLY)
+            guard dfd >= 0 else { throw POSIXError(.EIO) }
+            defer { _ = Darwin.close(dfd) }
+            guard Darwin.fsync(dfd) == 0 else { throw POSIXError(.EIO) }
+        } catch {
+            try? FileManager.default.removeItem(at: rollback)
+            throw error
         }
     }
 

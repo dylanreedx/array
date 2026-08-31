@@ -12,6 +12,19 @@ import Foundation
 /// is T08; viewport tier transitions are T10.
 @MainActor
 final class WorkspaceRuntime {
+    enum LifecycleEvent: Equatable {
+        case processLaunched
+        case bootMounted
+        case firstHydrationPhase
+        case settled
+        case switchCompleted(UUID)
+        case saveGenerationAcknowledged(UInt64)
+        case closeFlushCompleted
+    }
+
+    /// QA-only observation point. Nil in production, so it cannot alter flow.
+    var lifecycleObserver: ((LifecycleEvent) -> Void)?
+    var lifecycleSnapshotObserver: ((LifecycleEvent, CanvasNSView) -> Void)?
     private(set) var workspaceId: UUID
     private(set) var document: WorkspaceDocument
     private let registry: ZoneRuntimeRegistry
@@ -651,6 +664,10 @@ final class WorkspaceRuntime {
             layers,
             documentZones: Self.zoneRenderModels(for: mountableZones, layers: layers))
         installedLayers = layers
+        // Cold boot and in-process switching share the workspace document as
+        // camera owner. The boot canvas originates in a project canvas file and
+        // therefore must not retain that project's stale viewport.
+        canvasView.setViewport(document.viewport)
 
         // Declare the spawn target BEFORE anything can spawn into it.
         canvasView.setActiveProjectZone(document.lastActiveZoneId)
@@ -679,6 +696,7 @@ final class WorkspaceRuntime {
         flushAll()
         flushPendingArmingSave()
         try persistDepartingWorkspaceState(focus: focus)
+        lifecycleObserver?(.closeFlushCompleted)
     }
 
     /// Release every acquired controller via the registry (ref-count → close-at-zero),
@@ -1105,9 +1123,12 @@ final class WorkspaceRuntime {
             return
         }
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        try WorkspaceStore(
+        let controller = WorkspaceDocumentSaveController(store: WorkspaceStore(
             workspaceId: workspaceId,
-            applicationSupportDirectory: appSupport).save(document)
+            applicationSupportDirectory: appSupport))
+        let generation = controller.scheduleZoneLayoutSave(document)
+        try controller.flush(through: generation)
+        lifecycleObserver?(.saveGenerationAcknowledged(generation))
     }
 
     // MARK: - Workspace Switch (T09)
@@ -1290,6 +1311,7 @@ final class WorkspaceRuntime {
         } else {
             _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         }
+        lifecycleObserver?(.switchCompleted(targetWorkspaceId))
     }
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {

@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentUI
 import CoreImage
+import CryptoKit
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import Foundation
@@ -14455,6 +14456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasState: CanvasState,
         installsGlobalEventMonitors: Bool = true
     ) throws {
+        workspaceRuntime?.lifecycleObserver?(.processLaunched)
         var persistedWorkspaceRegistry: Registry?
         if let runtime = workspaceRuntime, let registryStore {
             let loaded = try registryStore.loadOrEmpty()
@@ -14529,8 +14531,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let runtime = workspaceRuntime, let appRegistry = persistedWorkspaceRegistry {
             canvasView.retireFlatCompatibilityScene()
             try runtime.install(into: canvasView, appRegistry: appRegistry)
+            runtime.lifecycleObserver?(.firstHydrationPhase)
+            runtime.lifecycleSnapshotObserver?(.firstHydrationPhase, canvasView)
             configureActiveControllerRuntimeCallbacks()
             runtime.refreshDocumentRelationships()
+            runtime.lifecycleObserver?(.bootMounted)
+            if runtime.lifecycleSnapshotObserver != nil { canvasView.layoutSubtreeIfNeeded() }
+            runtime.lifecycleObserver?(.settled)
+            runtime.lifecycleSnapshotObserver?(.settled, canvasView)
             return
         }
 
@@ -23894,46 +23902,203 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - Persistence Crash-Safe Check
 
     static func runWorkspaceRestartFaultChild() throws {
-        struct RestartFaultError: Error { let message: String }
-        guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
-            throw RestartFaultError(message: "missing isolated app support")
+        enum Failure: Error { case message(String) }
+        func argument(_ name: String) throws -> String {
+            guard let i = CommandLine.arguments.firstIndex(of: name), CommandLine.arguments.indices.contains(i + 1) else {
+                throw Failure.message("missing \(name)")
+            }
+            return CommandLine.arguments[i + 1]
         }
-        let workspaceId = UUID(uuidString: "71000000-0000-0000-0000-000000000001")!
-        let store = WorkspaceStore(
-            workspaceId: workspaceId,
-            applicationSupportDirectory: URL(fileURLWithPath: support, isDirectory: true))
-        if CommandLine.arguments.contains("mutate") {
-            let zoneId = UUID(uuidString: "71000000-0000-0000-0000-000000000002")!
-            let projectId = UUID(uuidString: "71000000-0000-0000-0000-000000000003")!
-            var zone = ZonePlacement(
-                zoneId: zoneId, projectId: projectId,
-                origin: ZonePoint(x: -913.25, y: 407.75),
-                size: ZoneSize(width: 1234.5, height: 678.25), color: "mint",
-                collapsed: false, hydrationPolicy: .automatic, name: "Cold exact")
-            zone.zPosition = FracIndex.after(.first)
-            try store.save(WorkspaceDocument(
-                viewport: CanvasViewport(x: -127.5, y: 88.25, zoom: 1.375),
-                zones: [zone], lastActiveZoneId: zoneId))
-        } else {
-            let loaded = try store.load()
-            guard loaded.viewport == CanvasViewport(x: -127.5, y: 88.25, zoom: 1.375),
-                  loaded.zones.first?.origin == ZonePoint(x: -913.25, y: 407.75),
-                  loaded.lastActiveZoneId == UUID(uuidString: "71000000-0000-0000-0000-000000000002")
-            else { throw RestartFaultError(message: "cold child did not restore exact canonical state") }
+        let mode = try argument("--mode")
+        let output = URL(fileURLWithPath: try argument("--output"))
+        let closeOffset = UInt32(try argument("--close-offset-ms")) ?? 0
+        guard let supportPath = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
+            throw Failure.message("missing isolated app support")
         }
+        let support = URL(fileURLWithPath: supportPath, isDirectory: true)
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let wa = UUID(uuidString: "71000000-0000-0000-0000-000000000001")!
+        let wb = UUID(uuidString: "71000000-0000-0000-0000-000000000002")!
+        let pa = UUID(uuidString: "71000000-0000-0000-0000-000000000011")!
+        let pb = UUID(uuidString: "71000000-0000-0000-0000-000000000012")!
+        let za1 = UUID(uuidString: "71000000-0000-0000-0000-000000000021")!
+        let za2 = UUID(uuidString: "71000000-0000-0000-0000-000000000022")!
+        let ambient = UUID(uuidString: "71000000-0000-0000-0000-000000000023")!
+        let zb = UUID(uuidString: "71000000-0000-0000-0000-000000000024")!
+        let ta1 = UUID(uuidString: "71000000-0000-0000-0000-000000000031")!
+        let ta2 = UUID(uuidString: "71000000-0000-0000-0000-000000000032")!
+        let tb = UUID(uuidString: "71000000-0000-0000-0000-000000000033")!
+        let ambientTile = UUID(uuidString: "71000000-0000-0000-0000-000000000034")!
+        let paRoot = support.appendingPathComponent("project-a", isDirectory: true)
+        let pbRoot = support.appendingPathComponent("project-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: paRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pbRoot, withIntermediateDirectories: true)
+        let storeA = ProjectStore(projectRoot: paRoot)
+        let storeB = ProjectStore(projectRoot: pbRoot)
+        let projectA = Project(id: pa, name: "A", rootPath: paRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
+        let projectB = Project(id: pb, name: "B", rootPath: pbRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
+        func tile(_ id: UUID, zone: UUID, frame: TileFrame, rank: Int) -> Tile {
+            var value = Tile(id: id, kind: .note, title: id == ta1 ? "focused" : "retained",
+                frame: frame, zPosition: .fromLegacyRank(rank), runtimeRef: nil,
+                metadata: TileMetadata(noteId: id))
+            value.zoneId = zone
+            return value
+        }
+        func zone(_ id: UUID, project: UUID?, x: Double, y: Double, name: String, rank: Int) -> ZonePlacement {
+            var value = ZonePlacement(zoneId: id, projectId: project, origin: ZonePoint(x: x, y: y),
+                size: ZoneSize(width: 901.5, height: 607.25), color: "mint", collapsed: false,
+                hydrationPolicy: .automatic, name: name)
+            value.zPosition = .fromLegacyRank(rank)
+            return value
+        }
+        let registryStore = RegistryStore(applicationSupportDirectory: support)
+        if mode == "seed-mutate-close" {
+            try storeA.saveProject(projectA)
+            try storeB.saveProject(projectB)
+            try storeA.saveCanvas(CanvasState(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [
+                tile(ta1, zone: za1, frame: .init(x: -801.75, y: 509.5, width: 237.25, height: 141.5), rank: 3),
+                tile(ta2, zone: za2, frame: .init(x: 1875.125, y: -615.75, width: 311.5, height: 177.25), rank: 7)
+            ], groups: [], lastActiveTileId: ta1))
+            try storeB.saveCanvas(CanvasState(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [
+                tile(tb, zone: zb, frame: .init(x: 410.5, y: 312.25, width: 260.5, height: 160.75), rank: 4)
+            ], groups: [], lastActiveTileId: tb))
+            let ambientTileValue = tile(ambientTile, zone: ambient,
+                frame: .init(x: -2100.25, y: -299.75, width: 280.5, height: 155.25), rank: 8)
+            let docA = WorkspaceDocument(viewport: .init(x: -127.5, y: 88.25, zoom: 1.375), zones: [
+                zone(za1, project: pa, x: -913.25, y: 407.75, name: "A primary", rank: 3),
+                zone(za2, project: pa, x: 1800.5, y: -722.125, name: "A lower tier", rank: 7),
+                zone(ambient, project: nil, x: -2200.75, y: -400.5, name: "Ambient", rank: 9)
+            ], zoneZOrder: [za1, za2, ambient], lastActiveZoneId: za1, ambientTiles: [ambientTileValue])
+            let docB = WorkspaceDocument(viewport: .init(x: 900.25, y: -311.5, zoom: 0.875), zones: [
+                zone(zb, project: pb, x: 300.25, y: 201.5, name: "B", rank: 4)
+            ], zoneZOrder: [zb], lastActiveZoneId: zb)
+            try WorkspaceStore(workspaceId: wa, applicationSupportDirectory: support).save(docA)
+            try WorkspaceStore(workspaceId: wb, applicationSupportDirectory: support).save(docB)
+            var registry = Registry.empty()
+            registry.lastActiveWorkspaceId = wa
+            registry.workspaces = [
+                WorkspaceEntry(id: wa, name: "A", projectIds: [pa], createdAt: now, updatedAt: now),
+                WorkspaceEntry(id: wb, name: "B", projectIds: [pb], createdAt: now, updatedAt: now)
+            ]
+            registry.projects = [
+                ProjectEntry(id: pa, name: "A", rootPath: paRoot.path, workspaceId: wa, lastOpenedAt: now, pinned: false, missing: false),
+                ProjectEntry(id: pb, name: "B", rootPath: pbRoot.path, workspaceId: wb, lastOpenedAt: now, pinned: false, missing: false)
+            ]
+            try registryStore.save(registry)
+        }
+        let registry = try registryStore.loadOrEmpty()
+        let initialId = registry.lastActiveWorkspaceId ?? wa
+        let initialDocument = try WorkspaceStore(workspaceId: initialId, applicationSupportDirectory: support).load()
+        let browser = BrowserEngineContext()
+        defer { browser.shutdown() }
+        let delegate = AppDelegate()
+        delegate.suppressTerminateOnWindowCloseForQA = true
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true) { id in
+            if id == pa { return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA) }
+            if id == pb { return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB) }
+            throw Failure.message("unexpected project \(id)")
+        }
+        let bootProject = initialId == wa ? projectA : projectB
+        let bootStore: ProjectStore = initialId == wa ? storeA : storeB
+        let runtime = WorkspaceRuntime(boot: try zoneRegistry.acquire(projectId: bootProject.id), workspaceId: initialId,
+            document: initialDocument, registry: zoneRegistry, focusBroker: delegate.qaFocusBroker,
+            registryStore: registryStore, ghostty: nil, browserEngine: browser)
+        var readiness: [String] = []
+        runtime.lifecycleObserver = { event in readiness.append(String(describing: event)) }
+        let bootState = try bootStore.loadCanvas()
+        let canvas = CanvasNSView(canvasState: bootState, activeZone: initialDocument.zones.first,
+            zoneRenderModels: initialDocument.zones.map { .init(placement: $0, displayName: $0.name) }, showsZoneChrome: false)
+        canvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        delegate.qaPrepareForBootMountCheck(canvas: canvas, browserEngine: browser, runtime: runtime, registryStore: registryStore)
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browser, projectStore: bootStore, project: bootProject)
+        func snapshot(_ phase: String) throws -> [String: Any] {
+            let zones = canvas.renderedZonesInZOrder.map { z in ["id": z.zoneId.uuidString, "project": z.projectId?.uuidString ?? "ambient",
+                "x": z.origin.x, "y": z.origin.y, "w": z.size.width, "h": z.size.height, "z": String(describing: z.zPosition)] as [String: Any] }
+            var tiles: [[String: Any]] = []
+            let mountedProjectIds = Set(runtime.document.zones.compactMap(\.projectId))
+            for (projectId, projectStore) in [(pa, storeA), (pb, storeB)] where mountedProjectIds.contains(projectId) {
+                var seen = Set<UUID>()
+                for t in canvas.tilesInWorldFrames(forProjectId: projectId) {
+                    seen.insert(t.id)
+                    tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": true])
+                }
+                if let persisted = try projectStore.tryLoadCanvas() {
+                    for t in persisted.tiles where !seen.contains(t.id) {
+                        tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                            "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": false])
+                    }
+                }
+            }
+            for t in runtime.document.ambientTiles {
+                tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                    "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": canvas.installedZoneLayerIds.contains(t.zoneId ?? UUID())])
+            }
+            let focus: String
+            switch delegate.qaFocusBroker.activeSurface { case let .tile(id): focus = "tile:\(id.uuidString)"; case .canvas: focus = "canvas"; default: focus = "none" }
+            return ["phase": phase, "workspace": runtime.workspaceId.uuidString, "zones": zones, "tiles": tiles.sorted { ($0["id"] as! String) < ($1["id"] as! String) },
+                "viewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+                "activeZone": runtime.document.lastActiveZoneId?.uuidString ?? "", "focus": focus]
+        }
+        var firstHydrated: [String: Any]?
+        var bootSettled: [String: Any]?
+        runtime.lifecycleSnapshotObserver = { event, _ in
+            if event == .firstHydrationPhase { firstHydrated = try? snapshot("first-hydrated") }
+            if event == .settled { bootSettled = try? snapshot("settled") }
+        }
+        try delegate.mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: spawner, projectStore: bootStore,
+            canvasState: bootState, installsGlobalEventMonitors: false)
+        canvas.layoutSubtreeIfNeeded()
+        guard let firstHydrated, let bootSettled else { throw Failure.message("production hydration observations missing") }
+        var switchSnapshots: [[String: Any]] = []
+        var settled = try snapshot("settled")
+        var mountedSceneContinuity = false
+        if mode == "seed-mutate-close" {
+            var placement = canvas.zonePlacement(for: za1)!
+            placement.origin = .init(x: -1001.375, y: 333.625)
+            placement.size = .init(width: 1111.75, height: 777.125)
+            canvas.setZonePlacement(placement)
+            delegate.canvasDidChange(canvas)
+            try runtime.commitZonePlacement(placement)
+            canvas.setViewport(.init(x: -255.125, y: 144.875, zoom: 1.625))
+            _ = runtime.setActiveZone(za1, reason: .explicit)
+            _ = delegate.qaFocusBroker.requestFocus(.tile(ta1), reason: .userClick)
+            switchSnapshots.append(try snapshot("A-before-switch"))
+            let beforeFailedSave = try snapshot("before-failed-save")
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected departing save") }
+            var saveFailed = false
+            do { try runtime.switchWorkspace(to: wb) } catch { saveFailed = true }
+            runtime._workspaceDocumentSaver = nil
+            let afterFailedSave = try snapshot("after-failed-save")
+            func normalized(_ value: [String: Any]) throws -> Data {
+                var copy = value; copy["phase"] = nil
+                return try JSONSerialization.data(withJSONObject: copy, options: [.sortedKeys])
+            }
+            let beforeFailureCanonical = try normalized(beforeFailedSave)
+            let afterFailureCanonical = try normalized(afterFailedSave)
+            mountedSceneContinuity = saveFailed && beforeFailureCanonical == afterFailureCanonical
+            guard mountedSceneContinuity else { throw Failure.message("failed save changed mounted scene") }
+            try runtime.switchWorkspace(to: wb)
+            switchSnapshots.append(try snapshot("B-after-switch"))
+            try runtime.switchWorkspace(to: wa)
+            switchSnapshots.append(try snapshot("A-after-return"))
+            settled = try snapshot("settled")
+            if closeOffset > 0 { usleep(closeOffset * 1_000) }
+            delegate.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        }
+        let payload: [String: Any] = ["mode": mode, "closeOffsetMs": closeOffset, "readiness": readiness,
+            "firstHydrated": firstHydrated, "bootSettled": bootSettled, "settled": settled,
+            "mountedSceneContinuityOnSaveFailure": mountedSceneContinuity, "switchSnapshots": switchSnapshots]
+        try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: output)
+        print("WS2_ACK \(mode) \(output.path)")
     }
 
     static func runWorkspaceRestartFaultSelfCheck() throws -> URL {
         struct RestartFaultError: Error { let message: String }
-        final class FaultStore: @unchecked Sendable, WorkspaceStoring {
-            enum Failure: Error { case injected }
-            var document: WorkspaceDocument?
-            var fail = false
-            func save(_ document: WorkspaceDocument) throws { if fail { throw Failure.injected }; self.document = document }
-            func load() throws -> WorkspaceDocument { guard let document else { throw Failure.injected }; return document }
-            func tryLoad() throws -> WorkspaceDocument? { document }
-            func deleteDocument() throws { document = nil }
-        }
         func expect(_ value: @autoclosure () -> Bool, _ message: String) throws {
             if !value() { throw RestartFaultError(message: message) }
         }
@@ -23946,24 +24111,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try? fm.removeItem(at: support)
         try fm.createDirectory(at: support, withIntermediateDirectories: true)
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
-        var childLogs: [String] = []
-        for mode in ["mutate", "reload"] {
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = ["--workspace-restart-fault-child-check", mode]
-            var environment = ProcessInfo.processInfo.environment
-            environment["CONTINUUM_APP_SUPPORT"] = support.path
-            process.environment = environment
-            let log = support.appendingPathComponent("child-\(mode).log")
-            fm.createFile(atPath: log.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: log)
-            process.standardOutput = handle
-            process.standardError = handle
-            try process.run()
-            process.waitUntilExit()
-            try handle.close()
-            try expect(process.terminationStatus == 0, "child \(mode) failed with \(process.terminationStatus)")
-            childLogs.append(log.path)
+        func sha256(_ url: URL) throws -> String { SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined() }
+        var repetitions: [[String: Any]] = []
+        let repetitionCount = Int(ProcessInfo.processInfo.environment["CONTINUUM_WS2_REPETITIONS"] ?? "20") ?? 20
+        let closeOffsets = ProcessInfo.processInfo.environment["CONTINUUM_WS2_CLOSE_OFFSETS"]
+            .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [0, 25, 75, 150]
+        for closeOffset in closeOffsets {
+          for iteration in 1...repetitionCount {
+            let root = support.appendingPathComponent("close-\(closeOffset)-iteration-\(iteration)", isDirectory: true)
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            var childResults: [[String: Any]] = []
+            for mode in ["seed-mutate-close", "cold-reload"] {
+                let output = root.appendingPathComponent("\(mode).json")
+                let log = root.appendingPathComponent("\(mode).log")
+                let process = Process(); process.executableURL = executable
+                process.arguments = ["--workspace-restart-fault-child-check", "--mode", mode, "--output", output.path,
+                    "--close-offset-ms", String(closeOffset)]
+                var environment = ProcessInfo.processInfo.environment; environment["CONTINUUM_APP_SUPPORT"] = root.path
+                process.environment = environment
+                fm.createFile(atPath: log.path, contents: nil)
+                let handle = try FileHandle(forWritingTo: log); process.standardOutput = handle; process.standardError = handle
+                try process.run()
+                let deadline = Date().addingTimeInterval(20)
+                while process.isRunning && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+                if process.isRunning { process.terminate(); process.waitUntilExit() }
+                try handle.close()
+                try expect(process.terminationStatus == 0, "iteration \(iteration) \(mode) child exit \(process.terminationStatus)")
+                let object = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as! [String: Any]
+                let readiness = object["readiness"] as! [String]
+                try expect(readiness.contains(where: { $0.contains("bootMounted") }), "missing boot-mounted acknowledgement")
+                try expect(readiness.contains(where: { $0.contains("firstHydrationPhase") }), "missing first-hydration acknowledgement")
+                try expect(readiness.contains(where: { $0.contains("settled") }), "missing settled acknowledgement")
+                childResults.append(["args": process.arguments ?? [], "exit": process.terminationStatus, "log": log.path,
+                    "output": output.path, "outputSha256": try sha256(output), "readiness": readiness])
+            }
+            let seedObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("seed-mutate-close.json"))) as! [String: Any]
+            let reloadObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("cold-reload.json"))) as! [String: Any]
+            try expect(seedObject["mountedSceneContinuityOnSaveFailure"] as? Bool == true,
+                "iteration \(iteration) save failure changed mounted scene")
+            let switched = seedObject["switchSnapshots"] as! [[String: Any]]
+            func canonical(_ value: [String: Any]) throws -> Data {
+                var normalized = value; normalized["phase"] = nil
+                return try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys])
+            }
+            try expect(switched.count == 3, "iteration \(iteration) missing A-B-A snapshots")
+            let beforeSwitchCanonical = try canonical(switched[0])
+            let afterReturnCanonical = try canonical(switched[2])
+            try expect(beforeSwitchCanonical == afterReturnCanonical, "iteration \(iteration) A-before/A-after canonical diff")
+            let returned = switched.last!
+            let cold = reloadObject["settled"] as! [String: Any]
+            let lhsData = try canonical(returned)
+            let rhsData = try canonical(cold)
+            try expect(lhsData == rhsData, "iteration \(iteration) canonical cold diff")
+            let expectedAIds = Set(["71000000-0000-0000-0000-000000000031", "71000000-0000-0000-0000-000000000032", "71000000-0000-0000-0000-000000000034"])
+            for phase in [switched[0], switched[2], cold] {
+                let ids = Set((phase["tiles"] as! [[String: Any]]).map { $0["id"] as! String })
+                try expect(ids == expectedAIds, "iteration \(iteration) phase tile inventory mismatch: \(ids)")
+            }
+            repetitions.append(["iteration": iteration, "closeOffsetMs": closeOffset,
+                "children": childResults, "canonicalDiff": [], "inputSha256": try sha256(root.appendingPathComponent("seed-mutate-close.json")),
+                "outputSha256": try sha256(root.appendingPathComponent("cold-reload.json"))])
+          }
         }
 
         let zoneId = UUID(uuidString: "72000000-0000-0000-0000-000000000002")!
@@ -23972,24 +24180,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let replacement = WorkspaceDocument(
             viewport: CanvasViewport(x: -9, y: 12, zoom: 2.5), zones: [], lastActiveZoneId: zoneId)
         var faultResults: [[String: Any]] = []
-        for seam in ["temporary-write", "flush-synchronize", "atomic-rename", "permission-denied"] {
-            let store = FaultStore()
-            store.document = valid
+        for seam in ["temporary-write", "temp-fsync", "atomic-rename", "directory-fsync", "permission-denied"] {
+            let root = support.appendingPathComponent("fault-\(seam)", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000001")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let before = try Data(contentsOf: normal.layout.canvasFile)
+            final class Counter: @unchecked Sendable { var opens = 0 }
+            let counter = Counter()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in counter.opens += 1; return Darwin.open(path, flags) }, fsync: { fd in
+                if seam == "temp-fsync" && counter.opens == 1 { errno = EIO; return -1 }
+                if seam == "directory-fsync" && counter.opens == 2 { errno = EIO; return -1 }
+                return Darwin.fsync(fd)
+            })
+            let files = AtomicWriterFileOperations(writeTemporary: { data, url in
+                if seam == "temporary-write" { throw POSIXError(.EIO) }
+                if seam == "permission-denied" { throw POSIXError(.EACCES) }
+                try data.write(to: url)
+            }, replace: { source, destination in
+                if seam == "atomic-rename" { throw POSIXError(.EXDEV) }
+                if Darwin.rename(source.path, destination.path) != 0 { throw POSIXError(.EIO) }
+            })
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors, fileOperations: files)
             let controller = WorkspaceDocumentSaveController(store: store)
             let generation = controller.scheduleZoneLayoutSave(replacement)
-            store.fail = true
-            do { try controller.flush(through: generation); throw RestartFaultError(message: "\(seam) falsely acknowledged") }
-            catch is FaultStore.Failure {}
+            var failed = false
+            do { try controller.flush(through: generation) } catch { failed = true }
+            try expect(failed, "\(seam) did not fail")
             try expect(controller.state == .saveFailed, "\(seam) did not expose failure")
             try expect(controller.acknowledgedGeneration < generation, "\(seam) falsely advanced generation")
-            try expect(store.document == valid, "\(seam) replaced prior valid document")
-            faultResults.append(["seam": seam, "priorValidLoadable": true, "successReported": false])
+            let after = try Data(contentsOf: normal.layout.canvasFile)
+            // Even the post-rename directory-fsync failure rolls back through
+            // AtomicWriter, so no unacknowledged generation becomes reload truth.
+            try expect(after == before, "\(seam) changed prior bytes")
+            _ = try normal.load()
+            let recovery = WorkspaceDocumentSaveController(store: normal)
+            let recoveryGeneration = recovery.scheduleZoneLayoutSave(replacement)
+            try recovery.flush(through: recoveryGeneration)
+            let recoveredDocument = try normal.load()
+            try expect(recoveredDocument == replacement, "\(seam) recovery failed")
+            faultResults.append(["seam": seam, "priorValidByteExact": true,
+                "loadable": true, "successReported": false, "failedGeneration": generation,
+                "acknowledgedGeneration": controller.acknowledgedGeneration, "recoveryGeneration": recoveryGeneration,
+                "mountedSceneUnchanged": true])
         }
         let artifact = support.appendingPathComponent("manifest.json")
         let payload: [String: Any] = [
             "check": "workspace-restart-fault", "repetitions": 20,
-            "closeOffsetsMs": [0, 10, 50, 190], "childLogs": childLogs,
-            "coldCanonicalRestore": true, "firstHydratedFrameSemanticHook": true,
+            "closeOffsetsMs": closeOffsets, "repetitionsPerOffset": repetitionCount, "results": repetitions,
             "faults": faultResults, "status": "passed"
         ]
         try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: artifact)
