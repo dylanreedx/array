@@ -5677,6 +5677,18 @@ final class CanvasNSView: NSView, TokenThemed {
             .filter { seen.insert($0.id).inserted }
     }
 
+    /// QA/persistence observation of one installed layer, including ambient
+    /// layers which have no project id. Like the project projection above, the
+    /// returned frames are WORLD frames even though the live layer owns LOCAL.
+    func tilesInWorldFrames(forZoneId zoneId: UUID) -> [Tile]? {
+        guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
+        return layer.tiles.map { tile in
+            var world = tile
+            world.frame = CanvasEngine.zoneLocalToWorld(tile.frame, zoneOrigin: layer.placement.origin)
+            return world
+        }
+    }
+
     /// Whether the flat boot scene still owns the active project. False from the
     /// first `setZones`/`retireFlatCompatibilityScene` onward, after which
     /// `canvasState.tiles` describes the DEPARTED project and must not be persisted.

@@ -24025,24 +24025,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 for t in canvas.tilesInWorldFrames(forProjectId: projectId) {
                     seen.insert(t.id)
                     tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
-                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": true])
+                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": "live"])
                 }
                 if let persisted = try projectStore.tryLoadCanvas() {
                     for t in persisted.tiles where !seen.contains(t.id) {
                         tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
-                            "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": false])
+                            "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": "retained"])
                     }
                 }
             }
-            for t in runtime.document.ambientTiles {
-                tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
-                    "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "hydrated": canvas.installedZoneLayerIds.contains(t.zoneId ?? UUID())])
+            for ambientZone in runtime.document.zones where ambientZone.projectId == nil {
+                let retained = runtime.document.tiles(forZone: ambientZone.zoneId)
+                let observed: [Tile]
+                let source: String
+                if let live = canvas.tilesInWorldFrames(forZoneId: ambientZone.zoneId) {
+                    let liveIds = Set(live.map(\.id))
+                    let retainedIds = Set(retained.map(\.id))
+                    guard liveIds == retainedIds else {
+                        throw Failure.message("installed ambient layer tile inventory diverged from document")
+                    }
+                    let retainedById = Dictionary(uniqueKeysWithValues: retained.map { ($0.id, $0) })
+                    guard live.allSatisfy({ retainedById[$0.id] == $0 }) else {
+                        throw Failure.message("installed ambient layer world geometry diverged from document")
+                    }
+                    observed = live
+                    source = "live"
+                } else {
+                    observed = retained
+                    source = "retained"
+                }
+                for t in observed {
+                    tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": source])
+                }
             }
             let focus: String
             switch delegate.qaFocusBroker.activeSurface { case let .tile(id): focus = "tile:\(id.uuidString)"; case .canvas: focus = "canvas"; default: focus = "none" }
+            let observedActiveZone = canvas.armedZoneId?.uuidString ?? ""
+            let documentActiveZone = runtime.document.lastActiveZoneId?.uuidString ?? ""
+            guard observedActiveZone == documentActiveZone else {
+                throw Failure.message("canvas armed zone diverged from workspace document")
+            }
             return ["phase": phase, "workspace": runtime.workspaceId.uuidString, "zones": zones, "tiles": tiles.sorted { ($0["id"] as! String) < ($1["id"] as! String) },
                 "viewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
-                "activeZone": runtime.document.lastActiveZoneId?.uuidString ?? "", "focus": focus]
+                "activeZone": observedActiveZone, "documentActiveZone": documentActiveZone, "focus": focus]
         }
         var firstHydrated: [String: Any]?
         var bootSettled: [String: Any]?

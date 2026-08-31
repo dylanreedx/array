@@ -829,7 +829,13 @@ final class WorkspaceRuntime {
         zone: ZonePlacement,
         document: WorkspaceDocument
     ) -> CanvasNSView.ZoneLayer {
-        let memberTiles = document.tiles(forZone: zone.zoneId)
+        let memberTiles = document.tiles(forZone: zone.zoneId).map { tile -> Tile in
+            var local = tile
+            // Workspace ambient tiles, like project canvas tiles, are durable in
+            // WORLD coordinates. A ZoneLayer owns LOCAL coordinates.
+            local.frame = CanvasEngine.worldToZoneLocal(tile.frame, zoneOrigin: zone.origin)
+            return local
+        }
         var tileViews: [UUID: TileNSView] = [:]
         for tile in memberTiles {
             tileViews[tile.id] = DescriptorTileNSView(tile: tile)
