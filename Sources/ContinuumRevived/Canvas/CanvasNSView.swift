@@ -846,6 +846,15 @@ final class CanvasNSView: NSView, TokenThemed {
     /// are its children at WORLD frames; screen-fixed overlays stay direct
     /// children of the canvas. See `CanvasWorldPlaneView`.
     let worldPlane = CanvasWorldPlaneView()
+
+    /// WS7. The ONE background renderer, a hit-transparent sibling installed
+    /// directly BELOW `worldPlane`. Below, because its base fill and image are
+    /// screen-fixed and anything inside the plane inherits the camera; a sibling
+    /// rather than the canvas's own drawing, because it can be invalidated for a
+    /// camera step without marking the canvas — and with it every tile subtree —
+    /// as needing display. See `CanvasBackgroundRendererView`.
+    let backgroundRenderer = CanvasBackgroundRendererView(
+        imageCache: CanvasBackgroundImageCache(store: CanvasBackgroundAssetStore()))
     private let documentRelationshipOverlay = DocumentRelationshipOverlayView()
     private var documentLinks: [DocumentAgentLink] = []
     private var documentAgentTileIds: [AgentID: UUID] = [:]
@@ -971,6 +980,10 @@ final class CanvasNSView: NSView, TokenThemed {
             || !Self.geometryNearlyEqual(worldPlane.frame.origin.y, 0) {
             // Only when the canvas itself resizes, never per camera step.
             worldPlane.frame = bounds
+            // Same rule for the background: the renderer IS the viewport, so its
+            // frame tracks the canvas's size and nothing else. A camera step
+            // never writes it.
+            backgroundRenderer.frame = bounds
         }
         let viewport = canvasState.viewport
         let writes = worldPlane.applyCamera(
@@ -979,6 +992,9 @@ final class CanvasNSView: NSView, TokenThemed {
             zoom: viewport.zoom
         )
         qaCameraLayoutStats.cameraMutations += writes
+        // WS7: arithmetic plus at most one `needsDisplay`. No layout, no decode,
+        // no tile or zone work — which is what the background counters assert.
+        backgroundRenderer.updateCamera(viewport: viewport)
         // The document-relationship overlay does NOT need a per-camera-step
         // recompute: it is a world-space sibling now (see
         // `updateDocumentRelationshipOverlay`'s doc comment), so its content is
@@ -1241,6 +1257,11 @@ final class CanvasNSView: NSView, TokenThemed {
         // above all world content without any further ordering work.
         worldPlane.frame = bounds
         addSubview(worldPlane, positioned: .below, relativeTo: nil)
+        // BELOW the plane, and installed before anything else can claim that
+        // slot. Nothing is added `.below` the background afterwards except the
+        // zero-sized surface park, which draws nothing.
+        backgroundRenderer.frame = bounds
+        addSubview(backgroundRenderer, positioned: .below, relativeTo: worldPlane)
         documentRelationshipOverlay.frame = worldPlane.bounds
         worldPlane.addSubview(documentRelationshipOverlay, positioned: .below, relativeTo: nil)
         // The park is a SIBLING of the world plane, which is the entire mechanism:
@@ -2615,6 +2636,14 @@ final class CanvasNSView: NSView, TokenThemed {
     ///    on-scrim text token, neither of which P1.3 declared. Left for whoever
     ///    declares them; `runCanvasScrimInventoryCheck` pins the exact set so it
     ///    cannot quietly grow.
+    /// WS7: the resolved (inherit/override already applied) background for the
+    /// mounted workspace. The canvas never resolves precedence itself — that is
+    /// `CanvasBackgroundResolver`'s job and its caller's.
+    func setCanvasBackground(_ configuration: CanvasBackgroundConfiguration) {
+        backgroundRenderer.setConfiguration(configuration)
+        backgroundRenderer.updateCamera(viewport: canvasState.viewport)
+    }
+
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.canvas.color.cgColor(in: self)
         if let zoneRenameField {

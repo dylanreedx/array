@@ -1107,6 +1107,33 @@ enum ContinuumApp {
             }
         }
 
+        // WS7 (.plans/54): the canvas background renderer, witnessed in pixels in
+        // an offscreen fixture window. The pure arithmetic it draws with is
+        // covered by CoreChecks' `--canvas-background-model-check`.
+        if CommandLine.arguments.contains("--canvas-background-render-check") {
+            do {
+                _ = NSApplication.shared
+                try MainActor.assumeIsolated { try CanvasBackgroundRenderChecks.run() }
+                print("ContinuumRevivedCanvasBackgroundRenderChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-background-settings-check") {
+            do {
+                _ = NSApplication.shared
+                try MainActor.assumeIsolated { try CanvasBackgroundSettingsChecks.run() }
+                print("ContinuumRevivedCanvasBackgroundSettingsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-persistence-model-check") {
             do {
                 _ = NSApplication.shared
@@ -8941,12 +8968,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// WS7. The editor writes through `WorkspaceRuntime` — the one workspace
+    /// writer — and through the channel-local global store. Nothing here
+    /// persists a picked URL: `importImage` copies the bytes into the managed
+    /// directory and returns a content-digest id.
+    private func makeCanvasBackgroundSettingsView() -> NSView {
+        let assetStore = CanvasBackgroundAssetStore()
+        let environment = CanvasBackgroundSettingsView.Environment(
+            loadGlobal: { CanvasBackgroundGlobalStore.load() },
+            saveGlobal: { [weak self] config in
+                CanvasBackgroundGlobalStore.save(config)
+                self?.workspaceRuntime?.applyCanvasBackground()
+            },
+            loadWorkspace: { [weak self] in self?.workspaceRuntime?.document.canvasBackground ?? .inherit },
+            saveWorkspace: { [weak self] value in
+                try? self?.workspaceRuntime?.setWorkspaceCanvasBackground(value)
+            },
+            importImage: { try assetStore.importImage(at: $0) },
+            chooseImageURL: {
+                let panel = NSOpenPanel()
+                panel.allowsMultipleSelection = false
+                panel.canChooseDirectories = false
+                panel.allowedFileTypes = Array(CanvasBackgroundAssetID.allowedExtensions)
+                panel.prompt = "Use Image"
+                return panel.runModal() == .OK ? panel.url : nil
+            },
+            hasWorkspace: workspaceRuntime != nil)
+        return CanvasBackgroundSettingsView(environment: environment)
+    }
+
     private func makeSettingsPanel() -> SettingsPanel {
         let panel = SettingsPanel(
             navKeymap: navKeymap,
-            customSectionViews: ["companion": { [weak self] in
-                self?.makeCompanionSettingsView() ?? NSView()
-            }]
+            customSectionViews: [
+                "companion": { [weak self] in
+                    self?.makeCompanionSettingsView() ?? NSView()
+                },
+                "canvasBackground": { [weak self] in
+                    self?.makeCanvasBackgroundSettingsView() ?? NSView()
+                },
+            ]
         )
         panel.onClose = { [weak self] in
             self?.focusBroker.closeModal(.settings)

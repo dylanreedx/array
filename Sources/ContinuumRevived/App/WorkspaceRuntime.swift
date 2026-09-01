@@ -233,6 +233,44 @@ final class WorkspaceRuntime {
     /// than a second boot path. `install(into:)` stays a checks-only entry point.
     func adoptCanvas(_ canvasView: CanvasNSView) {
         self.canvasView = canvasView
+        applyCanvasBackground()
+    }
+
+    // MARK: - Canvas background (WS7)
+
+    /// Where the GLOBAL half of the background lives. Channel-local by
+    /// construction (`UserDefaults.standard` under the channel's bundle id);
+    /// injectable so a check can drive a real suite instead of the user's domain.
+    var canvasBackgroundDefaults: UserDefaults = .standard
+
+    /// Precedence, resolved in exactly one place. `.inherit` reads the global
+    /// EVERY time — it is never snapshotted into the document, which is what
+    /// keeps a later global edit reaching an inheriting workspace.
+    var effectiveCanvasBackground: CanvasBackgroundConfiguration {
+        CanvasBackgroundResolver.effective(
+            workspace: document.canvasBackground,
+            global: CanvasBackgroundGlobalStore.load(defaults: canvasBackgroundDefaults))
+    }
+
+    /// Push the resolved background at the mounted canvas. Called on adopt, on
+    /// switch, and whenever either half of the precedence changes.
+    func applyCanvasBackground() {
+        canvasView?.setCanvasBackground(effectiveCanvasBackground)
+    }
+
+    /// The workspace half of the decision. Writes the document through the one
+    /// existing workspace writer — no second persistence path.
+    func setWorkspaceCanvasBackground(_ value: WorkspaceCanvasBackground) throws {
+        guard document.canvasBackground != value else { return }
+        document.canvasBackground = value
+        try persistWorkspaceDocument()
+        applyCanvasBackground()
+    }
+
+    /// The global half. Writing it must NOT disturb a workspace that overrides.
+    func setGlobalCanvasBackground(_ configuration: CanvasBackgroundConfiguration) {
+        CanvasBackgroundGlobalStore.save(configuration, defaults: canvasBackgroundDefaults)
+        applyCanvasBackground()
     }
 
     /// QA (M1.10): whether this runtime can actually drive a canvas. The assertion
@@ -1259,7 +1297,13 @@ final class WorkspaceRuntime {
             registry.release(projectId: projectId)
         }
 
-        // 6. Set viewport.
+        // 6. Set viewport. The background is resolved from the TARGET document,
+        // so it is applied here rather than after `document = targetDocument`
+        // below — the canvas must not draw one frame of the departing
+        // workspace's background under the arriving workspace's tiles.
+        canvasView?.setCanvasBackground(CanvasBackgroundResolver.effective(
+            workspace: targetDocument.canvasBackground,
+            global: CanvasBackgroundGlobalStore.load(defaults: canvasBackgroundDefaults)))
         canvasView?.setViewport(targetDocument.viewport)
 
         // 7. Re-establish focus.

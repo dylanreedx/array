@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+// WS7. A standalone gate for the canvas-background model suite. The full
+// CoreChecks run covers it too; this exists because the whole binary is a long,
+// filesystem- and process-heavy run, and a targeted arm is what makes a
+// mutation test of this feature cheap enough to actually perform.
+if CommandLine.arguments.contains("--canvas-background-model-check") {
+    runCanvasBackgroundChecks()
+    print("CanvasBackgroundModelChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-appserver-parity-check") {
     runCodexAppServerParityChecks()
     print("CodexAppServerParityChecks passed")
@@ -7131,10 +7141,10 @@ do {
 
     expect(
         sections.map(\.title) == [
-            "General", "Appearance", "Canvas & Zones", "Navigation", "Keybindings",
+            "General", "Appearance", "Canvas Background", "Canvas & Zones", "Navigation", "Keybindings",
             "Agents", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
         ],
-        "settings exposes the eleven product sections in stable order"
+        "settings exposes the twelve product sections in stable order"
     )
 
     // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
@@ -10385,7 +10395,9 @@ do {
     // Workspace v5 adds the canonical `documentLinks` field to materialized
     // workspace output; v6 adds the per-zone auto-layout encoding. Together
     // those intentional schema additions grow the seed-1 output by 100 bytes.
-    let expectedSeed1CanonicalBytes = 1600
+    // Workspace v9 (WS7) adds the canonical `canvasBackground` scope field to
+    // every materialized workspace: +39 bytes for the seed-1 corpus.
+    let expectedSeed1CanonicalBytes = 1639
     expect(i4Stats.seed1CanonicalBytes == expectedSeed1CanonicalBytes,
            "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Stats.seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
 }
@@ -11823,5 +11835,12 @@ runCodexAppServerRunnerChecks()
 // two-frame-type `PiEventTranslator` addition (`response`,
 // `extension_ui_request`).
 runPiRpcTransportChecks()
+
+// WS7 (.plans/54) — the pure half of the canvas background: colour validation,
+// the malformed corpus, inherit/override precedence, the negative-safe grid
+// phase, the adaptive stride's hysteresis, Fill/Fit geometry, the managed asset
+// contract and the v9 document round trip. The RENDERER is witnessed in pixels
+// by the app leg `--canvas-background-render-check`.
+runCanvasBackgroundChecks()
 
 print("ContinuumRevivedCoreChecks passed")
