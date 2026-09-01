@@ -915,6 +915,15 @@ final class CanvasNSView: NSView, TokenThemed {
         return window.occlusionState.contains(.visible)
     }
 
+    /// WS4: the same live occlusion answer residency uses, for the awareness
+    /// facts. Reusing `resolvedWindowVisibility` means a fixture that already has
+    /// to inject `occlusionVisibilityProvider` (every off-display check window
+    /// does) gets one consistent answer, and production reads the real window.
+    /// `nil` — no window at all — is NOT visible here: awareness must fail closed.
+    func awarenessWindowVisibility() -> Bool {
+        resolvedWindowVisibility() ?? false
+    }
+
     func qaResetSurfaceResidencyCounters() {
         qaSurfaceDemotionCount = 0
         qaSurfacePromotionCount = 0

@@ -41,6 +41,7 @@ check --canvas-persistence-model-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
 check --companion-sync-health-check
+check --completion-awareness-check
 check --component-lab-check
 check --composer-image-components-check
 check --conductor-queue-tile-check
@@ -223,6 +224,7 @@ leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
+leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
@@ -381,7 +383,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 108
+count ContinuumRevivedCoreChecks 109
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

@@ -46,6 +46,27 @@ public enum FocusRequest: String, Codable, Equatable, Hashable, Sendable {
     case tileClosed
     case runtimeExited
     case recovery
+
+    /// Is this focus a VISIT — a human deliberately going to look at something —
+    /// or the app putting focus back where it was?
+    ///
+    /// WS4: read-state may only be cleared by a visit. `appActivated` (the broker
+    /// re-acquiring the remembered surface when Array comes forward),
+    /// `modalDismissed` (the snapshot restored after a sheet closes) and
+    /// `recovery` all deliver an accepted-tile-focus callback that is
+    /// indistinguishable from a click at the callback site — which is how a
+    /// completion that arrived while the app was in the background got marked
+    /// read by the act of coming back to the app at all.
+    ///
+    /// Everything else stays a visit, including `tileSpawned`: that is the reason
+    /// the inbox reveal path uses (`jumpToTileFromPalette`), and clicking an inbox
+    /// row is the canonical deliberate visit.
+    public var isDeliberateVisit: Bool {
+        switch self {
+        case .appActivated, .modalDismissed, .recovery: return false
+        case .userClick, .modalOpened, .tileSpawned, .tileClosed, .runtimeExited: return true
+        }
+    }
 }
 
 public struct FocusKeyModifiers: OptionSet, Equatable, Hashable, Sendable {

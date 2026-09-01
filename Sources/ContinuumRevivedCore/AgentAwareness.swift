@@ -366,3 +366,179 @@ public enum AgentGitOperationClassifier {
         return segments.filter { !$0.isEmpty }
     }
 }
+
+// MARK: - WS4 · completion awareness
+
+/// The facts, sampled at the instant a terminal event ARRIVES, that decide
+/// whether a human was actually looking at this agent.
+///
+/// Every field is an observation of live AppKit/canvas state, never a remembered
+/// one. The defect this replaces read `AgentSupervisor.focusedAgentID`, which
+/// survives app resignation, window ordering, workspace switches and modal
+/// restoration — so a completion that landed while Array was in the background
+/// was recorded as read and the human never saw it.
+///
+/// Every value defaults to the AWAY answer: a caller that cannot establish a
+/// fact gets "not viewed", which leaves the completion unread. Unread is the
+/// recoverable direction; a false read is not.
+public struct AgentActiveViewFacts: Equatable, Sendable, Codable {
+    /// Array itself is the active application (`applicationDidBecomeActive`
+    /// observed and no `applicationDidResignActive` since).
+    public var appActive: Bool
+    /// No OTHER window of this application holds key status.
+    ///
+    /// Deliberately not `window.isKeyWindow`. Key status is granted by the window
+    /// server only to an ACTIVE application, so `isKeyWindow` is unconditionally
+    /// false in an offline check and a conjunct that can never be true is a
+    /// conjunct nothing can witness. What actually matters is that the tile is not
+    /// upstaged: if some other window of Array is key — a panel, an inspector, a
+    /// second document window — the human is not looking at this tile. In a live
+    /// active app this is equivalent to `isKeyWindow`; with no key window at all it
+    /// does not refuse, and the `appActive` and `modalPresented` facts cover that.
+    public var windowNotUpstaged: Bool
+    /// The window is on screen and not miniaturized.
+    public var windowVisible: Bool
+    /// `NSWindow.occlusionState` contains `.visible` — not covered, not hidden,
+    /// not on another Space.
+    public var windowOcclusionVisible: Bool
+    /// The agent's tile has a live view in the mounted canvas.
+    public var tileMounted: Bool
+    /// The window's first responder is the tile view or one of its descendants.
+    public var responderInTile: Bool
+    /// The focus broker's scope is this tile.
+    public var focusScopeIsTile: Bool
+    /// A modal window or a sheet is up. A completion behind a modal was not
+    /// watched, whatever the responder chain says.
+    public var modalPresented: Bool
+
+    public init(
+        appActive: Bool = false,
+        windowNotUpstaged: Bool = false,
+        windowVisible: Bool = false,
+        windowOcclusionVisible: Bool = false,
+        tileMounted: Bool = false,
+        responderInTile: Bool = false,
+        focusScopeIsTile: Bool = false,
+        modalPresented: Bool = false
+    ) {
+        self.appActive = appActive
+        self.windowNotUpstaged = windowNotUpstaged
+        self.windowVisible = windowVisible
+        self.windowOcclusionVisible = windowOcclusionVisible
+        self.tileMounted = tileMounted
+        self.responderInTile = responderInTile
+        self.focusScopeIsTile = focusScopeIsTile
+        self.modalPresented = modalPresented
+    }
+
+    /// Nothing is being viewed. The default answer whenever a fact is unknowable.
+    public static let away = AgentActiveViewFacts()
+
+    /// Every positive fact holds and nothing is in the way.
+    public var isActivelyViewed: Bool {
+        appActive && windowNotUpstaged && windowVisible && windowOcclusionVisible
+            && tileMounted && responderInTile && focusScopeIsTile && !modalPresented
+    }
+
+    /// Which facts refused, for the semantic record a check writes out.
+    public var blockingReasons: [String] {
+        var reasons: [String] = []
+        if !appActive { reasons.append("appInactive") }
+        if !windowNotUpstaged { reasons.append("windowUpstaged") }
+        if !windowVisible { reasons.append("windowNotVisible") }
+        if !windowOcclusionVisible { reasons.append("windowOccluded") }
+        if !tileMounted { reasons.append("tileNotMounted") }
+        if !responderInTile { reasons.append("responderOutsideTile") }
+        if !focusScopeIsTile { reasons.append("focusScopeElsewhere") }
+        if modalPresented { reasons.append("modalPresented") }
+        return reasons
+    }
+}
+
+/// What kind of terminal event landed. Failure is deliberately its own case:
+/// the product contract says failure must stay semantically stronger than an
+/// ordinary success and must never be presented as one.
+public enum AgentTerminalArrivalKind: String, Codable, Equatable, Sendable {
+    case completed
+    case failed
+}
+
+/// The three separable consequences of a terminal arrival. They are three
+/// fields rather than one boolean because the durable watermark and the live
+/// visual are different truths with different lifetimes, and conflating them is
+/// exactly the defect this replaces.
+public struct AgentAwarenessDecision: Equatable, Sendable, Codable {
+    /// Advance the durable read watermark on the record (survives relaunch).
+    public var advancesReadWatermark: Bool
+    /// Drop the live attention signal from the tile (this session only).
+    public var clearsLiveSignal: Bool
+    /// Play the finite completion acknowledgment on the tile.
+    public var acknowledgesVisually: Bool
+
+    public init(advancesReadWatermark: Bool, clearsLiveSignal: Bool, acknowledgesVisually: Bool) {
+        self.advancesReadWatermark = advancesReadWatermark
+        self.clearsLiveSignal = clearsLiveSignal
+        self.acknowledgesVisually = acknowledgesVisually
+    }
+
+    public static let none = AgentAwarenessDecision(
+        advancesReadWatermark: false, clearsLiveSignal: false, acknowledgesVisually: false)
+}
+
+/// The single pure owner of "what does this arrival mean".
+public enum AgentAwarenessTransition {
+    public static func decide(
+        arrival: AgentTerminalArrivalKind,
+        facts: AgentActiveViewFacts
+    ) -> AgentAwarenessDecision {
+        // Away — including every restoration shape — changes nothing. The
+        // completion waits for a deliberate visit.
+        guard facts.isActivelyViewed else { return .none }
+        switch arrival {
+        case .completed:
+            return AgentAwarenessDecision(
+                advancesReadWatermark: true, clearsLiveSignal: true, acknowledgesVisually: true)
+        case .failed:
+            // Watched, so it is read — but a failure keeps its live signal and
+            // never borrows the success acknowledgment.
+            return AgentAwarenessDecision(
+                advancesReadWatermark: true, clearsLiveSignal: false, acknowledgesVisually: false)
+        }
+    }
+}
+
+/// The finite shape of the completion acknowledgment. FINITE is the whole point:
+/// a steady-state colored border is what this replaces, and a repeating timer is
+/// forbidden — the plan describes one bounded generation and then the ordinary
+/// read appearance.
+public struct AgentCompletionAcknowledgmentPlan: Equatable, Sendable, Codable {
+    /// The contract's window. Anything outside it is a bug, and
+    /// `plan(reduceMotion:)` is the only producer.
+    public static let minimumDuration: TimeInterval = 1.2
+    public static let maximumDuration: TimeInterval = 1.6
+    public static let nominalDuration: TimeInterval = 1.4
+
+    public var duration: TimeInterval
+    /// Zero under Reduce Motion: the same finite window, held statically.
+    public var pulseCount: Int
+
+    public init(duration: TimeInterval, pulseCount: Int) {
+        self.duration = min(max(duration, Self.minimumDuration), Self.maximumDuration)
+        self.pulseCount = max(0, pulseCount)
+    }
+
+    public var isStatic: Bool { pulseCount == 0 }
+
+    /// Reduce Motion keeps the acknowledgment and drops the motion — the same
+    /// generation, the same duration, zero pulses. It does NOT get a persistent
+    /// treatment (which is what "no animation" degenerated into before) and it
+    /// does not get a repeating timer.
+    public static func plan(reduceMotion: Bool) -> AgentCompletionAcknowledgmentPlan {
+        AgentCompletionAcknowledgmentPlan(
+            duration: nominalDuration, pulseCount: reduceMotion ? 0 : 2)
+    }
+
+    public var isWithinContractWindow: Bool {
+        duration >= Self.minimumDuration && duration <= Self.maximumDuration
+    }
+}

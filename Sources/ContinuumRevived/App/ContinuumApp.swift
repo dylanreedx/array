@@ -2525,6 +2525,21 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--completion-awareness-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let artifact = try await CompletionAwarenessChecks.run()
+                    print("ContinuumRevivedCompletionAwarenessChecks passed: \(artifact.path)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-tile-click-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -3704,10 +3719,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         get { workspaceRuntime?.activeController?.fileTreeViews ?? [:] }
         set { workspaceRuntime?.activeController?.fileTreeViews = newValue }
     }
-    private var canvasView: CanvasNSView?
+    var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
-    private lazy var agentSignalCenter: AgentSignalCenter = {
+    // Internal, not private: the WS4 awareness witness reads the live signal
+    // from its own file and must see the same instance production drives.
+    lazy var agentSignalCenter: AgentSignalCenter = {
         let center = AgentSignalCenter()
         center.onChanged = { [weak self] tileID in
             self?.applyAgentSignalVisual(tileID: tileID)
@@ -3734,7 +3751,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceRuntime: WorkspaceRuntime?
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
-    private var registryStore: RegistryStore?
+    var registryStore: RegistryStore?
     /// The spawner built at launch for the BOOT project. It is only the fallback:
     /// `WorkspaceRuntime.switchWorkspace` builds a new spawner for the arriving
     /// project, and an app action that captured this one would install tiles into the
@@ -3774,7 +3791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var agentComposerAttachmentStore = AgentComposerAttachmentStore(
         applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
     )
-    private lazy var agentSupervisor = AgentSupervisor(
+    lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
@@ -3870,7 +3887,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
     private var suppressTerminateOnWindowCloseForQA = false
-    private let focusBroker = FocusBroker()
+    let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
     private lazy var agentTranscriptStore = AgentTranscriptStore(
         root: RegistryStore.defaultApplicationSupportDirectory()
@@ -5100,15 +5117,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func installAcceptedTileFocusHook() {
+    // MARK: - WS4 · completion awareness
+
+    /// Whether Array is the active application, maintained by AppKit's own
+    /// activation callbacks.
+    ///
+    /// This is a fact, not a flag a check can poke: `applicationDidBecomeActive`
+    /// and `applicationDidResignActive` are the only writers, and they are the
+    /// real delegate methods AppKit calls. A fixture proves the resign behaviour
+    /// by delivering those notifications, which is the same path the window
+    /// server drives — it does NOT get a setter, because a settable "pretend the
+    /// app resigned" is not evidence that resigning does anything.
+    ///
+    /// Seeded from `NSApp.isActive` so a delegate built mid-session starts honest.
+    private(set) lazy var applicationIsActiveForAwareness: Bool = NSApplication.shared.isActive
+
+    /// Reduce Motion, read once per acknowledgment. Injectable for the same reason
+    /// `CanvasNSView.occlusionVisibilityProvider` is: a check must be able to
+    /// exercise both accessibility branches without changing a system setting on
+    /// the machine it runs on. Production leaves it nil and reads `NSWorkspace`.
+    var reduceMotionProvider: (() -> Bool)?
+
+    /// Terminal arrivals the supervisor judged watched, stamped at arrival and
+    /// consumed when the matching signal reaches `recordManagedActivity`.
+    ///
+    /// A stamp exists because the two halves arrive on different turns: the
+    /// durable half runs inside `AgentSupervisor.deliver`, while the live signal
+    /// is published later, from the TILE's stream subscription. Clearing at
+    /// arrival would clear a signal that has not been published yet, and the
+    /// stale success badge would then sit on the tile forever.
+    /// The DECISION is stamped, not the arrival kind. Stamping the kind and
+    /// re-deriving "is this a success" here would make
+    /// `AgentAwarenessTransition` two owners of one rule, and the second one
+    /// silently wins.
+    private var pendingWatchedArrivalsByTile: [UUID: AgentAwarenessDecision] = [:]
+    /// Acknowledgments actually played. Positive control for the visual half.
+    private(set) var qaCompletionAcknowledgmentCount = 0
+    /// Stamps consumed by the live half. Positive control for the hand-off.
+    private(set) var qaWatchedArrivalStampsConsumed = 0
+    /// Accepted-tile-focus callbacks refused as restoration rather than a visit.
+    /// Positive control for "restoration did not mark it read": without it, a
+    /// witness cannot tell a refused restore from a restore that never happened.
+    private(set) var qaNonDeliberateFocusCount = 0
+
+    /// The one place the app answers "is a human looking at this agent".
+    ///
+    /// Every answer is read from live state at the moment of the call. Nothing is
+    /// remembered, so there is no value here that can go stale across a
+    /// resignation, a window ordering change, a Space switch or a modal.
+    func activeViewFacts(forAgent id: AgentID) -> AgentActiveViewFacts {
+        guard let tileId = agentSupervisor.records[id]?.tileId,
+              let canvasView,
+              let tileView = canvasView.tileView(for: tileId) else { return .away }
+        let window = tileView.window
+        var facts = AgentActiveViewFacts()
+        facts.tileMounted = true
+        facts.appActive = applicationIsActiveForAwareness
+        facts.focusScopeIsTile = focusBroker.activeSurface == .tile(tileId)
+        guard let window else { return facts }
+        // "Not upstaged", not `isKeyWindow` — see `AgentActiveViewFacts`.
+        facts.windowNotUpstaged = NSApplication.shared.keyWindow.map { $0 === window } ?? true
+        facts.windowVisible = window.isVisible && !window.isMiniaturized
+        facts.windowOcclusionVisible = canvasView.awarenessWindowVisibility()
+        facts.modalPresented = NSApplication.shared.modalWindow != nil
+            || window.attachedSheet != nil
+        if let responder = window.firstResponder as? NSView {
+            facts.responderInTile = responder === tileView || responder.isDescendant(of: tileView)
+        } else {
+            facts.responderInTile = false
+        }
+        return facts
+    }
+
+    /// Wires the supervisor's awareness seams. Folded into
+    /// `installAcceptedTileFocusHook` so no boot path or fixture can wire the
+    /// focus bridge and forget the awareness one.
+    func installAgentAwarenessHooks() {
+        agentSupervisor.activeViewFactsProvider = { [weak self] agentID in
+            self?.activeViewFacts(forAgent: agentID) ?? .away
+        }
+        agentSupervisor.onWatchedTerminalArrival = { [weak self] _, tileID, _, decision in
+            guard let self, let tileID else { return }
+            guard decision.clearsLiveSignal || decision.acknowledgesVisually else { return }
+            self.pendingWatchedArrivalsByTile[tileID] = decision
+        }
+    }
+
+    /// The live half, run once the signal for a watched arrival has been
+    /// published. Only an ordinary success is retired and acknowledged; a failure
+    /// keeps its signal, and `acknowledgeWatchedCompletion` refuses anything that
+    /// is not a live `.completed`, so an action request that outranks it is safe.
+    private func applyPendingWatchedArrival(tileID: UUID) {
+        guard let decision = pendingWatchedArrivalsByTile.removeValue(forKey: tileID) else { return }
+        qaWatchedArrivalStampsConsumed += 1
+        guard decision.clearsLiveSignal else { return }
+        // Refuses unless the live signal really is an ordinary success — which is
+        // how a completion arriving behind an open action request leaves the
+        // stronger state alone.
+        guard agentSignalCenter.acknowledgeWatchedCompletion(tileID: tileID) else { return }
+        guard decision.acknowledgesVisually else { return }
+        let reduceMotion = reduceMotionProvider?()
+            ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let plan = AgentCompletionAcknowledgmentPlan.plan(reduceMotion: reduceMotion)
+        (canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView)?
+            .beginCompletionAcknowledgment(plan)
+        qaCompletionAcknowledgmentCount += 1
+    }
+
+    func installAcceptedTileFocusHook() {
+        installAgentAwarenessHooks()
         // M1.10: the APP's field, not the broker's composite one. Assigning
         // `onAcceptedTileFocusWithReason` here overwrote the controller's
         // composite — which is why `recoverManagedSessionOnFocus` never ran at
         // boot — and would have been overwritten right back on every switch.
         focusBroker.appAcceptedTileFocusWithReason = { [weak self] tileId, reason in
             guard let self else { return }
-            self.synchronizeAgentFocus(to: tileId)
-            self.agentSignalCenter.markViewed(tileID: tileId)
+            // WS4: restoration is not a visit. App activation, modal dismissal and
+            // recovery all arrive here looking exactly like a click, which is how
+            // simply returning to Array cleared every completion that had landed
+            // while it was in the background. The scope, lineage, history and zone
+            // arming below still run — only the READ-STATE half is withheld.
+            let deliberate = reason.isDeliberateVisit
+            if !deliberate { self.qaNonDeliberateFocusCount += 1 }
+            self.synchronizeAgentFocus(to: tileId, deliberate: deliberate)
+            if deliberate { self.agentSignalCenter.markViewed(tileID: tileId) }
             self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
@@ -5165,11 +5297,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// window-level click monitor reports every click inside an already-focused
     /// transcript/composer; reloading the whole sidebar for each one would turn a
     /// read-watermark fix into an interaction performance regression.
-    private func synchronizeAgentFocus(to tileId: UUID?) {
+    private func synchronizeAgentFocus(to tileId: UUID?, deliberate: Bool = true) {
         let previousAgent = agentSupervisor.focusedAgentID
         let nextAgent = tileId.flatMap { agentSupervisor.agent(forTile: $0) }
         let previousAttention = nextAgent.map { agentSupervisor.attention(for: $0) }
-        agentSupervisor.focusTile(tileId)
+        agentSupervisor.focusTile(tileId, deliberate: deliberate)
         let attentionChanged = nextAgent.map {
             previousAttention != agentSupervisor.attention(for: $0)
         } ?? false
@@ -12079,7 +12211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Kept on ONE line: `--agent-restore-check` pins this whole signature by exact
     /// line match (`runAgentRestoreChecks`, via `paletteAgentSpawnBranch`), so wrapping
     /// it blinds that scan.
-    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
+    func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
         let agentId: AgentID
@@ -12609,6 +12741,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tileID: tileId,
             overrides: overrides
         )
+        // WS4: the live half of a watched arrival, run here because this is the
+        // first moment the signal for it exists.
+        if let tileId { applyPendingWatchedArrival(tileID: tileId) }
         guard let draft = ManagedAgentActivityBridge.draft(
             for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: Date()
         ) else { return }
@@ -14979,6 +15114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        // WS4: written BEFORE the broker re-acquires the remembered surface, so
+        // the facts a completion delivered during reactivation reads are the ones
+        // that actually hold.
+        applicationIsActiveForAwareness = true
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
         }
@@ -14987,6 +15126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        // WS4: the one writer that turns awareness off. Nothing delivered from
+        // here until the next activation can be actively viewed, whatever the
+        // broker still remembers.
+        applicationIsActiveForAwareness = false
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, false)
         }

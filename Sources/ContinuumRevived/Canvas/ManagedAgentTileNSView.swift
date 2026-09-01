@@ -603,6 +603,29 @@ final class ManagedAgentTileNSView: TileNSView {
 
     var qaAwarenessSignal: AgentSignal? { awarenessBadge.signal }
 
+    // MARK: - WS4 · the finite completion acknowledgment
+
+    /// A completion that landed while this tile was being watched. The signal has
+    /// already been cleared by then (it counts as read), so what is left is one
+    /// bounded acknowledgment on the border and then the ordinary read appearance.
+    func beginCompletionAcknowledgment(_ plan: AgentCompletionAcknowledgmentPlan) {
+        awarenessBorder.beginCompletionAcknowledgment(plan)
+        needsLayout = true
+    }
+
+    var qaAcknowledgmentPhase: AgentSignalBorderView.CompletionAcknowledgmentPhase {
+        awarenessBorder.completionAcknowledgmentPhase
+    }
+    var qaAcknowledgmentGeneration: UInt64 { awarenessBorder.completionAcknowledgmentGeneration }
+    var qaAcknowledgmentsStarted: Int { awarenessBorder.qaAcknowledgmentsStarted }
+    var qaAcknowledgmentsFinished: Int { awarenessBorder.qaAcknowledgmentsFinished }
+    var qaAcknowledgmentAnimationCount: Int { awarenessBorder.qaActiveAnimationCount }
+    var qaAcknowledgmentHasScheduledWork: Bool { awarenessBorder.qaHasScheduledAcknowledgmentWork }
+    var qaAwarenessBorderIsHidden: Bool { awarenessBorder.isHidden }
+    var qaAcknowledgmentPlan: AgentCompletionAcknowledgmentPlan? { awarenessBorder.qaAcknowledgmentPlan }
+    var qaAcknowledgmentAnimationRepeatCount: Float? { awarenessBorder.qaAcknowledgmentAnimationRepeatCount }
+    var qaAcknowledgmentAnimationTotalDuration: TimeInterval? { awarenessBorder.qaAcknowledgmentAnimationTotalDuration }
+
     override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
         let root = NSMenuItem(title: "Sounds", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "Sounds")

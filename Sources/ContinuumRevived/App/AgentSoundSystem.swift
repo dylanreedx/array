@@ -215,6 +215,27 @@ final class AgentSignalCenter {
         return signal
     }
 
+    /// WS4 · the live half of a WATCHED COMPLETION, and deliberately narrower
+    /// than `markViewed`.
+    ///
+    /// `markViewed` is a deliberate human visit and clears failure too. This runs
+    /// automatically the moment a completion lands in front of someone, so it may
+    /// only ever retire an ordinary success: a failure or an action request that
+    /// happens to be current keeps its stronger treatment, and returning false
+    /// tells the caller no acknowledgment is owed.
+    @discardableResult
+    func acknowledgeWatchedCompletion(tileID: UUID) -> Bool {
+        guard currentByTile[tileID]?.kind == .completed else { return false }
+        currentByTile.removeValue(forKey: tileID)
+        qaAcknowledgedCompletionCount += 1
+        notify(tileID: tileID)
+        return true
+    }
+
+    /// Completions retired by `acknowledgeWatchedCompletion`. The positive control
+    /// for "the live signal really was cleared here, not merely absent".
+    private(set) var qaAcknowledgedCompletionCount = 0
+
     func markViewed(tileID: UUID) {
         guard let current = currentByTile[tileID], current.kind != .actionRequired else { return }
         currentByTile.removeValue(forKey: tileID)
