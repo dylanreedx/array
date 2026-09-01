@@ -1,3 +1,4 @@
+import ContinuumRevivedCore
 import Foundation
 import Security
 
@@ -32,7 +33,11 @@ struct CompanionRelayProvisioning {
     static let productionHTTPOrigin = URL(string: "https://relay.arrayapp.dev")!
     static let productionWebSocket = URL(string: "wss://relay.arrayapp.dev/v2/socket")!
 
-    private static let keychainService = "dev.arrayapp.companion.relay"
+    /// Channel-scoped: a dev build must never read or disturb the prod
+    /// credential. See `AppChannel.keychainService`.
+    private static var keychainService: String {
+        AppChannel.liveKeychainService("dev.arrayapp.companion.relay")
+    }
     private static let keychainAccount = "desktop-instance"
 
     var httpOrigin: URL {

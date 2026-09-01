@@ -4440,6 +4440,33 @@ do {
            "Prod bundle id resolves the prod defaults domain")
     expect(AppChannel.bundledDefaultsDomain(bundleIdentifier: nil) == "dev.arrayapp.macos.dev",
            "Everything non-prod resolves the dev defaults domain")
+
+    // The keychain is prod state too, and it was the one piece the split did not
+    // cover: the relay credential and the paired-session secret were hardcoded
+    // constants shared by every build. A bare `swift build` binary reading the
+    // prod item made macOS prompt and left the user's running app asking for the
+    // keychain password on every companion sync.
+    let relayBase = "dev.arrayapp.companion.relay"
+    let sessionBase = "dev.arrayapp.macos.companion-session"
+    for base in [relayBase, sessionBase] {
+        expect(AppChannel.keychainService(base, bundleIdentifier: "dev.arrayapp.macos") == base,
+               "Prod keeps the EXACT existing keychain service for \(base) — a changed prod name "
+               + "would strand every shipped install's credential and force a re-pair")
+        for nonProd in ["dev.arrayapp.macos.dev", "com.example.other"] {
+            expect(AppChannel.keychainService(base, bundleIdentifier: nonProd) == base + ".dev",
+                   "\(nonProd) must resolve a dev-scoped keychain service for \(base)")
+        }
+        // A bare binary has NO bundle id, and that is exactly what a check run is.
+        expect(AppChannel.keychainService(base, bundleIdentifier: nil) == base + ".dev",
+               "A bare binary (nil bundle id) must never resolve the prod keychain service for \(base)")
+        expect(AppChannel.keychainService(base, bundleIdentifier: nil)
+                   != AppChannel.keychainService(base, bundleIdentifier: "dev.arrayapp.macos"),
+               "dev and prod keychain services for \(base) must differ")
+    }
+    // This process IS a bare binary, so the live accessor must resolve dev.
+    expect(AppChannel.liveKeychainService(relayBase) == relayBase + ".dev",
+           "CoreChecks itself must resolve the DEV keychain service; got "
+           + AppChannel.liveKeychainService(relayBase))
 }
 
 // MARK: - ProjectRootResolver

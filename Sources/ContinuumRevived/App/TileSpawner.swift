@@ -1604,6 +1604,9 @@ final class TileSpawner {
 
     /// QA (T4, `.plans/47`): seed the memo the way a real spawn does, so a leg can
     /// prove the cross-spawner lookup without running an agent process.
+    /// QA (WS9): which project's stores this spawner writes through.
+    var qaProjectId: UUID { project.id }
+
     func qaRememberManagedAgentCreationScope(tileId: UUID, scope: CreationScope) {
         managedAgentCreationScopes[tileId] = scope
     }

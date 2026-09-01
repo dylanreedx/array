@@ -1,3 +1,22 @@
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --tool-path-bootstrap-check
+count ContinuumRevivedAgentContentChecks 22
+count ContinuumRevivedAgentUIChecks 19
+count ContinuumRevivedCoreChecks 108
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncIntegrationChecks 1
 check --add-zone-check
 check --agent-awareness-check
 check --agent-display-name-check
@@ -175,6 +194,7 @@ check --zone-spawner-coverage-check
 check --zone-tier-transition-check
 check --zone-tile-detach-sweep-check
 check --zone-tile-hydration-check
+check --zone-unacquired-project-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
@@ -358,6 +378,7 @@ leg run_app_check .build/debug/Array --zone-spawner-coverage-check
 leg run_app_check .build/debug/Array --zone-tier-transition-check
 leg run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
+leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg scripts/check-color-hygiene.sh
@@ -374,22 +395,3 @@ leg run_leg swift run ContinuumRevivedRelayCoreChecks
 leg run_leg swift run ContinuumRevivedRelayIntegrationChecks
 leg run_leg swift run ContinuumRevivedRelayProtocolChecks
 leg run_leg swift run ContinuumRevivedSyncChecks
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 22
-count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 108
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
-count ContinuumRevivedSyncIntegrationChecks 1

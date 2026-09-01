@@ -502,6 +502,10 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# WS9: a zone below the live hydration tier must still create into its OWN
+# project. Controllers were acquired only at mount, so such a zone had none and
+# creation silently fell back to the active project's spawner.
+run_app_check .build/debug/Array --zone-unacquired-project-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
 run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
