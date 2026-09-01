@@ -81,7 +81,8 @@ public final class AgentStore: @unchecked Sendable {
         self.layout = AgentStoreLayout(applicationSupportDirectory: baseDir)
         self.writer = AtomicWriter(
             backupsDirectory: layout.backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            legacyBackupPolicy: .targetDedicated
         )
         self.warn = warn
     }

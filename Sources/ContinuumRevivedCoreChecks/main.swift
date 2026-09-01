@@ -3963,6 +3963,84 @@ do {
     expect(recovered.name == "v3", "AtomicWriter recovers from corruption via newest backup, got \(recovered.name)")
 }
 
+// MARK: - Legacy backup recovery through the STORES (WS2 F1)
+
+// `legacyBackupPolicy` gates whether a writer can still SEE backups written
+// under the pre-v2 name. It defaulted to `.disabled` and only `WorkspaceStore`
+// opted in, so `ProjectStore` — which owns `<project root>/.array/canvas.json`,
+// the file hazards 9 and 10 exist for — could not recover a single legacy
+// backup. A user whose canvas.json corrupted after updating would boot to an
+// empty canvas and start a fresh v2 chain over it, stranding every good backup
+// still sitting on disk.
+//
+// This drives the real STORES. The existing restart-fault assertions build their
+// own `AtomicWriter(legacyBackupPolicy: .targetDedicated)`, which is the
+// documented "witness re-derives what production derives" trap: flipping the
+// production wiring left all ten app legs and CoreChecks green.
+do {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("legacy-backup-stores-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    /// Write `count` backups under the historical name beside `target`, then
+    /// corrupt the target so only recovery can answer.
+    func seedLegacyBackups(target: URL, backupsDirectory: URL, payload: Data, count: Int) throws {
+        try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+        let stem = target.deletingPathExtension().lastPathComponent
+        let ext = target.pathExtension
+        for index in 0..<count {
+            let iso = "2026-08-2\(index)T10-00-00.000Z"
+            let name = "\(stem).\(iso).00000\(index).\(ext)"
+            try payload.write(to: backupsDirectory.appendingPathComponent(name))
+        }
+        try Data("{ not json".utf8).write(to: target)
+    }
+
+    // --- ProjectStore: the store the defect actually stranded ---
+    let projectRoot = root.appendingPathComponent("proj", isDirectory: true)
+    try! FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+    let projectStore = ProjectStore(projectRoot: projectRoot)
+    let recoverable = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [Tile(id: UUID(), kind: .note, title: "recoverable",
+                     frame: TileFrame(x: 201, y: 7, width: 100, height: 80),
+                     zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())],
+        groups: [], lastActiveTileId: nil)
+    try! projectStore.saveCanvas(recoverable)
+    let goodBytes = try! Data(contentsOf: projectStore.layout.canvasFile)
+    try! seedLegacyBackups(target: projectStore.layout.canvasFile,
+                           backupsDirectory: projectStore.layout.backupsDirectory,
+                           payload: goodBytes, count: 3)
+    // Positive control: the corruption must be real, or "recovered" proves nothing.
+    expect((try? JSONCodec.makeCanvasDecoder().decode(CanvasState.self,
+            from: Data(contentsOf: projectStore.layout.canvasFile))) == nil,
+           "legacy recovery: the fixture failed to corrupt canvas.json")
+    let recoveredProject = try? projectStore.loadCanvas()
+    expect(recoveredProject?.tiles.first?.frame.x == 201,
+           "ProjectStore could not recover a LEGACY backup of its own canvas.json — "
+           + "the user's entire recoverable canvas history is stranded on disk")
+
+    // --- WorkspaceStore: the one store that always worked; must not regress ---
+    let wsSupport = root.appendingPathComponent("support", isDirectory: true)
+    let workspaceId = UUID()
+    let wsStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: wsSupport)
+    try! wsStore.save(WorkspaceDocument(viewport: .init(x: 42, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil))
+    let wsBytes = try! Data(contentsOf: wsStore.layout.canvasFile)
+    try! seedLegacyBackups(target: wsStore.layout.canvasFile,
+                           backupsDirectory: wsStore.layout.backupsDirectory,
+                           payload: wsBytes, count: 2)
+    expect((try? wsStore.load())?.viewport.x == 42,
+           "WorkspaceStore lost its legacy backup recovery")
+
+    // --- A store that shares a directory must not adopt a foreign target's
+    //     backups: the legacy filter is stem+extension exact, and that is what
+    //     makes `.targetDedicated` safe as a default.
+    let foreign = projectStore.layout.backupsDirectory.appendingPathComponent("other.2026-08-20T10-00-00.000Z.000000.json")
+    try! Data("{}".utf8).write(to: foreign)
+    expect((try? projectStore.loadCanvas())?.tiles.first?.frame.x == 201,
+           "a foreign target's legacy backup was adopted as this target's own")
+}
+
 // MARK: - ProjectStore
 
 do {

@@ -80,7 +80,8 @@ public struct WorkspaceProfileStore: Sendable {
         self.layout = layout
         self.writer = AtomicWriter(
             backupsDirectory: layout.backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

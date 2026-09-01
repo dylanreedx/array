@@ -90,7 +90,12 @@ public struct ProjectStore: Sendable {
         self.layout = layout
         self.writer = AtomicWriter(
             backupsDirectory: layout.backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            // `<root>/.array/backups` belongs to this project alone, so legacy
+            // names cannot collide with another target's. Without this a
+            // corrupted canvas.json could not recover from the backups already
+            // on every installed copy.
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

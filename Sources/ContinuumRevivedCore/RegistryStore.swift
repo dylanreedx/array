@@ -18,7 +18,8 @@ public struct RegistryStore: Sendable {
         self.backupsDirectory = baseDir.appendingPathComponent("backups", isDirectory: true)
         self.writer = AtomicWriter(
             backupsDirectory: backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

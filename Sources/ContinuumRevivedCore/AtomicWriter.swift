@@ -2,6 +2,23 @@ import Darwin
 import Foundation
 import CryptoKit
 
+/// Whether a writer can still FIND backups written under the pre-v2 name
+/// `<stem>.<iso>.<counter>.<ext>`.
+///
+/// Every installed copy in the field has backups under the old name, and a
+/// writer that cannot see them silently strands the user's entire recoverable
+/// history: the target corrupts, recovery reports "no valid backup", the store
+/// boots empty, and the next save begins a fresh v2 chain over the empty
+/// document while the good files sit on disk that no code path will ever read.
+/// That really was the state — only `WorkspaceStore` opted in, so `ProjectStore`,
+/// which owns `<project root>/.array/canvas.json`, could not recover one of them.
+///
+/// So every store that owns its OWN backups directory opts in. The default stays
+/// `.disabled` deliberately: legacy names carry no identity, so two same-basename
+/// targets sharing ONE backups directory would cross-recover from each other's
+/// backups. v2 names embed the target's identity hash and are immune; legacy
+/// names are not, and `--workspace-restart-fault-check` pins that hazard. Opting
+/// in is therefore a per-store statement that the store owns its directory.
 public enum AtomicWriterLegacyBackupPolicy: Sendable, Equatable {
     case disabled
     case targetDedicated

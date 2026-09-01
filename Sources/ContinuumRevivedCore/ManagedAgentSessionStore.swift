@@ -8,7 +8,8 @@ public final class ManagedAgentSessionStore: @unchecked Sendable {
         self.layout = ProjectStoreLayout(projectRoot: projectRoot)
         self.writer = AtomicWriter(
             backupsDirectory: layout.backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

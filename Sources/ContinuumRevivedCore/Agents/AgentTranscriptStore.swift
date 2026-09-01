@@ -163,7 +163,8 @@ public actor AgentTranscriptStore {
             backupsDirectory: directory(agentID: agentID, sessionID: sessionID)
                 .appendingPathComponent("backups", isDirectory: true),
             retainedBackups: 2,
-            prettyPrint: false)
+            prettyPrint: false,
+            legacyBackupPolicy: .targetDedicated)
     }
 
     private func snapshotURL(agentID: AgentID, sessionID: String) -> URL {
