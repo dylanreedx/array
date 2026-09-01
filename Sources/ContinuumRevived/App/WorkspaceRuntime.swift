@@ -2058,12 +2058,25 @@ final class WorkspaceRuntime {
                 + abs(chromeFrame.origin.y - expectedChromeFrame.origin.y)
                 + abs(chromeFrame.width - expectedChromeFrame.width)
                 + abs(chromeFrame.height - expectedChromeFrame.height)
-            try expect(diff < 1.0, "stored-frame chrome: zoneA chrome frame \(chromeFrame) should match its stored placement \(expectedChromeFrame)")
+            try expect(diff < 1.0, "stored-frame chrome: zoneA chrome WORLD frame \(chromeFrame) should match its stored placement \(expectedChromeFrame)")
             // And the whole point of the stored frame: chrome IS the grab target.
-            if let header = chromeCanvas.qaZoneHeaderGrabRect(zoneA) {
-                try expect(abs(header.origin.x - chromeFrame.origin.x) < 1.0
-                           && abs(header.width - chromeFrame.width) < 1.0,
-                           "the zone's move-grab header must sit on its visible chrome: header \(header) vs chrome \(chromeFrame)")
+            //
+            // These two rects live in DIFFERENT SPACES and must be compared in
+            // the same one. `zoneLayerChromeFrame` is the chrome view's frame in
+            // its superview, the world plane — a WORLD rect, camera-free by
+            // design (`worldRect`). `qaZoneHeaderGrabRect` is a SCREEN rect:
+            // `zoneHeaderScreenRect` applies `canvasState.viewport`. Comparing
+            // them directly only agreed while the canvas camera sat at the
+            // origin, and silently became an off-by-the-viewport assertion the
+            // moment the mount adopted the document's own camera. Convert the
+            // installed chrome view into canvas points and compare there, which
+            // is also the space a click arrives in.
+            if let header = chromeCanvas.qaZoneHeaderGrabRect(zoneA),
+               let chromeOnScreen = chromeCanvas.qaZoneChromeRectInCanvas(for: zoneA) {
+                try expect(abs(header.origin.x - chromeOnScreen.origin.x) < 1.0
+                           && abs(header.origin.y - chromeOnScreen.origin.y) < 1.0
+                           && abs(header.width - chromeOnScreen.width) < 1.0,
+                           "the zone's move-grab header must sit on its visible chrome: header \(header) vs chrome on screen \(chromeOnScreen)")
             }
         }
         // If chrome frame is nil, showsZoneChrome may be inactive — assertion skipped (no chrome to verify).
