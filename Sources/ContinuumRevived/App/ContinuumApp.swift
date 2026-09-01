@@ -3404,8 +3404,23 @@ enum ContinuumApp {
         //
         // Refuse instead, and name the two mistakes that actually get made:
         // a typo, and running a CoreChecks flag against the app binary.
+        // These eight are handled in `applicationDidFinishLaunching`, not here:
+        // they are LIVE checks that need a booted app, so reaching this line is
+        // correct for them and only for them. Keep this list in step with that
+        // method — `--live-check-flag-inventory-check` fails if it drifts.
+        let flagsHandledAfterLaunch: Set<String> = [
+            "--agent-location-live-check",
+            "--claude-agent-live-check",
+            "--codex-agent-live-check",
+            "--managed-agent-live-check",
+            "--palette-captures-keys-over-browser-check",
+            "--previous-focus-navigation-check",
+            "--sidebar-live-capture-check",
+            "--terminal-scroll-ergonomics-check",
+        ]
         let unhandledCheckFlags = CommandLine.arguments.filter { argument in
             argument.hasPrefix("--") && argument.hasSuffix("-check")
+                && !flagsHandledAfterLaunch.contains(argument)
         }
         if !unhandledCheckFlags.isEmpty {
             fputs("""
@@ -26398,9 +26413,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // --- Assertion 6: restore-over leaves a backup. ---
         let wsBackupsDir = WorkspaceStore(workspaceId: W0, applicationSupportDirectory: appSupport).layout.backupsDirectory
-        let backupFiles = try fm.contentsOfDirectory(at: wsBackupsDir, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("canvas.") && $0.pathExtension == "json" }
-        try expect(backupFiles.count >= 1, "assertion 6: backups directory contains at least one canvas.*.json backup")
+        // The assertion is "restore-over left a backup", not "the file is named a
+        // particular way". WS2 changed the scheme from `canvas.<iso>.<n>.json` to
+        // `array-backup-v2-<identity>-<generation>-<iso>`, which is
+        // identity-scoped and generation-ordered rather than stem-and-clock
+        // ordered. Accept both: an installed copy's existing backups keep the old
+        // names, so a filter that recognised only one scheme would be wrong in
+        // the field as well as here.
+        let allBackupFiles = try fm.contentsOfDirectory(at: wsBackupsDir, includingPropertiesForKeys: nil)
+        let backupFiles = allBackupFiles.filter { url in
+            let name = url.lastPathComponent
+            return (name.hasPrefix("canvas.") && url.pathExtension == "json")
+                || name.hasPrefix("array-backup-v2-")
+        }
+        try expect(backupFiles.count >= 1,
+                   "assertion 6: backups directory contains at least one backup "
+                   + "(canvas.*.json or array-backup-v2-*); found \(allBackupFiles.map(\.lastPathComponent))")
 
         // --- Assertion 7: Apply instantiate-as-new from template — new workspace created. ---
         let newEntry = registry.createWorkspace(name: "From Template", now: now2)

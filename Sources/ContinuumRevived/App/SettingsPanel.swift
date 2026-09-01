@@ -1099,6 +1099,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         case leakedPanel
         case missingTerminalTmuxFields
         case missingCompanionCustomSection
+        case missingCustomSection(String)
 
         var description: String {
             switch self {
@@ -1106,6 +1107,11 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 return "sidebar row count \(actual), expected \(expected)"
             case let .sectionFieldsNotRendered(title):
                 return "section \(title) did not render a control for every field"
+            case let .missingCustomSection(id):
+                return "section \(id) declares no fields, so production renders it with a custom "
+                    + "view — but none mounted here. Every custom section in "
+                    + "`AppDelegate`'s `customSectionViews` needs a sentinel below, or this "
+                    + "leg fails the moment one is added."
             case let .toggleDidNotRoundTrip(stored, expected):
                 return "toggle round-trip: stored \(String(describing: stored)), expected \(expected)"
             case .noGeneralToggle:
@@ -1144,13 +1150,30 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
         var companionCustomSectionMounts = 0
         let companionSentinel = NSView(frame: NSRect(x: 0, y: 0, width: 510, height: 80))
+        // Every id in `AppDelegate.customSectionViews` must appear here. A custom
+        // section declares `fields: []`, so without a sentinel it renders nothing
+        // and `selectedSectionFieldsAllRenderedForQA` reports the section as
+        // unrendered — which is what happened when WS7 added Canvas Background.
+        let customSectionIds = ["companion", "canvasBackground"]
+        var customSectionMounts: [String: Int] = [:]
+        var customSentinels: [String: NSView] = [:]
+        var customViewFactories: [String: () -> NSView] = [:]
+        for id in customSectionIds {
+            let sentinel = NSView(frame: NSRect(x: 0, y: 0, width: 510, height: 80))
+            customSentinels[id] = sentinel
+            customViewFactories[id] = {
+                customSectionMounts[id, default: 0] += 1
+                if id == "companion" {
+                    companionCustomSectionMounts += 1
+                    return companionSentinel
+                }
+                return sentinel
+            }
+        }
         let panel = SettingsPanel(
             sections: sections,
             defaults: defaults,
-            customSectionViews: ["companion": {
-                companionCustomSectionMounts += 1
-                return companionSentinel
-            }]
+            customSectionViews: customViewFactories
         )
         panel.show(near: nil)
 
@@ -1168,6 +1191,20 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             if section.id == "companion",
                (companionCustomSectionMounts == 0 || companionSentinel.superview == nil) {
                 throw SettingsPanelSelfCheckError.missingCompanionCustomSection
+            }
+            // Same contract for every other custom section: it mounted, and its
+            // view is actually in the hierarchy rather than merely constructed.
+            if section.id != "companion", customSectionIds.contains(section.id) {
+                let mounted = (customSectionMounts[section.id] ?? 0) > 0
+                    && customSentinels[section.id]?.superview != nil
+                guard mounted else {
+                    throw SettingsPanelSelfCheckError.missingCustomSection(section.id)
+                }
+            }
+            // A section with no fields and no custom view renders nothing at all;
+            // that is a schema mistake, not a pass.
+            if section.fields.isEmpty, !customSectionIds.contains(section.id) {
+                throw SettingsPanelSelfCheckError.missingCustomSection(section.id)
             }
         }
 
