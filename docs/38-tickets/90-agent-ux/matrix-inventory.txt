@@ -68,6 +68,7 @@ check --diff-tile-check
 check --document-location-check
 check --drag-magnetize-check
 check --empty-workspace-creation-check
+check --exact-rebase-performance-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
 check --file-open-active-context-check
@@ -381,6 +382,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 leg run_leg scripts/check-color-hygiene.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh

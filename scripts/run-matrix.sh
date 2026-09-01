@@ -338,6 +338,10 @@ run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
 run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
+# Worst-case cost of the exact zone-origin correction on the resize input path
+# (it runs per zone per mouseDragged). Registered so the bound is gated, not
+# merely measurable: the leg existed with a failing exit path no gate ran.
+run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from

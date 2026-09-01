@@ -1,6 +1,14 @@
 import CoreGraphics
 import Foundation
 
+private func autoLayoutFirstWinsDictionary<Key: Hashable, Value>(
+    _ pairs: some Sequence<(Key, Value)>
+) -> [Key: Value] {
+    var result: [Key: Value] = [:]
+    for (key, value) in pairs where result[key] == nil { result[key] = value }
+    return result
+}
+
 public struct CanvasLayoutTransaction: Equatable, Sendable {
     public var tileFrames: [UUID: TileFrame]
     public var zonePlacements: [UUID: ZonePlacement]
@@ -66,8 +74,8 @@ public enum CanvasAutoLayoutEngine {
         let gap = max(0, preferredGap.isFinite ? preferredGap : 0)
         let padding = max(0, preferredPadding.isFinite ? preferredPadding : 0)
         let header = max(0, headerHeight.isFinite ? headerHeight : 0)
-        var tiles = Dictionary(uniqueKeysWithValues: scene.tiles.map { ($0.id, $0) })
-        var zones = Dictionary(uniqueKeysWithValues: scene.zones.map { ($0.zoneId, $0) })
+        var tiles = autoLayoutFirstWinsDictionary(scene.tiles.map { ($0.id, $0) })
+        var zones = autoLayoutFirstWinsDictionary(scene.zones.map { ($0.zoneId, $0) })
         var activeTile: UUID?
         var activeZone: UUID?
         var activeZoneOnlyTranslated = false
@@ -96,7 +104,7 @@ public enum CanvasAutoLayoutEngine {
                 let originDY = placement.origin.y - previous.origin.y
                 activeZoneOnlyTranslated = placement.size == previous.size
                     && (originDX != 0 || originDY != 0)
-                if originDX != 0 || originDY != 0 {
+                if activeZoneOnlyTranslated && (originDX != 0 || originDY != 0) {
                     for tileId in tiles.keys where tiles[tileId]?.zoneId == id {
                         tiles[tileId]?.frame.x += originDX
                         tiles[tileId]?.frame.y += originDY
@@ -115,6 +123,58 @@ public enum CanvasAutoLayoutEngine {
         case let .settle(zoneId, _, _): targetZoneIds = [zoneId]
         case let .zone(id, _): targetZoneIds = [id]
         case let .tile(id, _): targetZoneIds = tiles[id]?.zoneId.map { [$0] } ?? []
+        }
+
+        // Direct resize is deliberately non-destructive. It is not a packing
+        // request: the pointer-owned rectangle changes, passive rectangles stay
+        // exact, and only the owning container may grow to contain the result.
+        if let activeTile, activeTileResizeIsHorizontal != nil,
+           let zoneId = tiles[activeTile]?.zoneId, var zone = zones[zoneId] {
+            let members = tiles.values.filter { $0.zoneId == zoneId }.map(\.frame)
+            if let first = members.first {
+                let minX = members.dropFirst().reduce(first.x) { min($0, $1.x) }
+                let minY = members.dropFirst().reduce(first.y) { min($0, $1.y) }
+                let maxX = members.reduce(first.x + first.width) { max($0, $1.x + $1.width) }
+                let maxY = members.reduce(first.y + first.height) { max($0, $1.y + $1.height) }
+                let left = min(zone.origin.x, minX - padding)
+                let top = min(zone.origin.y, minY - header - padding)
+                let right = max(zone.origin.x + zone.size.width, maxX + padding)
+                let bottom = max(zone.origin.y + zone.size.height, maxY + padding)
+                zone.origin = ZonePoint(x: left, y: top)
+                zone.size = ZoneSize(width: right - left, height: bottom - top)
+                zones[zoneId] = zone
+            }
+            var result = CanvasLayoutTransaction()
+            if let original = scene.tiles.first(where: { $0.id == activeTile }),
+               let changed = tiles[activeTile]?.frame, changed != original.frame {
+                result.tileFrames[activeTile] = changed
+            }
+            if let original = scene.zones.first(where: { $0.zoneId == zoneId }), zone != original {
+                result.zonePlacements[zoneId] = zone
+            }
+            return result
+        }
+
+        // A manual zone resize clamps only the dragged container through the
+        // padded member envelope. Members, peer zones, and outside tiles are
+        // immutable; outward overlap is allowed.
+        if let activeZone, !activeZoneOnlyTranslated, var zone = zones[activeZone],
+           let original = scene.zones.first(where: { $0.zoneId == activeZone }),
+           zone.size != original.size {
+            let members = scene.tiles.filter { $0.zoneId == activeZone }.map(\.frame)
+            if let first = members.first {
+                let minX = members.dropFirst().reduce(first.x) { min($0, $1.x) }
+                let minY = members.dropFirst().reduce(first.y) { min($0, $1.y) }
+                let maxX = members.reduce(first.x + first.width) { max($0, $1.x + $1.width) }
+                let maxY = members.reduce(first.y + first.height) { max($0, $1.y + $1.height) }
+                let left = min(zone.origin.x, minX - padding)
+                let top = min(zone.origin.y, minY - header - padding)
+                let right = max(zone.origin.x + zone.size.width, maxX + padding)
+                let bottom = max(zone.origin.y + zone.size.height, maxY + padding)
+                zone.origin = ZonePoint(x: left, y: top)
+                zone.size = ZoneSize(width: right - left, height: bottom - top)
+            }
+            return CanvasLayoutTransaction(zonePlacements: zone == original ? [:] : [activeZone: zone])
         }
 
         var blocked: Set<UUID> = []
@@ -698,8 +758,8 @@ public enum CanvasAutoLayoutEngine {
         // anything and settles by the drop policy), and a member tile's world
         // ends at its zone. "Zones push tiles; tiles never push zones."
         guard let active = activeZone.map(Peer.zone) else { return }
-        let baselineTiles = Dictionary(uniqueKeysWithValues: scene.tiles.map { ($0.id, $0.frame) })
-        let baselineZones = Dictionary(uniqueKeysWithValues: scene.zones.map { placement in
+        let baselineTiles = autoLayoutFirstWinsDictionary(scene.tiles.map { ($0.id, $0.frame) })
+        let baselineZones = autoLayoutFirstWinsDictionary(scene.zones.map { placement in
             (placement.zoneId, TileFrame(x: placement.origin.x, y: placement.origin.y, width: placement.size.width, height: placement.size.height))
         })
         func frame(_ peer: Peer) -> TileFrame? {

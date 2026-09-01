@@ -1,5 +1,13 @@
 import Foundation
 
+private func geometryFirstWinsDictionary<Key: Hashable, Value>(
+    _ pairs: some Sequence<(Key, Value)>
+) -> [Key: Value] {
+    var result: [Key: Value] = [:]
+    for (key, value) in pairs where result[key] == nil { result[key] = value }
+    return result
+}
+
 /// The user-visible geometry operations that may participate in canvas undo.
 /// Viewport navigation and entity lifecycle deliberately do not appear here.
 public enum CanvasGeometryAction: String, Codable, Equatable, Sendable {
@@ -64,6 +72,45 @@ public struct CanvasGeometrySnapshot: Codable, Equatable, Sendable {
     }
 }
 
+extension CanvasGeometrySnapshot {
+    /// Does this snapshot describe the same geometry as `other`, allowing for
+    /// floating-point noise?
+    ///
+    /// History compares a recorded snapshot against live geometry to refuse a
+    /// replay onto state something else has changed. That comparison used exact
+    /// `==`, which cannot survive the sub-ULP zone-origin correction that keeps
+    /// passive members exact: a 1e-14 difference read as "someone else moved
+    /// this", and the entire undo stack was silently discarded. Reconciling the
+    /// replayed transaction alone was not enough, because the neighbouring entry
+    /// on the stack still recorded the uncorrected origin.
+    ///
+    /// The tolerance is a few ULP -- around 1e-13 at canvas magnitudes, some ten
+    /// orders of magnitude below one device pixel -- so a real edit can never
+    /// pass as noise. Identity and membership stay exact.
+    public func describesSameGeometry(as other: CanvasGeometrySnapshot) -> Bool {
+        func close(_ lhs: Double, _ rhs: Double) -> Bool {
+            if lhs == rhs { return true }
+            guard lhs.isFinite, rhs.isFinite else { return false }
+            return abs(lhs - rhs) <= 8 * Swift.max(abs(lhs), abs(rhs)).ulp
+        }
+        guard tiles.count == other.tiles.count, zones.count == other.zones.count else { return false }
+        // Both sides are id-sorted by `init`, so a positional zip is aligned.
+        for (lhs, rhs) in zip(tiles, other.tiles) {
+            guard lhs.tileId == rhs.tileId, lhs.zoneId == rhs.zoneId,
+                  close(lhs.frame.x, rhs.frame.x), close(lhs.frame.y, rhs.frame.y),
+                  close(lhs.frame.width, rhs.frame.width),
+                  close(lhs.frame.height, rhs.frame.height) else { return false }
+        }
+        for (lhs, rhs) in zip(zones, other.zones) {
+            guard lhs.zoneId == rhs.zoneId,
+                  close(lhs.origin.x, rhs.origin.x), close(lhs.origin.y, rhs.origin.y),
+                  close(lhs.size.width, rhs.size.width),
+                  close(lhs.size.height, rhs.size.height) else { return false }
+        }
+        return true
+    }
+}
+
 /// One semantic canvas edit. `before` and `after` contain only fields touched by
 /// the edit, so applying either side cannot rewind unrelated canvas state.
 public struct CanvasGeometryTransaction: Codable, Equatable, Sendable {
@@ -87,10 +134,12 @@ public struct CanvasGeometryTransaction: Codable, Equatable, Sendable {
     public var isNoOp: Bool { before == after }
 
     public var changedEntityCount: Int {
-        let beforeTiles = Dictionary(uniqueKeysWithValues: before.tiles.map { ($0.tileId, $0) })
-        let beforeZones = Dictionary(uniqueKeysWithValues: before.zones.map { ($0.zoneId, $0) })
-        let changedTiles = after.tiles.lazy.filter { beforeTiles[$0.tileId] != $0 }.count
-        let changedZones = after.zones.lazy.filter { beforeZones[$0.zoneId] != $0 }.count
+        let beforeTiles = geometryFirstWinsDictionary(before.tiles.map { ($0.tileId, $0) })
+        let beforeZones = geometryFirstWinsDictionary(before.zones.map { ($0.zoneId, $0) })
+        let afterTiles = geometryFirstWinsDictionary(after.tiles.map { ($0.tileId, $0) })
+        let afterZones = geometryFirstWinsDictionary(after.zones.map { ($0.zoneId, $0) })
+        let changedTiles = afterTiles.lazy.filter { beforeTiles[$0.key] != $0.value }.count
+        let changedZones = afterZones.lazy.filter { beforeZones[$0.key] != $0.value }.count
         return changedTiles + changedZones
     }
 }

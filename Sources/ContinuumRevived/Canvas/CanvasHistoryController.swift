@@ -60,7 +60,20 @@ final class CanvasHistoryController: NSObject {
             invalidateAfterReplay()
             return
         }
-        register(transaction, direction: direction == .undo ? .redo : .undo)
+        // The canvas may install a corrected geometry rather than the requested
+        // one. Re-register the side that actually landed, so the next replay's
+        // exact-equality guard describes the canvas instead of invalidating the
+        // entire stack.
+        let installed = canvas.lastInstalledGeometry ?? destination
+        let reconciled = installed == destination ? transaction : (
+            direction == .undo
+                ? CanvasGeometryTransaction(
+                    id: transaction.id, action: transaction.action,
+                    before: installed, after: transaction.after)
+                : CanvasGeometryTransaction(
+                    id: transaction.id, action: transaction.action,
+                    before: transaction.before, after: installed))
+        register(reconciled, direction: direction == .undo ? .redo : .undo)
     }
 
     /// Foundation is still closing its internal replay group while invoking an

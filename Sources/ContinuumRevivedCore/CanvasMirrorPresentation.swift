@@ -296,22 +296,25 @@ public enum CanvasMirrorPresentation {
         // tile hint — a headless row simply contributes no overlay — via the one shared
         // rule in `keyedByTileHint`.
         let rowsByTile = keyedByTileHint(rows.map { (agentId: $0.agentId, tileId: $0.tileId, value: $0) })
-        return Dictionary(uniqueKeysWithValues: scene.tiles.map { tile in
+        var result: [UUID: CanvasMirrorTileStatus] = [:]
+        for tile in scene.tiles where result[tile.tileId] == nil {
             if let row = rowsByTile[tile.tileId] {
-                return (tile.tileId, CanvasMirrorTileStatus(
+                result[tile.tileId] = CanvasMirrorTileStatus(
                     tileId: tile.tileId,
                     status: row.status,
                     summary: row.lastSummary,
                     updatedAt: row.updatedAt
-                ))
+                )
+                continue
             }
-            return (tile.tileId, CanvasMirrorTileStatus(
+            result[tile.tileId] = CanvasMirrorTileStatus(
                 tileId: tile.tileId,
                 status: .stale,
                 summary: nil,
                 updatedAt: nil
-            ))
-        })
+            )
+        }
+        return result
     }
 
     public static func scopeBadge(

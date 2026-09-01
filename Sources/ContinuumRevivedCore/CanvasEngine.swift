@@ -64,6 +64,104 @@ public enum CanvasEngine {
         )
     }
 
+    /// Rebase a captured world-space frame into a zone while retaining that
+    /// world frame as the exact source of truth. A rounded subtraction is not
+    /// necessarily the inverse of floating-point addition, so inspect the few
+    /// adjacent representable locals when the naive result does not round back
+    /// to the captured coordinate.
+    ///
+    /// Returns `nil` when the geometry is non-finite, or when no adjacent local
+    /// reconstructs the captured world coordinate. Callers reach this helper
+    /// from persisted documents and from live gestures, where an unsupported
+    /// pair is data — not a programmer error — so it is reported rather than
+    /// trapped. A trapping variant crashed `--jelly-auto-layout-check` through
+    /// the production `applyLayoutTransaction` path
+    /// (Array-2026-08-31-072842.ips).
+    ///
+    /// Callers that are MOVING a tile fall back to plain `worldToZoneLocal`
+    /// when this returns nil: the contract scopes exactness to passive tiles,
+    /// and dropping a layout transaction is worse than a sub-ULP landing.
+    public static func worldToZoneLocalPreservingWorld(
+        _ frame: TileFrame,
+        zoneOrigin: ZonePoint
+    ) -> TileFrame? {
+        guard frame.x.isFinite, frame.y.isFinite,
+              frame.width.isFinite, frame.height.isFinite,
+              zoneOrigin.x.isFinite, zoneOrigin.y.isFinite else { return nil }
+
+        func exactLocal(world: Double, origin: Double) -> Double? {
+            let naive = world - origin
+            if naive + origin == world { return naive }
+
+            var lower = naive
+            var upper = naive
+            for _ in 0..<4 {
+                lower = lower.nextDown
+                if lower + origin == world { return lower }
+                upper = upper.nextUp
+                if upper + origin == world { return upper }
+            }
+            return nil
+        }
+
+        guard let x = exactLocal(world: frame.x, origin: zoneOrigin.x),
+              let y = exactLocal(world: frame.y, origin: zoneOrigin.y) else { return nil }
+
+        return TileFrame(x: x, y: y, width: frame.width, height: frame.height)
+    }
+
+    /// Choose the nearest representable origin (within 1,024 ULPs of the proposed
+    /// placement) for which every supplied world coordinate has an exact local
+    /// representation. This is needed because some finite world/origin pairs
+    /// have no additive inverse in `Double` at all.
+    public static func exactRebaseOriginIfPossible(
+        near proposed: ZonePoint,
+        preserving frames: [TileFrame]
+    ) -> ZonePoint? {
+        func supports(world: Double, origin: Double) -> Bool {
+            let naive = world - origin
+            if naive + origin == world { return true }
+            var lower = naive
+            var upper = naive
+            for _ in 0..<4 {
+                lower = lower.nextDown
+                upper = upper.nextUp
+                if lower + origin == world || upper + origin == world { return true }
+            }
+            return false
+        }
+        func nearestOrigin(
+            _ proposed: Double,
+            coordinate: (TileFrame) -> Double
+        ) -> Double? {
+            func supportsAll(_ origin: Double) -> Bool {
+                frames.allSatisfy { supports(world: coordinate($0), origin: origin) }
+            }
+            if supportsAll(proposed) { return proposed }
+            var lower = proposed
+            var upper = proposed
+            for _ in 0..<1_024 {
+                lower = lower.nextDown
+                if supportsAll(lower) { return lower }
+                upper = upper.nextUp
+                if supportsAll(upper) { return upper }
+            }
+            return nil
+        }
+        // Non-finite geometry is data here too, exactly as it is for
+        // `worldToZoneLocalPreservingWorld`. Trapping would also make that
+        // helper's guard dead on the main path, because callers run this
+        // correction first and a NaN frame would never reach it.
+        guard proposed.x.isFinite, proposed.y.isFinite, frames.allSatisfy({
+            $0.x.isFinite && $0.y.isFinite && $0.width.isFinite && $0.height.isFinite
+        }) else { return nil }
+        guard let x = nearestOrigin(proposed.x, coordinate: { $0.x }),
+              let y = nearestOrigin(proposed.y, coordinate: { $0.y }) else {
+            return nil
+        }
+        return ZonePoint(x: x, y: y)
+    }
+
     public static func worldFrame(tile: Tile, in zone: ZonePlacement) -> TileFrame {
         zoneLocalToWorld(tile.frame, zoneOrigin: zone.origin)
     }
