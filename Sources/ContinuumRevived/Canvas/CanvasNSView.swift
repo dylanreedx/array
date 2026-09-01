@@ -2476,7 +2476,7 @@ final class CanvasNSView: NSView, TokenThemed {
         captureGeometry(
             tileIds: Set(snapshot.tiles.map(\.tileId)),
             zoneIds: Set(snapshot.zones.map(\.zoneId))
-        ) == snapshot
+        ).describesSameGeometry(as: snapshot)
     }
 
     @discardableResult
@@ -8192,10 +8192,15 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         try expect(divergeInstalled != divergeRequested,
                    "undo-divergence witness must actually trigger an origin correction; installed == requested")
-        try expect(!layerCanvas.geometryMatches(divergeRequested),
-                   "the REQUESTED snapshot must not describe the canvas -- that divergence is the bug")
         try expect(layerCanvas.geometryMatches(divergeInstalled),
-                   "the geometry reported as installed must describe the canvas exactly, or history invalidates on the next replay")
+                   "the geometry reported as installed must describe the canvas")
+        // The requested snapshot differs from what landed by a sub-ULP
+        // correction (asserted above). History must nonetheless accept it:
+        // treating that difference as a foreign edit is what discarded the
+        // undo stack, and no reconciliation of one entry can fix the entry
+        // beneath it.
+        try expect(layerCanvas.geometryMatches(divergeRequested),
+                   "history must tolerate a sub-ULP origin correction rather than refuse the replay")
 
         // ...and end to end through the real history controller. A geometry edit
         // scoped to the ZONE ONLY records no member tiles, so replaying it mixes
@@ -8203,6 +8208,66 @@ final class CanvasNSView: NSView, TokenThemed {
         // the mixed case that provokes a correction. If the controller re-registers
         // the REQUESTED geometry, the next replay's exact-equality guard fails,
         // `onInvalidated` fires, and redo silently does nothing.
+        // MULTI-STEP UNDO WITNESS (the F1 repro). Reconciling only the replayed
+        // transaction was not enough: the entry BENEATH it on the stack still
+        // recorded the uncorrected origin, so the second Cmd-Z compared live
+        // geometry against it, failed the equality guard, and wiped the stack.
+        //
+        // A zone resize records zone geometry and NO tile geometry, so a member
+        // arriving afterwards has its local minted against the CURRENT origin.
+        // Undoing that resize then mixes the snapshot's origin with that
+        // member's world -- the case an origin correction exists to resolve.
+        layerCanvas.activateUndoWorkspace(UUID(uuidString: "00000000-0000-0000-0000-00000000F1F1")!)
+        var multiBase = passiveRebaseBaselinePlacement
+        multiBase.origin = ZonePoint(x: passiveRebaseBaselinePlacement.origin.x, y: -77.08333333333336)
+        layer.placement = multiBase
+        layer.tiles = passiveRebaseBaselineTiles
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
+
+        // t1: an ordinary tile move, which records the zone too.
+        let multiTileBeforeX = layer.tiles[0].frame.x
+        layerCanvas.beginGeometryEdit(.moveTile, tileIds: [layerFirstId], zoneIds: [layerZoneId])
+        layer.tiles[0].frame.x = multiTileBeforeX + 24
+        layerCanvas.layoutAllTiles()
+        try expect(layerCanvas.commitGeometryEdit() != nil, "multi-step witness must record the tile move")
+        let multiTileMovedX = layer.tiles[0].frame.x
+
+        // t2: a zone resize -- zones only, no tile geometry.
+        layerCanvas.beginGeometryEdit(.resizeZone, zoneIds: [layerZoneId])
+        var multiResized = layer.placement
+        multiResized.origin = ZonePoint(x: multiResized.origin.x, y: 0)
+        layerCanvas.applyConcreteZonePlacement(multiResized, to: layer, registerUndo: false)
+        try expect(layerCanvas.commitGeometryEdit() != nil, "multi-step witness must record the zone resize")
+
+        // A member arrives afterwards, its local minted against the new origin.
+        let lateTemplate = passiveRebaseBaselineTiles[0]
+        var lateMember = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000AAEE")!,
+            kind: lateTemplate.kind,
+            title: "late arrival",
+            frame: TileFrame(x: lateTemplate.frame.x, y: 60.25,
+                             width: lateTemplate.frame.width, height: lateTemplate.frame.height),
+            zPosition: lateTemplate.zPosition,
+            runtimeRef: nil,
+            metadata: lateTemplate.metadata)
+        lateMember.zoneId = layerZoneId
+        layer.tiles.append(lateMember)
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
+
+        let multiCorrectionsBefore = layerCanvas.qaCorrectedSnapshotOrigins
+        layerCanvas.activeCanvasUndoManager?.undo()
+        try expect(layerCanvas.qaCorrectedSnapshotOrigins > multiCorrectionsBefore,
+                   "multi-step witness never reached an origin correction, so it witnesses nothing")
+        layerCanvas.activeCanvasUndoManager?.undo()
+        try expect(layer.tiles[0].frame.x == multiTileBeforeX,
+                   "the SECOND undo must restore the tile move; a stack invalidated by an origin correction silently does nothing (before=\(multiTileBeforeX) moved=\(multiTileMovedX) now=\(layer.tiles[0].frame.x))")
+        layer.tiles = passiveRebaseBaselineTiles
+        layer.placement = passiveRebaseBaselinePlacement
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
+
         // NOT WITNESSED: the controller half. `CanvasHistoryController.apply` now
         // re-registers the geometry that actually landed, but no fixture here
         // reaches an origin correction during undo/redo replay -- a scenario

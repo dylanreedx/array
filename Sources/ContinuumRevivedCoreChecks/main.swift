@@ -4803,6 +4803,52 @@ do {
     expect(minimizedLocal.map { CanvasEngine.zoneLocalToWorld($0, zoneOrigin: corrected) } == minimizedWorld,
            "Minimized 60.25 test-X coordinate round-trips exactly after bounded origin correction")
 
+    // Geometry-history comparison must tolerate the sub-ULP zone-origin
+    // correction that keeps passive members exact, and nothing more. Exact `==`
+    // read a 1e-14 rebase as "someone else moved this" and silently discarded
+    // the whole undo stack.
+    do {
+        let zoneId = UUID(), tileId = UUID(), otherTile = UUID()
+        func snap(originY: Double, tileY: Double, zone: UUID? = nil) -> CanvasGeometrySnapshot {
+            CanvasGeometrySnapshot(
+                tiles: [CanvasTileGeometry(
+                    tileId: tileId,
+                    frame: TileFrame(x: 100, y: tileY, width: 220, height: 160),
+                    zoneId: zone ?? zoneId)],
+                zones: [CanvasZoneGeometry(
+                    zoneId: zoneId,
+                    origin: ZonePoint(x: 20.5, y: originY),
+                    size: ZoneSize(width: 400, height: 320))])
+        }
+        let base = snap(originY: -77.08333333333336, tileY: 60.25)
+        expect(base.describesSameGeometry(as: base), "identical geometry must match")
+        // one ULP of correction, the real case
+        let corrected = snap(originY: (-77.08333333333336 as Double).nextUp, tileY: 60.25)
+        expect(base != corrected, "the corrected snapshot must differ under exact equality")
+        expect(base.describesSameGeometry(as: corrected),
+               "a one-ULP origin correction must not read as a foreign edit")
+        expect(corrected.describesSameGeometry(as: base), "tolerance must be symmetric")
+        // a real edit must still be refused, however small
+        expect(!base.describesSameGeometry(as: snap(originY: -77.08333333333336 + 0.01, tileY: 60.25)),
+               "a 0.01pt zone move must still refuse replay")
+        expect(!base.describesSameGeometry(as: snap(originY: -77.08333333333336, tileY: 60.26)),
+               "a 0.01pt tile move must still refuse replay")
+        // identity and membership stay exact
+        expect(!base.describesSameGeometry(as: snap(originY: -77.08333333333336, tileY: 60.25, zone: otherTile)),
+               "a changed zone membership must refuse replay")
+        expect(!base.describesSameGeometry(as: CanvasGeometrySnapshot(tiles: [], zones: base.zones)),
+               "a missing tile must refuse replay")
+        expect(!base.describesSameGeometry(as: snap(originY: .nan, tileY: 60.25)),
+               "non-finite geometry must refuse replay")
+        // tolerance must scale with magnitude, not be absolute
+        let big = 8_192_000.5
+        let bigSnap = snap(originY: big, tileY: 60.25)
+        expect(bigSnap.describesSameGeometry(as: snap(originY: big.nextUp, tileY: 60.25)),
+               "tolerance must scale with magnitude")
+        expect(!bigSnap.describesSameGeometry(as: snap(originY: big + 0.5, tileY: 60.25)),
+               "tolerance must not swallow a half-point move at large coordinates")
+    }
+
     // Unvetted-origin policy. `applyLayoutTransaction` vets origins only for
     // zones the transaction MOVES, so a tile resized inside an unmoved zone
     // reaches the rebase with an origin nobody corrected. This corpus measures
