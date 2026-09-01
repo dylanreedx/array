@@ -126,6 +126,17 @@ private func runCodexAppServerTranslatorMappingChecks() {
         """#)
     expect(fileEnd == [.itemCompleted(threadId: "th-SECRET-THREAD", itemId: "exec-2", kind: .fileChange, status: .completed)],
            "a completed fileChange item/completed must map to .completed")
+    _ = translator.translate(line: #"""
+        {"jsonrpc":"2.0","method":"item/started","params":{"threadId":"th-SECRET-THREAD","turnId":"turn-1","item":{"id":"hostile-files","type":"fileChange","changes":[{"path":"C:\\Users\\Alice\\Secrets\\token.txt","kind":{"type":"update"},"diff":"+ Authorization: Bearer appserver-secret\n+ /Users/alice/private"},{"path":"Sources/AppServerSafe.swift","kind":{"type":"update"},"diff":"+safe"}],"status":"inProgress"}}}
+        """#)
+    let hostileDetails = observationBox.snapshot().compactMap { observation -> AgentToolDetailObservation? in
+        guard case let .toolDetail(itemId, detail) = observation, itemId == "hostile-files" else { return nil }
+        return detail
+    }.flatMap(\.fileChanges)
+    let hostileSurface = hostileDetails.map { [$0.path, $0.renamePath ?? "", $0.diffPreview ?? ""].joined(separator: "\n") }.joined(separator: "\n")
+    expect(!hostileSurface.contains("Alice") && !hostileSurface.contains("appserver-secret")
+        && !hostileSurface.contains("/Users/") && hostileSurface.contains("AppServerSafe.swift"),
+        "Codex app-server hostile file facts must be safe at raw construction: \(hostileSurface)")
 
     // thread/tokenUsage/updated: the separate-notification restructure (#2).
     // `total` is the cumulative accounting figure — same semantics as exec's

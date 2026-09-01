@@ -256,6 +256,8 @@ public struct ClaudeEventTranslator {
                     toolName: name,
                     fields: Self.toolDetailFields(
                         toolName: name, input: block["input"] as? [String: Any] ?? [:]),
+                    fileChanges: Self.fileDetails(toolName: name, input: block["input"] as? [String: Any] ?? [:]),
+                    parentItemID: object["parent_tool_use_id"] as? String,
                     observedAt: now()
                 )))
             }
@@ -526,6 +528,16 @@ public struct ClaudeEventTranslator {
             fields.append((key: "subagent_type", value: subagentType))
         }
         return fields
+    }
+
+    private static func fileDetails(toolName: String, input: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
+        guard let path = (input["file_path"] as? String) ?? (input["path"] as? String) else { return [] }
+        let name = toolName.lowercased()
+        let action: AgentToolDetailObservation.FileAction
+        if name == "write" { action = .write }
+        else if name.contains("edit") || name.contains("patch") { action = .edit }
+        else { return [] }
+        return [.init(action: action, path: path)]
     }
 
     /// A bounded plain-text preview of a `tool_result`'s content: the string

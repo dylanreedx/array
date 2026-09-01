@@ -667,6 +667,7 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # transcript's other structural witness lives in --component-lab-check, which is
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
+run_app_check .build/debug/Array --transcript-provider-parity-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

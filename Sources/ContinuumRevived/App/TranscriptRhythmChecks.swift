@@ -234,6 +234,9 @@ enum TranscriptRhythmChecks {
         let (surface, _) = try render(.turnBoundary)
         let layout = surface.transcript.transcriptLayout
         let gaps = layout.qaRowGapsForChecks
+        guard AgentTranscriptLayout.interTurnSpacing == 24 else {
+            throw fail("turn separation: expected the locked 24pt inter-turn rhythm, got \(AgentTranscriptLayout.interTurnSpacing)pt")
+        }
         guard gaps.count >= 4 else {
             throw fail(
                 "turn separation: the three-turn fixture produced only \(gaps.count) row gap(s); "

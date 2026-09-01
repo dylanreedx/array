@@ -241,6 +241,8 @@ public struct PiEventTranslator {
                     toolName: toolName,
                     fields: Self.toolDetailFields(
                         toolName: toolName, args: object["args"] as? [String: Any] ?? [:]),
+                    fileChanges: Self.fileDetails(toolName: toolName, args: object["args"] as? [String: Any] ?? [:]),
+                    parentItemID: (object["parentToolCallId"] as? String) ?? (object["parent_tool_call_id"] as? String),
                     observedAt: Self.timestamp(from: object) ?? now()
                 )))
             }
@@ -578,6 +580,16 @@ public struct PiEventTranslator {
             fields.append((key: "description", value: description))
         }
         return fields
+    }
+
+    private static func fileDetails(toolName: String, args: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
+        guard let path = (args["path"] as? String) ?? (args["file"] as? String) ?? (args["file_path"] as? String) else { return [] }
+        let name = toolName.lowercased()
+        let action: AgentToolDetailObservation.FileAction
+        if name == "write" { action = .write }
+        else if name.contains("edit") || name.contains("patch") { action = .edit }
+        else { return [] }
+        return [.init(action: action, path: path)]
     }
 
     /// A bounded preview of `result.content[].text`. Non-text blocks and

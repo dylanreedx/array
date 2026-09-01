@@ -45,6 +45,191 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     case toolDetail(itemId: String, detail: AgentToolDetailObservation)
 }
 
+/// The single host-local privacy boundary for strings that can become file
+/// disclosure text. It deliberately returns display paths, never filesystem
+/// locations: ordinary repository-relative paths survive, while every private
+/// or ambiguous syntax is reduced to a non-secret basename (or dropped).
+public enum AgentToolDetailDisplaySanitizer {
+    private enum ScalarPolicy { case singleLine, diff }
+    private struct PolicyViews {
+        let authored: String
+        let classified: String
+        let authoredHostile: Bool
+        let classifiedHostile: Bool
+
+        var hasHostileDisclosureShape: Bool { authoredHostile || classifiedHostile }
+    }
+
+    // Explicit-secret transformations share the same strict work window as the
+    // store's substring fingerprint witness. This prevents an attacker from
+    // turning nested encodings into an unbounded candidate cross-product.
+    private static let explicitSecretWorkBudget = 1_024
+    private static let bidiScalars: Set<UInt32> = [
+        0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+        0x2066, 0x2067, 0x2068, 0x2069
+    ]
+
+    public static func path(_ raw: String, explicitSecrets: [String] = [], maxBytes: Int = AgentToolDetailObservation.FileChange.maxPathCharacters) -> String? {
+        let authored = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let views = policyViews(authored, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: max(4_096, maxBytes), scalarPolicy: .singleLine) else { return nil }
+        let value = views.classified
+
+        let slashPath = value.replacingOccurrences(of: "\\", with: "/")
+        let lower = slashPath.lowercased()
+        let isDrive = slashPath.count >= 3 && slashPath[slashPath.index(after: slashPath.startIndex)] == ":"
+        let hasScheme = lower.range(of: #"^[a-z][a-z0-9+.-]*://"#, options: .regularExpression) != nil
+        let components = slashPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let isUnsafeShape = slashPath.hasPrefix("/") || slashPath.hasPrefix("~") || value.hasPrefix("\\\\")
+            || isDrive || hasScheme || components.contains("..") || components.contains(".")
+        let candidate: String
+        if isUnsafeShape {
+            let withoutQuery = slashPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? slashPath
+            let withoutFragment = withoutQuery.split(separator: "#", maxSplits: 1).first.map(String.init) ?? withoutQuery
+            guard let basename = withoutFragment.split(separator: "/", omittingEmptySubsequences: true).last,
+                  !basename.isEmpty else { return nil }
+            candidate = String(basename)
+        } else {
+            guard !slashPath.hasSuffix("/") else { return nil }
+            candidate = slashPath
+        }
+        guard !candidate.isEmpty, candidate != ".", candidate != "..", !candidate.contains(":"),
+              policyViews(candidate, explicitSecrets: explicitSecrets,
+                          maxInputBytes: max(4_096, maxBytes), scalarPolicy: .singleLine) != nil else { return nil }
+        return boundedUTF8(candidate, maxBytes: maxBytes)
+    }
+
+    public static func parentItemID(_ raw: String?, explicitSecrets: [String] = []) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let views = policyViews(value, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: 200, scalarPolicy: .singleLine),
+              !views.authored.contains("/"), !views.authored.contains("\\"), !views.authored.contains(":"), !views.authored.contains("~"),
+              !views.classified.contains("/"), !views.classified.contains("\\"), !views.classified.contains(":"), !views.classified.contains("~"),
+              !views.hasHostileDisclosureShape else { return nil }
+        return value
+    }
+
+    public static func diffPreview(_ raw: String?, explicitSecrets: [String] = [], maxBytes: Int = 16_384, maxLines: Int = 200) -> String? {
+        guard let raw else { return nil }
+        guard let views = policyViews(raw, explicitSecrets: explicitSecrets,
+                                      maxInputBytes: maxBytes, scalarPolicy: .diff),
+              !views.hasHostileDisclosureShape else { return "[REDACTED]" }
+        let lines = views.authored.split(separator: "\n", omittingEmptySubsequences: false).prefix(maxLines)
+        let bounded = boundedUTF8(lines.joined(separator: "\n"), maxBytes: maxBytes)
+        return bounded.isEmpty ? nil : bounded
+    }
+
+    private static func policyViews(
+        _ authored: String,
+        explicitSecrets: [String],
+        maxInputBytes: Int,
+        scalarPolicy: ScalarPolicy
+    ) -> PolicyViews? {
+        guard !authored.isEmpty, authored.utf8.count <= maxInputBytes,
+              let classified = classificationView(authored, maxInputBytes: maxInputBytes),
+              let secrets = classifiedExplicitSecrets(explicitSecrets) else { return nil }
+        let scalarSafe: (String) -> Bool
+        switch scalarPolicy {
+        case .singleLine: scalarSafe = isScalarSafe
+        case .diff: scalarSafe = isDiffScalarSafe
+        }
+        guard scalarSafe(authored), scalarSafe(classified),
+              SecretRedactor.redact(authored, explicitSecrets: secrets) == authored,
+              SecretRedactor.redact(classified, explicitSecrets: secrets) == classified else { return nil }
+        return PolicyViews(
+            authored: authored,
+            classified: classified,
+            authoredHostile: containsHostileDisclosureShape(authored),
+            classifiedHostile: containsHostileDisclosureShape(classified)
+        )
+    }
+
+    private static func classifiedExplicitSecrets(_ candidates: [String]) -> [String]? {
+        var result: [String] = []
+        var seen = Set<String>()
+        var work = 0
+        for candidate in candidates {
+            guard !candidate.isEmpty else { continue }
+            work += candidate.utf8.count
+            guard work <= explicitSecretWorkBudget else { return nil }
+            for value in [candidate, classificationView(candidate, maxInputBytes: explicitSecretWorkBudget)].compactMap({ $0 }) {
+                if seen.insert(value).inserted { result.append(value) }
+            }
+        }
+        return result
+    }
+
+    /// A single bounded decoder used only for classification. Authored display
+    /// bytes are retained by callers. Three layers cover provider nesting; a
+    /// fourth still-valid escape fails closed instead of changing meaning later.
+    private static func classificationView(_ raw: String, maxInputBytes: Int = 16_384) -> String? {
+        guard raw.utf8.count <= maxInputBytes else { return nil }
+        var bytes = Array(raw.utf8)
+        for _ in 0..<3 {
+            var output: [UInt8] = []; output.reserveCapacity(bytes.count)
+            var changed = false; var index = 0
+            while index < bytes.count {
+                if bytes[index] == 0x25, index + 2 < bytes.count,
+                   let high = hex(bytes[index + 1]), let low = hex(bytes[index + 2]) {
+                    output.append(high << 4 | low); index += 3; changed = true
+                } else {
+                    output.append(bytes[index]); index += 1
+                }
+            }
+            guard let decoded = String(bytes: output, encoding: .utf8) else { return nil }
+            bytes = output
+            if !changed { return decoded }
+        }
+        // Remaining syntactically valid escapes could alter classification.
+        if bytes.indices.contains(where: { i in
+            bytes[i] == 0x25 && i + 2 < bytes.count && hex(bytes[i + 1]) != nil && hex(bytes[i + 2]) != nil
+        }) { return nil }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    private static func hex(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: return byte - 48
+        case 65...70: return byte - 55
+        case 97...102: return byte - 87
+        default: return nil
+        }
+    }
+
+    private static func containsHostileDisclosureShape(_ value: String) -> Bool {
+        let slash = value.replacingOccurrences(of: "\\", with: "/")
+        let lower = slash.lowercased()
+        return lower.contains("/users/") || lower.contains("/home/")
+            || lower.contains("/private/") || lower.contains("/var/folders/")
+            || lower.contains("file://") || value.contains("\\\\")
+            || slash.contains("../")
+            || value.range(of: #"(?i)(^|[\s\"'])[a-z]:[/\\]"#, options: .regularExpression) != nil
+            || value.range(of: #"(?i)https?://[^\s/@]+:[^\s/@]+@"#, options: .regularExpression) != nil
+    }
+
+    private static func isScalarSafe(_ value: String) -> Bool {
+        !value.unicodeScalars.contains {
+            CharacterSet.controlCharacters.contains($0) || bidiScalars.contains($0.value)
+        }
+    }
+
+    private static func isDiffScalarSafe(_ value: String) -> Bool {
+        !value.unicodeScalars.contains {
+            (CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t")
+                || bidiScalars.contains($0.value)
+        }
+    }
+
+    private static func boundedUTF8(_ value: String, maxBytes: Int) -> String {
+        guard maxBytes > 0, value.utf8.count > maxBytes else { return value }
+        var result = ""
+        result.reserveCapacity(maxBytes)
+        for character in value where result.utf8.count + String(character).utf8.count <= maxBytes { result.append(character) }
+        return result
+    }
+}
+
 /// One tool call's whitelisted detail, as observed from a provider stream.
 ///
 /// Values are BOUNDED AT CONSTRUCTION and the store's sanitizer runs on top —
@@ -53,6 +238,21 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
 /// command BODY never enters (claude's `Bash.description` is the sanctioned
 /// human summary; `command` itself is not carried).
 public struct AgentToolDetailObservation: Equatable, Sendable {
+    public enum FileAction: String, Equatable, Sendable { case add, edit, write, delete, rename, unknown }
+    public struct FileChange: Equatable, Sendable {
+        public static let maxPathCharacters = 240
+        public static let maxDiffCharacters = 2_000
+        public let action: FileAction
+        public let path: String
+        public let renamePath: String?
+        public let diffPreview: String?
+        public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
+            self.action = action
+            self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
+            self.renamePath = renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
+            self.diffPreview = AgentToolDetailDisplaySanitizer.diffPreview(diffPreview, maxBytes: Self.maxDiffCharacters, maxLines: 80)
+        }
+    }
     public enum Phase: Equatable, Sendable {
         case started
         case ended
@@ -68,6 +268,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     public let fields: [(key: String, value: String)]
     public let outputPreview: String?
     public let exitCode: Int?
+    public let fileChanges: [FileChange]
+    public let parentItemID: String?
     public let observedAt: Date
 
     public init(
@@ -76,6 +278,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         fields: [(key: String, value: String)] = [],
         outputPreview: String? = nil,
         exitCode: Int? = nil,
+        fileChanges: [FileChange] = [],
+        parentItemID: String? = nil,
         observedAt: Date
     ) {
         self.phase = phase
@@ -85,6 +289,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         }
         self.outputPreview = outputPreview.map { String($0.prefix(Self.maxOutputCharacters)) }
         self.exitCode = exitCode
+        self.fileChanges = Array(fileChanges.prefix(24))
+        self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
         self.observedAt = observedAt
     }
 
@@ -92,6 +298,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         lhs.phase == rhs.phase && lhs.toolName == rhs.toolName
             && lhs.fields.elementsEqual(rhs.fields, by: { $0.key == $1.key && $0.value == $1.value })
             && lhs.outputPreview == rhs.outputPreview && lhs.exitCode == rhs.exitCode
+            && lhs.fileChanges == rhs.fileChanges && lhs.parentItemID == rhs.parentItemID
             && lhs.observedAt == rhs.observedAt
     }
 }
