@@ -628,6 +628,26 @@ run_app_check .build/debug/Array --workspace-scene-owner-check
 # whichever project is now active. Unlike the placeholder defect above, this one is
 # not undone by relaunching -- it overwrites the file.
 run_app_check .build/debug/Array --canvas-persistence-model-check
+# WS7 (.plans/54): the canvas background. Three legs, split by what they can
+# actually prove.
+#
+# The pure model/geometry suite runs inside the full CoreChecks leg above too;
+# this targeted arm exists because the background's arithmetic (negative-safe
+# phase, adaptive stride hysteresis, Fill/Fit, the malformed corpus, the managed
+# asset contract) is exhaustive and fast, and a long process-heavy binary is a
+# bad place to bisect it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
+# The RENDERER, in pixels, in an offscreen fixture window: it sits below
+# worldPlane and hit-transparent, base+image are screen-fixed while the grid is
+# world-aligned (sampled before and after a pan into negative world space), a
+# camera step costs zero decodes/cache misses/tile layouts, image Fill vs Fit and
+# opacity 0/.35/1, and a missing or corrupt asset falls back to base+pattern.
+run_app_check .build/debug/Array --canvas-background-render-check
+# The EDITOR and the PRECEDENCE, on a real WorkspaceRuntime with real
+# WorkspaceStores: accessibility and the key-view loop, that selecting a scope
+# writes nothing while the first edit forks an override, and that an override in
+# one workspace survives A->B->A and a relaunch without leaking to the other.
+run_app_check .build/debug/Array --canvas-background-settings-check
 # M1.3 (.plans/46): a controller survives a workspace switch whenever its project
 # is shared between the two workspaces, and its runtimes/browserRuntimes are plain
 # arrays with no uniqueness invariant. restartTerminalTile never consults them --

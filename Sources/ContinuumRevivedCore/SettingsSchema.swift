@@ -17,6 +17,11 @@ public enum SettingsSchema {
                 .number(key: FocusBorderConfig.gapKey, label: "Focus Border Gap", range: 0...40, default: FocusBorderConfig.defaultGap, unit: "px", step: 1),
                 .number(key: FocusBorderConfig.speedKey, label: "Focus Border Speed", range: 0.05...5, default: FocusBorderConfig.defaultSpeed, unit: "s", step: 0.05),
             ]),
+            // WS7. Fields are empty because the section is rendered by a custom
+            // view (`CanvasBackgroundSettingsView`): scope, exact colour wells,
+            // an image import and a live preview are not independent defaults
+            // keys, and the precedence rule must live in exactly one place.
+            SettingsSection(id: "canvasBackground", title: "Canvas Background", iconSystemName: "photo", fields: []),
             SettingsSection(id: "canvasAndZones", title: "Canvas & Zones", iconSystemName: "square.grid.2x2", fields: [
                 .toggle(key: CanvasAutoLayoutConfig.enabledKey, label: "Auto Layout by Default", default: CanvasAutoLayoutConfig.defaultEnabled),
                 .choice(key: CanvasAutoLayoutConfig.activationKey, label: "When Enabling Auto Layout", options: CanvasAutoLayoutActivation.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultActivation.rawValue),

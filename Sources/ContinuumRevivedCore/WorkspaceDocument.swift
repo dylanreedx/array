@@ -12,7 +12,9 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// project root (`homeRelativePath == nil`).
     /// v8: workspace-local last explicitly confirmed creation scope. Focus and
     /// automatic navigation never write it.
-    public static let currentSchemaVersion = 8
+    /// v9: per-workspace canvas background — an EXPLICIT `.inherit` or
+    /// `.override`, never a materialised copy of the global value (WS7).
+    public static let currentSchemaVersion = 9
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -25,6 +27,10 @@ public struct WorkspaceDocument: Equatable, Sendable {
     public var ambientTiles: [Tile]
     public var documentLinks: [DocumentAgentLink]
     public var lastExplicitCreationScope: ZoneScope?
+    /// WS7. Missing key decodes to `.inherit`, so every document written before
+    /// v9 keeps following the global configuration — which is what it was
+    /// implicitly doing.
+    public var canvasBackground: WorkspaceCanvasBackground
 
     /// `zoneZOrder` is a RANK-STAMPING convenience mirroring the decoder's
     /// legacy migration: zones listed in it receive evenly distributed
@@ -40,7 +46,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
         lastActiveZoneId: UUID?,
         ambientTiles: [Tile] = [],
         documentLinks: [DocumentAgentLink] = [],
-        lastExplicitCreationScope: ZoneScope? = nil
+        lastExplicitCreationScope: ZoneScope? = nil,
+        canvasBackground: WorkspaceCanvasBackground = .inherit
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
@@ -49,6 +56,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
         self.ambientTiles = ambientTiles
         self.documentLinks = Self.deduplicated(documentLinks)
         self.lastExplicitCreationScope = lastExplicitCreationScope
+        self.canvasBackground = canvasBackground
     }
 
     public mutating func linkDocument(_ tileId: UUID, to agentId: AgentID, at date: Date = Date()) {
@@ -229,7 +237,7 @@ extension WorkspaceDocument: Codable {
     private enum CodingKeys: String, CodingKey {
         // `groupZoneTiles` (pre-v3) and `zoneZOrder` (pre-v4) are decode-only
         // legacy migration keys. Never re-emitted.
-        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles, documentLinks, lastExplicitCreationScope
+        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles, documentLinks, lastExplicitCreationScope, canvasBackground
     }
 
     /// Decode-only parse of the pre-v3 grouped shape. Not public API; exists
@@ -270,6 +278,9 @@ extension WorkspaceDocument: Codable {
         ambientTiles = tiles
         documentLinks = Self.deduplicated(try container.decodeIfPresent([DocumentAgentLink].self, forKey: .documentLinks) ?? [])
         lastExplicitCreationScope = try container.decodeIfPresent(ZoneScope.self, forKey: .lastExplicitCreationScope)
+        // Tolerant on purpose: a background that cannot be read must not cost the
+        // user their zones. Absent or unreadable both mean "follow the global".
+        canvasBackground = ((try? container.decodeIfPresent(WorkspaceCanvasBackground.self, forKey: .canvasBackground)) ?? nil) ?? .inherit
 
         // Migrate-forward-on-load: supported older versions decode into the current
         // in-memory shape and are stamped current. Future versions keep their stamp
@@ -294,6 +305,7 @@ extension WorkspaceDocument: Codable {
         try container.encode(ambientTiles, forKey: .ambientTiles)
         try container.encode(documentLinks, forKey: .documentLinks)
         try container.encodeIfPresent(lastExplicitCreationScope, forKey: .lastExplicitCreationScope)
+        try container.encode(canvasBackground, forKey: .canvasBackground)
     }
 }
 

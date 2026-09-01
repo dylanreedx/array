@@ -55,6 +55,25 @@ count ContinuumRevivedRelayIntegrationChecks 0
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 11
 count ContinuumRevivedSyncIntegrationChecks 1
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --tool-path-bootstrap-check
+count ContinuumRevivedAgentContentChecks 22
+count ContinuumRevivedAgentUIChecks 19
+count ContinuumRevivedCoreChecks 110
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncIntegrationChecks 1
 check --add-zone-check
 check --agent-awareness-check
 check --agent-display-name-check
@@ -92,6 +111,9 @@ check --browser-target-blank-check
 check --browser-ui-delegate-check
 check --browser-url-focus-check
 check --camera-chrome-redraw-check
+check --canvas-background-model-check
+check --canvas-background-render-check
+check --canvas-background-settings-check
 check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
 check --canvas-persistence-model-check
@@ -280,6 +302,8 @@ leg run_app_check .build/debug/Array --browser-target-blank-check
 leg run_app_check .build/debug/Array --browser-ui-delegate-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
+leg run_app_check .build/debug/Array --canvas-background-render-check
+leg run_app_check .build/debug/Array --canvas-background-settings-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
@@ -425,6 +449,7 @@ leg run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 leg run_leg scripts/check-color-hygiene.sh
