@@ -3295,6 +3295,40 @@ enum ContinuumApp {
         // authed in pi. QA never enables this and keeps the frozen fallback.
         AgentModelCatalog.shared.enableLiveRefresh()
 
+        // Every `--*-check` flag is handled above and exits. Reaching here with
+        // one still on the command line means it was MISSPELLED or belongs to a
+        // different binary — and falling through booted the FULL app instead.
+        //
+        // That is not a harmless no-op. A bare `swift build` binary launched this
+        // way reads real state: it prompted for, and disturbed, the production
+        // keychain item the installed app depends on, leaving the user's copy
+        // asking for their keychain password on every companion sync. It also
+        // hangs the caller, because a check runner waits for an exit that a
+        // running app never produces. Both happened during this program, twice
+        // in one session, to someone who knew the hazard.
+        //
+        // Refuse instead, and name the two mistakes that actually get made:
+        // a typo, and running a CoreChecks flag against the app binary.
+        let unhandledCheckFlags = CommandLine.arguments.filter { argument in
+            argument.hasPrefix("--") && argument.hasSuffix("-check")
+        }
+        if !unhandledCheckFlags.isEmpty {
+            fputs("""
+            FAIL: unknown check flag(s): \(unhandledCheckFlags.joined(separator: ", "))
+
+            This flag is not handled by the Array binary, so it would have fallen
+            through and booted the full app against real state. Refusing.
+
+              * Check the spelling. The app's flags are:
+                  grep -oE '\\-\\-[a-z0-9-]+-check' \\
+                    Sources/ContinuumRevived/App/ContinuumApp.swift | sort -u
+              * Check the BINARY. Some legs belong to ContinuumRevivedCoreChecks,
+                not to Array. scripts/run-matrix.sh names the binary for each leg.
+
+            """, stderr)
+            Foundation.exit(1)
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         Self.delegate = delegate
