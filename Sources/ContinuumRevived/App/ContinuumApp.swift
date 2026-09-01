@@ -7707,6 +7707,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// WS5 fixture seams. `canvasView` and `focusBroker` are private, and the
+    /// page-zoom routing witness lives in its own file; these let it wire a real
+    /// canvas and a real focus scope and then drive the PRODUCTION
+    /// `handleManagedAgentPageZoom` below, rather than re-deriving what it does.
+    func qaInstallCanvasForChecks(_ canvas: CanvasNSView) {
+        // The broker must be wired BEFORE any tile is installed: tile views
+        // register their focus adapters on install, and `acceptExistingFocus`
+        // refuses a surface with no adapter (`adapters[id] != nil`). Without
+        // this the fixture's focus silently did nothing, `activeSurface` stayed
+        // nil, and every routing assertion below failed for a fixture reason
+        // rather than a product one. Production wires it the same way, before
+        // `setZones`.
+        canvas.focusBroker = focusBroker
+        canvasView = canvas
+    }
+
+    @discardableResult
+    func qaEnterFocusScopeForChecks(_ scope: FocusSurfaceID) -> Bool {
+        // `acceptingExisting`: the fixture installs tile VIEWS on a bare canvas
+        // and registers no focus adapters, so the acquire path would refuse.
+        // This is the same seam a content click uses, and it sets
+        // `activeSurface` — which is all `reservedDispatchScope` reads.
+        focusBroker.enterScope(scope, reason: .tileSpawned, acceptingExisting: true)
+    }
+
     /// WS5: route a page-zoom chord to the FOCUSED managed-agent tile.
     ///
     /// Returns whether the event was consumed. A chord at an end stop is still

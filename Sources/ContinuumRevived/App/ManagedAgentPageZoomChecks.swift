@@ -43,6 +43,7 @@ enum ManagedAgentPageZoomChecks {
         try checkTailFollowSurvivesAZoomDuringStreaming()
         try checkMenuOffersTheRungAndDisablesTheEndStops()
         try checkShortcutRoutingOnRealEvents()
+        try checkOnlyTheFocusedManagedTileAnswersAChord()
         try checkTwoTilesHoldDifferentRungs()
         try checkNothingIsPersistedAndRecreationResets()
         print(
@@ -841,6 +842,103 @@ enum ManagedAgentPageZoomChecks {
                 "\(testCase.name): the rung is \(tile.pageZoom.percent)%, expected \(testCase.expected)%"
             )
         }
+    }
+
+    // MARK: - 8b. The app routes a chord to the FOCUSED tile only
+
+    /// The audit's risk 6, driven through the real app dispatch rather than
+    /// through the tile's own handler.
+    ///
+    /// `AppDelegate.handleManagedAgentPageZoom` resolves the focused tile
+    /// exactly as every other tile action does, so this witnesses two things at
+    /// once: a background managed-agent tile must not answer a chord meant for
+    /// the focused one, and a chord must fall through untouched when the focused
+    /// tile is not a managed agent at all.
+    private static func checkOnlyTheFocusedManagedTileAnswersAChord() throws {
+        let app = AppDelegate()
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_200, height: 800)
+        app.qaInstallCanvasForChecks(canvas)
+
+        func managedTile(_ title: String, x: Double) -> ManagedAgentTileNSView {
+            let model = Tile(
+                id: UUID(), kind: .managedAgent, title: title,
+                frame: TileFrame(x: x, y: 0, width: 480, height: 420),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed"))
+            let view = ManagedAgentTileNSView(tile: model)
+            canvas.install(tileView: view, for: model)
+            return view
+        }
+        let focused = managedTile("ws5-focused", x: 0)
+        let background = managedTile("ws5-background", x: 600)
+        canvas.layoutSubtreeIfNeeded()
+
+        func event(_ characters: String, _ ignoring: String, _ flags: NSEvent.ModifierFlags) -> NSEvent {
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: 0, context: nil, characters: characters,
+                charactersIgnoringModifiers: ignoring, isARepeat: false, keyCode: 0)!
+        }
+
+        guard app.qaEnterFocusScopeForChecks(.tile(focused.tile.id)) else {
+            throw fail("focus routing: the broker refused to focus the managed tile")
+        }
+        try expect(
+            app.handleManagedAgentPageZoom(event("=", "=", [.command])),
+            "focus routing: Command-equal was not consumed while a managed tile was focused"
+        )
+        try expect(
+            focused.pageZoom.percent == 110,
+            "focus routing: the FOCUSED tile is at \(focused.pageZoom.percent)%, expected 110"
+        )
+        try expect(
+            background.pageZoom.percent == 100,
+            "focus routing: a BACKGROUND managed tile answered the chord and is now at "
+            + "\(background.pageZoom.percent)%"
+        )
+
+        // An unrelated chord still falls through with a managed tile focused.
+        try expect(
+            !app.handleManagedAgentPageZoom(event("c", "c", [.command])),
+            "focus routing: Command-C was consumed"
+        )
+        try expect(focused.pageZoom.percent == 110, "focus routing: Command-C moved the rung")
+
+        // Focus a NON-managed tile: the chords must fall through entirely.
+        let noteModel = Tile(
+            id: UUID(), kind: .note, title: "ws5-note",
+            frame: TileFrame(x: 0, y: 500, width: 400, height: 300),
+            zPosition: .fromLegacyRank(2), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "note"))
+        canvas.install(
+            tileView: NoteTileNSView(tile: noteModel, noteId: UUID(), initialBody: ""),
+            for: noteModel)
+        guard app.qaEnterFocusScopeForChecks(.tile(noteModel.id)) else {
+            throw fail("focus routing: the broker refused to focus the note tile")
+        }
+        for chord in [("=", "="), ("-", "-"), ("0", "0")] {
+            try expect(
+                !app.handleManagedAgentPageZoom(event(chord.0, chord.1, [.command])),
+                "focus routing: Command-\(chord.1) was consumed while a NOTE tile was focused"
+            )
+        }
+        try expect(
+            focused.pageZoom.percent == 110 && background.pageZoom.percent == 100,
+            "focus routing: chords sent at a note tile still moved a managed tile's rung"
+        )
+
+        // …and with the CANVAS focused, nothing answers either.
+        app.qaEnterFocusScopeForChecks(.canvas)
+        try expect(
+            !app.handleManagedAgentPageZoom(event("=", "=", [.command])),
+            "focus routing: Command-equal was consumed with the canvas focused"
+        )
+        try expect(focused.pageZoom.percent == 110, "focus routing: a canvas-scoped chord moved a tile")
     }
 
     // MARK: - 9. Two tiles, two rungs, no bleed
