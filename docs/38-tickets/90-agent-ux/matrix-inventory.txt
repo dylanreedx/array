@@ -36,6 +36,25 @@ count ContinuumRevivedRelayIntegrationChecks 0
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 11
 count ContinuumRevivedSyncIntegrationChecks 1
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --tool-path-bootstrap-check
+count ContinuumRevivedAgentContentChecks 22
+count ContinuumRevivedAgentUIChecks 20
+count ContinuumRevivedCoreChecks 108
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncIntegrationChecks 1
 check --add-zone-check
 check --agent-awareness-check
 check --agent-display-name-check
@@ -108,6 +127,7 @@ check --leader-snap-check
 check --leader-zone-jump-check
 check --location-action-surface-check
 check --managed-agent-model-spawn-check
+check --managed-agent-page-zoom-check
 check --multi-zone-render-check
 check --nav-mode-check
 check --new-tile-cwd-check
@@ -293,6 +313,7 @@ leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
 leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
+leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
 leg run_app_check .build/debug/Array --new-tile-cwd-check

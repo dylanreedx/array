@@ -21,7 +21,9 @@ final class DiffSummaryRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .diff(payload) = block.payload else { return 0 }
-        return AgentDiffSummaryView.measuredHeight(blockID: block.id, revision: block.revision, payload: payload, width: width)
+        return AgentDiffSummaryView.measuredHeight(
+            blockID: block.id, revision: block.revision, payload: payload, width: width,
+            zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -35,20 +37,38 @@ final class AgentDiffSummaryView: NSView {
     // Tightened 2026-08-24: the card was 40pt of header + 28pt per file row +
     // 16pt of bottom inset, so two changed files cost ~120pt of transcript for
     // four facts. A diffstat is a dense format; this reads as one.
-    static let headerHeight = CGFloat(Space.xxl + Space.xs)
-    static let fileRowHeight = CGFloat(Space.xl + Space.xs)
-    static let actionHeight = CGFloat(Space.xl + Space.xs)
-    static let horizontalInset = CGFloat(Space.l)
-    static let bottomInset = CGFloat(Space.s)
+    //
+    // WS5: every one of these is a LENGTH, so it is derived from the page zoom
+    // the render context carries rather than read from a stored constant. At
+    // 100% `scaled` is an exact identity, so the shipped card is unchanged.
+    static func headerHeight(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xxl + Space.xs))
+    }
+    static func fileRowHeight(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xl + Space.xs))
+    }
+    static func actionHeight(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xl + Space.xs))
+    }
+    static func horizontalInset(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.l))
+    }
+    static func bottomInset(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.s))
+    }
     static let maximumVisibleFiles = 8
     /// The proportional add/remove bar, git `--stat` style.
-    static let statBarWidth = CGFloat(Space.xxl * 2)
+    static func statBarWidth(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xxl * 2))
+    }
     /// A3: the bound on the inline raw-diff preview. Lines beyond this become
     /// the "+N more lines" affordance rather than growing the card unbounded
     /// (`performance.md` trap 1's lesson one level up — the number of hunks a
     /// provider hands back is as unbounded as a file the user opens).
     static let bodyMaxLines = 30
-    static let bodySpacing = CGFloat(Space.s)
+    static func bodySpacing(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.s))
+    }
 
     private(set) var titleLabel = NSTextField(labelWithString: "Changes")
     private(set) var countsLabel = NSTextField(labelWithString: "")
@@ -81,8 +101,13 @@ final class AgentDiffSummaryView: NSView {
     private var bodyHeightCache: (width: CGFloat, height: CGFloat)?
     /// The stat label's measured width, one per pooled row, kept alongside the
     /// pool instead of re-typeset from `layout()`. Populated only when the row's
-    /// file summary actually changed (`syncFileRows`).
+    /// file summary actually changed (`syncFileRows`), or when the page zoom
+    /// moved (the same string at a new rung measures differently).
     private var statLabelWidths: [CGFloat] = []
+    /// WS5: the rung the pooled file rows were last fonted and measured at. A
+    /// zoom change is exactly as invalidating as a file-summary change, and the
+    /// unchanged-row fast path in `syncFileRows` must not skip past it.
+    private var appliedRowZoom: AgentPageZoom?
 
     private var blockID: AgentNodeID?
     private var revision: UInt64 = 0
@@ -201,22 +226,17 @@ final class AgentDiffSummaryView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
 
-        // A diffstat's subject is its numbers; the word "Changes" is an
-        // EYEBROW, not a headline — uppercase with tracking, secondary colour,
-        // so the summary sentence below it is the thing being read.
-        titleLabel.font = NSFont.token(.caption)
-        countsLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.token(.caption).pointSize, weight: .regular)
+        // WS5: every font and the corner radius are assigned by
+        // `applyPageZoomMetrics`, which `apply` re-runs from the render
+        // context's rung — this view is recycled, so a metric assigned only
+        // here would survive into a row rendered at another zoom.
+        applyPageZoomMetrics(context.pageZoom)
         countsLabel.lineBreakMode = .byTruncatingTail
-        summaryLabel.font = NSFont.token(.body)
         summaryLabel.maximumNumberOfLines = 1
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
-        overflowLabel.font = NSFont.token(.caption)
-        bodyOverflowLabel.font = NSFont.token(.caption)
         openReviewButton.target = self
         openReviewButton.action = #selector(openReview(_:))
 
@@ -240,12 +260,16 @@ final class AgentDiffSummaryView: NSView {
         self.revision = revision
         self.payload = payload
         self.context = context
+        applyPageZoomMetrics(context.pageZoom)
         let previousFiles = displayedFiles
         displayedFiles = Array(payload.files.prefix(Self.maximumVisibleFiles))
         titleLabel.attributedStringValue = NSAttributedString(
             string: "CHANGES",
             attributes: [
-                .font: NSFont.token(.caption),
+                .font: NSFont.token(.caption, zoom: context.pageZoom),
+                // Tracking is deliberately NOT scaled: `AgentPageZoom.scaled`
+                // quantizes to half points, so 0.8 would become 1.0 at 100% and
+                // break the "100% is unchanged" contract.
                 .kern: 0.8,
             ])
         countsLabel.stringValue = Self.countsText(payload.files)
@@ -261,6 +285,26 @@ final class AgentDiffSummaryView: NSView {
         applyAccessibility(payload: payload)
         applyTokens()
         needsLayout = true
+    }
+
+    /// WS5: every zoom-derived metric this card owns, assigned from scratch.
+    /// Runs from `init` and again from every `apply` — a renderer view built at
+    /// 100% is handed to a row at 150% and must re-derive, never inherit.
+    ///
+    /// The pooled file-row fonts are re-assigned in `syncFileRows`, which also
+    /// owns their measured widths; the button re-derives its own.
+    private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        // A diffstat's subject is its numbers; the word "Changes" is an
+        // EYEBROW, not a headline — uppercase with tracking, secondary colour,
+        // so the summary sentence below it is the thing being read.
+        titleLabel.font = NSFont.token(.caption, zoom: zoom)
+        countsLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.token(.caption, zoom: zoom).pointSize, weight: .regular)
+        summaryLabel.font = NSFont.token(.body, zoom: zoom)
+        overflowLabel.font = NSFont.token(.caption, zoom: zoom)
+        bodyOverflowLabel.font = NSFont.token(.caption, zoom: zoom)
+        openReviewButton.applyZoom(zoom)
     }
 
     /// A3. Renders at most `bodyMaxLines` of `payload.text` (parsed via the
@@ -360,31 +404,38 @@ final class AgentDiffSummaryView: NSView {
                 qaFrameWritesForChecks += 1
             }
         }
-        let inset = Self.horizontalInset
+        // WS5: one rung for the whole pass, so every frame below is framed
+        // against the same zoom `measure` used.
+        let zoom = context.pageZoom
+        let inset = Self.horizontalInset(zoom: zoom)
+        let headerHeight = Self.headerHeight(zoom: zoom)
+        let fileRowHeight = Self.fileRowHeight(zoom: zoom)
         let countsIntrinsic = countsLabel.intrinsicContentSize
-        let countsWidth = min(ceil(countsIntrinsic.width) + CGFloat(Space.s), max(0, bounds.width * 0.50))
+        let countsWidth = min(
+            ceil(countsIntrinsic.width) + CGFloat(zoom.scaled(Space.s)),
+            max(0, bounds.width * 0.50))
         place(countsLabel, NSRect(
             x: max(inset, bounds.width - inset - countsWidth),
-            y: (Self.headerHeight - countsIntrinsic.height) / 2,
+            y: (headerHeight - countsIntrinsic.height) / 2,
             width: countsWidth,
             height: countsIntrinsic.height
         ))
         let titleIntrinsic = titleLabel.intrinsicContentSize
         place(titleLabel, NSRect(
             x: inset,
-            y: (Self.headerHeight - titleIntrinsic.height) / 2,
-            width: max(1, countsLabel.frame.minX - inset - CGFloat(Space.m)),
+            y: (headerHeight - titleIntrinsic.height) / 2,
+            width: max(1, countsLabel.frame.minX - inset - CGFloat(zoom.scaled(Space.m))),
             height: titleIntrinsic.height
         ))
-        var y = Self.headerHeight
+        var y = headerHeight
         if !summaryLabel.isHidden {
-            let height = Self.summaryHeight(payload.summary, width: bounds.width)
+            let height = Self.summaryHeight(payload.summary, width: bounds.width, zoom: zoom)
             place(summaryLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height))
-            y += height + CGFloat(Space.s)
+            y += height + CGFloat(zoom.scaled(Space.s))
         }
         for index in 0..<displayedFiles.count {
             let label = fileLabels[index]
-            let barWidth = min(Self.statBarWidth, max(0, bounds.width * 0.22))
+            let barWidth = min(Self.statBarWidth(zoom: zoom), max(0, bounds.width * 0.22))
             let statLabel = fileStatLabels.indices.contains(index) ? fileStatLabels[index] : nil
             // The width was measured once, when this row's text was last set
             // (`syncFileRows`) — never re-typeset here.
@@ -393,37 +444,37 @@ final class AgentDiffSummaryView: NSView {
             let barX = bounds.width - inset - barWidth
             if fileStatBars.indices.contains(index) {
                 let bar = fileStatBars[index]
-                let barHeight = CGFloat(Space.s)
+                let barHeight = CGFloat(zoom.scaled(Space.s))
                 place(bar, NSRect(
-                    x: barX, y: y + (Self.fileRowHeight - barHeight) / 2,
+                    x: barX, y: y + (fileRowHeight - barHeight) / 2,
                     width: barWidth, height: barHeight))
             }
             if let statLabel {
                 let statIntrinsicHeight = statLabel.intrinsicContentSize.height
                 place(statLabel, NSRect(
-                    x: max(inset, barX - CGFloat(Space.s) - statWidth),
-                    y: y + (Self.fileRowHeight - statIntrinsicHeight) / 2,
+                    x: max(inset, barX - CGFloat(zoom.scaled(Space.s)) - statWidth),
+                    y: y + (fileRowHeight - statIntrinsicHeight) / 2,
                     width: statWidth, height: statIntrinsicHeight))
             }
             let nameLimit = statLabel?.frame.minX ?? barX
             let labelIntrinsic = label.intrinsicContentSize
             place(label, NSRect(
                 x: inset,
-                y: y + (Self.fileRowHeight - labelIntrinsic.height) / 2,
-                width: max(1, nameLimit - inset - CGFloat(Space.s)),
+                y: y + (fileRowHeight - labelIntrinsic.height) / 2,
+                width: max(1, nameLimit - inset - CGFloat(zoom.scaled(Space.s))),
                 height: labelIntrinsic.height))
-            y += Self.fileRowHeight
+            y += fileRowHeight
         }
         if !overflowLabel.isHidden {
-            place(overflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight))
-            y += Self.fileRowHeight
+            place(overflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: fileRowHeight))
+            y += fileRowHeight
         }
         // A3: the inline diff body. Its height is measured once per width
         // (`bodyHeightCache`), never here — `performance.md` trap 2. A pan,
         // zoom or neighbour-resize that keeps the same width reuses the cache
         // on every one of these `layout()` passes.
         if let bodyTextView, !bodyTextView.isHidden {
-            y += Self.bodySpacing
+            y += Self.bodySpacing(zoom: zoom)
             let bodyWidth = max(1, bounds.width - inset * 2)
             let bodyHeight: CGFloat
             if let cache = bodyHeightCache, cache.width == bodyWidth {
@@ -437,14 +488,15 @@ final class AgentDiffSummaryView: NSView {
             y += bodyHeight
         }
         if !bodyOverflowLabel.isHidden {
-            y += CGFloat(Space.xs)
-            place(bodyOverflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: Self.fileRowHeight))
-            y += Self.fileRowHeight
+            y += CGFloat(zoom.scaled(Space.xs))
+            place(bodyOverflowLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: fileRowHeight))
+            y += fileRowHeight
         }
         if !openReviewButton.isHidden {
             place(openReviewButton, NSRect(
-                x: inset, y: y + CGFloat(Space.xs),
-                width: min(132, max(1, bounds.width - inset * 2)), height: Self.actionHeight
+                x: inset, y: y + CGFloat(zoom.scaled(Space.xs)),
+                width: min(CGFloat(zoom.scaled(132)), max(1, bounds.width - inset * 2)),
+                height: Self.actionHeight(zoom: zoom)
             ))
         }
     }
@@ -470,7 +522,8 @@ final class AgentDiffSummaryView: NSView {
             guard displayedFiles.indices.contains(index) else { continue }
             let file = displayedFiles[index]
             label.attributedStringValue = Self.statText(
-                file, added: added, removed: removed, unavailable: unavailable)
+                file, added: added, removed: removed, unavailable: unavailable,
+                zoom: context.pageZoom)
         }
         for bar in fileStatBars { bar.applyColors(added: added, removed: removed) }
         openReviewButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
@@ -483,23 +536,33 @@ final class AgentDiffSummaryView: NSView {
         }
     }
 
-    static func measuredHeight(blockID: AgentNodeID, revision: UInt64, payload: AgentDiffPayload, width: CGFloat) -> CGFloat {
-        var result = headerHeight
+    /// WS5: the same derived metrics `layout()` uses, at the same rung — a
+    /// measurement taken at another zoom than the one the card lays out at is a
+    /// clipped row.
+    static func measuredHeight(
+        blockID: AgentNodeID, revision: UInt64, payload: AgentDiffPayload, width: CGFloat,
+        zoom: AgentPageZoom = .default
+    ) -> CGFloat {
+        var result = headerHeight(zoom: zoom)
         let summary = safeSummary(payload.summary)
-        if !summary.isEmpty { result += summaryHeight(summary, width: width) + CGFloat(Space.s) }
-        result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight
-        if payload.files.count > maximumVisibleFiles { result += fileRowHeight }
+        if !summary.isEmpty {
+            result += summaryHeight(summary, width: width, zoom: zoom) + CGFloat(zoom.scaled(Space.s))
+        }
+        result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight(zoom: zoom)
+        if payload.files.count > maximumVisibleFiles { result += fileRowHeight(zoom: zoom) }
         if !payload.text.isEmpty {
             let model = parsedModel(blockID: blockID, revision: revision, text: payload.text)
             let rendered = truncatedBody(model: model, theme: .dark)
             if rendered.shown > 0 {
-                let bodyWidth = max(1, width - horizontalInset * 2)
-                result += bodySpacing + measuredBodyHeight(rendered.attributed, width: bodyWidth)
-                if rendered.total > rendered.shown { result += CGFloat(Space.xs) + fileRowHeight }
+                let bodyWidth = max(1, width - horizontalInset(zoom: zoom) * 2)
+                result += bodySpacing(zoom: zoom) + measuredBodyHeight(rendered.attributed, width: bodyWidth)
+                if rendered.total > rendered.shown {
+                    result += CGFloat(zoom.scaled(Space.xs)) + fileRowHeight(zoom: zoom)
+                }
             }
         }
-        if payload.canOpenReview { result += CGFloat(Space.xs) + actionHeight }
-        return result + bottomInset
+        if payload.canOpenReview { result += CGFloat(zoom.scaled(Space.xs)) + actionHeight(zoom: zoom) }
+        return result + bottomInset(zoom: zoom)
     }
 
     static func countsText(_ files: [AgentDiffFileSummary]) -> String {
@@ -540,10 +603,16 @@ final class AgentDiffSummaryView: NSView {
         let theme = effectiveTokenTheme
         let added = AccentToken.accentDone.color.nsColor(for: theme)
         let removed = AccentToken.accentFailed.color.nsColor(for: theme)
-        let monoSize = NSFont.token(.label).pointSize
+        let zoom = context.pageZoom
+        // WS5: a rung change invalidates a pooled row exactly the way a changed
+        // file summary does — the font, the attributed stat string and the
+        // measured stat width all move — so it must defeat the fast path below.
+        let zoomChanged = appliedRowZoom != zoom
+        let monoFont = NSFont.monospacedSystemFont(
+            ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .regular)
         while fileLabels.count < displayedFiles.count {
             let label = NSTextField(labelWithString: "")
-            label.font = NSFont.monospacedSystemFont(ofSize: monoSize, weight: .regular)
+            label.font = monoFont
             label.lineBreakMode = .byTruncatingMiddle
             label.isSelectable = true
             addSubview(label)
@@ -571,7 +640,10 @@ final class AgentDiffSummaryView: NSView {
             label.isHidden = false
             stat.isHidden = false
             bar.isHidden = false
-            guard !(previousFiles.indices.contains(index) && previousFiles[index] == file) else { continue }
+            // Recycled rows: re-assign the zoomed font unconditionally, so a row
+            // pooled at 100% cannot keep that face at 150%.
+            if zoomChanged { label.font = monoFont }
+            guard zoomChanged || !(previousFiles.indices.contains(index) && previousFiles[index] == file) else { continue }
             let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
             if label.stringValue != name { label.stringValue = name }
             label.setAccessibilityLabel(file.lineCountsAreKnown
@@ -581,11 +653,12 @@ final class AgentDiffSummaryView: NSView {
                 file,
                 added: added,
                 removed: removed,
-                unavailable: context.tokens.secondaryText.color.nsColor(for: theme)
+                unavailable: context.tokens.secondaryText.color.nsColor(for: theme),
+                zoom: zoom
             )
             stat.attributedStringValue = statString
             qaStatMeasurementsForChecks += 1
-            statLabelWidths[index] = ceil(statString.size().width) + CGFloat(Space.s)
+            statLabelWidths[index] = ceil(statString.size().width) + CGFloat(zoom.scaled(Space.s))
             bar.apply(
                 added: file.lineCountsAreKnown ? file.addedLineCount : 0,
                 removed: file.lineCountsAreKnown ? file.removedLineCount : 0
@@ -597,6 +670,7 @@ final class AgentDiffSummaryView: NSView {
             fileStatLabels[index].isHidden = true
             fileStatBars[index].isHidden = true
         }
+        appliedRowZoom = zoom
     }
 
     /// "+42 −3" with each number in its own accent. Monospaced digits so the
@@ -605,14 +679,17 @@ final class AgentDiffSummaryView: NSView {
         _ file: AgentDiffFileSummary,
         added: NSColor,
         removed: NSColor,
-        unavailable: NSColor
+        unavailable: NSColor,
+        zoom: AgentPageZoom = .default
     ) -> NSAttributedString {
         let font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.token(.label).pointSize, weight: .medium)
+            ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .medium)
         guard file.lineCountsAreKnown else {
             return NSAttributedString(
                 string: "counts unavailable",
-                attributes: [.font: NSFont.token(.caption), .foregroundColor: unavailable]
+                attributes: [
+                    .font: NSFont.token(.caption, zoom: zoom), .foregroundColor: unavailable,
+                ]
             )
         }
         let result = NSMutableAttributedString()
@@ -630,16 +707,18 @@ final class AgentDiffSummaryView: NSView {
         context.actions.perform(.openDiff(blockID: blockID))
     }
 
-    private static func summaryHeight(_ summary: String?, width: CGFloat) -> CGFloat {
+    private static func summaryHeight(
+        _ summary: String?, width: CGFloat, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
         let value = safeSummary(summary)
         guard !value.isEmpty else { return 0 }
-        let available = max(1, width - horizontalInset * 2)
+        let available = max(1, width - horizontalInset(zoom: zoom) * 2)
         let rect = (value as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(.body)]
+            attributes: [.font: NSFont.token(.body, zoom: zoom)]
         )
-        return min(ceil(rect.height), CGFloat(Metrics.lineHeight(for: .body) * 2))
+        return min(ceil(rect.height), CGFloat(zoom.lineHeight(for: .body) * 2))
     }
 
     private static func safeSummary(_ value: String?) -> String {
@@ -716,7 +795,7 @@ final class AgentOpenReviewButton: NSButton {
         isBordered = false
         bezelStyle = .inline
         focusRingType = .exterior
-        font = NSFont.token(.label)
+        applyZoom(.default)
         setButtonType(.momentaryChange)
         setAccessibilityRole(.button)
         setAccessibilityLabel("Open diff review")
@@ -725,4 +804,10 @@ final class AgentOpenReviewButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// WS5: the card's `applyPageZoomMetrics` calls this on every apply, so a
+    /// button built at 100% and recycled into a 150% card re-fonts itself.
+    func applyZoom(_ zoom: AgentPageZoom) {
+        font = NSFont.token(.label, zoom: zoom)
+    }
 }

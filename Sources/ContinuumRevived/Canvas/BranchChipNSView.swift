@@ -12,7 +12,7 @@ import ContinuumRevivedCore
 // Thin renderer, the same shape as `StatusChipNSView`: `display(for:)` is the one
 // pure (context -> chip) mapping and this view only paints it, so the tile and the
 // Component Lab card cannot draw two different chips for one agent.
-final class BranchChipNSView: NSView, TokenThemed {
+final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
     /// A branch. `⎇` (U+2387) rather than a tree/fork emoji: it is monochrome, so
     /// it takes the label's token colour instead of shipping a colour no gate
     /// measures.
@@ -81,10 +81,23 @@ final class BranchChipNSView: NSView, TokenThemed {
     private let label = NSTextField(labelWithString: "")
     private var isWarning = false
 
+    /// This chip's rung of the tile's page zoom. `.default` until the tile's
+    /// subtree walk delivers one, which is why every metric below is an exact
+    /// identity at 100%.
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    private var stack: NSStackView?
+    private var minimumTextWidthConstraint: NSLayoutConstraint?
+    private var heightConstraint: NSLayoutConstraint?
+
     /// Derived from the type it holds, like every other height in the tile: one
     /// `.label` line plus the chip's own vertical padding.
     static var preferredHeight: Double {
-        Metrics.lineHeight(for: .label) + insets.vertical
+        preferredHeight(zoom: .default)
+    }
+
+    static func preferredHeight(zoom: AgentPageZoom) -> Double {
+        zoom.lineHeight(for: .label) + zoom.scaled(insets).vertical
     }
 
     private static let insets = EdgeInsetsToken(top: Space.xs, left: Space.m, bottom: Space.xs, right: Space.m)
@@ -94,7 +107,11 @@ final class BranchChipNSView: NSView, TokenThemed {
     /// .expectNoZeroSizeViews is an error, and an invisible chip is a lie besides.
     /// Four `.label` characters wide, measured from the font rather than guessed.
     private static var minimumTextWidth: Double {
-        ("0000" as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width
+        minimumTextWidth(zoom: .default)
+    }
+
+    private static func minimumTextWidth(zoom: AgentPageZoom) -> Double {
+        ("0000" as NSString).size(withAttributes: [.font: NSFont.token(.label, zoom: zoom)]).width
     }
 
     init() {
@@ -105,11 +122,11 @@ final class BranchChipNSView: NSView, TokenThemed {
         // to half the view's height, so 999 on an 18pt chip is not a capsule but
         // undefined-looking geometry that would also make the PNG baseline
         // machine-dependent.
-        layer?.cornerRadius = Radius.card
+        layer?.cornerRadius = pageZoom.scaled(Radius.card)
         layer?.masksToBounds = true
         applyTokens()
 
-        label.font = .token(.label)
+        label.font = .token(.label, zoom: pageZoom)
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
         // Lower than a label's default 750, so this is what gives way when the
@@ -119,16 +136,24 @@ final class BranchChipNSView: NSView, TokenThemed {
         let stack = NSStackView(views: [label])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.edgeInsets = NSEdgeInsets(Self.insets)
+        stack.edgeInsets = NSEdgeInsets(Self.insets, zoom: pageZoom)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        self.stack = stack
+        // Both constants follow the page zoom, so they are held rather than baked
+        // into an activated anchor a later rung could not reach.
+        let minimumWidth = label.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.minimumTextWidth(zoom: pageZoom))
+        let height = heightAnchor.constraint(equalToConstant: Self.preferredHeight(zoom: pageZoom))
+        minimumTextWidthConstraint = minimumWidth
+        heightConstraint = height
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            label.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumTextWidth),
-            heightAnchor.constraint(equalToConstant: Self.preferredHeight)
+            minimumWidth,
+            height
         ])
     }
 
@@ -167,6 +192,20 @@ final class BranchChipNSView: NSView, TokenThemed {
         // `dynamicNSColor(` ends in exactly that substring.
         let textToken = isWarning ? AccentToken.accentApproval.color : TextToken.textSecondary.color
         label.textColor = StatusChipNSView.dynamicNSColor(textToken)
+    }
+
+    /// Re-derives every metric this chip owns from `zoom`. Same contract as
+    /// `applyTokens()`: idempotent, and safe on a chip already painting a display
+    /// — it touches no text, no tooltip and no warning state.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = pageZoom.scaled(Radius.card)
+        label.font = .token(.label, zoom: pageZoom)
+        stack?.edgeInsets = NSEdgeInsets(Self.insets, zoom: pageZoom)
+        minimumTextWidthConstraint?.constant = Self.minimumTextWidth(zoom: pageZoom)
+        heightConstraint?.constant = Self.preferredHeight(zoom: pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     override func viewDidChangeEffectiveAppearance() {

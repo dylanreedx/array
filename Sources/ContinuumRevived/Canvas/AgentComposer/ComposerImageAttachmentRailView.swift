@@ -54,10 +54,30 @@ enum ComposerImageAttachmentState: String, Equatable, Sendable {
 }
 
 @MainActor
-final class ComposerImageAttachmentRailView: NSView, TokenThemed {
+final class ComposerImageAttachmentRailView: NSView, TokenThemed, AgentPageZoomScalable {
     static let itemSize = NSSize(width: 132, height: 72)
     static let railHeight: CGFloat = 108
+    // Rasterization size, not a layout length: the thumbnail pipeline caches by
+    // it, so it stays fixed across page zoom.
     static let thumbnailMaxPixelSize = 192
+
+    /// One cell's box at `zoom`. The un-parameterised `itemSize` stays for
+    /// callers that measure at 100%.
+    static func itemSize(zoom: AgentPageZoom) -> NSSize {
+        NSSize(width: CGFloat(zoom.scaled(132)), height: CGFloat(zoom.scaled(72)))
+    }
+
+    /// The rail's reserved height at `zoom`. The un-parameterised `railHeight`
+    /// stays for callers that reserve space at 100%.
+    static func railHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(108))
+    }
+
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    /// This rail's cell box and reserved height at its own zoom.
+    var itemSize: NSSize { Self.itemSize(zoom: pageZoom) }
+    var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     let scrollView = NSScrollView(frame: .zero)
     let collectionView = ComposerImageAttachmentCollectionView(frame: .zero)
@@ -102,7 +122,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: items.isEmpty ? 0 : Self.railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: items.isEmpty ? 0 : railHeight)
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -138,7 +158,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         visibleThumbnailIDs.formIntersection(ids)
 
         if collectionView.bounds.height <= 0 {
-            collectionView.setFrameSize(NSSize(width: max(bounds.width, 1), height: max(bounds.height, Self.railHeight)))
+            collectionView.setFrameSize(NSSize(width: max(bounds.width, 1), height: max(bounds.height, railHeight)))
         }
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
@@ -188,19 +208,39 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        let documentHeight = max(scrollView.contentView.bounds.height, Self.itemSize.height + CGFloat(Space.xs * 2) + 2)
+        let documentHeight = max(
+            scrollView.contentView.bounds.height,
+            itemSize.height + CGFloat(pageZoom.scaled(Space.xs * 2)) + CGFloat(pageZoom.scaled(2))
+        )
         if abs(collectionView.frame.height - documentHeight) > 0.5 {
             collectionView.setFrameSize(NSSize(width: max(collectionView.frame.width, bounds.width), height: documentHeight))
         }
-        flowLayout.itemSize = Self.itemSize
-        flowLayout.minimumInteritemSpacing = CGFloat(Space.s)
-        flowLayout.minimumLineSpacing = CGFloat(Space.s)
+        applyFlowLayoutMetrics()
+    }
+
+    private func applyFlowLayoutMetrics() {
+        flowLayout.itemSize = itemSize
+        flowLayout.minimumInteritemSpacing = CGFloat(pageZoom.scaled(Space.s))
+        flowLayout.minimumLineSpacing = CGFloat(pageZoom.scaled(Space.s))
         flowLayout.sectionInset = NSEdgeInsets(
-            top: CGFloat(Space.xs),
-            left: CGFloat(Space.xs),
-            bottom: CGFloat(Space.xs),
-            right: CGFloat(Space.xs)
+            top: CGFloat(pageZoom.scaled(Space.xs)),
+            left: CGFloat(pageZoom.scaled(Space.xs)),
+            bottom: CGFloat(pageZoom.scaled(Space.xs)),
+            right: CGFloat(pageZoom.scaled(Space.xs))
         )
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        applyFlowLayoutMetrics()
+        flowLayout.invalidateLayout()
+        // Cells already materialized are re-derived here; a cell created after
+        // this point is born scaled because `configure` carries the rung.
+        for case let item as ComposerImageAttachmentRailCollectionItem in collectionView.visibleItems() {
+            item.cellView.applyPageZoom(zoom)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     private func configureViews() {
@@ -211,9 +251,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
         setAccessibilityHelp("Attached images. Use left and right arrows to navigate, Delete to remove.")
 
         flowLayout.scrollDirection = .horizontal
-        flowLayout.itemSize = Self.itemSize
-        flowLayout.minimumInteritemSpacing = CGFloat(Space.s)
-        flowLayout.minimumLineSpacing = CGFloat(Space.s)
+        applyFlowLayoutMetrics()
         collectionView.collectionViewLayout = flowLayout
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = false
@@ -266,6 +304,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed {
                 with: item,
                 thumbnail: self.thumbnailsByID[id],
                 theme: self.effectiveTokenTheme,
+                zoom: self.pageZoom,
                 onRemove: { [weak self] removed in self?.onRemoveAttachment?(removed) }
             )
             self.visibleThumbnailIDs.insert(id)
@@ -464,14 +503,15 @@ final class ComposerImageAttachmentRailCollectionItem: NSCollectionViewItem {
         with item: ComposerImageAttachmentRailItem,
         thumbnail: ComposerImageThumbnail?,
         theme: TokenTheme,
+        zoom: AgentPageZoom = .default,
         onRemove: @escaping (AgentPromptImageAttachment) -> Void
     ) {
-        cellView.configure(with: item, thumbnail: thumbnail, theme: theme, onRemove: onRemove)
+        cellView.configure(with: item, thumbnail: thumbnail, theme: theme, zoom: zoom, onRemove: onRemove)
     }
 }
 
 @MainActor
-final class ComposerImageAttachmentCellView: NSView {
+final class ComposerImageAttachmentCellView: NSView, AgentPageZoomScalable {
     private let imageContainer = NSView(frame: .zero)
     private let imageView = NSImageView(frame: .zero)
     private let placeholderLabel = NSTextField(labelWithString: "")
@@ -482,6 +522,27 @@ final class ComposerImageAttachmentCellView: NSView {
 
     private var item: ComposerImageAttachmentRailItem?
     private var onRemove: ((AgentPromptImageAttachment) -> Void)?
+
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    // Metrics baked into an activated anchor cannot be re-derived, so every
+    // zoom-dependent constant is held.
+    private var imageContainerLeadingConstraint: NSLayoutConstraint!
+    private var imageContainerTopConstraint: NSLayoutConstraint!
+    private var imageContainerWidthConstraint: NSLayoutConstraint!
+    private var imageContainerHeightConstraint: NSLayoutConstraint!
+    private var removeTrailingConstraint: NSLayoutConstraint!
+    private var removeTopConstraint: NSLayoutConstraint!
+    private var removeWidthConstraint: NSLayoutConstraint!
+    private var removeHeightConstraint: NSLayoutConstraint!
+    private var filenameLeadingConstraint: NSLayoutConstraint!
+    private var filenameTrailingConstraint: NSLayoutConstraint!
+    private var filenameTopConstraint: NSLayoutConstraint!
+    private var detailTrailingConstraint: NSLayoutConstraint!
+    private var detailTopConstraint: NSLayoutConstraint!
+    private var stateLeadingConstraint: NSLayoutConstraint!
+    private var stateTrailingConstraint: NSLayoutConstraint!
+    private var stateBottomConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -495,10 +556,12 @@ final class ComposerImageAttachmentCellView: NSView {
         with item: ComposerImageAttachmentRailItem,
         thumbnail: ComposerImageThumbnail?,
         theme: TokenTheme,
+        zoom: AgentPageZoom = .default,
         onRemove: @escaping (AgentPromptImageAttachment) -> Void
     ) {
         self.item = item
         self.onRemove = onRemove
+        applyPageZoom(zoom)
 
         let metadata = item.attachment.metadata
         let filename = ComposerImageDisplay.sanitizedFilename(metadata.displayName)
@@ -540,24 +603,26 @@ final class ComposerImageAttachmentCellView: NSView {
 
     func applyTokens(theme: TokenTheme) {
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        // Every metric here is re-derived from `pageZoom`: a token pass must
+        // never put an unscaled value back.
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(AgentTileRadius.artifact))
         layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
         let lineRole = item?.state.lineRole ?? .decorativeHairline
         layer?.borderColor = lineRole.color.cgColor(for: theme)
         layer?.borderWidth = item?.state == .ready ? 1 : 1.5
 
         imageContainer.wantsLayer = true
-        imageContainer.layer?.cornerRadius = CGFloat(AgentTileRadius.artifact) - 2
+        imageContainer.layer?.cornerRadius = CGFloat(pageZoom.scaled(AgentTileRadius.artifact - 2))
         imageContainer.layer?.backgroundColor = AgentSurfaceRole.codeSubdued.color.cgColor(for: theme)
         imageContainer.layer?.masksToBounds = true
 
-        filenameLabel.font = .token(.caption)
+        filenameLabel.font = .token(.caption, zoom: pageZoom)
         filenameLabel.textColor = TextToken.textPrimary.color.nsColor(for: theme)
-        detailLabel.font = .token(.caption)
+        detailLabel.font = .token(.caption, zoom: pageZoom)
         detailLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
-        stateLabel.font = .token(.caption)
+        stateLabel.font = .token(.caption, zoom: pageZoom)
         stateLabel.textColor = stateTextColor(theme: theme)
-        placeholderLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+        placeholderLabel.font = .systemFont(ofSize: CGFloat(pageZoom.scaled(22)), weight: .semibold)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         removeButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
     }
@@ -592,18 +657,38 @@ final class ComposerImageAttachmentCellView: NSView {
         removeButton.isBordered = false
         removeButton.bezelStyle = .regularSquare
         removeButton.setButtonType(.momentaryPushIn)
-        removeButton.font = .systemFont(ofSize: 13, weight: .semibold)
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.translatesAutoresizingMaskIntoConstraints = false
         removeButton.setAccessibilityLabel("Remove image attachment")
         addSubview(removeButton)
 
+        imageContainerLeadingConstraint = imageContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        imageContainerTopConstraint = imageContainer.topAnchor.constraint(equalTo: topAnchor, constant: 0)
+        imageContainerWidthConstraint = imageContainer.widthAnchor.constraint(equalToConstant: 0)
+        imageContainerHeightConstraint = imageContainer.heightAnchor.constraint(equalToConstant: 0)
+        removeTrailingConstraint = removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0)
+        removeTopConstraint = removeButton.topAnchor.constraint(equalTo: topAnchor, constant: 0)
+        removeWidthConstraint = removeButton.widthAnchor.constraint(equalToConstant: 0)
+        removeHeightConstraint = removeButton.heightAnchor.constraint(equalToConstant: 0)
+        filenameLeadingConstraint = filenameLabel.leadingAnchor.constraint(
+            equalTo: imageContainer.trailingAnchor, constant: 0
+        )
+        filenameTrailingConstraint = filenameLabel.trailingAnchor.constraint(
+            equalTo: removeButton.leadingAnchor, constant: 0
+        )
+        filenameTopConstraint = filenameLabel.topAnchor.constraint(equalTo: topAnchor, constant: 0)
+        detailTrailingConstraint = detailLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0)
+        detailTopConstraint = detailLabel.topAnchor.constraint(equalTo: filenameLabel.bottomAnchor, constant: 0)
+        stateLeadingConstraint = stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        stateTrailingConstraint = stateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0)
+        stateBottomConstraint = stateLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 0)
+
         NSLayoutConstraint.activate([
-            imageContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Space.xs)),
-            imageContainer.topAnchor.constraint(equalTo: topAnchor, constant: CGFloat(Space.xs)),
-            imageContainer.widthAnchor.constraint(equalToConstant: 46),
-            imageContainer.heightAnchor.constraint(equalToConstant: 46),
+            imageContainerLeadingConstraint,
+            imageContainerTopConstraint,
+            imageContainerWidthConstraint,
+            imageContainerHeightConstraint,
 
             imageView.leadingAnchor.constraint(equalTo: imageContainer.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: imageContainer.trailingAnchor),
@@ -613,23 +698,54 @@ final class ComposerImageAttachmentCellView: NSView {
             placeholderLabel.trailingAnchor.constraint(equalTo: imageContainer.trailingAnchor),
             placeholderLabel.centerYAnchor.constraint(equalTo: imageContainer.centerYAnchor),
 
-            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.xs)),
-            removeButton.topAnchor.constraint(equalTo: topAnchor, constant: CGFloat(Space.xs)),
-            removeButton.widthAnchor.constraint(equalToConstant: 22),
-            removeButton.heightAnchor.constraint(equalToConstant: 22),
+            removeTrailingConstraint,
+            removeTopConstraint,
+            removeWidthConstraint,
+            removeHeightConstraint,
 
-            filenameLabel.leadingAnchor.constraint(equalTo: imageContainer.trailingAnchor, constant: CGFloat(Space.s)),
-            filenameLabel.trailingAnchor.constraint(equalTo: removeButton.leadingAnchor, constant: -CGFloat(Space.xs)),
-            filenameLabel.topAnchor.constraint(equalTo: topAnchor, constant: CGFloat(Space.s)),
+            filenameLeadingConstraint,
+            filenameTrailingConstraint,
+            filenameTopConstraint,
 
             detailLabel.leadingAnchor.constraint(equalTo: filenameLabel.leadingAnchor),
-            detailLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.xs)),
-            detailLabel.topAnchor.constraint(equalTo: filenameLabel.bottomAnchor, constant: 1),
+            detailTrailingConstraint,
+            detailTopConstraint,
 
-            stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Space.xs)),
-            stateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.xs)),
-            stateLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -CGFloat(Space.xs)),
+            stateLeadingConstraint,
+            stateTrailingConstraint,
+            stateBottomConstraint,
         ])
+
+        applyPageZoom(pageZoom)
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        removeButton.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
+        placeholderLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(22)), weight: .semibold)
+        filenameLabel.font = .token(.caption, zoom: zoom)
+        detailLabel.font = .token(.caption, zoom: zoom)
+        stateLabel.font = .token(.caption, zoom: zoom)
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        imageContainer.layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact - 2))
+        imageContainerLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        imageContainerTopConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        imageContainerWidthConstraint.constant = CGFloat(zoom.scaled(46))
+        imageContainerHeightConstraint.constant = CGFloat(zoom.scaled(46))
+        removeTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        removeTopConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        removeWidthConstraint.constant = CGFloat(zoom.scaled(22))
+        removeHeightConstraint.constant = CGFloat(zoom.scaled(22))
+        filenameLeadingConstraint.constant = CGFloat(zoom.scaled(Space.s))
+        filenameTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        filenameTopConstraint.constant = CGFloat(zoom.scaled(Space.s))
+        detailTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        detailTopConstraint.constant = CGFloat(zoom.scaled(1))
+        stateLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        stateTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        stateBottomConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     @objc private func removePressed(_ sender: NSButton) {

@@ -25,7 +25,8 @@ final class CommandOutputRenderer: AgentBlockRendering {
             blockID: block.id,
             default: payload.status.agentToolDefaultExpanded
         )
-        return CommandOutputView.measuredHeight(text: payload.text, width: width, expanded: expanded)
+        return CommandOutputView.measuredHeight(
+            text: payload.text, width: width, expanded: expanded, zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -42,6 +43,17 @@ final class CommandOutputView: NSView {
     static let minimumOutputHeight = CGFloat(Metrics.lineHeight(for: .bodyMono)) + CGFloat(Space.m) * 2
     static let horizontalInset = CGFloat(Space.l)
     static let outputBottomInset = CGFloat(Space.m)
+    // WS5: the same metrics at a tile's page zoom. The zero-argument statics
+    // above are the 100% values and stay put — out-of-module witnesses read
+    // them — so these are companions.
+    static func rowHeight(zoom: AgentPageZoom) -> CGFloat { ToolCallView.rowHeight(zoom: zoom) }
+    static func maximumOutputHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
+    static func minimumOutputHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.lineHeight(for: .bodyMono)) + CGFloat(zoom.scaled(Space.m)) * 2
+    }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func outputBottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    private var zoom: AgentPageZoom { context.pageZoom }
 
     private(set) var disclosureButton = AgentDisclosureButton(frame: .zero)
     private(set) var iconView = NSImageView(frame: .zero)
@@ -107,13 +119,21 @@ final class CommandOutputView: NSView {
         self.exitCode = payload.exitCode
         self.context = context
 
+        // WS5: re-derived per apply, never left at the construction-time zoom —
+        // this view is recycled across rows and across tiles.
+        let zoom = context.pageZoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
+        statusLabel.font = NSFont.token(.caption, zoom: zoom)
+        copyButton.applyZoom(zoom)
+
         isExpanded = context.actions.isExpanded(
             blockID: blockID,
             default: payload.status.agentToolDefaultExpanded
         )
         statusLabel.stringValue = Self.statusText(status: payload.status, exitCode: payload.exitCode)
         outputTextView.apply(text: payload.text, context: context)
-        disclosureButton.apply(expanded: isExpanded, title: "command output")
+        disclosureButton.apply(expanded: isExpanded, title: "command output", zoom: zoom)
         setDetailHidden(!isExpanded)
         identifier = NSUserInterfaceItemIdentifier("agent.commandOutput.\(blockID.rawValue)")
         applyAccessibility(status: payload.status, exitCode: payload.exitCode)
@@ -130,28 +150,32 @@ final class CommandOutputView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = Self.horizontalInset
-        let buttonSide = CGFloat(Space.xxl)
+        let zoom = self.zoom
+        let rowHeight = Self.rowHeight(zoom: zoom)
+        let inset = Self.horizontalInset(zoom: zoom)
+        let buttonSide = CGFloat(zoom.scaled(Space.xxl))
         disclosureButton.frame = NSRect(
-            x: inset, y: (Self.rowHeight - buttonSide) / 2,
+            x: inset, y: (rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
         iconView.frame = NSRect(
-            x: disclosureButton.frame.maxX + CGFloat(Space.s),
-            y: (Self.rowHeight - buttonSide) / 2,
+            x: disclosureButton.frame.maxX + CGFloat(zoom.scaled(Space.s)),
+            y: (rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
-        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.46))
+        let statusWidth = min(
+            ceil(statusLabel.intrinsicContentSize.width) + CGFloat(zoom.scaled(Space.s)),
+            max(0, bounds.width * 0.46))
         statusLabel.frame = NSRect(
             x: max(iconView.frame.maxX, bounds.maxX - inset - statusWidth),
-            y: (Self.rowHeight - statusLabel.intrinsicContentSize.height) / 2,
+            y: (rowHeight - statusLabel.intrinsicContentSize.height) / 2,
             width: statusWidth, height: statusLabel.intrinsicContentSize.height
         )
-        let titleX = iconView.frame.maxX + CGFloat(Space.m)
+        let titleX = iconView.frame.maxX + CGFloat(zoom.scaled(Space.m))
         titleLabel.frame = NSRect(
             x: titleX,
-            y: (Self.rowHeight - titleLabel.intrinsicContentSize.height) / 2,
-            width: max(1, statusLabel.frame.minX - titleX - CGFloat(Space.m)),
+            y: (rowHeight - titleLabel.intrinsicContentSize.height) / 2,
+            width: max(1, statusLabel.frame.minX - titleX - CGFloat(zoom.scaled(Space.m))),
             height: titleLabel.intrinsicContentSize.height
         )
 
@@ -160,20 +184,20 @@ final class CommandOutputView: NSView {
             copyButton.frame = .zero
             return
         }
-        let detailY = Self.rowHeight
+        let detailY = rowHeight
         let copyWidth = copyButton.intrinsicContentSize.width
         copyButton.frame = NSRect(
             x: max(inset, bounds.maxX - inset - copyWidth), y: detailY,
-            width: copyWidth, height: CGFloat(Space.xxl)
+            width: copyWidth, height: CGFloat(zoom.scaled(Space.xxl))
         )
-        let outputY = copyButton.frame.maxY + CGFloat(Space.xs)
+        let outputY = copyButton.frame.maxY + CGFloat(zoom.scaled(Space.xs))
         scrollView.frame = NSRect(
             x: 0, y: outputY, width: bounds.width,
-            height: max(0, bounds.height - outputY - Self.outputBottomInset)
+            height: max(0, bounds.height - outputY - Self.outputBottomInset(zoom: zoom))
         )
         scrollView.layoutSubtreeIfNeeded()
         scrollView.layoutSubtreeIfNeeded()
-        let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string)
+        let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string, zoom: zoom)
         let needsVerticalScroll = measuredOutput.height > scrollView.contentSize.height + 0.5
         if scrollView.hasVerticalScroller != needsVerticalScroll {
             scrollView.hasVerticalScroller = needsVerticalScroll
@@ -203,13 +227,16 @@ final class CommandOutputView: NSView {
         outputTextView.applyTheme(theme)
     }
 
-    static func measuredHeight(text: String, width: CGFloat, expanded: Bool) -> CGFloat {
-        guard expanded else { return rowHeight }
+    static func measuredHeight(
+        text: String, width: CGFloat, expanded: Bool, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
+        guard expanded else { return rowHeight(zoom: zoom) }
         let outputHeight = min(
-            maximumOutputHeight,
-            max(minimumOutputHeight, CommandOutputTextView.measuredSize(text).height)
+            maximumOutputHeight(zoom: zoom),
+            max(minimumOutputHeight(zoom: zoom), CommandOutputTextView.measuredSize(text, zoom: zoom).height)
         )
-        return rowHeight + CGFloat(Space.xxl + Space.xs) + outputHeight + outputBottomInset
+        return rowHeight(zoom: zoom) + CGFloat(zoom.scaled(Space.xxl + Space.xs))
+            + outputHeight + outputBottomInset(zoom: zoom)
     }
 
     func copyEntireOutput(to pasteboard: NSPasteboard) {
@@ -220,7 +247,7 @@ final class CommandOutputView: NSView {
         guard let blockID else { return }
         isExpanded.toggle()
         context.actions.setExpanded(isExpanded, blockID: blockID)
-        disclosureButton.apply(expanded: isExpanded, title: "command output")
+        disclosureButton.apply(expanded: isExpanded, title: "command output", zoom: zoom)
         setDetailHidden(!isExpanded)
         applyAccessibility(status: status, exitCode: exitCode)
         invalidateIntrinsicContentSize()
@@ -250,6 +277,9 @@ final class CommandOutputView: NSView {
 final class CommandOutputTextView: NSTextView {
     private var theme: TokenTheme = .dark
     private var tokens: AgentRenderTokens = .transcript
+    /// WS5: the zoom of the last `apply(text:context:)`. The container inset and
+    /// the mono font are re-derived from it rather than frozen at construction.
+    private var pageZoom: AgentPageZoom = .default
 
     override init(frame frameRect: NSRect) {
         let storage = NSTextStorage()
@@ -269,7 +299,7 @@ final class CommandOutputTextView: NSTextView {
         drawsBackground = false
         isHorizontallyResizable = true
         isVerticallyResizable = true
-        textContainerInset = NSSize(width: CGFloat(Space.l), height: CGFloat(Space.m))
+        textContainerInset = Self.containerInset(zoom: .default)
         textContainer?.lineFragmentPadding = 0
         minSize = .zero
         maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -284,8 +314,10 @@ final class CommandOutputTextView: NSTextView {
         let selection = selectedRange()
         theme = context.appearance
         tokens = context.tokens
+        pageZoom = context.pageZoom
+        textContainerInset = Self.containerInset(zoom: pageZoom)
         string = text
-        font = NSFont.token(.bodyMono)
+        font = NSFont.token(.bodyMono, zoom: pageZoom)
         textColor = tokens.primaryText.color.nsColor(for: theme)
         let length = (text as NSString).length
         let location = min(selection.location, length)
@@ -298,12 +330,18 @@ final class CommandOutputTextView: NSTextView {
     }
 
     func sizeDocument(toFit viewport: NSSize) {
-        let measured = Self.measuredSize(string)
+        let measured = Self.measuredSize(string, zoom: pageZoom)
         frame.size = NSSize(width: max(viewport.width, measured.width), height: max(viewport.height, measured.height))
     }
 
-    static func measuredSize(_ text: String) -> NSSize {
-        let font = NSFont.token(.bodyMono)
+    /// The text-container inset an output surface uses at `zoom`. Shared by the
+    /// live view and `measuredSize` so the measured box matches the painted one.
+    static func containerInset(zoom: AgentPageZoom) -> NSSize {
+        NSSize(width: CGFloat(zoom.scaled(Space.l)), height: CGFloat(zoom.scaled(Space.m)))
+    }
+
+    static func measuredSize(_ text: String, zoom: AgentPageZoom = .default) -> NSSize {
+        let font = NSFont.token(.bodyMono, zoom: zoom)
         let sample = text.isEmpty ? " " : text
         let unbounded = CGFloat.greatestFiniteMagnitude
         let rect = (sample as NSString).boundingRect(
@@ -313,9 +351,10 @@ final class CommandOutputTextView: NSTextView {
         )
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
         let newlineCount = text.reduce(into: 0) { if $1 == "\n" { $0 += 1 } }
-        let measuredWidth = ceil(rect.width) + CGFloat(Space.l) * 2
+        let inset = containerInset(zoom: zoom)
+        let measuredWidth = ceil(rect.width) + inset.width * 2
         let linesHeight = CGFloat(newlineCount + 1) * lineHeight
-        let measuredHeight = max(ceil(rect.height), linesHeight) + CGFloat(Space.m) * 2
+        let measuredHeight = max(ceil(rect.height), linesHeight) + inset.height * 2
         return NSSize(width: measuredWidth, height: measuredHeight)
     }
 
@@ -339,6 +378,11 @@ final class CommandOutputCopyButton: NSButton {
         setAccessibilityRole(.button)
         setAccessibilityLabel("Copy command output")
         toolTip = "Copy command output"
+    }
+
+    /// WS5: re-derived per apply — this button is recycled with its row.
+    func applyZoom(_ zoom: AgentPageZoom) {
+        font = NSFont.token(.label, zoom: zoom)
     }
 
     @available(*, unavailable)

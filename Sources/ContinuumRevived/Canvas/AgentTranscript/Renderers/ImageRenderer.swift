@@ -50,20 +50,40 @@ final class AgentImageGalleryRenderer: AgentBlockRendering {
 final class AgentImageGalleryView: NSView {
     enum Mode { case single, gallery }
 
-    static let horizontalInset = CGFloat(Space.l)
-    static let verticalInset = CGFloat(Space.l)
-    static let itemGap = CGFloat(Space.m)
-    static let titleHeight = CGFloat(Metrics.lineHeight(for: .label))
-    static let metadataHeight = CGFloat(Metrics.lineHeight(for: .caption))
-    static let captionHeight = CGFloat(Metrics.lineHeight(for: .caption))
-    static let cellInset = CGFloat(Space.m)
-    static let labelGap = CGFloat(Space.xs)
-    static let imageGap = CGFloat(Space.m)
-    static let minimumImageHeight: CGFloat = 72
-    static let maximumSingleImageHeight: CGFloat = 360
-    static let maximumGalleryImageHeight: CGFloat = 180
+    // WS5: every gallery metric is derived from the page zoom the render
+    // context carries. The zero-argument default is 100%, which `scaled` leaves
+    // exactly where it was.
+    static func horizontalInset(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func verticalInset(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func itemGap(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func titleHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.lineHeight(for: .label)) }
+    static func metadataHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.lineHeight(for: .caption)) }
+    static func captionHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.lineHeight(for: .caption)) }
+    static func cellInset(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func labelGap(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.xs)) }
+    static func imageGap(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func minimumImageHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(72)) }
+    static func maximumSingleImageHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(360)) }
+    static func maximumGalleryImageHeight(zoom: AgentPageZoom = .default) -> CGFloat { CGFloat(zoom.scaled(180)) }
+
     static let maximumGalleryViewportHeight: CGFloat = 420
+
+    /// The gallery viewport cap at `zoom`. The un-parameterised
+    /// `maximumGalleryViewportHeight` stays for callers that size at 100%.
+    static func maximumGalleryViewportHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(420))
+    }
+
     static let maximumThumbnailPixelEdge: CGFloat = 768
+
+    /// The thumbnail pixel-edge cap at `zoom`. The layout box the thumbnail is
+    /// fitted into grows with the page zoom, so the cap on the pixels requested
+    /// for it grows with it; the image's own pixel dimensions are data and are
+    /// never scaled. The un-parameterised `maximumThumbnailPixelEdge` stays for
+    /// callers that bound at 100%.
+    static func maximumThumbnailPixelEdge(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(768))
+    }
 
     private let mode: Mode
     private let contentView = LazyImageGalleryContentView(frame: .zero)
@@ -83,7 +103,9 @@ final class AgentImageGalleryView: NSView {
         self.mode = mode
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        // Re-derived in `apply` — a gallery view is recycled across blocks and
+        // may be handed a row at a different page zoom than it was born at.
+        layer?.cornerRadius = CGFloat(AgentPageZoom.default.scaled(AgentTileRadius.artifact))
         layer?.masksToBounds = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -114,6 +136,7 @@ final class AgentImageGalleryView: NSView {
         occurrenceKeys = Self.occurrenceKeys(for: images)
         snapshots = Self.snapshotMap(images: images, keys: occurrenceKeys, context: context)
         replaceObservations(blockID: blockID, images: images, context: context)
+        layer?.cornerRadius = CGFloat(context.pageZoom.scaled(AgentTileRadius.artifact))
         identifier = NSUserInterfaceItemIdentifier("agent.imageGallery.\(blockID.rawValue)")
         contentView.apply(blockID: blockID, images: images, occurrenceKeys: occurrenceKeys, snapshots: snapshots, context: context)
         applyAccessibility(blockID: blockID, images: images, context: context)
@@ -130,7 +153,7 @@ final class AgentImageGalleryView: NSView {
     override func layout() {
         super.layout()
         let frames = Self.itemFrames(images: images, keys: occurrenceKeys, width: bounds.width, snapshots: snapshots, context: context, mode: mode)
-        let contentHeight = Self.contentHeight(for: frames)
+        let contentHeight = Self.contentHeight(for: frames, zoom: context.pageZoom)
         contentView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: contentHeight)
         let viewport = contentView.convert(visibleRect, from: self)
         contentView.applyLayout(frames: frames, viewport: viewport.isEmpty ? contentView.bounds : viewport)
@@ -155,13 +178,14 @@ final class AgentImageGalleryView: NSView {
         context: AgentRenderContext,
         mode: Mode
     ) -> CGFloat {
+        let zoom = context.pageZoom
         guard !images.isEmpty else {
-            return verticalInset * 2 + titleHeight
+            return verticalInset(zoom: zoom) * 2 + titleHeight(zoom: zoom)
         }
         let keys = occurrenceKeys(for: images)
         let snapshots = snapshotMap(images: images, keys: keys, context: context)
         let frames = itemFrames(images: images, keys: keys, width: width, snapshots: snapshots, context: context, mode: mode)
-        let fullHeight = max(verticalInset * 2 + titleHeight, contentHeight(for: frames))
+        let fullHeight = max(verticalInset(zoom: zoom) * 2 + titleHeight(zoom: zoom), contentHeight(for: frames, zoom: zoom))
         return fullHeight
     }
 
@@ -203,8 +227,8 @@ final class AgentImageGalleryView: NSView {
         return map
     }
 
-    private static func contentHeight(for frames: [NSRect]) -> CGFloat {
-        (frames.map(\.maxY).max() ?? 0) + verticalInset
+    private static func contentHeight(for frames: [NSRect], zoom: AgentPageZoom = .default) -> CGFloat {
+        (frames.map(\.maxY).max() ?? 0) + verticalInset(zoom: zoom)
     }
 
     private static func itemFrames(
@@ -215,51 +239,54 @@ final class AgentImageGalleryView: NSView {
         context: AgentRenderContext,
         mode: Mode
     ) -> [NSRect] {
+        let zoom = context.pageZoom
         let safeWidth = max(1, width)
-        let columns = columnCount(for: safeWidth, imageCount: images.count, mode: mode)
-        let availableWidth = max(1, safeWidth - horizontalInset * 2 - CGFloat(max(0, columns - 1)) * itemGap)
+        let columns = columnCount(for: safeWidth, imageCount: images.count, mode: mode, zoom: zoom)
+        let availableWidth = max(1, safeWidth - horizontalInset(zoom: zoom) * 2 - CGFloat(max(0, columns - 1)) * itemGap(zoom: zoom))
         let cellWidth = max(1, floor(availableWidth / CGFloat(columns)))
-        let imageAreaWidth = max(1, cellWidth - cellInset * 2)
+        let imageAreaWidth = max(1, cellWidth - cellInset(zoom: zoom) * 2)
         let imageHeights = images.enumerated().map { index, payload -> CGFloat in
             let key = keys.indices.contains(index) ? keys[index] : ImageOccurrenceKey(attachmentID: payload.attachment.id, ordinal: index)
             let snapshot = snapshots[key] ?? context.imageResources.snapshot(payload.attachment.id)
             let ratio = aspectRatio(for: payload, snapshot: snapshot)
             let raw = imageAreaWidth / max(0.1, ratio)
-            let cap = mode == .single ? maximumSingleImageHeight : maximumGalleryImageHeight
-            return min(max(minimumImageHeight, ceil(raw)), cap)
+            let cap = mode == .single ? maximumSingleImageHeight(zoom: zoom) : maximumGalleryImageHeight(zoom: zoom)
+            return min(max(minimumImageHeight(zoom: zoom), ceil(raw)), cap)
         }
         let cellHeights = images.enumerated().map { index, payload -> CGFloat in
             let caption = plainText(payload.caption)
-            return cellInset
-                + titleHeight
-                + labelGap
-                + metadataHeight
-                + imageGap
+            return cellInset(zoom: zoom)
+                + titleHeight(zoom: zoom)
+                + labelGap(zoom: zoom)
+                + metadataHeight(zoom: zoom)
+                + imageGap(zoom: zoom)
                 + imageHeights[index]
-                + (caption.isEmpty ? 0 : imageGap + captionHeight)
-                + cellInset
+                + (caption.isEmpty ? 0 : imageGap(zoom: zoom) + captionHeight(zoom: zoom))
+                + cellInset(zoom: zoom)
         }
 
         var frames: [NSRect] = []
-        var y = verticalInset
+        var y = verticalInset(zoom: zoom)
         var index = 0
         while index < images.count {
             let rowCount = min(columns, images.count - index)
             let rowHeight = (0..<rowCount).map { cellHeights[index + $0] }.max() ?? 0
             for column in 0..<rowCount {
-                let x = horizontalInset + CGFloat(column) * (cellWidth + itemGap)
+                let x = horizontalInset(zoom: zoom) + CGFloat(column) * (cellWidth + itemGap(zoom: zoom))
                 frames.append(NSRect(x: x, y: y, width: cellWidth, height: rowHeight))
             }
-            y += rowHeight + itemGap
+            y += rowHeight + itemGap(zoom: zoom)
             index += rowCount
         }
         return frames
     }
 
-    private static func columnCount(for width: CGFloat, imageCount: Int, mode: Mode) -> Int {
+    private static func columnCount(for width: CGFloat, imageCount: Int, mode: Mode, zoom: AgentPageZoom = .default) -> Int {
         guard mode == .gallery, imageCount > 1 else { return 1 }
-        if width >= 560 { return min(3, imageCount) }
-        if width >= 340 { return min(2, imageCount) }
+        // The breakpoints are column WIDTHS: a zoomed cell needs proportionally
+        // more room before another column fits beside it.
+        if width >= CGFloat(zoom.scaled(560)) { return min(3, imageCount) }
+        if width >= CGFloat(zoom.scaled(340)) { return min(2, imageCount) }
         return 1
     }
 
@@ -408,7 +435,7 @@ private final class LazyImageGalleryContentView: NSView {
 
     private func updateVisibleCells(viewport: NSRect) {
         guard let blockID else { return }
-        let paddedViewport = viewport.insetBy(dx: 0, dy: -AgentImageGalleryView.maximumGalleryImageHeight)
+        let paddedViewport = viewport.insetBy(dx: 0, dy: -AgentImageGalleryView.maximumGalleryImageHeight(zoom: context.pageZoom))
         let visibleIndexes = Set(frames.indices.filter { frames[$0].intersects(paddedViewport) })
         let visibleKeys = Set(visibleIndexes.compactMap { occurrenceKeys.indices.contains($0) ? occurrenceKeys[$0] : nil })
         recycleCellsNotIn(visibleKeys)
@@ -495,21 +522,20 @@ final class AgentImageCellView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
         layer?.masksToBounds = true
         layer?.borderWidth = CGFloat(LineWidth.hairline)
 
-        titleLabel.font = NSFont.token(.label)
         titleLabel.lineBreakMode = .byTruncatingMiddle
-        metadataLabel.font = NSFont.token(.caption)
         metadataLabel.lineBreakMode = .byTruncatingTail
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        stateLabel.font = NSFont.token(.caption)
         stateLabel.alignment = .center
         stateLabel.lineBreakMode = .byWordWrapping
-        captionLabel.font = NSFont.token(.caption)
         captionLabel.maximumNumberOfLines = 1
         captionLabel.lineBreakMode = .byTruncatingTail
+        // A cell is recycled across rows, so every zoom-dependent metric is
+        // re-derived in `apply` rather than baked in here. This call only gives
+        // a freshly minted cell the 100% rung until its first `apply`.
+        applyPageZoomMetrics(.default)
 
         addSubview(titleLabel)
         addSubview(metadataLabel)
@@ -566,6 +592,7 @@ final class AgentImageCellView: NSView {
         }
 
         identifier = NSUserInterfaceItemIdentifier("agent.image.\(image.attachment.id.rawValue).\(occurrenceKey.ordinal)")
+        applyPageZoomMetrics(context.pageZoom)
         applyAccessibility(title: title)
         applyTokens(theme: context.appearance, context: context)
         needsLayout = true
@@ -576,6 +603,16 @@ final class AgentImageCellView: NSView {
         thumbnailRequest?.cancel()
         thumbnailRequest = nil
         requestedThumbnailKey = nil
+    }
+
+    /// Every metric a recycled cell must re-derive when it is handed a row at a
+    /// different page zoom. Called from `apply(...)`, not only from `init`.
+    private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
+        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
+        metadataLabel.font = NSFont.token(.caption, zoom: zoom)
+        stateLabel.font = NSFont.token(.caption, zoom: zoom)
+        captionLabel.font = NSFont.token(.caption, zoom: zoom)
     }
 
     func applyTokens(theme: TokenTheme, context: AgentRenderContext) {
@@ -589,17 +626,18 @@ final class AgentImageCellView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = AgentImageGalleryView.cellInset
-        titleLabel.frame = NSRect(x: inset, y: inset, width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.titleHeight)
-        metadataLabel.frame = NSRect(x: inset, y: titleLabel.frame.maxY + AgentImageGalleryView.labelGap, width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.metadataHeight)
-        let captionReserve = captionLabel.isHidden ? 0 : AgentImageGalleryView.captionHeight + AgentImageGalleryView.imageGap
-        let imageY = metadataLabel.frame.maxY + AgentImageGalleryView.imageGap
+        let zoom = context.pageZoom
+        let inset = AgentImageGalleryView.cellInset(zoom: zoom)
+        titleLabel.frame = NSRect(x: inset, y: inset, width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.titleHeight(zoom: zoom))
+        metadataLabel.frame = NSRect(x: inset, y: titleLabel.frame.maxY + AgentImageGalleryView.labelGap(zoom: zoom), width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.metadataHeight(zoom: zoom))
+        let captionReserve = captionLabel.isHidden ? 0 : AgentImageGalleryView.captionHeight(zoom: zoom) + AgentImageGalleryView.imageGap(zoom: zoom)
+        let imageY = metadataLabel.frame.maxY + AgentImageGalleryView.imageGap(zoom: zoom)
         let imageHeight = max(1, bounds.height - imageY - inset - captionReserve)
         let imageFrame = NSRect(x: inset, y: imageY, width: max(1, bounds.width - inset * 2), height: imageHeight)
         imageView.frame = imageFrame
-        stateLabel.frame = imageFrame.insetBy(dx: CGFloat(Space.s), dy: CGFloat(Space.s))
+        stateLabel.frame = imageFrame.insetBy(dx: CGFloat(zoom.scaled(Space.s)), dy: CGFloat(zoom.scaled(Space.s)))
         if !captionLabel.isHidden {
-            captionLabel.frame = NSRect(x: inset, y: imageFrame.maxY + AgentImageGalleryView.imageGap, width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.captionHeight)
+            captionLabel.frame = NSRect(x: inset, y: imageFrame.maxY + AgentImageGalleryView.imageGap(zoom: zoom), width: max(1, bounds.width - inset * 2), height: AgentImageGalleryView.captionHeight(zoom: zoom))
         } else {
             captionLabel.frame = .zero
         }
@@ -659,7 +697,7 @@ final class AgentImageCellView: NSView {
 
     private func requestThumbnailIfNeeded() {
         guard snapshot.state == .available, let attachmentID = payload?.attachment.id else { return }
-        let target = Self.boundedTargetPixelSize(for: imageView.bounds.size, scale: backingScale)
+        let target = Self.boundedTargetPixelSize(for: imageView.bounds.size, scale: backingScale, zoom: context.pageZoom)
         guard target.width >= 1, target.height >= 1 else { return }
         let key = ThumbnailKey(attachmentID: attachmentID, revision: snapshot.revision, width: Int(target.width), height: Int(target.height), scale: Int((backingScale * 1000).rounded()))
         guard requestedThumbnailKey != key else { return }
@@ -779,12 +817,16 @@ final class AgentImageCellView: NSView {
         return String(filtered.prefix(64))
     }
 
-    private static func boundedTargetPixelSize(for size: NSSize, scale: CGFloat) -> NSSize {
+    private static func boundedTargetPixelSize(for size: NSSize, scale: CGFloat, zoom: AgentPageZoom = .default) -> NSSize {
+        // `size` is the LAYOUT box, which already carries the page zoom; only the
+        // cap on it is derived here. The image's own pixel dimensions and aspect
+        // ratio are data and are never scaled.
         let width = max(1, ceil(size.width * scale))
         let height = max(1, ceil(size.height * scale))
         let edge = max(width, height)
-        guard edge > AgentImageGalleryView.maximumThumbnailPixelEdge else { return NSSize(width: width, height: height) }
-        let factor = AgentImageGalleryView.maximumThumbnailPixelEdge / edge
+        let maximumEdge = AgentImageGalleryView.maximumThumbnailPixelEdge(zoom: zoom)
+        guard edge > maximumEdge else { return NSSize(width: width, height: height) }
+        let factor = maximumEdge / edge
         return NSSize(width: max(1, floor(width * factor)), height: max(1, floor(height * factor)))
     }
 

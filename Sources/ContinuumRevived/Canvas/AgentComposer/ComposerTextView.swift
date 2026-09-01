@@ -24,11 +24,14 @@ protocol ComposerTextViewObserver: AnyObject {
 }
 
 @MainActor
-final class ComposerTextView: NSTextView, NSTextViewDelegate {
+final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScalable {
     weak var composerObserver: ComposerTextViewObserver?
     /// Set by the completion controller while its custom surface is presented.
     /// Escape remains native when there is no completion surface to dismiss.
     var suggestionsAreVisible = false
+
+    /// WS5: the tile's page-zoom rung, delivered by the subtree walk.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     private var promptHistory: AgentPromptHistory?
     private var promptHistoryAgentID: AgentID?
@@ -72,14 +75,25 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         autoresizingMask = [.width]
         textContainerInset = .zero
         textContainer?.lineFragmentPadding = 0
-        font = .token(.body)
-        let lineHeight = layoutManager?.defaultLineHeight(for: font ?? .token(.body)) ?? 17
-        minSize = NSSize(width: 0, height: lineHeight)
+        applyEditorMetrics()
         maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         setAccessibilityRole(.textArea)
         setAccessibilityLabel("Agent prompt")
         setAccessibilityHelp("Enter a prompt for the agent")
         registerForDraggedTypes([.fileURL, .png, .tiff, ComposerImagePasteboardDecoder.jpegPasteboardType])
+    }
+
+    /// Every zoom-derived metric this editor owns, assigned from scratch. Text
+    /// storage, selection and first-responder state are deliberately untouched:
+    /// the font is re-assigned IN PLACE so a zoom change cannot disturb what the
+    /// user has typed or where their caret sits.
+    private func applyEditorMetrics() {
+        let editorFont = NSFont.token(.body, zoom: pageZoom)
+        font = editorFont
+        let lineHeight = layoutManager?.defaultLineHeight(for: editorFont)
+            ?? CGFloat(pageZoom.scaled(17))
+        minSize = NSSize(width: 0, height: lineHeight)
+        typingAttributes[.font] = editorFont
     }
 
     /// TextKit's laid-out document height at the current tracked width. The shell
@@ -98,13 +112,20 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
             .backgroundColor: AgentSurfaceRole.rowSelected.color.nsColor(for: theme),
             .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme),
         ]
-        typingAttributes[.font] = NSFont.token(.body)
+        typingAttributes[.font] = NSFont.token(.body, zoom: pageZoom)
         typingAttributes[.foregroundColor] = TextToken.textPrimary.color.nsColor(for: theme)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        applyEditorMetrics()
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     override func becomeFirstResponder() -> Bool {

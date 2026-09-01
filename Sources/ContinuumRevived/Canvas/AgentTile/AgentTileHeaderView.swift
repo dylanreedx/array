@@ -5,13 +5,22 @@ import ContinuumRevivedCore
 /// Quiet v2 header for one agent session. It owns only header presentation and
 /// its timer; transcript layout never participates in a timer tick.
 @MainActor
-final class AgentTileHeaderView: NSView, TokenThemed {
+final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     static let stopActionTitle = "Stop agent run"
     static let detachActionTitle = "Detach agent view"
 
     static var preferredHeight: CGFloat {
-        CGFloat(Metrics.rowHeight(for: .title, lines: 2))
+        preferredHeight(zoom: .default)
     }
+
+    static func preferredHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.rowHeight(for: .title, lines: 2))
+    }
+
+    /// This header's rung of the tile's page zoom. `.default` until the tile's
+    /// subtree walk delivers one; every derivation below is an exact identity
+    /// at 100%.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     private let nameLabel = NSTextField(labelWithString: "")
     private let stateDot = NSView(frame: .zero)
@@ -22,22 +31,33 @@ final class AgentTileHeaderView: NSView, TokenThemed {
     private var presentation: AgentTileStatePresenter.Presentation?
     private var elapsedTimer: Timer?
 
+    // Every constant that follows the page zoom is held, not baked into an
+    // activated anchor a later rung could not reach.
+    private var stateRow: NSStackView?
+    private var identity: NSStackView?
+    private var row: NSStackView?
+    private var stateDotWidth: NSLayoutConstraint?
+    private var stateDotHeight: NSLayoutConstraint?
+    private var elapsedWidth: NSLayoutConstraint?
+    private var overflowWidth: NSLayoutConstraint?
+    private var overflowHeight: NSLayoutConstraint?
+
     var onStopAgentRun: (() -> Void)?
     var onDetachView: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        nameLabel.font = .token(.title)
+        nameLabel.font = .token(.title, zoom: pageZoom)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.maximumNumberOfLines = 1
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         stateDot.wantsLayer = true
-        stateDot.layer?.cornerRadius = 3
+        stateDot.layer?.cornerRadius = CGFloat(pageZoom.scaled(3))
         stateDot.translatesAutoresizingMaskIntoConstraints = false
-        stateLabel.font = .token(.label)
-        elapsedLabel.font = .token(.captionMono)
+        stateLabel.font = .token(.label, zoom: pageZoom)
+        elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         elapsedLabel.alignment = .left
         elapsedLabel.lineBreakMode = .byClipping
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -49,31 +69,46 @@ final class AgentTileHeaderView: NSView, TokenThemed {
         let stateRow = NSStackView(views: [stateDot, stateLabel, elapsedLabel])
         stateRow.orientation = .horizontal
         stateRow.alignment = .centerY
-        stateRow.spacing = CGFloat(Space.s)
+        stateRow.spacing = CGFloat(pageZoom.scaled(Space.s))
+        self.stateRow = stateRow
 
         let identity = NSStackView(views: [nameLabel, stateRow])
         identity.orientation = .vertical
         identity.alignment = .leading
-        identity.spacing = CGFloat(Space.xs)
+        identity.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        self.identity = identity
 
         let row = NSStackView(views: [identity, NSView(), branchChip, overflowButton])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = CGFloat(Space.m)
-        row.edgeInsets = NSEdgeInsets(Inset.row)
+        row.spacing = CGFloat(pageZoom.scaled(Space.m))
+        row.edgeInsets = NSEdgeInsets(Inset.row, zoom: pageZoom)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
+        self.row = row
+
+        let stateDotWidth = stateDot.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(6)))
+        let stateDotHeight = stateDot.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(6)))
+        let elapsedWidth = elapsedLabel.widthAnchor.constraint(
+            equalToConstant: Self.elapsedColumnWidth(zoom: pageZoom))
+        let overflowWidth = overflowButton.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(28)))
+        let overflowHeight = overflowButton.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(28)))
+        self.stateDotWidth = stateDotWidth
+        self.stateDotHeight = stateDotHeight
+        self.elapsedWidth = elapsedWidth
+        self.overflowWidth = overflowWidth
+        self.overflowHeight = overflowHeight
 
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor),
             row.topAnchor.constraint(equalTo: topAnchor),
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stateDot.widthAnchor.constraint(equalToConstant: 6),
-            stateDot.heightAnchor.constraint(equalToConstant: 6),
-            elapsedLabel.widthAnchor.constraint(equalToConstant: Self.elapsedColumnWidth),
-            overflowButton.widthAnchor.constraint(equalToConstant: 28),
-            overflowButton.heightAnchor.constraint(equalToConstant: 28),
+            stateDotWidth,
+            stateDotHeight,
+            elapsedWidth,
+            overflowWidth,
+            overflowHeight,
         ])
 
         setAccessibilityRole(.group)
@@ -110,6 +145,31 @@ final class AgentTileHeaderView: NSView, TokenThemed {
         overflowButton.applyTokens()
     }
 
+    /// Re-derives every metric this header owns from `zoom`. Same contract as
+    /// `applyTokens()`: idempotent, and safe on a header already showing a
+    /// presentation — it touches no string, no timer and no accessibility value.
+    ///
+    /// The chip and the overflow button are `AgentPageZoomScalable` themselves and
+    /// are reached by the tile's subtree walk, so this does not re-apply to them.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        nameLabel.font = .token(.title, zoom: pageZoom)
+        stateLabel.font = .token(.label, zoom: pageZoom)
+        elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
+        stateDot.layer?.cornerRadius = CGFloat(pageZoom.scaled(3))
+        stateRow?.spacing = CGFloat(pageZoom.scaled(Space.s))
+        identity?.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        row?.spacing = CGFloat(pageZoom.scaled(Space.m))
+        row?.edgeInsets = NSEdgeInsets(Inset.row, zoom: pageZoom)
+        stateDotWidth?.constant = CGFloat(pageZoom.scaled(6))
+        stateDotHeight?.constant = CGFloat(pageZoom.scaled(6))
+        elapsedWidth?.constant = Self.elapsedColumnWidth(zoom: pageZoom)
+        overflowWidth?.constant = CGFloat(pageZoom.scaled(28))
+        overflowHeight?.constant = CGFloat(pageZoom.scaled(28))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
@@ -130,7 +190,11 @@ final class AgentTileHeaderView: NSView, TokenThemed {
     /// formatter value. The separator is decorative on screen but still occupies
     /// drawable width, so leaving it out would clip the timer around ten minutes.
     private static var elapsedColumnWidth: CGFloat {
-        let font = NSFont.token(.captionMono)
+        elapsedColumnWidth(zoom: .default)
+    }
+
+    private static func elapsedColumnWidth(zoom: AgentPageZoom) -> CGFloat {
+        let font = NSFont.token(.captionMono, zoom: zoom)
         // Measured over what the formatter EMITS at every branch boundary, prefix
         // included — not over a hand-kept list. An earlier attempt measured the bare
         // forms and clipped a nine-glyph string; the list it measured was also 8pt
@@ -138,8 +202,8 @@ final class AgentTileHeaderView: NSView, TokenThemed {
         let width = AgentElapsedFormatter.widestFormProbes.map { seconds in
             Double(ceil((AgentElapsedFormatter.prefixedLabel(seconds) as NSString)
                 .size(withAttributes: [.font: font]).width))
-                + Metrics.cellTextInset
-        }.max() ?? Metrics.cellTextInset
+                + zoom.scaled(Metrics.cellTextInset)
+        }.max() ?? zoom.scaled(Metrics.cellTextInset)
         return CGFloat(width)
     }
 
@@ -205,10 +269,14 @@ final class AgentTileHeaderView: NSView, TokenThemed {
 /// NSControl supplies target/action, keyboard focus and accessibility without
 /// leaking an Aqua button bezel into the header.
 @MainActor
-private final class AgentTileOverflowButton: NSControl, TokenThemed {
+private final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let imageView = NSImageView(frame: .zero)
     var stopIsEnabled = false
     private var isPressed = false
+
+    /// This button's rung of the tile's page zoom, delivered by the tile's
+    /// subtree walk. Identity at 100%.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -229,7 +297,8 @@ private final class AgentTileOverflowButton: NSControl, TokenThemed {
 
     override func layout() {
         super.layout()
-        imageView.frame = bounds.insetBy(dx: 7, dy: 7)
+        let inset = CGFloat(pageZoom.scaled(7))
+        imageView.frame = bounds.insetBy(dx: inset, dy: inset)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -250,7 +319,8 @@ private final class AgentTileOverflowButton: NSControl, TokenThemed {
     override func draw(_ dirtyRect: NSRect) {
         guard window?.firstResponder === self else { return }
         AgentLineRole.focusRing.color.nsColor(in: self).setStroke()
-        let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: CGFloat(Radius.card), yRadius: CGFloat(Radius.card))
+        let radius = CGFloat(pageZoom.scaled(Radius.card))
+        let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius)
         ring.lineWidth = 2
         ring.stroke()
     }
@@ -259,6 +329,15 @@ private final class AgentTileOverflowButton: NSControl, TokenThemed {
         let theme = effectiveTokenTheme
         imageView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
         alphaValue = isPressed ? 0.72 : 1
+        needsDisplay = true
+    }
+
+    /// The glyph box and the focus-ring radius are laid out in `layout()`/`draw`,
+    /// so re-deriving them is a matter of invalidating both.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        invalidateIntrinsicContentSize()
+        needsLayout = true
         needsDisplay = true
     }
 

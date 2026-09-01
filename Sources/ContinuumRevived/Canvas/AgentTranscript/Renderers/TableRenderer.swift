@@ -56,8 +56,17 @@ final class AgentTableView: NSView, TokenThemed {
     /// known-slow case.
     static let maximumNaturalColumnWidth: CGFloat = 220
     static let minimumColumnWidth: CGFloat = 40
-    private static let columnGap = CGFloat(Space.l)
-    private static let headerRuleInset = CGFloat(Space.s)
+    // WS5 companions. The column solve is what decides where the glyphs wrap, so
+    // every width in it has to move with the type — a 150% table solved against
+    // a 220pt cap truncates every cell it used to fit.
+    static func maximumNaturalColumnWidth(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(220))
+    }
+    static func minimumColumnWidth(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(40))
+    }
+    private static func columnGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    private static func headerRuleInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s)) }
 
     private let textView = RichInlineTextView(frame: .zero)
     private let headerRule = CALayer()
@@ -113,10 +122,19 @@ final class AgentTableView: NSView, TokenThemed {
         let columnCount = payload.columnCount
         guard columnCount > 0 else { return (NSAttributedString(string: ""), 0) }
 
+        // One zoom for the whole solve: the cell fonts, the natural widths they
+        // produce, the gaps between them and the tab stops all have to agree, or
+        // the measure path and the paint path disagree about where a column is.
+        let zoom = context.pageZoom
+        let maximumNaturalColumnWidth = Self.maximumNaturalColumnWidth(zoom: zoom)
+        let minimumColumnWidth = Self.minimumColumnWidth(zoom: zoom)
+        let columnGap = Self.columnGap(zoom: zoom)
+
         func cell(_ inlines: [AgentInline], bold: Bool) -> NSAttributedString {
             AgentTextStyleResolver.attributedString(
                 for: inlines, theme: context.appearance, tokens: context.tokens,
-                textRole: .body, style: AgentProseTextStyle(bold: bold))
+                textRole: .body, style: AgentProseTextStyle(bold: bold),
+                zoom: zoom)
         }
         let header = payload.header.map { cell($0, bold: true) }
         let rows = payload.rows.map { row in row.map { cell($0, bold: false) } }
@@ -195,7 +213,7 @@ final class AgentTableView: NSView, TokenThemed {
     ) -> CGFloat {
         let composed = compose(payload, context: context, width: width)
         return RichInlineTextView.measuredHeight(for: composed.string, width: width)
-            + (payload.header.isEmpty ? 0 : headerRuleInset * 2)
+            + (payload.header.isEmpty ? 0 : headerRuleInset(zoom: context.pageZoom) * 2)
     }
 
     override func layout() {
@@ -205,7 +223,7 @@ final class AgentTableView: NSView, TokenThemed {
         let frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
         if textView.frame != frame { textView.frame = frame }
         let ruleFrame = NSRect(
-            x: 0, y: headerLineHeight + Self.headerRuleInset,
+            x: 0, y: headerLineHeight + Self.headerRuleInset(zoom: context.pageZoom),
             width: bounds.width,
             height: max(CGFloat(LineWidth.hairline), 1.0 / (window?.backingScaleFactor ?? 2)))
         if headerRule.frame != ruleFrame {

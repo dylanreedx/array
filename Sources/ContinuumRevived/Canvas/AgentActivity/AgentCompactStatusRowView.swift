@@ -18,8 +18,16 @@ struct AgentCompactStatusRowConfiguration: Equatable {
 /// tile. Caller supplies a pure presentation and, if desired, an already-chosen
 /// thinking indicator view; the host supplies the location action route.
 @MainActor
-final class AgentCompactStatusRowView: NSView, TokenThemed {
+final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalable {
     static let preferredHeight: CGFloat = 28
+
+    /// The same row height at one rung of the tile's page zoom. Exact identity
+    /// with `preferredHeight` at 100%.
+    static func preferredHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(28)) }
+
+    /// This row's rung of the tile's page zoom, delivered by the tile's subtree
+    /// walk. Every derivation below is an exact identity at 100%.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     private let locationIcon = NSImageView()
     private let locationLabel = NSTextField(labelWithString: "")
@@ -53,6 +61,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     private var thinkingIndicatorIsAnimating = false
     var onActionMenuRequested: ((NSButton) -> Void)?
 
+    // Every constant that follows the page zoom is held rather than baked into an
+    // activated anchor a later rung could not reach.
+    private var actionButtonWidth: NSLayoutConstraint?
+    private var locationLabelMinimumWidth: NSLayoutConstraint?
+    private var contextMeterSize: [NSLayoutConstraint] = []
+    private var thinkingSlotSize: [NSLayoutConstraint] = []
+    private var iconSize: [NSLayoutConstraint] = []
+    private var rowHeight: NSLayoutConstraint?
+
     init(
         frame frameRect: NSRect = .zero,
         configuration: AgentCompactStatusRowConfiguration = .production,
@@ -67,13 +84,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         super.init(frame: frameRect)
 
         if configuration.deterministicSnapshotPhase == nil {
-            let actionWidth = actionButton.widthAnchor.constraint(equalToConstant: 18)
+            let actionWidth = actionButton.widthAnchor.constraint(
+                equalToConstant: CGFloat(pageZoom.scaled(18)))
             actionWidth.priority = .defaultLow
             actionWidth.isActive = true
+            actionButtonWidth = actionWidth
         }
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
 
         configureIcon(locationIcon)
         configureIcon(activityIcon)
@@ -89,7 +108,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         // tile (including the 320pt Component Lab card); deterministic geometry
         // probes intentionally let it yield completely before protected groups.
         if configuration.deterministicSnapshotPhase == nil {
-            locationLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 6).isActive = true
+            let minimumWidth = locationLabel.widthAnchor.constraint(
+                greaterThanOrEqualToConstant: CGFloat(pageZoom.scaled(6)))
+            minimumWidth.isActive = true
+            locationLabelMinimumWidth = minimumWidth
         }
 
         // The phase label is the only variable-length text left in the row, so it
@@ -115,18 +137,22 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         contextMeter.translatesAutoresizingMaskIntoConstraints = false
         contextMeter.setContentHuggingPriority(.required, for: .horizontal)
         contextMeter.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            contextMeter.widthAnchor.constraint(equalToConstant: AgentRadialContextMeterView.side),
-            contextMeter.heightAnchor.constraint(equalToConstant: AgentRadialContextMeterView.side),
-        ])
+        contextMeterSize = [
+            contextMeter.widthAnchor.constraint(
+                equalToConstant: AgentRadialContextMeterView.side(zoom: pageZoom)),
+            contextMeter.heightAnchor.constraint(
+                equalToConstant: AgentRadialContextMeterView.side(zoom: pageZoom)),
+        ]
+        NSLayoutConstraint.activate(contextMeterSize)
 
         thinkingSlot.translatesAutoresizingMaskIntoConstraints = false
         thinkingSlot.setContentHuggingPriority(.required, for: .horizontal)
         thinkingSlot.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            thinkingSlot.widthAnchor.constraint(equalToConstant: 20),
-            thinkingSlot.heightAnchor.constraint(equalToConstant: 20),
-        ])
+        thinkingSlotSize = [
+            thinkingSlot.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(20))),
+            thinkingSlot.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(20))),
+        ]
+        NSLayoutConstraint.activate(thinkingSlotSize)
         if let thinkingIndicator {
             thinkingIndicator.translatesAutoresizingMaskIntoConstraints = false
             thinkingIndicator.setReducedMotion(configuration.reducedMotion)
@@ -144,7 +170,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
 
         locationGroup.orientation = .horizontal
         locationGroup.alignment = .centerY
-        locationGroup.spacing = CGFloat(Space.xs)
+        locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         locationGroup.setContentHuggingPriority(.defaultLow, for: .horizontal)
         locationGroup.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(10), for: .horizontal)
         actionButton.target = self
@@ -152,7 +178,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
 
         activityGroup.orientation = .horizontal
         activityGroup.alignment = .centerY
-        activityGroup.spacing = CGFloat(Space.xs)
+        activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.addArrangedSubview(thinkingSlot)
         activityGroup.addArrangedSubview(activityIcon)
         activityGroup.addArrangedSubview(activityLabel)
@@ -162,14 +188,14 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
 
         contextGroup.orientation = .horizontal
         contextGroup.alignment = .centerY
-        contextGroup.spacing = CGFloat(Space.xs)
+        contextGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         contextGroup.setContentHuggingPriority(.required, for: .horizontal)
         contextGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         rootStack.orientation = .horizontal
         rootStack.alignment = .centerY
-        rootStack.spacing = CGFloat(Space.m)
-        rootStack.edgeInsets = NSEdgeInsets(top: 4, left: CGFloat(Space.s), bottom: 4, right: CGFloat(Space.s))
+        rootStack.spacing = CGFloat(pageZoom.scaled(Space.m))
+        rootStack.edgeInsets = Self.rootInsets(zoom: pageZoom)
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         rootStack.addArrangedSubview(locationGroup)
         rootStack.addArrangedSubview(activityGroup)
@@ -181,8 +207,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
             rootStack.trailingAnchor.constraint(equalTo: trailingAnchor),
             rootStack.topAnchor.constraint(equalTo: topAnchor),
             rootStack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: Self.preferredHeight),
         ])
+        let rowHeight = heightAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.preferredHeight(zoom: pageZoom))
+        rowHeight.isActive = true
+        self.rowHeight = rowHeight
 
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -197,7 +226,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: Self.preferredHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.preferredHeight(zoom: pageZoom))
+    }
+
+    /// The row's own padding. Held apart so `applyPageZoom` re-derives exactly
+    /// what the initializer assigned.
+    private static func rootInsets(zoom: AgentPageZoom) -> NSEdgeInsets {
+        NSEdgeInsets(
+            top: CGFloat(zoom.scaled(4)),
+            left: CGFloat(zoom.scaled(Space.s)),
+            bottom: CGFloat(zoom.scaled(4)),
+            right: CGFloat(zoom.scaled(Space.s)))
     }
 
     override var isHidden: Bool {
@@ -282,6 +321,46 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         contextMeter.applyTokens()
     }
 
+    /// Re-derives every metric this row owns from `zoom`. Same contract as
+    /// `applyTokens()`: idempotent, and safe on a row already showing a
+    /// presentation — it touches no string, no visibility and no indicator
+    /// lifecycle. The context meter is `AgentPageZoomScalable` itself and is
+    /// reached by the tile's subtree walk, so this only re-pins the box it sits in.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        locationLabel.font = .token(.label, zoom: pageZoom)
+        activityLabel.font = .token(.label, zoom: pageZoom)
+        elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
+        contextLabel.font = .token(.captionMono, zoom: pageZoom)
+        locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        contextGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        rootStack.spacing = CGFloat(pageZoom.scaled(Space.m))
+        rootStack.edgeInsets = Self.rootInsets(zoom: pageZoom)
+        actionButtonWidth?.constant = CGFloat(pageZoom.scaled(18))
+        locationLabelMinimumWidth?.constant = CGFloat(pageZoom.scaled(6))
+        for constraint in contextMeterSize {
+            constraint.constant = AgentRadialContextMeterView.side(zoom: pageZoom)
+        }
+        for constraint in thinkingSlotSize {
+            constraint.constant = CGFloat(pageZoom.scaled(20))
+        }
+        for constraint in iconSize {
+            constraint.constant = CGFloat(pageZoom.scaled(14))
+        }
+        rowHeight?.constant = Self.preferredHeight(zoom: pageZoom)
+        // The glyphs are rasterized at a point size, so they have to be re-made
+        // rather than merely re-pinned.
+        if let presentation {
+            applySymbol(presentation.location.symbolName, to: locationIcon)
+            applySymbol(presentation.activity.symbolName, to: activityIcon)
+        }
+        invalidateIntrinsicContentSize()
+        rootStack.needsLayout = true
+        needsLayout = true
+    }
+
     @objc private func showActions(_ sender: NSButton) {
         onActionMenuRequested?(sender)
     }
@@ -327,7 +406,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
     }
 
     private func configureLabel(_ label: NSTextField, role: TextRole) {
-        label.font = .token(role)
+        label.font = .token(role, zoom: pageZoom)
         label.maximumNumberOfLines = 1
         label.translatesAutoresizingMaskIntoConstraints = false
     }
@@ -338,15 +417,18 @@ final class AgentCompactStatusRowView: NSView, TokenThemed {
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
         icon.setAccessibilityElement(false)
-        NSLayoutConstraint.activate([
-            icon.widthAnchor.constraint(equalToConstant: 14),
-            icon.heightAnchor.constraint(equalToConstant: 14),
-        ])
+        let size = [
+            icon.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(14))),
+            icon.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(14))),
+        ]
+        iconSize.append(contentsOf: size)
+        NSLayoutConstraint.activate(size)
     }
 
     private func applySymbol(_ symbolName: String, to icon: NSImageView) {
-        icon.image = CanvasSymbolImage.image(named: symbolName, pointSize: 11, weight: .semibold)
-            ?? CanvasSymbolImage.image(named: "circle", pointSize: 11, weight: .semibold)
+        let pointSize = CGFloat(pageZoom.scaled(11))
+        icon.image = CanvasSymbolImage.image(named: symbolName, pointSize: pointSize, weight: .semibold)
+            ?? CanvasSymbolImage.image(named: "circle", pointSize: pointSize, weight: .semibold)
     }
 
     private func updateThinkingLifecycle() {

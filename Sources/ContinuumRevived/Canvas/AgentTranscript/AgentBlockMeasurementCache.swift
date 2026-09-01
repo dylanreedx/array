@@ -29,6 +29,11 @@ struct AgentBlockMeasureKey: Hashable {
 final class AgentBlockMeasurementCache {
     private var heights: [AgentBlockMeasureKey: CGFloat] = [:]
     private let widthQuantum: CGFloat
+    /// Every real renderer measurement this cache has performed since it was
+    /// created. A count, not a size: `cachedMeasurementCount` cannot tell a
+    /// steady state (no new work) from a drop-and-refill (the same final size,
+    /// every row re-measured), and the zoom gates need exactly that difference.
+    private(set) var measurementMissCount = 0
 
     init(widthQuantum: CGFloat = 1) {
         precondition(widthQuantum > 0 && widthQuantum.isFinite)
@@ -52,6 +57,7 @@ final class AgentBlockMeasurementCache {
             presentationRevision: context.actions.presentationRevision(blockID: block.id)
         )
         if let cached = heights[key] { return cached }
+        measurementMissCount += 1
         let measured = max(0, renderer.measure(block: block, width: width, context: context))
         heights[key] = measured
         return measured

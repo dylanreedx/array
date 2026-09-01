@@ -29,7 +29,8 @@ final class ToolCallRenderer: AgentBlockRendering {
             outputText: payload.presentedOutputText,
             outputNote: payload.presentedOutputNote,
             width: width,
-            expanded: expanded
+            expanded: expanded,
+            zoom: context.pageZoom
         )
     }
 
@@ -47,12 +48,26 @@ final class ToolCallView: NSView {
     static let rowHeight = CGFloat(Space.xxl + Space.xs)
     static let horizontalInset = CGFloat(Space.l)
     static let detailBottomInset = CGFloat(Space.xs)
+    // WS5: the same three metrics at a tile's page zoom. The zero-argument
+    // statics above stay exactly as they were — they are the 100% values, and
+    // out-of-module witnesses read them — so these are companions, not
+    // replacements.
+    static func rowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.xs)) }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func detailBottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xs)) }
     /// Where the row's own text starts: past the disclosure control and the
     /// icon. The detail line hangs from the SAME x as the title, so a row reads
     /// as one block instead of a title with an unrelated sentence beneath it.
     static var detailIndent: CGFloat { horizontalInset + CGFloat(Space.xxl) * 2 + CGFloat(Space.s) + CGFloat(Space.m) }
+    static func detailIndent(zoom: AgentPageZoom) -> CGFloat {
+        horizontalInset(zoom: zoom) + CGFloat(zoom.scaled(Space.xxl)) * 2
+            + CGFloat(zoom.scaled(Space.s)) + CGFloat(zoom.scaled(Space.m))
+    }
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled row re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
     private var effectiveDetailIndent: CGFloat {
-        Self.detailIndent + (isClusterMember ? Self.clusterIndent : 0)
+        Self.detailIndent(zoom: zoom) + (isClusterMember ? Self.clusterIndent(zoom: zoom) : 0)
     }
 
     private(set) var disclosureButton = AgentDisclosureButton(frame: .zero)
@@ -74,6 +89,7 @@ final class ToolCallView: NSView {
     /// The group rail drawn down the left of an expanded cluster's members.
     private let clusterRail = CALayer()
     static let clusterIndent = CGFloat(Space.l)
+    static func clusterIndent(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
 
     private var blockID: AgentNodeID?
     private var disclosureText = ""
@@ -156,6 +172,18 @@ final class ToolCallView: NSView {
         self.status = payload.status
         self.context = context
 
+        // WS5: fonts and radii are assigned at construction too, but this view is
+        // recycled — a row built at 100% and reused for a 150% tile would keep
+        // the smaller type. Re-derive them here, from THIS context's zoom.
+        let zoom = context.pageZoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
+        statusLabel.font = NSFont.token(.caption, zoom: zoom)
+        summaryLabel.font = NSFont.token(.body, zoom: zoom)
+        outputNoteLabel.font = NSFont.token(.caption, zoom: zoom)
+        outputScrollView.layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        outputCopyButton.applyZoom(zoom)
+
         isExpanded = context.actions.isExpanded(
             blockID: blockID,
             default: payload.status.agentToolDefaultExpanded
@@ -218,7 +246,7 @@ final class ToolCallView: NSView {
         syncOutputPaneVisibility()
         disclosureButton.isHidden = !hasDisclosureDetail
         disclosureButton.isEnabled = hasDisclosureDetail
-        disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
+        disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue, zoom: zoom)
         identifier = NSUserInterfaceItemIdentifier("agent.toolCall.\(blockID.rawValue)")
         applyAccessibility(name: toolName, status: payload.status)
         applyTokens()
@@ -246,12 +274,14 @@ final class ToolCallView: NSView {
         func place(_ view: NSView, _ frame: NSRect) {
             if view.frame != frame { view.frame = frame }
         }
-        let inset = Self.horizontalInset + (isClusterMember ? Self.clusterIndent : 0)
-        let buttonSide = CGFloat(Space.xxl)
+        let zoom = self.zoom
+        let rowHeight = Self.rowHeight(zoom: zoom)
+        let inset = Self.horizontalInset(zoom: zoom) + (isClusterMember ? Self.clusterIndent(zoom: zoom) : 0)
+        let buttonSide = CGFloat(zoom.scaled(Space.xxl))
         if isClusterMember {
             clusterRail.isHidden = false
             clusterRail.frame = CGRect(
-                x: Self.horizontalInset + CGFloat(Space.xs), y: 0,
+                x: Self.horizontalInset(zoom: zoom) + CGFloat(zoom.scaled(Space.xs)), y: 0,
                 width: max(1, CGFloat(LineWidth.hairline)), height: bounds.height)
         } else {
             clusterRail.isHidden = true
@@ -261,67 +291,67 @@ final class ToolCallView: NSView {
         let titleIntrinsic = titleLabel.intrinsicContentSize
 
         place(disclosureButton, disclosureButton.isHidden ? .zero : NSRect(
-            x: inset, y: (Self.rowHeight - buttonSide) / 2,
+            x: inset, y: (rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide))
         // The disclosure column is reserved whether or not this row has one, so
         // titles align down the transcript and the detail line below can hang
         // from exactly the title's x.
         place(iconView, NSRect(
-            x: inset + buttonSide + CGFloat(Space.s),
-            y: (Self.rowHeight - buttonSide) / 2,
+            x: inset + buttonSide + CGFloat(zoom.scaled(Space.s)),
+            y: (rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         ))
-        let statusWidth = min(ceil(statusIntrinsic.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
+        let statusWidth = min(ceil(statusIntrinsic.width) + CGFloat(zoom.scaled(Space.s)), max(0, bounds.width * 0.40))
         place(statusLabel, NSRect(
             x: max(iconView.frame.maxX, bounds.maxX - inset - statusWidth),
-            y: (Self.rowHeight - statusIntrinsic.height) / 2,
+            y: (rowHeight - statusIntrinsic.height) / 2,
             width: statusWidth, height: statusIntrinsic.height
         ))
-        let titleX = iconView.frame.maxX + CGFloat(Space.m)
+        let titleX = iconView.frame.maxX + CGFloat(zoom.scaled(Space.m))
         place(titleLabel, NSRect(
             x: titleX,
-            y: (Self.rowHeight - titleIntrinsic.height) / 2,
-            width: max(1, statusLabel.frame.minX - titleX - CGFloat(Space.m)),
+            y: (rowHeight - titleIntrinsic.height) / 2,
+            width: max(1, statusLabel.frame.minX - titleX - CGFloat(zoom.scaled(Space.m))),
             height: titleIntrinsic.height
         ))
-        let detailY = Self.rowHeight
+        let detailY = rowHeight
         let outputVisible = !outputScrollView.isHidden
         let summaryHeight: CGFloat
         if outputVisible {
             summaryHeight = summaryLabel.isHidden ? 0 : Self.measuredSummaryHeight(
-                summaryLabel.stringValue, width: bounds.width, expanded: isExpanded)
+                summaryLabel.stringValue, width: bounds.width, expanded: isExpanded, zoom: zoom)
         } else {
-            summaryHeight = max(0, bounds.height - detailY - Self.detailBottomInset)
+            summaryHeight = max(0, bounds.height - detailY - Self.detailBottomInset(zoom: zoom))
         }
         place(summaryLabel, NSRect(
             x: effectiveDetailIndent, y: detailY,
-            width: max(1, bounds.width - effectiveDetailIndent - Self.horizontalInset),
+            width: max(1, bounds.width - effectiveDetailIndent - Self.horizontalInset(zoom: zoom)),
             height: summaryHeight
         ))
         if outputVisible {
-            var y = summaryLabel.frame.maxY + CGFloat(Space.xs)
+            var y = summaryLabel.frame.maxY + CGFloat(zoom.scaled(Space.xs))
             let paneX = effectiveDetailIndent
             let copyWidth = outputCopyButton.intrinsicContentSize.width
             place(outputCopyButton, NSRect(
                 x: max(paneX, bounds.maxX - inset - copyWidth), y: y,
-                width: copyWidth, height: CGFloat(Space.xl)
+                width: copyWidth, height: CGFloat(zoom.scaled(Space.xl))
             ))
             if !outputNoteLabel.isHidden {
                 let noteSize = outputNoteLabel.intrinsicContentSize
                 place(outputNoteLabel, NSRect(
-                    x: paneX, y: y + (CGFloat(Space.xl) - noteSize.height) / 2,
-                    width: max(1, outputCopyButton.frame.minX - paneX - CGFloat(Space.s)),
+                    x: paneX, y: y + (CGFloat(zoom.scaled(Space.xl)) - noteSize.height) / 2,
+                    width: max(1, outputCopyButton.frame.minX - paneX - CGFloat(zoom.scaled(Space.s))),
                     height: noteSize.height
                 ))
             }
-            y = outputCopyButton.frame.maxY + CGFloat(Space.xs)
+            y = outputCopyButton.frame.maxY + CGFloat(zoom.scaled(Space.xs))
             place(outputScrollView, NSRect(
                 x: paneX, y: y,
                 width: max(1, bounds.width - paneX - inset),
-                height: max(0, bounds.height - y - Self.detailBottomInset)
+                height: max(0, bounds.height - y - Self.detailBottomInset(zoom: zoom))
             ))
             outputScrollView.layoutSubtreeIfNeeded()
-            let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string)
+            let measuredOutput = CommandOutputTextView.measuredSize(outputTextView.string, zoom: zoom)
             let needsVerticalScroll = measuredOutput.height > outputScrollView.contentSize.height + 0.5
             if outputScrollView.hasVerticalScroller != needsVerticalScroll {
                 outputScrollView.hasVerticalScroller = needsVerticalScroll
@@ -451,44 +481,55 @@ final class ToolCallView: NSView {
     }
 
     static let maximumOutputHeight: CGFloat = 240
+    static func maximumOutputHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
 
     static func measuredHeight(
         summary: String?,
         outputText: String? = nil,
         outputNote: String? = nil,
         width: CGFloat,
-        expanded: Bool
+        expanded: Bool,
+        zoom: AgentPageZoom = .default
     ) -> CGFloat {
         _ = outputNote
+        let zoomedRowHeight = rowHeight(zoom: zoom)
+        let zoomedDetailBottomInset = detailBottomInset(zoom: zoom)
         var height: CGFloat
         if let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
-            height = rowHeight + measuredSummaryHeight(summary, width: width, expanded: expanded) + detailBottomInset
+            height = zoomedRowHeight + measuredSummaryHeight(summary, width: width, expanded: expanded, zoom: zoom)
+                + zoomedDetailBottomInset
         } else {
-            height = rowHeight
+            height = zoomedRowHeight
         }
         // `.plans/45` S4.2 — the expanded output pane: copy row + bounded text.
         if expanded, let outputText, !outputText.isEmpty {
-            if height == rowHeight { height += detailBottomInset }
+            if height == zoomedRowHeight { height += zoomedDetailBottomInset }
             let outputHeight = min(
-                maximumOutputHeight,
-                max(CommandOutputView.minimumOutputHeight, CommandOutputTextView.measuredSize(outputText).height)
+                maximumOutputHeight(zoom: zoom),
+                max(
+                    CommandOutputView.minimumOutputHeight(zoom: zoom),
+                    CommandOutputTextView.measuredSize(outputText, zoom: zoom).height
+                )
             )
-            height += CGFloat(Space.xs) + CGFloat(Space.xl) + CGFloat(Space.xs) + outputHeight
+            height += CGFloat(zoom.scaled(Space.xs)) + CGFloat(zoom.scaled(Space.xl))
+                + CGFloat(zoom.scaled(Space.xs)) + outputHeight
         }
         return height
     }
 
-    static func measuredSummaryHeight(_ summary: String, width: CGFloat, expanded: Bool) -> CGFloat {
+    static func measuredSummaryHeight(
+        _ summary: String, width: CGFloat, expanded: Bool, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
         // Measured against the INDENTED width the detail actually gets.
         let lines = summary.split(whereSeparator: { $0.isNewline }).map(String.init)
         let measuredText = expanded && lines.count > 1 ? summary : (lines.first ?? "")
-        let available = max(1, width - detailIndent - horizontalInset)
+        let available = max(1, width - detailIndent(zoom: zoom) - horizontalInset(zoom: zoom))
         let rect = (measuredText as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(.body)]
+            attributes: [.font: NSFont.token(.body, zoom: zoom)]
         )
-        let lineHeight = CGFloat(Metrics.lineHeight(for: .body))
+        let lineHeight = CGFloat(zoom.lineHeight(for: .body))
         let lineLimit: CGFloat = expanded ? 12 : 1
         return min(ceil(rect.height), lineHeight * lineLimit)
     }
@@ -501,7 +542,7 @@ final class ToolCallView: NSView {
         summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         syncOutputPaneVisibility()
-        disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue)
+        disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue, zoom: zoom)
         applyAccessibility(name: titleLabel.stringValue, status: status)
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -556,7 +597,10 @@ final class AgentDisclosureButton: NSButton {
 
     override func accessibilityChildren() -> [Any]? { [] }
 
-    func apply(expanded: Bool, title itemTitle: String) {
+    func apply(expanded: Bool, title itemTitle: String, zoom: AgentPageZoom = .default) {
+        // Re-derived per apply: the chevron is a glyph in `.label`, and this
+        // button is recycled with its row.
+        font = NSFont.token(.label, zoom: zoom)
         title = expanded ? "▾" : "▸"
         toolTip = expanded ? "Collapse \(itemTitle)" : "Expand \(itemTitle)"
         setAccessibilityLabel(toolTip)

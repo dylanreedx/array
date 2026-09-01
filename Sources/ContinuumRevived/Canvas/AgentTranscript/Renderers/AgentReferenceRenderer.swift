@@ -39,7 +39,7 @@ final class AgentReferenceRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        AgentReferenceChipView.height
+        AgentReferenceChipView.height(zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -64,6 +64,16 @@ final class AgentReferenceChipRowView: NSView {
         max(0, ToolCallView.detailIndent - AgentReferenceChipView.titleOffset)
     }
 
+    /// WS5: the same derivation at a tile's page zoom. Both halves move with the
+    /// zoom, so the chip's label stays on the tool title's reading column.
+    static func leadingInset(zoom: AgentPageZoom) -> CGFloat {
+        max(0, ToolCallView.detailIndent(zoom: zoom) - AgentReferenceChipView.titleOffset(zoom: zoom))
+    }
+
+    /// The page zoom of the last `apply`; `layout()` reads it, so a recycled row
+    /// re-derives rather than keeping the zoom it was built at.
+    private var pageZoom: AgentPageZoom = .default
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         addSubview(chip)
@@ -76,7 +86,7 @@ final class AgentReferenceChipRowView: NSView {
     override func layout() {
         super.layout()
         let intrinsic = chip.intrinsicContentSize
-        let x = min(Self.leadingInset, max(0, bounds.width - intrinsic.width))
+        let x = min(Self.leadingInset(zoom: pageZoom), max(0, bounds.width - intrinsic.width))
         chip.frame = NSRect(
             x: x,
             y: floor((bounds.height - intrinsic.height) / 2),
@@ -93,6 +103,7 @@ final class AgentReferenceChipRowView: NSView {
     }
 
     func apply(blockID: AgentNodeID, payload: AgentReferencePayload, context: AgentRenderContext) {
+        pageZoom = context.pageZoom
         chip.apply(blockID: blockID, payload: payload, context: context)
         needsLayout = true
     }
@@ -112,6 +123,26 @@ final class AgentReferenceChipView: NSButton {
     private static let glyphSide = CGFloat(14)
     private static let contentGap = CGFloat(Space.s)
     static var titleOffset: CGFloat { horizontalPadding + glyphSide + contentGap }
+
+    // WS5: the same chip metrics at a tile's page zoom. The zero-argument
+    // properties above remain the 100% values.
+    static func height(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
+    private static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(26)) }
+    private static func cornerRadius(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
+    private static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    private static func glyphSide(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(14)) }
+    private static func contentGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s)) }
+    /// The glyph's own point size, which follows the chip rather than the type.
+    private static func glyphPointSize(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(11)) }
+    /// The chip's minimum width — a short name still reads as a capsule.
+    private static func minimumWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(58)) }
+    static func titleOffset(zoom: AgentPageZoom) -> CGFloat {
+        horizontalPadding(zoom: zoom) + glyphSide(zoom: zoom) + contentGap(zoom: zoom)
+    }
+
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled chip re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { renderContext.pageZoom }
     private let glyphView = NSImageView(frame: .zero)
     private let titleLabel = NSTextField(labelWithString: "")
     private var blockID: AgentNodeID?
@@ -147,21 +178,29 @@ final class AgentReferenceChipView: NSButton {
         // leading image and centred title in separate allocation regions, which
         // produced the enormous provider-dependent-looking gap in the first
         // feel builds even though every provider used this same renderer.
-        glyphView.image = CanvasSymbolImage.image(named: "person.2.fill", pointSize: 11, weight: .semibold)
-            ?? CanvasSymbolImage.image(named: "person.2", pointSize: 11, weight: .semibold)
         glyphView.imageScaling = .scaleProportionallyDown
-        titleLabel.font = NSFont.token(.label)
         titleLabel.lineBreakMode = .byTruncatingTail
         glyphView.setAccessibilityElement(false)
         titleLabel.setAccessibilityElement(false)
         addSubview(glyphView)
         addSubview(titleLabel)
-        font = NSFont.token(.label)
         focusRingType = .exterior
         wantsLayer = true
-        layer?.borderWidth = 1
-        layer?.cornerRadius = Self.cornerRadius
         setAccessibilityRole(.button)
+        applyZoomMetrics()
+    }
+
+    /// Every construction-time metric, re-derived from the CURRENT context's
+    /// zoom. A recycled chip runs this again from `apply`.
+    private func applyZoomMetrics() {
+        let zoom = self.zoom
+        let glyphPointSize = Self.glyphPointSize(zoom: zoom)
+        glyphView.image = CanvasSymbolImage.image(named: "person.2.fill", pointSize: glyphPointSize, weight: .semibold)
+            ?? CanvasSymbolImage.image(named: "person.2", pointSize: glyphPointSize, weight: .semibold)
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
+        font = NSFont.token(.label, zoom: zoom)
+        layer?.borderWidth = CGFloat(zoom.scaled(1))
+        layer?.cornerRadius = Self.cornerRadius(zoom: zoom)
     }
 
     @available(*, unavailable)
@@ -179,28 +218,32 @@ final class AgentReferenceChipView: NSButton {
     override var focusRingMaskBounds: NSRect { bounds }
 
     override func drawFocusRingMask() {
+        let cornerRadius = Self.cornerRadius(zoom: zoom)
         NSBezierPath(
             roundedRect: bounds,
-            xRadius: Self.cornerRadius,
-            yRadius: Self.cornerRadius
+            xRadius: cornerRadius,
+            yRadius: cornerRadius
         ).fill()
     }
 
     override func layout() {
         super.layout()
+        let zoom = self.zoom
+        let glyphSide = Self.glyphSide(zoom: zoom)
+        let contentGap = Self.contentGap(zoom: zoom)
         let titleSize = titleLabel.intrinsicContentSize
-        let contentWidth = Self.glyphSide + Self.contentGap + ceil(titleSize.width)
+        let contentWidth = glyphSide + contentGap + ceil(titleSize.width)
         let contentX = floor((bounds.width - contentWidth) / 2)
         glyphView.frame = NSRect(
             x: contentX,
-            y: floor((bounds.height - Self.glyphSide) / 2),
-            width: Self.glyphSide,
-            height: Self.glyphSide
+            y: floor((bounds.height - glyphSide) / 2),
+            width: glyphSide,
+            height: glyphSide
         )
         titleLabel.frame = NSRect(
-            x: glyphView.frame.maxX + Self.contentGap,
+            x: glyphView.frame.maxX + contentGap,
             y: floor((bounds.height - titleSize.height) / 2),
-            width: min(ceil(titleSize.width), max(0, bounds.maxX - Self.horizontalPadding - glyphView.frame.maxX - Self.contentGap)),
+            width: min(ceil(titleSize.width), max(0, bounds.maxX - Self.horizontalPadding(zoom: zoom) - glyphView.frame.maxX - contentGap)),
             height: titleSize.height
         )
     }
@@ -229,6 +272,7 @@ final class AgentReferenceChipView: NSButton {
             statusSource = context.agentStatus
         }
         currentInboxState = statusSource.current(payload.agentID)
+        applyZoomMetrics()
         applyTokens()
         refreshAccessibilityLabel()
     }
@@ -304,7 +348,7 @@ final class AgentReferenceChipView: NSButton {
         } else {
             layer?.backgroundColor = nil
         }
-        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerRadius = Self.cornerRadius(zoom: zoom)
         layer?.borderColor = statusColor?.withAlphaComponent(0.42).cgColor
             ?? renderContext.tokens.decorativeLine.color.cgColor(for: theme)
         glyphView.contentTintColor = statusColor
@@ -316,10 +360,15 @@ final class AgentReferenceChipView: NSButton {
     }
 
     override var intrinsicContentSize: NSSize {
+        let zoom = self.zoom
         let titleWidth = ceil(titleLabel.attributedStringValue.size().width)
         return NSSize(
-            width: max(58, titleWidth + Self.glyphSide + Self.contentGap + Self.horizontalPadding * 2),
-            height: Self.controlHeight
+            width: max(
+                Self.minimumWidth(zoom: zoom),
+                titleWidth + Self.glyphSide(zoom: zoom) + Self.contentGap(zoom: zoom)
+                    + Self.horizontalPadding(zoom: zoom) * 2
+            ),
+            height: Self.controlHeight(zoom: zoom)
         )
     }
 
@@ -341,14 +390,14 @@ final class AgentReferenceChipView: NSButton {
         let composed = NSMutableAttributedString(
             string: name,
             attributes: [
-                .font: NSFont.token(.label),
+                .font: NSFont.token(.label, zoom: zoom),
                 .foregroundColor: renderContext.tokens.primaryText.color.nsColor(for: theme)
             ])
         guard let label = currentInboxState?.label, !label.isEmpty else { return composed }
         composed.append(NSAttributedString(
             string: "  ·  \(label)",
             attributes: [
-                .font: NSFont.token(.label),
+                .font: NSFont.token(.label, zoom: zoom),
                 .foregroundColor: renderContext.tokens.secondaryText.color.nsColor(for: theme)
             ]))
         return composed

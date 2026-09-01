@@ -37,6 +37,10 @@ final class CodeTextView: NSTextView {
     private var language: String?
     private var theme: TokenTheme = .dark
     private var tokens: AgentRenderTokens = .transcript
+    /// WS5: the page zoom of the last `apply(code:language:context:)`. A code
+    /// view is recycled, so the container inset and the mono font are re-derived
+    /// on every apply rather than frozen at construction.
+    private var pageZoom: AgentPageZoom = .default
 
     private(set) var appliedSpans: [HighlightSpan] = []
 
@@ -67,7 +71,7 @@ final class CodeTextView: NSTextView {
         drawsBackground = false
         isHorizontallyResizable = true
         isVerticallyResizable = true
-        textContainerInset = NSSize(width: CGFloat(Space.l), height: CGFloat(Space.m))
+        textContainerInset = Self.containerInset(zoom: .default)
         textContainer?.lineFragmentPadding = 0
         minSize = .zero
         maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -86,6 +90,10 @@ final class CodeTextView: NSTextView {
         self.language = language
         theme = context.appearance
         tokens = context.tokens
+        pageZoom = context.pageZoom
+        // Re-derived per apply, not per construction: this view is recycled, and
+        // a container inset frozen at 100% would misalign every zoomed row.
+        textContainerInset = Self.containerInset(zoom: pageZoom)
         let codeLength = (code as NSString).length
         appliedSpans = highlighter.spans(language: language, code: code).filter { span in
             let location = span.range.location
@@ -98,7 +106,7 @@ final class CodeTextView: NSTextView {
 
         let fullRange = NSRange(location: 0, length: codeLength)
         let base: [NSAttributedString.Key: Any] = [
-            .font: NSFont.token(.bodyMono),
+            .font: NSFont.token(.bodyMono, zoom: pageZoom),
             .foregroundColor: tokens.primaryText.color.nsColor(for: theme),
         ]
         let attributed = NSMutableAttributedString(string: code, attributes: base)
@@ -132,15 +140,22 @@ final class CodeTextView: NSTextView {
     /// Keeps the document at least viewport-sized while allowing either axis to
     /// exceed it and activate the enclosing scroller.
     func sizeDocument(toFit viewport: NSSize) {
-        let measured = Self.measuredCodeSize(string)
+        let measured = Self.measuredCodeSize(string, zoom: pageZoom)
         frame.size = NSSize(
             width: max(viewport.width, measured.width),
             height: max(viewport.height, measured.height)
         )
     }
 
-    static func measuredCodeSize(_ code: String) -> NSSize {
-        let font = NSFont.token(.bodyMono)
+    /// The text-container inset a code surface uses at `zoom`. Shared by the
+    /// live view and `measuredCodeSize` so the measured box can never disagree
+    /// with the painted one.
+    static func containerInset(zoom: AgentPageZoom) -> NSSize {
+        NSSize(width: CGFloat(zoom.scaled(Space.l)), height: CGFloat(zoom.scaled(Space.m)))
+    }
+
+    static func measuredCodeSize(_ code: String, zoom: AgentPageZoom = .default) -> NSSize {
+        let font = NSFont.token(.bodyMono, zoom: zoom)
         let sample = code.isEmpty ? " " : code
         let rect = (sample as NSString).boundingRect(
             with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
@@ -150,9 +165,10 @@ final class CodeTextView: NSTextView {
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
         let newlineCount = code.reduce(into: 0) { if $1 == "\n" { $0 += 1 } }
         let height = max(ceil(rect.height), CGFloat(newlineCount + 1) * lineHeight)
+        let inset = containerInset(zoom: zoom)
         return NSSize(
-            width: ceil(rect.width) + CGFloat(Space.l) * 2,
-            height: height + CGFloat(Space.m) * 2
+            width: ceil(rect.width) + inset.width * 2,
+            height: height + inset.height * 2
         )
     }
 

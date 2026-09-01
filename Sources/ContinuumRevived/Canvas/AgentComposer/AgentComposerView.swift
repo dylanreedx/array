@@ -64,7 +64,7 @@ private struct TriggerRestrictedCompletionSource: AgentCompletionSuggestionSourc
 /// Isolated custom composer shell. The surface and focus treatment are owned here
 /// while `ComposerTextView` remains the native editing engine.
 @MainActor
-final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
+final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, AgentPageZoomScalable {
     let variant: AgentComposerVariant
     let textView: ComposerTextView
     private(set) var scrollView: NSScrollView
@@ -142,9 +142,30 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
     private let heightController: ComposerHeightController
+    /// WS5: the tile's page-zoom rung, delivered by the subtree walk.
+    private(set) var pageZoom: AgentPageZoom = .default
+    /// Constraints whose constant is `+internalPadding`, held so a zoom change
+    /// can re-derive them: a constant baked into an activated anchor is
+    /// otherwise unreachable.
+    private var leadingPaddingConstraints: [NSLayoutConstraint] = []
+    /// Constraints whose constant is `-internalPadding`.
+    private var trailingPaddingConstraints: [NSLayoutConstraint] = []
 
     static let cornerRadius = CGFloat(AgentTileRadius.composer)
     static let internalPadding = CGFloat(Space.l)
+
+    /// `cornerRadius` at a page-zoom rung. Identity at 100%.
+    static func cornerRadius(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(AgentTileRadius.composer))
+    }
+
+    /// `internalPadding` at a page-zoom rung. Identity at 100%.
+    static func internalPadding(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Space.l))
+    }
+
+    /// The padding ring this shell is currently drawing.
+    var internalPadding: CGFloat { Self.internalPadding(zoom: pageZoom) }
     static let idleBorderWidth: CGFloat = 1
     static let focusedBorderWidth: CGFloat = 2
     static let maximumVisibleLines = AgentComposerVariant.fullTurn.maximumVisibleLines
@@ -168,7 +189,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
         layer?.masksToBounds = false
 
         scrollView.borderType = .noBorder
@@ -205,37 +226,42 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         addSubview(scrollView)
 
         placeholderLabel.stringValue = variant.placeholder
-        placeholderLabel.font = .token(.body)
+        placeholderLabel.font = .token(.body, zoom: pageZoom)
         placeholderLabel.lineBreakMode = .byTruncatingTail
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
         placeholderLabel.setAccessibilityElement(false)
         addSubview(placeholderLabel)
 
+        let padding = Self.internalPadding(zoom: pageZoom)
+        leadingPaddingConstraints = [
+            replyOptionRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            fileReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            queuedMessageRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            scrollView.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor, constant: padding),
+        ]
+        trailingPaddingConstraints = [
+            replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            fileReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            queuedMessageRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
+        ]
         NSLayoutConstraint.activate([
             replyOptionRailHeightConstraint,
-            replyOptionRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
-            replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
             replyOptionRail.topAnchor.constraint(equalTo: topAnchor),
             fileReferenceRailHeightConstraint,
-            fileReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
-            fileReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
             fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
-            attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
-            attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
             attachmentRail.topAnchor.constraint(equalTo: fileReferenceRail.bottomAnchor),
             queuedMessageRailHeightConstraint,
-            queuedMessageRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
-            queuedMessageRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
             queuedMessageRail.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.internalPadding),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.internalPadding),
-            scrollView.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor, constant: Self.internalPadding),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.internalPadding),
             placeholderLabel.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor),
             placeholderLabel.topAnchor.constraint(equalTo: scrollView.topAnchor),
-        ])
+        ] + leadingPaddingConstraints + trailingPaddingConstraints)
 
         textView.composerObserver = self
         NotificationCenter.default.addObserver(
@@ -270,17 +296,18 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         if let measurement = heightController.measurement {
             editorHeight = measurement.visibleEditorHeight
         } else {
-            let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            let font = textView.font
+                ?? NSFont.systemFont(ofSize: CGFloat(pageZoom.scaled(Double(NSFont.systemFontSize))))
             editorHeight = textView.layoutManager?.defaultLineHeight(for: font)
                 ?? ceil(font.ascender - font.descender + font.leading)
         }
-        let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight + Self.internalPadding
-        let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight
-        let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight
-        let queuedRailHeight = queuedMessageRail.isHidden ? 0 : ComposerQueuedMessageRailView.railHeight
+        let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight(zoom: pageZoom) + internalPadding
+        let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
+        let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
+        let queuedRailHeight = queuedMessageRail.isHidden ? 0 : ComposerQueuedMessageRailView.railHeight(zoom: pageZoom)
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: editorHeight + (Self.internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
+            height: editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
         )
     }
 
@@ -451,7 +478,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     /// the chips do not imply they are about to run.
     func updateQueuedMessages(_ messages: [AgentComposerQueuedMessage], paused: Bool) {
         queuedMessageRail.setMessages(messages, paused: paused)
-        queuedMessageRailHeightConstraint.constant = messages.isEmpty ? 0 : ComposerQueuedMessageRailView.railHeight
+        queuedMessageRailHeightConstraint.constant = messages.isEmpty ? 0 : ComposerQueuedMessageRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -509,16 +536,45 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         editorContentsChanged()
     }
 
+    private func rescaleRail(_ constraint: NSLayoutConstraint, to height: CGFloat) {
+        guard constraint.constant != 0 else { return }
+        constraint.constant = height
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
+        let padding = Self.internalPadding(zoom: pageZoom)
+        for constraint in leadingPaddingConstraints { constraint.constant = padding }
+        for constraint in trailingPaddingConstraints { constraint.constant = -padding }
+        // Rescale each rail's BOX without re-publishing its contents: a zero
+        // constant means the rail is currently withdrawn, and scaling must not
+        // bring it back.
+        rescaleRail(replyOptionRailHeightConstraint, to: ComposerReplyOptionRailView.railHeight(zoom: pageZoom))
+        rescaleRail(fileReferenceRailHeightConstraint, to: ComposerFileReferenceRailView.railHeight(zoom: pageZoom))
+        rescaleRail(attachmentRailHeightConstraint, to: ComposerImageAttachmentRailView.railHeight(zoom: pageZoom))
+        rescaleRail(queuedMessageRailHeightConstraint, to: ComposerQueuedMessageRailView.railHeight(zoom: pageZoom))
+        // The completion popover's content view lives in its own window, so the
+        // tile's subtree walk never reaches it. The composer owns the controller,
+        // so the composer is where the rung is handed over.
+        completionController.pageZoom = pageZoom
+        // Re-derives the placeholder/editor fonts, then re-measures the editor
+        // at the new line height.
+        applyTokens()
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
         layer?.borderColor = (isEditorFocused ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)
         layer?.borderWidth = isEditorFocused ? Self.focusedBorderWidth : Self.idleBorderWidth
-        placeholderLabel.font = .token(.body)
+        placeholderLabel.font = .token(.body, zoom: pageZoom)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         // Update existing draft attributes as well as typing attributes so
         // TextKit line metrics follow token/readability changes immediately.
-        let editorFont = NSFont.token(.body)
+        let editorFont = NSFont.token(.body, zoom: pageZoom)
         textView.font = editorFont
         if let textStorage = textView.textStorage, textStorage.length > 0 {
             textStorage.addAttribute(
@@ -1218,7 +1274,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     private func updateAttachmentRail() {
         attachmentRail.setItems(importedAttachments.map { ComposerImageAttachmentRailItem(attachment: $0) })
-        attachmentRailHeightConstraint.constant = importedAttachments.isEmpty ? 0 : ComposerImageAttachmentRailView.railHeight
+        attachmentRailHeightConstraint.constant = importedAttachments.isEmpty ? 0 : ComposerImageAttachmentRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -1241,7 +1297,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             ? replyOptions : []
         replyOptionRail.setOptions(visible)
         replyOptionRailHeightConstraint.constant =
-            visible.isEmpty ? 0 : ComposerReplyOptionRailView.railHeight
+            visible.isEmpty ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -1259,7 +1315,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
 
     private func updateFileReferenceRail() {
         fileReferenceRail.setReferences(importedFileReferences)
-        fileReferenceRailHeightConstraint.constant = importedFileReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight
+        fileReferenceRailHeightConstraint.constant = importedFileReferences.isEmpty ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -1307,7 +1363,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         guard viewport.width > 0, viewport.height > 0 else { return }
         let previousHeight = heightController.measurement?.visibleEditorHeight
         let measurement = heightController.update(
-            textView: textView, scrollView: scrollView, width: viewport.width
+            textView: textView, scrollView: scrollView, width: viewport.width,
+            zoom: pageZoom
         )
         if let previousHeight, abs(previousHeight - measurement.visibleEditorHeight) > 0.5 {
             invalidateIntrinsicContentSize()

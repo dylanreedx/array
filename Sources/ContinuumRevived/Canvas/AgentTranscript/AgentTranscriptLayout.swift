@@ -16,6 +16,30 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     /// paragraph gaps inside a reply — "spread out too much". The turn boundary
     /// carries the separation instead, at 4x this.
     var rowSpacing: CGFloat = 8
+    /// WS5 page zoom. Every geometry term below is derived from it, and it is
+    /// part of the prepared identity: without that the fast path early-returns
+    /// on a zoom change and the transcript keeps the previous rung's frames.
+    var pageZoom: AgentPageZoom = .default {
+        didSet {
+            guard pageZoom != oldValue else { return }
+            invalidateForStructureChange()
+        }
+    }
+    /// The row gap actually left, at the current rung.
+    var scaledRowSpacing: CGFloat { CGFloat(pageZoom.scaled(Double(rowSpacing))) }
+    /// `interTurnSpacing` at the current rung.
+    var scaledInterTurnSpacing: CGFloat {
+        CGFloat(pageZoom.scaled(Double(Self.interTurnSpacing)))
+    }
+    /// `contentInsets` at the current rung.
+    var scaledContentInsets: NSEdgeInsets {
+        NSEdgeInsets(
+            top: CGFloat(pageZoom.scaled(Double(contentInsets.top))),
+            left: CGFloat(pageZoom.scaled(Double(contentInsets.left))),
+            bottom: CGFloat(pageZoom.scaled(Double(contentInsets.bottom))),
+            right: CGFloat(pageZoom.scaled(Double(contentInsets.right)))
+        )
+    }
     /// Separation between two rows belonging to different turns.
     ///
     /// `_DESIGN.md` §11 asks for a soft hairline for section separation; the rule
@@ -36,13 +60,15 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     private var contentSize = NSSize.zero
     private var preparedWidthBucket: Int?
     private var preparedBoundarySignature: Int?
+    private var preparedZoomPercent: Int?
     private(set) var preparePassCount = 0
 
     override func prepare() {
         super.prepare()
         guard let collectionView else { return }
 
-        let width = max(0, collectionView.bounds.width - contentInsets.left - contentInsets.right)
+        let insets = scaledContentInsets
+        let width = max(0, collectionView.bounds.width - insets.left - insets.right)
         let widthBucket = Int(width.rounded())
         let count = itemCount()
         // The signature is part of the guard, not decoration. Spacing now depends
@@ -50,7 +76,12 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
         // width alone -- one entry's rows becoming two entries' rows -- would
         // otherwise early-return with the previous turn boundaries baked in.
         let signature = boundarySignature?() ?? 0
+        // WS5: the zoom rung is part of the identity. A zoom change moves every
+        // row's height and every gap between them while leaving the width
+        // bucket, the boundary signature and the row count alone — exactly the
+        // shape this fast path was built to skip.
         if preparedWidthBucket == widthBucket, preparedBoundarySignature == signature,
+           preparedZoomPercent == pageZoom.percent,
            attributes.count == count, !attributes.isEmpty || count == 0 {
             return
         }
@@ -61,19 +92,20 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
 
         preparedWidthBucket = widthBucket
         preparedBoundarySignature = signature
+        preparedZoomPercent = pageZoom.percent
         attributes.removeAll(keepingCapacity: true)
         attributes.reserveCapacity(count)
-        var y = contentInsets.top
+        var y = insets.top
         for index in 0..<count {
             let path = IndexPath(item: index, section: 0)
             let itemAttributes = NSCollectionViewLayoutAttributes(forItemWith: path)
             let height = max(1, measuredHeight(index, width))
-            itemAttributes.frame = NSRect(x: contentInsets.left, y: y, width: width, height: height)
+            itemAttributes.frame = NSRect(x: insets.left, y: y, width: width, height: height)
             attributes.append(itemAttributes)
             y += height
-            if index + 1 < count { y += spacingBefore?(index + 1) ?? rowSpacing }
+            if index + 1 < count { y += spacingBefore?(index + 1) ?? scaledRowSpacing }
         }
-        y += contentInsets.bottom
+        y += insets.bottom
         contentSize = NSSize(width: collectionView.bounds.width, height: y)
     }
 
@@ -120,11 +152,13 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     func invalidate(changedIDs: Set<AgentNodeID>) {
         guard !changedIDs.isEmpty else { return }
         preparedWidthBucket = nil
+        preparedZoomPercent = nil
         invalidateLayout()
     }
 
     func invalidateForStructureChange() {
         preparedWidthBucket = nil
+        preparedZoomPercent = nil
         invalidateLayout()
     }
 }

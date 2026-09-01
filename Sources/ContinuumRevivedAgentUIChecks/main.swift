@@ -53,6 +53,9 @@ runTypographyChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P1.5-spacing-radius-scale.md
 runMetricsChecks()
 
+// WS5: per-managed-agent-tile page zoom — the pure ladder, scaling and routing.
+runAgentPageZoomChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P3.1-inbox-row-model.md
 runAgentInboxRowChecks()
 

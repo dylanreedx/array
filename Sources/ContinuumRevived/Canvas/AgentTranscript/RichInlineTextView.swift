@@ -166,13 +166,14 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
             theme: context.appearance,
             tokens: context.tokens,
             textRole: textRole,
-            style: style
+            style: style,
+            zoom: context.pageZoom
         )
         let rect = attributed.boundingRect(
             with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
-        let font = NSFont.token(textRole)
+        let font = NSFont.token(textRole, zoom: context.pageZoom)
         return max(ceil(rect.height), ceil(font.ascender - font.descender + font.leading))
     }
 
@@ -230,7 +231,8 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
             theme: renderContext.appearance,
             tokens: renderContext.tokens,
             textRole: textRole,
-            style: proseStyle
+            style: proseStyle,
+            zoom: renderContext.pageZoom
         )
         textStorage?.setAttributedString(resolved.attributedString)
         textColor = renderContext.tokens.primaryText.color.nsColor(for: renderContext.appearance)

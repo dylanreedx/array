@@ -14,7 +14,7 @@ final class QuestionRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .question(payload) = block.payload else { return 0 }
-        return AgentRequestView.measuredHeight(payload: payload, width: width)
+        return AgentRequestView.measuredHeight(payload: payload, width: width, zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {

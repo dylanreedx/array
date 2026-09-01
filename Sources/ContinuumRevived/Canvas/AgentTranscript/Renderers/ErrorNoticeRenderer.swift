@@ -30,12 +30,13 @@ final class ErrorNoticeRenderer: AgentBlockRendering {
         case .error(let payload) where kind == .error:
             return AgentErrorNoticeView.measuredHeight(
                 message: payload.message, metadata: payload.code,
-                actionCount: payload.isRecoverable ? 2 : 1, width: width
+                actionCount: payload.isRecoverable ? 2 : 1, width: width,
+                zoom: context.pageZoom
             )
         case .notice(let payload) where kind == .notice:
             return AgentErrorNoticeView.measuredHeight(
                 message: agentPlainText(payload.message), metadata: nil,
-                actionCount: 0, width: width
+                actionCount: 0, width: width, zoom: context.pageZoom
             )
         default:
             return 0
@@ -53,6 +54,13 @@ final class AgentErrorNoticeView: NSView {
     static let horizontalInset = CGFloat(Space.l)
     static let actionHeight = CGFloat(Space.xxl + Space.xs)
     static let bottomInset = CGFloat(Space.l)
+
+    // WS5: the same four metrics at a tile's page zoom. The zero-argument
+    // properties above remain the 100% values.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.l)) }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func actionHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.xs)) }
+    static func bottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
 
     private final class BlockToken: NSObject {
         let generation: UInt64
@@ -75,19 +83,18 @@ final class AgentErrorNoticeView: NSView {
     private var blockID: AgentNodeID?
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
+    /// The page zoom of the last apply. Every metric below reads it, so a
+    /// recycled notice re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
+
     init(kind: AgentBlockKind) {
         self.kind = kind
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
-        titleLabel.font = NSFont.token(.title)
-        statusLabel.font = NSFont.token(.caption)
-        messageLabel.font = NSFont.token(.body)
         messageLabel.maximumNumberOfLines = 5
         messageLabel.lineBreakMode = .byWordWrapping
         messageLabel.isSelectable = true
-        metadataLabel.font = NSFont.token(.captionMono)
         metadataLabel.lineBreakMode = .byTruncatingTail
         metadataLabel.isSelectable = true
         retryButton.target = self
@@ -97,6 +104,20 @@ final class AgentErrorNoticeView: NSView {
         [titleLabel, statusLabel, messageLabel, metadataLabel, retryButton, copyButton].forEach(addSubview)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+        applyZoomMetrics()
+    }
+
+    /// Every construction-time metric, re-derived from the CURRENT context's
+    /// zoom. A recycled notice runs this again from `finishApply`.
+    private func applyZoomMetrics() {
+        let zoom = self.zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        titleLabel.font = NSFont.token(.title, zoom: zoom)
+        statusLabel.font = NSFont.token(.caption, zoom: zoom)
+        messageLabel.font = NSFont.token(.body, zoom: zoom)
+        metadataLabel.font = NSFont.token(.captionMono, zoom: zoom)
+        retryButton.applyZoom(zoom)
+        copyButton.applyZoom(zoom)
     }
 
     @available(*, unavailable)
@@ -154,35 +175,37 @@ final class AgentErrorNoticeView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = Self.horizontalInset
+        let zoom = self.zoom
+        let inset = Self.horizontalInset(zoom: zoom)
+        let headerHeight = Self.headerHeight(zoom: zoom)
         let statusWidth = statusLabel.isHidden
             ? 0
-            : min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
+            : min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(zoom.scaled(Space.s)), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
-            y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,
+            y: (headerHeight - statusLabel.intrinsicContentSize.height) / 2,
             width: statusWidth, height: statusLabel.intrinsicContentSize.height
         )
         titleLabel.frame = NSRect(
-            x: inset, y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
-            width: max(1, (statusLabel.isHidden ? bounds.width - inset : statusLabel.frame.minX) - inset - CGFloat(Space.m)),
+            x: inset, y: (headerHeight - titleLabel.intrinsicContentSize.height) / 2,
+            width: max(1, (statusLabel.isHidden ? bounds.width - inset : statusLabel.frame.minX) - inset - CGFloat(zoom.scaled(Space.m))),
             height: titleLabel.intrinsicContentSize.height
         )
-        let messageHeight = Self.textHeight(messageLabel.stringValue, width: bounds.width, role: .body, lines: 5)
-        messageLabel.frame = NSRect(x: inset, y: Self.headerHeight, width: max(1, bounds.width - inset * 2), height: messageHeight)
+        let messageHeight = Self.textHeight(messageLabel.stringValue, width: bounds.width, role: .body, lines: 5, zoom: zoom)
+        messageLabel.frame = NSRect(x: inset, y: headerHeight, width: max(1, bounds.width - inset * 2), height: messageHeight)
         var y = messageLabel.frame.maxY
         if !metadataLabel.isHidden {
-            y += CGFloat(Space.s)
+            y += CGFloat(zoom.scaled(Space.s))
             metadataLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: metadataLabel.intrinsicContentSize.height)
             y = metadataLabel.frame.maxY
         }
         let buttons = [retryButton, copyButton].filter { !$0.isHidden }
         guard !buttons.isEmpty else { return }
-        y += CGFloat(Space.m)
-        let gap = CGFloat(Space.s)
+        y += CGFloat(zoom.scaled(Space.m))
+        let gap = CGFloat(zoom.scaled(Space.s))
         let width = max(1, (bounds.width - inset * 2 - gap * CGFloat(buttons.count - 1)) / CGFloat(buttons.count))
         for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight)
+            button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight(zoom: zoom))
         }
     }
 
@@ -225,14 +248,16 @@ final class AgentErrorNoticeView: NSView {
     }
 
     static func measuredHeight(
-        message: String, metadata: String?, actionCount: Int, width: CGFloat
+        message: String, metadata: String?, actionCount: Int, width: CGFloat,
+        zoom: AgentPageZoom = .default
     ) -> CGFloat {
-        var height = headerHeight + textHeight(message, width: width, role: .body, lines: 5)
+        var height = headerHeight(zoom: zoom)
+            + textHeight(message, width: width, role: .body, lines: 5, zoom: zoom)
         if let metadata, !metadata.isEmpty {
-            height += CGFloat(Space.s + Metrics.lineHeight(for: .caption))
+            height += CGFloat(zoom.scaled(Space.s) + zoom.lineHeight(for: .caption))
         }
-        if actionCount > 0 { height += CGFloat(Space.m) + actionHeight }
-        return height + bottomInset
+        if actionCount > 0 { height += CGFloat(zoom.scaled(Space.m)) + actionHeight(zoom: zoom) }
+        return height + bottomInset(zoom: zoom)
     }
 
     private func beginApply(blockID: AgentNodeID, context: AgentRenderContext) {
@@ -244,6 +269,7 @@ final class AgentErrorNoticeView: NSView {
     private func finishApply(blockID: AgentNodeID) {
         identifier = NSUserInterfaceItemIdentifier("agent.\(kind.rawValue).\(blockID.rawValue)")
         updateAccessibility()
+        applyZoomMetrics()
         applyTokens()
         needsLayout = true
     }
@@ -266,13 +292,14 @@ final class AgentErrorNoticeView: NSView {
     }
 
     private static func textHeight(
-        _ value: String, width: CGFloat, role: TextRole, lines: Int
+        _ value: String, width: CGFloat, role: TextRole, lines: Int,
+        zoom: AgentPageZoom = .default
     ) -> CGFloat {
         let rect = (value as NSString).boundingRect(
-            with: NSSize(width: max(1, width - horizontalInset * 2), height: .greatestFiniteMagnitude),
+            with: NSSize(width: max(1, width - horizontalInset(zoom: zoom) * 2), height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(role)]
+            attributes: [.font: NSFont.token(role, zoom: zoom)]
         )
-        return max(CGFloat(Metrics.lineHeight(for: role)), min(ceil(rect.height), CGFloat(Metrics.lineHeight(for: role) * Double(lines))))
+        return max(CGFloat(zoom.lineHeight(for: role)), min(ceil(rect.height), CGFloat(zoom.lineHeight(for: role) * Double(lines))))
     }
 }

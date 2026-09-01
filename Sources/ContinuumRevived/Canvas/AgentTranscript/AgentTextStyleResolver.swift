@@ -32,9 +32,11 @@ enum AgentTextStyleResolver {
         theme: TokenTheme,
         tokens: AgentRenderTokens = .transcript,
         textRole: TextRole = .body,
-        style: AgentProseTextStyle = .plain
+        style: AgentProseTextStyle = .plain,
+        zoom: AgentPageZoom = .default
     ) -> NSAttributedString {
-        resolve(runs, theme: theme, tokens: tokens, textRole: textRole, style: style).attributedString
+        resolve(runs, theme: theme, tokens: tokens, textRole: textRole, style: style, zoom: zoom)
+            .attributedString
     }
 
     /// Serializes exactly the selected visible UTF-16 range while retaining any
@@ -52,13 +54,14 @@ enum AgentTextStyleResolver {
         theme: TokenTheme,
         tokens: AgentRenderTokens = .transcript,
         textRole: TextRole = .body,
-        style: AgentProseTextStyle = .plain
+        style: AgentProseTextStyle = .plain,
+        zoom: AgentPageZoom = .default
     ) -> Result {
         let output = NSMutableAttributedString()
         var links: [LinkRange] = []
         var markdown = ""
         append(runs, marks: Marks(), theme: theme, tokens: tokens, textRole: textRole, style: style,
-               output: output, links: &links, markdown: &markdown)
+               zoom: zoom, output: output, links: &links, markdown: &markdown)
         // Applied once over the finished string rather than per run: a paragraph
         // style is a property of the paragraph, and setting it per appended run
         // would let a row with mixed emphasis wrap differently from a plain one.
@@ -77,6 +80,7 @@ enum AgentTextStyleResolver {
         tokens: AgentRenderTokens,
         textRole: TextRole,
         style: AgentProseTextStyle,
+        zoom: AgentPageZoom,
         output: NSMutableAttributedString,
         links: inout [LinkRange],
         markdown: inout String
@@ -84,32 +88,32 @@ enum AgentTextStyleResolver {
         for run in runs {
             switch run {
             case let .text(text):
-                appendText(text, marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, output: output)
+                appendText(text, marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, zoom: zoom, output: output)
                 markdown += escapeMarkdown(text)
             case let .code(text):
                 var nested = marks
                 nested.code = true
-                appendText(text, marks: nested, theme: theme, tokens: tokens, textRole: textRole, style: style, output: output)
+                appendText(text, marks: nested, theme: theme, tokens: tokens, textRole: textRole, style: style, zoom: zoom, output: output)
                 markdown += "`" + text.replacingOccurrences(of: "`", with: "\\`") + "`"
             case let .emphasis(children):
                 var nested = marks
                 nested.emphasis = true
                 markdown += "*"
                 append(children, marks: nested, theme: theme, tokens: tokens, textRole: textRole, style: style,
-                       output: output, links: &links, markdown: &markdown)
+                       zoom: zoom, output: output, links: &links, markdown: &markdown)
                 markdown += "*"
             case let .strong(children):
                 var nested = marks
                 nested.strong = true
                 markdown += "**"
                 append(children, marks: nested, theme: theme, tokens: tokens, textRole: textRole, style: style,
-                       output: output, links: &links, markdown: &markdown)
+                       zoom: zoom, output: output, links: &links, markdown: &markdown)
                 markdown += "**"
             case let .link(destination, title, children):
                 let start = output.length
                 var labelMarkdown = ""
                 append(children, marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style,
-                       output: output, links: &links, markdown: &labelMarkdown)
+                       zoom: zoom, output: output, links: &links, markdown: &labelMarkdown)
                 let range = NSRange(location: start, length: output.length - start)
                 let disposition = AgentLinkPolicy.disposition(for: destination)
                 if range.length > 0 {
@@ -128,10 +132,10 @@ enum AgentTextStyleResolver {
                 if let title { markdown += " \"\(title.replacingOccurrences(of: "\"", with: "\\\""))\"" }
                 markdown += ")"
             case .softBreak:
-                appendText(" ", marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, output: output)
+                appendText(" ", marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, zoom: zoom, output: output)
                 markdown += "\n"
             case .hardBreak:
-                appendText("\n", marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, output: output)
+                appendText("\n", marks: marks, theme: theme, tokens: tokens, textRole: textRole, style: style, zoom: zoom, output: output)
                 markdown += "  \n"
             }
         }
@@ -201,9 +205,10 @@ enum AgentTextStyleResolver {
         tokens: AgentRenderTokens,
         textRole: TextRole,
         style: AgentProseTextStyle,
+        zoom: AgentPageZoom,
         output: NSMutableAttributedString
     ) {
-        var font = NSFont.token(marks.code ? .bodyMono : textRole)
+        var font = NSFont.token(marks.code ? .bodyMono : textRole, zoom: zoom)
         var traits: NSFontTraitMask = []
         if marks.strong || style.bold { traits.insert(.boldFontMask) }
         if marks.emphasis { traits.insert(.italicFontMask) }

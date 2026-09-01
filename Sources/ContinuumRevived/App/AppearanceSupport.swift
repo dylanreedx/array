@@ -125,11 +125,40 @@ extension NSFont {
     /// mono roles to different faces would smuggle a second axis into the scale
     /// that `TextStyle` does not carry.
     static func token(_ role: TextRole) -> NSFont {
+        token(role, zoom: .default)
+    }
+
+    /// WS5: the same role at a managed-agent tile's page zoom.
+    ///
+    /// The zoom moves the SIZE only. Weight and face are semantic properties of
+    /// the role, so a zoomed `bodyMono` is still mono at the same weight — a
+    /// page zoom that changed either would be restyling, not scaling.
+    static func token(_ role: TextRole, zoom: AgentPageZoom) -> NSFont {
         let style = Typography.style(for: role)
         let weight = NSFont.Weight(style.weight)
+        let size = CGFloat(zoom.fontSize(for: role))
         return style.monospaced
-            ? .monospacedSystemFont(ofSize: style.size, weight: weight)
-            : .systemFont(ofSize: style.size, weight: weight)
+            ? .monospacedSystemFont(ofSize: size, weight: weight)
+            : .systemFont(ofSize: size, weight: weight)
+    }
+}
+
+extension AgentPageZoomModifier {
+    /// WS5: the significant modifiers of an AppKit event.
+    ///
+    /// `deviceIndependentFlagsMask` first, then Caps Lock, Function and the
+    /// numeric-pad bit are dropped: AppKit sets those independently of what the
+    /// user pressed, and a routing policy that treated them as "an unknown
+    /// modifier" would refuse every zoom chord typed with Caps Lock on, or every
+    /// chord on a keyboard whose hyphen lives on the numeric pad.
+    static func set(from flags: NSEvent.ModifierFlags) -> Set<AgentPageZoomModifier> {
+        let significant = flags.intersection(.deviceIndependentFlagsMask)
+        var result: Set<AgentPageZoomModifier> = []
+        if significant.contains(.command) { result.insert(.command) }
+        if significant.contains(.shift) { result.insert(.shift) }
+        if significant.contains(.option) { result.insert(.option) }
+        if significant.contains(.control) { result.insert(.control) }
+        return result
     }
 }
 
@@ -137,6 +166,11 @@ extension NSEdgeInsets {
     /// An `Inset` token as AppKit insets — what `NSStackView.edgeInsets` wants.
     init(_ token: EdgeInsetsToken) {
         self.init(top: token.top, left: token.left, bottom: token.bottom, right: token.right)
+    }
+
+    /// WS5: the same token at a managed-agent tile's page zoom.
+    init(_ token: EdgeInsetsToken, zoom: AgentPageZoom) {
+        self.init(zoom.scaled(token))
     }
 }
 

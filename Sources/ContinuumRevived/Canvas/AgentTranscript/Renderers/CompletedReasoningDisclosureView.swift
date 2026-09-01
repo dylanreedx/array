@@ -34,6 +34,18 @@ final class CompletedReasoningDisclosureView: NSView {
     static let bodyBottomInset = CGFloat(Space.m)
     static let bodyBlockSpacing = CGFloat(Space.m)
 
+    // WS5: the same metrics at a tile's page zoom. The zero-argument properties
+    // above remain the 100% values the rhythm checks and probes read.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xl + Space.xs)) }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func bodyTopSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func bodyLeadingInset(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Space.l)) + CGFloat(zoom.scaled(Space.xxl)) + CGFloat(zoom.scaled(Space.s))
+            + CGFloat(zoom.scaled(Space.xxl)) + CGFloat(zoom.scaled(Space.m))
+    }
+    static func bodyBottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func bodyBlockSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+
     private(set) var disclosureButton = AgentDisclosureButton(frame: .zero)
     /// Reasoning rows reserve the SAME icon column tool rows do, so every row's
     /// text starts on one x. Without it a thought sat 32pt left of the searches
@@ -52,6 +64,10 @@ final class CompletedReasoningDisclosureView: NSView {
     private let measurementCache = AgentBlockMeasurementCache()
     private var bodyHostsByBlockID: [AgentNodeID: AgentBlockHostView] = [:]
 
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled row re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setAccessibilityElement(true)
@@ -61,7 +77,6 @@ final class CompletedReasoningDisclosureView: NSView {
         disclosureButton.target = self
         disclosureButton.action = #selector(toggleDisclosure(_:))
 
-        titleLabel.font = NSFont.token(.label)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityElement(false)
 
@@ -74,6 +89,13 @@ final class CompletedReasoningDisclosureView: NSView {
         addSubview(iconView)
         addSubview(titleLabel)
         addSubview(bodyContainer)
+        applyZoomMetrics()
+    }
+
+    /// Every construction-time metric, re-derived from the CURRENT context's
+    /// zoom. A recycled row runs this again from `apply`.
+    private func applyZoomMetrics() {
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
     }
 
     @available(*, unavailable)
@@ -105,7 +127,8 @@ final class CompletedReasoningDisclosureView: NSView {
         isHidden = false
         isExpanded = presentation.isExpanded
         titleLabel.stringValue = presentation.title
-        disclosureButton.apply(expanded: isExpanded, title: presentation.title)
+        applyZoomMetrics()
+        disclosureButton.apply(expanded: isExpanded, title: presentation.title, zoom: zoom)
         identifier = NSUserInterfaceItemIdentifier("agent.completedReasoning.\(presentation.entryID.rawValue)")
         if isExpanded || !bodyHosts.isEmpty {
             reconcileBody(for: presentation.bodyBlocks, context: context)
@@ -134,35 +157,38 @@ final class CompletedReasoningDisclosureView: NSView {
     override func layout() {
         super.layout()
         qaLayoutPassCount += 1
-        let inset = Self.horizontalInset
-        let buttonSide = CGFloat(Space.xxl)
+        let zoom = self.zoom
+        let inset = Self.horizontalInset(zoom: zoom)
+        let headerHeight = Self.headerHeight(zoom: zoom)
+        let buttonSide = CGFloat(zoom.scaled(Space.xxl))
         disclosureButton.frame = NSRect(
             x: inset,
-            y: (Self.headerHeight - buttonSide) / 2,
+            y: (headerHeight - buttonSide) / 2,
             width: buttonSide,
             height: buttonSide
         )
         iconView.frame = NSRect(
-            x: inset + buttonSide + CGFloat(Space.s),
-            y: (Self.headerHeight - buttonSide) / 2,
+            x: inset + buttonSide + CGFloat(zoom.scaled(Space.s)),
+            y: (headerHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
-        let titleX = iconView.frame.maxX + CGFloat(Space.m)
+        let titleX = iconView.frame.maxX + CGFloat(zoom.scaled(Space.m))
         titleLabel.frame = NSRect(
             x: titleX,
-            y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
+            y: (headerHeight - titleLabel.intrinsicContentSize.height) / 2,
             width: max(1, bounds.maxX - inset - titleX),
             height: titleLabel.intrinsicContentSize.height
         )
 
-        let bodyY = Self.headerHeight + Self.bodyTopSpacing
-        let bodyWidth = max(1, bounds.width - Self.bodyLeadingInset - inset)
+        let bodyY = headerHeight + Self.bodyTopSpacing(zoom: zoom)
+        let bodyLeadingInset = Self.bodyLeadingInset(zoom: zoom)
+        let bodyWidth = max(1, bounds.width - bodyLeadingInset - inset)
         qaLastBodyWidth = bodyWidth
         bodyContainer.frame = NSRect(
-            x: Self.bodyLeadingInset,
+            x: bodyLeadingInset,
             y: bodyY,
             width: bodyWidth,
-            height: max(0, bounds.height - bodyY - Self.bodyBottomInset)
+            height: max(0, bounds.height - bodyY - Self.bodyBottomInset(zoom: zoom))
         )
         // Heights come from the shared measurement cache (a hit in steady
         // state) and are written to the constraints only when they actually
@@ -234,15 +260,16 @@ final class CompletedReasoningDisclosureView: NSView {
             authoritativeDuration: authoritativeDuration,
             actions: context.actions
         ) else { return 0 }
-        guard presentation.isExpanded else { return headerHeight }
-        let bodyWidth = max(1, width - bodyLeadingInset - horizontalInset)
+        let zoom = context.pageZoom
+        guard presentation.isExpanded else { return headerHeight(zoom: zoom) }
+        let bodyWidth = max(1, width - bodyLeadingInset(zoom: zoom) - horizontalInset(zoom: zoom))
         let measurementHost = AgentBlockHostView(registry: registry)
         let bodyHeight = presentation.bodyBlocks.enumerated().reduce(CGFloat.zero) { total, pair in
             total
                 + measuredBlockHeight(for: pair.element, host: measurementHost, width: bodyWidth, context: context)
-                + (pair.offset + 1 < presentation.bodyBlocks.count ? bodyBlockSpacing : 0)
+                + (pair.offset + 1 < presentation.bodyBlocks.count ? bodyBlockSpacing(zoom: zoom) : 0)
         }
-        return ceil(headerHeight + bodyTopSpacing + bodyHeight + bodyBottomInset)
+        return ceil(headerHeight(zoom: zoom) + bodyTopSpacing(zoom: zoom) + bodyHeight + bodyBottomInset(zoom: zoom))
     }
 
     @objc private func toggleDisclosure(_ sender: Any?) {
@@ -252,7 +279,7 @@ final class CompletedReasoningDisclosureView: NSView {
             reconcileBody(for: presentation.bodyBlocks, context: context)
         }
         context.actions.setExpanded(isExpanded, blockID: presentation.entryID)
-        disclosureButton.apply(expanded: isExpanded, title: presentation.title)
+        disclosureButton.apply(expanded: isExpanded, title: presentation.title, zoom: zoom)
         bodyContainer.isHidden = !isExpanded
         // The reasoning body fades up into the room the remeasure makes for it.
         if isExpanded { AgentTranscriptMotion.fadeIn(bodyContainer, duration: AgentTranscriptMotion.emphasis) }
@@ -303,7 +330,7 @@ final class CompletedReasoningDisclosureView: NSView {
                 host.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
                 previous.map {
                     host.topAnchor.constraint(
-                        equalTo: $0.bottomAnchor, constant: Self.bodyBlockSpacing)
+                        equalTo: $0.bottomAnchor, constant: Self.bodyBlockSpacing(zoom: context.pageZoom))
                 } ?? host.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
             ])
             previous = host
@@ -322,7 +349,7 @@ final class CompletedReasoningDisclosureView: NSView {
         isExpanded = false
         isHidden = true
         titleLabel.stringValue = CompletedReasoningDisclosurePresenter.baseTitle
-        disclosureButton.apply(expanded: false, title: CompletedReasoningDisclosurePresenter.baseTitle)
+        disclosureButton.apply(expanded: false, title: CompletedReasoningDisclosurePresenter.baseTitle, zoom: zoom)
         NSLayoutConstraint.deactivate(bodyStackConstraints + bodyHeightConstraints)
         bodyStackConstraints = []
         bodyHeightConstraints = []
@@ -349,7 +376,7 @@ final class CompletedReasoningDisclosureView: NSView {
         setAccessibilityLabel(presentation.accessibilityLabel)
         setAccessibilityValue(isExpanded ? "Expanded" : "Collapsed")
         setAccessibilityHelp("Completed reasoning disclosure")
-        disclosureButton.apply(expanded: isExpanded, title: presentation.title)
+        disclosureButton.apply(expanded: isExpanded, title: presentation.title, zoom: zoom)
         let children: [NSView] = isExpanded ? [disclosureButton] + bodyHosts.map { $0 as NSView } : [disclosureButton]
         setAccessibilityChildren(children)
     }
@@ -361,6 +388,6 @@ final class CompletedReasoningDisclosureView: NSView {
         context: AgentRenderContext
     ) -> CGFloat {
         (try? host.measuredHeight(for: block, entryRole: .reasoning, width: width, context: context))
-            ?? AgentUnknownBlockView.height
+            ?? AgentUnknownBlockView.height(zoom: context.pageZoom)
     }
 }

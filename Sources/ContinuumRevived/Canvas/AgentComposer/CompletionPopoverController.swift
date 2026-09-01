@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// Provider-driven completion presentation. The controller owns exactly one
@@ -14,6 +15,15 @@ final class CompletionPopoverController {
     private var insertionInProgress = false
     private var completionsByChoiceID: [String: AgentCompletion] = [:]
     private(set) var qaRequestStartCount = 0
+
+    /// WS5: the page zoom the completion panel draws at.
+    ///
+    /// The panel is NOT a subview of the tile, so `AgentPageZoomScaling.apply`
+    /// never reaches it. The composer that owns this controller forwards its own
+    /// rung here; the controller passes it straight to the popover it hosts.
+    var pageZoom: AgentPageZoom = .default {
+        didSet { popover.pageZoom = pageZoom }
+    }
 
     var isPresented: Bool { popover.isPresented }
 
@@ -152,6 +162,7 @@ final class CompletionPopoverController {
                 popoverLayout = .commands(CommandPopoverLayout())
                 listPresentation = .commands
             }
+            self.popover.pageZoom = self.pageZoom
             self.popover.present(
                 items: items,
                 selectedID: nil,
