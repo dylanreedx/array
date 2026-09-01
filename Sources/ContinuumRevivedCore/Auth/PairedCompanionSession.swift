@@ -78,7 +78,13 @@ public struct KeychainPairedCompanionSessionStore: PairedCompanionSessionStoring
     private let service: String
     private let account: String
 
-    public init(service: String = "dev.arrayapp.macos.companion-session", account: String = "paired-session") {
+    /// The default service is channel-scoped (`AppChannel.keychainService`) so a
+    /// dev build cannot read or disturb the prod paired session. Callers that
+    /// pass an explicit service — the checks do — are unaffected.
+    public init(
+        service: String = AppChannel.liveKeychainService("dev.arrayapp.macos.companion-session"),
+        account: String = "paired-session"
+    ) {
         self.service = service
         self.account = account
     }
