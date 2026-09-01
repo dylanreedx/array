@@ -2508,6 +2508,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 qaRejectedGeometrySnapshots += 1
                 return false
             }
+            if exactOrigin != value.origin { qaCorrectedSnapshotOrigins += 1 }
             var corrected = value
             corrected.origin = exactOrigin
             corrected.size = ZoneSize(
@@ -2617,12 +2618,21 @@ final class CanvasNSView: NSView, TokenThemed {
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
 
+        // Record what actually landed. The origin correction above can install a
+        // geometry a few ULP from the requested one; persisting or replaying the
+        // REQUESTED geometry then leaves live state describing something no
+        // recorded snapshot matches, and `CanvasHistoryController.apply` guards
+        // on exact equality -- so the next undo silently wiped the whole stack.
+        let installed = captureGeometry(
+            tileIds: Set(snapshot.tiles.map(\.tileId)),
+            zoneIds: Set(snapshot.zones.map(\.zoneId)))
+        lastInstalledGeometry = installed
         if notifyCommit {
-            guard persistGeometrySnapshot(snapshot) else {
+            guard persistGeometrySnapshot(installed) else {
                 if let previous { _ = applyGeometrySnapshot(previous, notifyCommit: false) }
                 return false
             }
-            notifyGeometrySnapshotApplied(snapshot, previous: previous)
+            notifyGeometrySnapshotApplied(installed, previous: previous)
         }
         return true
     }
@@ -3082,6 +3092,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `applyGeometrySnapshot` backs undo/redo replay, so a silent abandon here
     /// drops a whole history step rather than one drag frame.
     var qaRejectedGeometrySnapshots = 0
+
+    /// The geometry `applyGeometrySnapshot` most recently installed, which is
+    /// not necessarily the geometry it was asked for: a zone origin may be
+    /// corrected so passive members keep exact world frames. Callers that record
+    /// history must register THIS, or the snapshot they hold stops describing
+    /// the canvas and `geometryMatches` fails on the next replay.
+    private(set) var lastInstalledGeometry: CanvasGeometrySnapshot?
+
+    /// QA: how many times a snapshot's zone origin was actually corrected. A
+    /// witness for the divergence must assert this INCREASED, or it proves
+    /// nothing about a path it never reached.
+    var qaCorrectedSnapshotOrigins = 0
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
     func qaActiveZoneResizeEdge(zoneId: UUID) -> ResizeEdge? {
         guard case let .resizingZone(target, edge, _) = zoneGesture,
@@ -8139,6 +8161,58 @@ final class CanvasNSView: NSView, TokenThemed {
             abs(unvettedLanded.y - unvettedTargetY)
                 <= 2 * Swift.max(abs(unvettedTargetY), abs(unvettedPlacement.origin.y)).ulp,
             "unvetted-origin tile must land within rounding of its solver target; got \(unvettedLanded.y) want \(unvettedTargetY)")
+
+        // UNDO-STACK INVALIDATION WITNESS. `applyGeometrySnapshot` may install a
+        // CORRECTED zone origin rather than the requested one. If the requested
+        // snapshot is what gets persisted and re-registered, live state then
+        // matches no recorded snapshot, and `CanvasHistoryController.apply`
+        // guards on exact equality -- so the next undo took `onInvalidated` and
+        // silently wiped the user's entire history.
+        //
+        // The trigger is a snapshot that names a zone but OMITS one of its
+        // members: the omitted member's world frame is derived from the CURRENT
+        // origin and mixed with the snapshot's origin, which is exactly the case
+        // a correction exists to resolve.
+        let divergePlacement = layer.placement
+        let divergeMemberWorld = CanvasEngine.worldFrame(tile: layer.tiles[0], in: divergePlacement)
+        var divergeZone = divergePlacement
+        divergeZone.origin = ZonePoint(
+            x: divergePlacement.origin.x, y: -77.08333333333336)
+        let divergeRequested = CanvasGeometrySnapshot(
+            tiles: [CanvasTileGeometry(
+                tileId: layerFirstId,
+                frame: TileFrame(x: divergeMemberWorld.x, y: 60.25,
+                                 width: divergeMemberWorld.width, height: divergeMemberWorld.height),
+                zoneId: layerZoneId)],
+            zones: [CanvasZoneGeometry(
+                zoneId: layerZoneId, origin: divergeZone.origin, size: divergeZone.size)])
+        _ = layerCanvas.applyGeometrySnapshot(divergeRequested, notifyCommit: false)
+        guard let divergeInstalled = layerCanvas.lastInstalledGeometry else {
+            throw CheckError.failed("applyGeometrySnapshot did not report the geometry it installed")
+        }
+        try expect(divergeInstalled != divergeRequested,
+                   "undo-divergence witness must actually trigger an origin correction; installed == requested")
+        try expect(!layerCanvas.geometryMatches(divergeRequested),
+                   "the REQUESTED snapshot must not describe the canvas -- that divergence is the bug")
+        try expect(layerCanvas.geometryMatches(divergeInstalled),
+                   "the geometry reported as installed must describe the canvas exactly, or history invalidates on the next replay")
+
+        // ...and end to end through the real history controller. A geometry edit
+        // scoped to the ZONE ONLY records no member tiles, so replaying it mixes
+        // the snapshot's origin with member worlds derived from the current one --
+        // the mixed case that provokes a correction. If the controller re-registers
+        // the REQUESTED geometry, the next replay's exact-equality guard fails,
+        // `onInvalidated` fires, and redo silently does nothing.
+        // NOT WITNESSED: the controller half. `CanvasHistoryController.apply` now
+        // re-registers the geometry that actually landed, but no fixture here
+        // reaches an origin correction during undo/redo replay -- a scenario
+        // built for it was asserted with `qaCorrectedSnapshotOrigins` and proved
+        // it never entered the correction path, so it was removed rather than
+        // left passing vacuously. The seam above covers `applyGeometrySnapshot`;
+        // the replay path needs a fixture that can provoke a correction.
+        layer.placement = passiveRebaseBaselinePlacement
+        layerCanvas.upsertZoneLayer(layer)
+        layerCanvas.layoutAllTiles()
 
         layer.tiles = passiveRebaseBaselineTiles
         layer.placement = passiveRebaseBaselinePlacement
