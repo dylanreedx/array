@@ -517,6 +517,7 @@ run_app_check .build/debug/Array --zindex-relaunch-hit-test-check
 run_app_check .build/debug/Array --single-zone-compat-check
 run_app_check .build/debug/Array --unified-model-boot-check
 run_app_check .build/debug/Array --workspace-boot-persistence-check
+run_app_check .build/debug/Array --workspace-restart-fault-check
 run_app_check .build/debug/Array --zone-move-unified-check
 run_app_check .build/debug/Array --multi-zone-render-check
 run_app_check .build/debug/Array --zone-create-gesture-check

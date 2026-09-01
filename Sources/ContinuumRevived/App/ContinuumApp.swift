@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentUI
 import CoreImage
+import CryptoKit
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import Foundation
@@ -2293,6 +2294,37 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-restart-fault-check") {
+            do {
+                let artifact = try AppDelegate.runWorkspaceRestartFaultSelfCheck()
+                print("ContinuumRevivedWorkspaceRestartFaultChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--workspace-restart-fault-child-check") {
+            do {
+                try AppDelegate.runWorkspaceRestartFaultChild()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--atomic-writer-lock-child") {
+            do {
+                try AppDelegate.runAtomicWriterLockChild()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-move-unified-check") {
             do {
                 _ = NSApplication.shared
@@ -3924,6 +3956,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
     private var suppressTerminateOnWindowCloseForQA = false
+    /// Set only by the vetoable NSWindowDelegate close decision. `willClose`
+    /// consumes it so a successful save is acknowledged exactly once.
+    private weak var closeFlushAcknowledgedWindow: NSWindow?
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
     private lazy var agentTranscriptStore = AgentTranscriptStore(
@@ -14508,6 +14543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasState: CanvasState,
         installsGlobalEventMonitors: Bool = true
     ) throws {
+        workspaceRuntime?.lifecycleObserver?(.processLaunched)
         var persistedWorkspaceRegistry: Registry?
         if let runtime = workspaceRuntime, let registryStore {
             let loaded = try registryStore.loadOrEmpty()
@@ -14582,8 +14618,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let runtime = workspaceRuntime, let appRegistry = persistedWorkspaceRegistry {
             canvasView.retireFlatCompatibilityScene()
             try runtime.install(into: canvasView, appRegistry: appRegistry)
+            runtime.lifecycleObserver?(.firstHydrationPhase)
+            runtime.lifecycleSnapshotObserver?(.firstHydrationPhase, canvasView)
             configureActiveControllerRuntimeCallbacks()
             runtime.refreshDocumentRelationships()
+            runtime.lifecycleObserver?(.bootMounted)
+            if runtime.lifecycleSnapshotObserver != nil { canvasView.layoutSubtreeIfNeeded() }
+            runtime.lifecycleObserver?(.settled)
+            runtime.lifecycleSnapshotObserver?(.settled, canvasView)
             return
         }
 
@@ -15052,6 +15094,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         Task { await agentComposerDraftStore.flushAll() }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        do {
+            try workspaceRuntime?.flushMountedWorkspaceState()
+            closeFlushAcknowledgedWindow = window
+            return .terminateNow
+        } catch {
+            fputs("workspace termination flush failed; termination cancelled\n", stderr)
+            return .terminateCancel
+        }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
@@ -15068,7 +15121,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshAgentSurfaces()
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        do {
+            try workspaceRuntime?.flushMountedWorkspaceState()
+            closeFlushAcknowledgedWindow = sender
+            return true
+        } catch {
+            closeFlushAcknowledgedWindow = nil
+            fputs("workspace close flush failed; close cancelled\n", stderr)
+            return false
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        // Direct/programmatic notification paths which did not ask the delegate
+        // first retain the old save-before-teardown guarantee. A real user close
+        // was already flushed in windowShouldClose and must not save twice.
+        let closingWindow = notification.object as? NSWindow
+        guard closingWindow == nil || closingWindow === window else { return }
+        if closeFlushAcknowledgedWindow !== closingWindow || closingWindow == nil {
+            do {
+                try workspaceRuntime?.flushMountedWorkspaceState()
+            } catch {
+                fputs("workspace close flush failed before teardown\n", stderr)
+                return
+            }
+        }
+        closeFlushAcknowledgedWindow = nil
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
             hotkeyMonitor = nil
@@ -23936,6 +24016,1149 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     // MARK: - Persistence Crash-Safe Check
 
+    static func runAtomicWriterLockChild() throws {
+        func argument(_ name: String) throws -> String {
+            guard let index = CommandLine.arguments.firstIndex(of: name),
+                  CommandLine.arguments.indices.contains(index + 1) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return CommandLine.arguments[index + 1]
+        }
+        let root = URL(fileURLWithPath: try argument("--support"), isDirectory: true)
+        let workspaceId = UUID(uuidString: try argument("--workspace-id"))!
+        let fixedBackupDate: Date? = {
+            if let epoch = try? argument("--backup-epoch"), let seconds = Double(epoch) {
+                return Date(timeIntervalSince1970: seconds)
+            }
+            return CommandLine.arguments.contains("--fixed-backup-date")
+                ? Date(timeIntervalSince1970: 1_900_000_000.123) : nil
+        }()
+        let generation = Int((try? argument("--generation")) ?? "177") ?? 177
+        let document = WorkspaceDocument(
+            viewport: .init(x: Double(generation), y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+            retainedBackups: 4, backupDate: { fixedBackupDate ?? Date() }).save(document)
+    }
+
+    static func runWorkspaceRestartFaultChild() throws {
+        enum Failure: Error { case message(String) }
+        func argument(_ name: String) throws -> String {
+            guard let i = CommandLine.arguments.firstIndex(of: name), CommandLine.arguments.indices.contains(i + 1) else {
+                throw Failure.message("missing \(name)")
+            }
+            return CommandLine.arguments[i + 1]
+        }
+        let mode = try argument("--mode")
+        let output = URL(fileURLWithPath: try argument("--output"))
+        let closeOffset = UInt32(try argument("--close-offset-ms")) ?? 0
+        guard let supportPath = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] else {
+            throw Failure.message("missing isolated app support")
+        }
+        let support = URL(fileURLWithPath: supportPath, isDirectory: true)
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let wa = UUID(uuidString: "71000000-0000-0000-0000-000000000001")!
+        let wb = UUID(uuidString: "71000000-0000-0000-0000-000000000002")!
+        let pa = UUID(uuidString: "71000000-0000-0000-0000-000000000011")!
+        let pb = UUID(uuidString: "71000000-0000-0000-0000-000000000012")!
+        let za1 = UUID(uuidString: "71000000-0000-0000-0000-000000000021")!
+        let za2 = UUID(uuidString: "71000000-0000-0000-0000-000000000022")!
+        let ambient = UUID(uuidString: "71000000-0000-0000-0000-000000000023")!
+        let zb = UUID(uuidString: "71000000-0000-0000-0000-000000000024")!
+        let ta1 = UUID(uuidString: "71000000-0000-0000-0000-000000000031")!
+        let ta2 = UUID(uuidString: "71000000-0000-0000-0000-000000000032")!
+        let tb = UUID(uuidString: "71000000-0000-0000-0000-000000000033")!
+        let ambientTile = UUID(uuidString: "71000000-0000-0000-0000-000000000034")!
+        let paRoot = support.appendingPathComponent("project-a", isDirectory: true)
+        let pbRoot = support.appendingPathComponent("project-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: paRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pbRoot, withIntermediateDirectories: true)
+        let storeA = ProjectStore(projectRoot: paRoot)
+        let storeB = ProjectStore(projectRoot: pbRoot)
+        let projectA = Project(id: pa, name: "A", rootPath: paRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
+        let projectB = Project(id: pb, name: "B", rootPath: pbRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
+        func tile(_ id: UUID, zone: UUID, frame: TileFrame, rank: Int) -> Tile {
+            var value = Tile(id: id, kind: .note, title: id == ta1 ? "focused" : "retained",
+                frame: frame, zPosition: .fromLegacyRank(rank), runtimeRef: nil,
+                metadata: TileMetadata(noteId: id))
+            value.zoneId = zone
+            return value
+        }
+        func zone(_ id: UUID, project: UUID?, x: Double, y: Double, name: String, rank: Int) -> ZonePlacement {
+            var value = ZonePlacement(zoneId: id, projectId: project, origin: ZonePoint(x: x, y: y),
+                size: ZoneSize(width: 901.5, height: 607.25), color: "mint", collapsed: false,
+                hydrationPolicy: .automatic, name: name)
+            value.zPosition = .fromLegacyRank(rank)
+            return value
+        }
+        let registryStore = RegistryStore(applicationSupportDirectory: support)
+        if mode == "seed-mutate-close" {
+            try storeA.saveProject(projectA)
+            try storeB.saveProject(projectB)
+            try storeA.saveCanvas(CanvasState(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [
+                tile(ta1, zone: za1, frame: .init(x: -801.75, y: 509.5, width: 237.25, height: 141.5), rank: 3),
+                tile(ta2, zone: za2, frame: .init(x: 1875.125, y: -615.75, width: 311.5, height: 177.25), rank: 7)
+            ], groups: [], lastActiveTileId: ta1))
+            try storeB.saveCanvas(CanvasState(viewport: .init(x: 0, y: 0, zoom: 1), tiles: [
+                tile(tb, zone: zb, frame: .init(x: 410.5, y: 312.25, width: 260.5, height: 160.75), rank: 4)
+            ], groups: [], lastActiveTileId: tb))
+            let ambientTileValue = tile(ambientTile, zone: ambient,
+                frame: .init(x: -2100.25, y: -299.75, width: 280.5, height: 155.25), rank: 8)
+            // The persisted nonzero camera deliberately fits the primary zone
+            // and hydrated tile inside the 1600×1000 evidence canvas.
+            let docA = WorkspaceDocument(viewport: .init(x: -1050.5, y: 200.25, zoom: 0.8), zones: [
+                zone(za1, project: pa, x: -913.25, y: 407.75, name: "A primary", rank: 3),
+                zone(za2, project: pa, x: 1800.5, y: -722.125, name: "A lower tier", rank: 7),
+                zone(ambient, project: nil, x: -2200.75, y: -400.5, name: "Ambient", rank: 9)
+            ], zoneZOrder: [za1, za2, ambient], lastActiveZoneId: za1, ambientTiles: [ambientTileValue])
+            let docB = WorkspaceDocument(viewport: .init(x: 900.25, y: -311.5, zoom: 0.875), zones: [
+                zone(zb, project: pb, x: 300.25, y: 201.5, name: "B", rank: 4)
+            ], zoneZOrder: [zb], lastActiveZoneId: zb)
+            try WorkspaceStore(workspaceId: wa, applicationSupportDirectory: support).save(docA)
+            try WorkspaceStore(workspaceId: wb, applicationSupportDirectory: support).save(docB)
+            var registry = Registry.empty()
+            registry.lastActiveWorkspaceId = wa
+            registry.workspaces = [
+                WorkspaceEntry(id: wa, name: "A", projectIds: [pa], createdAt: now, updatedAt: now),
+                WorkspaceEntry(id: wb, name: "B", projectIds: [pb], createdAt: now, updatedAt: now)
+            ]
+            registry.projects = [
+                ProjectEntry(id: pa, name: "A", rootPath: paRoot.path, workspaceId: wa, lastOpenedAt: now, pinned: false, missing: false),
+                ProjectEntry(id: pb, name: "B", rootPath: pbRoot.path, workspaceId: wb, lastOpenedAt: now, pinned: false, missing: false)
+            ]
+            try registryStore.save(registry)
+        }
+        let registry = try registryStore.loadOrEmpty()
+        let initialId = registry.lastActiveWorkspaceId ?? wa
+        let initialDocument = try WorkspaceStore(workspaceId: initialId, applicationSupportDirectory: support).load()
+        let browser = BrowserEngineContext()
+        defer { browser.shutdown() }
+        let delegate = AppDelegate()
+        delegate.suppressTerminateOnWindowCloseForQA = true
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true) { id in
+            if id == pa { return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA) }
+            if id == pb { return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB) }
+            throw Failure.message("unexpected project \(id)")
+        }
+        let bootProject = initialId == wa ? projectA : projectB
+        let bootStore: ProjectStore = initialId == wa ? storeA : storeB
+        let runtime = WorkspaceRuntime(boot: try zoneRegistry.acquire(projectId: bootProject.id), workspaceId: initialId,
+            document: initialDocument, registry: zoneRegistry, focusBroker: delegate.qaFocusBroker,
+            registryStore: registryStore, ghostty: nil, browserEngine: browser)
+        var readiness: [String] = []
+        runtime.lifecycleObserver = { event in readiness.append(String(describing: event)) }
+        let bootState = try bootStore.loadCanvas()
+        let canvas = CanvasNSView(canvasState: bootState, activeZone: initialDocument.zones.first,
+            zoneRenderModels: initialDocument.zones.map { .init(placement: $0, displayName: $0.name) }, showsZoneChrome: true)
+        canvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        // Deterministic offscreen host for first-frame evidence. It is never
+        // ordered onto the physical desktop; the explicit bitmap below locks 2×.
+        let renderWindow = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+            backing: .buffered, defer: false)
+        renderWindow.isReleasedWhenClosed = false
+        renderWindow.contentView = canvas
+        delegate.qaPrepareForBootMountCheck(canvas: canvas, browserEngine: browser, runtime: runtime, registryStore: registryStore)
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browser, projectStore: bootStore, project: bootProject)
+        func snapshot(_ phase: String) throws -> [String: Any] {
+            let zones = canvas.renderedZonesInZOrder.map { z in ["id": z.zoneId.uuidString, "project": z.projectId?.uuidString ?? "ambient",
+                "x": z.origin.x, "y": z.origin.y, "w": z.size.width, "h": z.size.height, "z": String(describing: z.zPosition)] as [String: Any] }
+            var tiles: [[String: Any]] = []
+            let mountedProjectIds = Set(runtime.document.zones.compactMap(\.projectId))
+            for (projectId, projectStore) in [(pa, storeA), (pb, storeB)] where mountedProjectIds.contains(projectId) {
+                var seen = Set<UUID>()
+                for t in canvas.tilesInWorldFrames(forProjectId: projectId) {
+                    seen.insert(t.id)
+                    tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": "live"])
+                }
+                if let persisted = try projectStore.tryLoadCanvas() {
+                    for t in persisted.tiles where !seen.contains(t.id) {
+                        // The fixture declares exactly one intentionally
+                        // unhydrated lower-tier member. Every other automatic,
+                        // mounted project member is required to come from the
+                        // live CanvasNSView; retained state may not conceal a
+                        // failed layer install.
+                        guard projectId == pa, t.id == ta2, t.zoneId == za2 else {
+                            throw Failure.message("hydrated project tile missing from live canvas: \(t.id)")
+                        }
+                        tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                            "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": "retained"])
+                    }
+                }
+            }
+            for ambientZone in runtime.document.zones where ambientZone.projectId == nil {
+                let retained = runtime.document.tiles(forZone: ambientZone.zoneId)
+                let observed: [Tile]
+                let source: String
+                if let live = canvas.tilesInWorldFrames(forZoneId: ambientZone.zoneId) {
+                    let liveIds = Set(live.map(\.id))
+                    let retainedIds = Set(retained.map(\.id))
+                    guard liveIds == retainedIds else {
+                        throw Failure.message("installed ambient layer tile inventory diverged from document")
+                    }
+                    let retainedById = Dictionary(uniqueKeysWithValues: retained.map { ($0.id, $0) })
+                    guard live.allSatisfy({ retainedById[$0.id] == $0 }) else {
+                        throw Failure.message("installed ambient layer world geometry diverged from document")
+                    }
+                    observed = live
+                    source = "live"
+                } else {
+                    observed = retained
+                    source = "retained"
+                }
+                for t in observed {
+                    tiles.append(["id": t.id.uuidString, "zone": t.zoneId?.uuidString ?? "", "x": t.frame.x, "y": t.frame.y,
+                        "w": t.frame.width, "h": t.frame.height, "z": String(describing: t.zPosition), "source": source])
+                }
+            }
+            let focus: String
+            switch delegate.qaFocusBroker.activeSurface { case let .tile(id): focus = "tile:\(id.uuidString)"; case .canvas: focus = "canvas"; default: focus = "none" }
+            let observedActiveZone = canvas.armedZoneId?.uuidString ?? ""
+            let documentActiveZone = runtime.document.lastActiveZoneId?.uuidString ?? ""
+            guard observedActiveZone == documentActiveZone else {
+                throw Failure.message("canvas armed zone diverged from workspace document")
+            }
+            return ["phase": phase, "workspace": runtime.workspaceId.uuidString, "zones": zones, "tiles": tiles.sorted { ($0["id"] as! String) < ($1["id"] as! String) },
+                "viewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+                "activeZone": observedActiveZone, "documentActiveZone": documentActiveZone, "focus": focus]
+        }
+        var firstHydrated: [String: Any]?
+        var bootSettled: [String: Any]?
+        var visualEvidence: [[String: Any]] = []
+        var visualCaptureFailures: [String] = []
+        var visualCaptureSequence = 0
+        func captureVisual(_ phase: String, appearanceName: NSAppearance.Name, slug: String) {
+            guard ProcessInfo.processInfo.environment["CONTINUUM_WS2_CAPTURE_VISUALS"] == "1" else { return }
+            visualCaptureSequence += 1
+            let sequence = visualCaptureSequence
+            let prior = canvas.appearance
+            let priorViewport = canvas.viewport
+            defer {
+                canvas.setViewport(priorViewport)
+                canvas.appearance = prior
+                canvas.layoutSubtreeIfNeeded()
+            }
+            canvas.appearance = NSAppearance(named: appearanceName)
+
+            // The persisted camera deliberately frames only the primary zone, so
+            // capturing through it renders one zone against empty canvas and
+            // proves nothing about topology. Fit the whole seeded scene for the
+            // image, then restore the document camera in `defer` so every
+            // viewport assertion still reads the persisted value. This fit is
+            // evidence framing, never persisted state - it is recorded as
+            // `cameraFit` so the image can never be misread as the saved camera.
+            guard var fitted = canvas.fitAllToViewport() else {
+                visualCaptureFailures.append("\(phase)-\(slug): no fitted camera for seeded scene")
+                return
+            }
+            let visibleWorldWidth = canvas.bounds.width / fitted.zoom
+            let visibleWorldHeight = canvas.bounds.height / fitted.zoom
+            let centerWorldX = fitted.x + visibleWorldWidth / 2
+            let centerWorldY = fitted.y + visibleWorldHeight / 2
+            let margined = fitted.zoom * 0.88
+            fitted = CanvasViewport(
+                x: centerWorldX - canvas.bounds.width / margined / 2,
+                y: centerWorldY - canvas.bounds.height / margined / 2,
+                zoom: margined)
+            canvas.setViewport(fitted)
+            canvas.layoutSubtreeIfNeeded()
+
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3200, pixelsHigh: 2000,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+                visualCaptureFailures.append("\(phase)-\(slug): bitmap allocation")
+                return
+            }
+            rep.size = NSSize(width: 1600, height: 1000)
+            canvas.cacheDisplay(in: canvas.bounds, to: rep)
+
+            // Every seeded zone must be COMPLETELY inside the raster with a real
+            // margin. A rectangle that merely intersects the bounds is the
+            // clipped-corner false-green this check was rejected for twice.
+            let margin: CGFloat = 8
+            let safe = canvas.bounds.insetBy(dx: margin, dy: margin)
+            var expectedRects: [[String: Any]] = []
+            var missing: [String] = []
+            var clipped: [String] = []
+            func requireInside(_ label: String, _ rect: CGRect?, minWidth: CGFloat, minHeight: CGFloat) {
+                guard let rect else { missing.append(label); return }
+                expectedRects.append(["label": label, "x": rect.minX, "y": rect.minY,
+                    "width": rect.width, "height": rect.height, "insideSafeArea": safe.contains(rect)])
+                if !safe.contains(rect) || rect.width < minWidth || rect.height < minHeight {
+                    clipped.append("\(label)=\(rect)")
+                }
+            }
+            requireInside("zone:A-primary", canvas.qaZoneChromeRectInCanvas(for: za1), minWidth: 120, minHeight: 90)
+            requireInside("zone:A-lower-tier", canvas.qaZoneChromeRectInCanvas(for: za2), minWidth: 120, minHeight: 90)
+            requireInside("zone:ambient", canvas.qaZoneChromeRectInCanvas(for: ambient), minWidth: 120, minHeight: 90)
+            requireInside("tile:focused", canvas.qaTileRectInCanvas(for: ta1), minWidth: 24, minHeight: 16)
+            // Tiles in zones below the live hydration tier legitimately have no
+            // view; assert only the ones that are actually installed.
+            for (label, id) in [("tile:retained-lower", ta2), ("tile:ambient", ambientTile)] {
+                if let rect = canvas.qaTileRectInCanvas(for: id) {
+                    requireInside(label, rect, minWidth: 24, minHeight: 16)
+                }
+            }
+            guard missing.isEmpty, clipped.isEmpty else {
+                visualCaptureFailures.append(
+                    "\(phase)-\(slug): scene not completely framed missing=\(missing) clipped=\(clipped) bounds=\(canvas.bounds) camera=\(fitted)")
+                return
+            }
+
+            let path = output.deletingLastPathComponent().appendingPathComponent("\(phase)-\(slug).png")
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                visualCaptureFailures.append("\(phase)-\(slug): PNG encoding")
+                return
+            }
+            do { try png.write(to: path, options: .atomic) }
+            catch {
+                visualCaptureFailures.append("\(phase)-\(slug): PNG write \(error)")
+                return
+            }
+            guard let bitmapData = rep.bitmapData else {
+                visualCaptureFailures.append("\(phase)-\(slug): missing bitmap bytes")
+                return
+            }
+            let byteCount = rep.bytesPerRow * rep.pixelsHigh
+            let bytes = UnsafeBufferPointer(start: bitmapData, count: byteCount)
+            let minimum = bytes.min() ?? 0
+            let maximum = bytes.max() ?? 0
+
+            // cacheDisplay writes row 0 at the top of the rep. Canvas points are
+            // only top-left-origin when the view is flipped, so convert rather
+            // than assume - a silently mirrored probe reads background as body.
+            func rgba(at point: CGPoint) -> [Int] {
+                let px = max(0, min(rep.pixelsWide - 1, Int(point.x * 2)))
+                let canvasY = canvas.isFlipped ? point.y : (canvas.bounds.height - point.y)
+                let py = max(0, min(rep.pixelsHigh - 1, Int(canvasY * 2)))
+                let offset = py * rep.bytesPerRow + px * 4
+                return (0..<4).map { Int(bitmapData[offset + $0]) }
+            }
+            let primaryZone = canvas.qaZoneChromeRectInCanvas(for: za1)!
+            let lowerZone = canvas.qaZoneChromeRectInCanvas(for: za2)!
+            let focusedTile = canvas.qaTileRectInCanvas(for: ta1)!
+            let probes: [String: [Int]] = [
+                "background": rgba(at: CGPoint(x: safe.minX + 2, y: safe.minY + 2)),
+                "primaryZoneBorder": rgba(at: CGPoint(x: primaryZone.minX + 1, y: primaryZone.midY)),
+                "primaryZoneHeader": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.maxY - 6)),
+                "primaryZoneBody": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.midY)),
+                "lowerZoneBody": rgba(at: CGPoint(x: lowerZone.midX, y: lowerZone.midY)),
+                "tileBorder": rgba(at: CGPoint(x: focusedTile.minX + 1, y: focusedTile.midY)),
+                "tileBody": rgba(at: CGPoint(x: focusedTile.midX, y: focusedTile.midY))]
+            let distinctProbeColors = Set(probes.values.map { $0.map(String.init).joined(separator: ",") })
+            if minimum == maximum || distinctProbeColors.count < 4 {
+                visualCaptureFailures.append(
+                    "\(phase)-\(slug): semantic raster probes lack background/border/body transitions probes=\(probes)")
+                return
+            }
+            visualEvidence.append(["phase": phase, "appearance": slug, "path": path.path,
+                "captureSequence": sequence, "lifecycleEvent": phase,
+                "points": ["width": canvas.bounds.width, "height": canvas.bounds.height],
+                "pixels": ["width": rep.pixelsWide, "height": rep.pixelsHigh],
+                "backingScale": 2.0, "pixelMinimum": minimum, "pixelMaximum": maximum,
+                "cameraFit": ["x": fitted.x, "y": fitted.y, "zoom": fitted.zoom,
+                    "note": "evidence framing only; document camera restored after capture"],
+                "documentCamera": ["x": priorViewport.x, "y": priorViewport.y, "zoom": priorViewport.zoom],
+                "expectedRects": expectedRects, "safeArea": ["x": safe.minX, "y": safe.minY,
+                    "width": safe.width, "height": safe.height],
+                "semanticProbes": probes])
+        }
+        runtime.lifecycleSnapshotObserver = { event, _ in
+            if event == .firstHydrationPhase {
+                firstHydrated = try? snapshot("first-hydrated")
+                captureVisual("first-hydrated", appearanceName: .aqua, slug: "aqua")
+                captureVisual("first-hydrated", appearanceName: .darkAqua, slug: "dark-aqua")
+            }
+            if event == .settled {
+                bootSettled = try? snapshot("settled")
+                captureVisual("settled", appearanceName: .aqua, slug: "aqua")
+                captureVisual("settled", appearanceName: .darkAqua, slug: "dark-aqua")
+            }
+        }
+        try delegate.mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: spawner, projectStore: bootStore,
+            canvasState: bootState, installsGlobalEventMonitors: false)
+        canvas.layoutSubtreeIfNeeded()
+        if ProcessInfo.processInfo.environment["CONTINUUM_WS2_CAPTURE_VISUALS"] == "1" {
+            guard visualCaptureFailures.isEmpty, visualEvidence.count == 4 else {
+                throw Failure.message("offscreen visual capture failed: \(visualCaptureFailures), count=\(visualEvidence.count)")
+            }
+        }
+        guard let firstHydrated, let bootSettled else { throw Failure.message("production hydration observations missing") }
+        let firstViewport = firstHydrated["viewport"] as! [String: Double]
+        guard firstViewport["x"] == initialDocument.viewport.x,
+              firstViewport["y"] == initialDocument.viewport.y,
+              firstViewport["zoom"] == initialDocument.viewport.zoom else {
+            throw Failure.message("first hydration used project viewport instead of workspace viewport")
+        }
+        var switchSnapshots: [[String: Any]] = []
+        var settled = try snapshot("settled")
+        var mountedSceneContinuity = false
+        var closeWitness: [String: Bool] = [:]
+        var closeChronology: [String: Any] = [:]
+        if mode == "seed-mutate-close" {
+            // Keep switch coverage separate from the timed close witness. The
+            // close clock starts only after returning to A and driving the live
+            // mutation path below.
+            switchSnapshots.append(try snapshot("A-before-switch"))
+            try runtime.switchWorkspace(to: wb)
+            switchSnapshots.append(try snapshot("B-after-switch"))
+            try runtime.switchWorkspace(to: wa)
+            switchSnapshots.append(try snapshot("A-after-return-before-mutation"))
+
+            // Window construction/order is fixture setup, not close latency.
+            // In particular the 0 ms leg has no work between the end of the
+            // pending mutation and its first and only performClose request.
+            let closeWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            closeWindow.isReleasedWhenClosed = false
+            closeWindow.delegate = delegate
+            delegate.window = closeWindow
+            closeWindow.orderFront(nil)
+
+            let mutationStartTick = DispatchTime.now().uptimeNanoseconds
+            var placement = canvas.zonePlacement(for: za1)!
+            placement.origin = .init(x: -1001.375, y: 333.625)
+            placement.size = .init(width: 1111.75, height: 777.125)
+            canvas.setZonePlacement(placement)
+            // Geometry persistence is intentionally synchronous in production.
+            canvas.onZoneMoved?(placement)
+            canvas.setViewport(.init(x: -255.125, y: 144.875, zoom: 1.625))
+            // Change arming via the real ambient path. This schedules the
+            // runtime's long-lived arming controller and remains pending until
+            // close drains it; viewport is captured by the departing write.
+            _ = runtime.setActiveZone(za2, reason: .click)
+            _ = delegate.qaFocusBroker.requestFocus(.tile(ta1), reason: .userClick)
+            delegate.canvasDidChange(canvas)
+            let scheduledGeneration = runtime.qaArmingScheduledGeneration
+            let acknowledgedBeforeClose = runtime.qaArmingAcknowledgedGeneration
+            guard scheduledGeneration > acknowledgedBeforeClose else {
+                throw Failure.message("ambient arming save was not pending at mutation end")
+            }
+            settled = try snapshot("settled")
+            switchSnapshots.append(settled.merging(["phase":"A-after-return-and-mutation"]) { _, new in new })
+            // All fixture inspection is complete before this boundary. From
+            // mutationEndTick onward the only operations are the requested
+            // delay, the adjacent request timestamp, and performClose itself.
+            let mutationEndTick = DispatchTime.now().uptimeNanoseconds
+            if closeOffset > 0 { usleep(closeOffset * 1_000) }
+            // Timestamp the actual request, immediately adjacent to it.
+            let closeRequestTick = DispatchTime.now().uptimeNanoseconds
+            closeWindow.performClose(nil)
+            let acknowledgedGeneration = runtime.qaArmingAcknowledgedGeneration
+            let closeCompleted = delegate.workspaceRuntime == nil && !closeWindow.isVisible
+            guard closeCompleted else {
+                throw Failure.message("timed close did not tear down exactly once")
+            }
+            closeWitness = ["timedCloseCompleted": closeCompleted]
+            let elapsedMS = Double(closeRequestTick - mutationEndTick) / 1_000_000
+            closeChronology = ["phase":"close-chronology", "requestedOffsetMs":closeOffset,
+                "mutationStartTick":mutationStartTick, "mutationEndTick":mutationEndTick,
+                "closeRequestTick":closeRequestTick, "observedElapsedMs":elapsedMS,
+                "scheduledGeneration":scheduledGeneration,
+                "acknowledgedGenerationAtMutationEnd":acknowledgedBeforeClose,
+                "acknowledgedGenerationBeforeTeardown":acknowledgedGeneration,
+                "departingWriteScheduledGeneration":runtime.qaLastScheduledWorkspaceGeneration,
+                "departingWriteAcknowledgedGeneration":runtime.qaLastAcknowledgedWorkspaceGeneration]
+        } else if mode == "failure-continuity" {
+            // Fault continuity is intentionally untimed. It must never pollute
+            // the mutation-to-close clock exercised by seed-mutate-close.
+            func normalized(_ value: [String: Any]) throws -> Data {
+                var copy = value
+                copy["phase"] = nil
+                return try JSONSerialization.data(withJSONObject: copy, options: [.sortedKeys])
+            }
+            let beforeFailedSwitch = try snapshot("before-failed-switch")
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected departing save") }
+            var switchFailed = false
+            do { try runtime.switchWorkspace(to: wb) } catch { switchFailed = true }
+            runtime._workspaceDocumentSaver = nil
+            let afterFailedSwitch = try snapshot("after-failed-switch")
+            let beforeFailedSwitchCanonical = try normalized(beforeFailedSwitch)
+            let afterFailedSwitchCanonical = try normalized(afterFailedSwitch)
+            mountedSceneContinuity = switchFailed
+                && beforeFailedSwitchCanonical == afterFailedSwitchCanonical
+            guard mountedSceneContinuity else {
+                throw Failure.message("failed switch changed mounted scene")
+            }
+
+            let faultWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            faultWindow.isReleasedWhenClosed = false
+            faultWindow.delegate = delegate
+            delegate.window = faultWindow
+            faultWindow.orderFront(nil)
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected close save") }
+            faultWindow.performClose(nil)
+            let failedCloseVetoed = delegate.workspaceRuntime === runtime
+                && faultWindow.delegate === delegate && faultWindow.isVisible
+            runtime._workspaceDocumentSaver = nil
+            faultWindow.performClose(nil)
+            let recoveredCloseCompleted = delegate.workspaceRuntime == nil && !faultWindow.isVisible
+            guard failedCloseVetoed && recoveredCloseCompleted else {
+                throw Failure.message("failed close continuity/recovery mismatch")
+            }
+            closeWitness = ["failedCloseVetoed": failedCloseVetoed,
+                "recoveredCloseCompleted": recoveredCloseCompleted]
+        }
+        let payload: [String: Any] = ["mode": mode, "closeOffsetMs": closeOffset, "readiness": readiness,
+            "firstHydrated": firstHydrated, "bootSettled": bootSettled, "settled": settled,
+            "mountedSceneContinuityOnSaveFailure": mountedSceneContinuity, "switchSnapshots": switchSnapshots,
+            "closeWitness": closeWitness, "closeChronology": closeChronology,
+            "visualEvidence": visualEvidence]
+        try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: output)
+        print("WS2_ACK \(mode) \(output.path)")
+    }
+
+    static func runWorkspaceRestartFaultSelfCheck() throws -> URL {
+        struct RestartFaultError: Error { let message: String }
+        func expect(_ value: @autoclosure () -> Bool, _ message: String) throws {
+            if !value() { throw RestartFaultError(message: message) }
+        }
+        let fm = FileManager.default
+        guard let supportPath = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"], !supportPath.isEmpty else {
+            throw RestartFaultError(message: "CONTINUUM_APP_SUPPORT must name the isolated root")
+        }
+        let support = URL(fileURLWithPath: supportPath, isDirectory: true)
+            .appendingPathComponent("workspace-restart-fault", isDirectory: true)
+        try? fm.removeItem(at: support)
+        try fm.createDirectory(at: support, withIntermediateDirectories: true)
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        func sha256(_ url: URL) throws -> String { SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined() }
+        var repetitions: [[String: Any]] = []
+        let repetitionCount = Int(ProcessInfo.processInfo.environment["CONTINUUM_WS2_REPETITIONS"] ?? "20") ?? 20
+        let closeOffsets = ProcessInfo.processInfo.environment["CONTINUUM_WS2_CLOSE_OFFSETS"]
+            .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [0, 10, 50, 190]
+        try expect(closeOffsets == [0, 10, 50, 190],
+            "restart/fault offset inventory must be exactly 0/10/50/190, got \(closeOffsets)")
+        for closeOffset in closeOffsets {
+          for iteration in 1...repetitionCount {
+            let root = support.appendingPathComponent("close-\(closeOffset)-iteration-\(iteration)", isDirectory: true)
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            var childResults: [[String: Any]] = []
+            for mode in ["seed-mutate-close", "failure-continuity", "cold-reload"] {
+                let output = root.appendingPathComponent("\(mode).json")
+                let log = root.appendingPathComponent("\(mode).log")
+                let process = Process(); process.executableURL = executable
+                process.arguments = ["--workspace-restart-fault-child-check", "--mode", mode, "--output", output.path,
+                    "--close-offset-ms", String(closeOffset)]
+                var environment = ProcessInfo.processInfo.environment; environment["CONTINUUM_APP_SUPPORT"] = root.path
+                if closeOffset == 0 && iteration == 1 && mode == "seed-mutate-close" {
+                    environment["CONTINUUM_WS2_CAPTURE_VISUALS"] = "1"
+                }
+                process.environment = environment
+                fm.createFile(atPath: log.path, contents: nil)
+                let handle = try FileHandle(forWritingTo: log); process.standardOutput = handle; process.standardError = handle
+                try process.run()
+                let deadline = Date().addingTimeInterval(20)
+                while process.isRunning && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+                if process.isRunning { process.terminate(); process.waitUntilExit() }
+                try handle.close()
+                try expect(process.terminationStatus == 0, "iteration \(iteration) \(mode) child exit \(process.terminationStatus)")
+                let object = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as! [String: Any]
+                let readiness = object["readiness"] as! [String]
+                try expect(readiness.contains(where: { $0.contains("bootMounted") }), "missing boot-mounted acknowledgement")
+                try expect(readiness.contains(where: { $0.contains("firstHydrationPhase") }), "missing first-hydration acknowledgement")
+                try expect(readiness.contains(where: { $0.contains("settled") }), "missing settled acknowledgement")
+                childResults.append(["args": process.arguments ?? [], "exit": process.terminationStatus, "log": log.path,
+                    "output": output.path, "outputSha256": try sha256(output), "readiness": readiness])
+            }
+            let seedObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("seed-mutate-close.json"))) as! [String: Any]
+            let failureObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("failure-continuity.json"))) as! [String: Any]
+            let reloadObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("cold-reload.json"))) as! [String: Any]
+            try expect(failureObject["mountedSceneContinuityOnSaveFailure"] as? Bool == true,
+                "iteration \(iteration) failed switch changed mounted scene")
+            let faultClose = failureObject["closeWitness"] as! [String: Bool]
+            try expect(faultClose["failedCloseVetoed"] == true && faultClose["recoveredCloseCompleted"] == true,
+                "iteration \(iteration) failed-close continuity/recovery mismatch")
+            let chronology = seedObject["closeChronology"] as! [String: Any]
+            let elapsed = chronology["observedElapsedMs"] as! Double
+            let scheduled = chronology["scheduledGeneration"] as! UInt64
+            let acknowledgedAtMutation = chronology["acknowledgedGenerationAtMutationEnd"] as! UInt64
+            let acknowledged = chronology["acknowledgedGenerationBeforeTeardown"] as! UInt64
+            try expect(elapsed >= Double(closeOffset) && elapsed <= Double(closeOffset + 50),
+                "iteration \(iteration) close chronology outside tolerance requested=\(closeOffset) observed=\(elapsed)")
+            try expect(scheduled > acknowledgedAtMutation && acknowledged == scheduled,
+                "iteration \(iteration) close did not acknowledge scheduled generation \(scheduled)/\(acknowledged)")
+            try expect(chronology["departingWriteScheduledGeneration"] as! UInt64
+                    == chronology["departingWriteAcknowledgedGeneration"] as! UInt64,
+                "iteration \(iteration) final departing-document generation was not acknowledged")
+            let switched = seedObject["switchSnapshots"] as! [[String: Any]]
+            func canonical(_ value: [String: Any]) throws -> Data {
+                var normalized = value; normalized["phase"] = nil
+                return try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys])
+            }
+            try expect(switched.count == 4, "iteration \(iteration) missing A-B-A plus mutated snapshots")
+            let beforeSwitchCanonical = try canonical(switched[0])
+            let afterReturnCanonical = try canonical(switched[2])
+            try expect(beforeSwitchCanonical == afterReturnCanonical, "iteration \(iteration) A-before/A-after canonical diff")
+            let returned = switched.last!
+            let cold = reloadObject["settled"] as! [String: Any]
+            let lhsData = try canonical(returned)
+            let rhsData = try canonical(cold)
+            try expect(lhsData == rhsData, "iteration \(iteration) canonical cold diff")
+            let expectedAIds = Set(["71000000-0000-0000-0000-000000000031", "71000000-0000-0000-0000-000000000032", "71000000-0000-0000-0000-000000000034"])
+            for phase in [switched[0], switched[2], cold] {
+                let phaseTiles = phase["tiles"] as! [[String: Any]]
+                let ids = Set(phaseTiles.map { $0["id"] as! String })
+                try expect(ids == expectedAIds, "iteration \(iteration) phase tile inventory mismatch: \(ids)")
+                let sourceByID = Dictionary(uniqueKeysWithValues: phaseTiles.map {
+                    ($0["id"] as! String, $0["source"] as! String)
+                })
+                try expect(sourceByID["71000000-0000-0000-0000-000000000031"] == "live",
+                    "iteration \(iteration) hydrated sentinel was not observed live")
+                try expect(sourceByID["71000000-0000-0000-0000-000000000032"] == "retained",
+                    "iteration \(iteration) lower-tier retained contract changed")
+                try expect(sourceByID["71000000-0000-0000-0000-000000000034"] == "live",
+                    "iteration \(iteration) hydrated ambient tile was not observed live")
+            }
+            repetitions.append(["iteration": iteration, "closeOffsetMs": closeOffset,
+                "children": childResults, "canonicalDiff": [], "inputSha256": try sha256(root.appendingPathComponent("seed-mutate-close.json")),
+                "outputSha256": try sha256(root.appendingPathComponent("cold-reload.json"))])
+          }
+        }
+
+        let zoneId = UUID(uuidString: "72000000-0000-0000-0000-000000000002")!
+        let valid = WorkspaceDocument(
+            viewport: CanvasViewport(x: 1, y: 2, zoom: 1.25), zones: [], lastActiveZoneId: nil)
+        let replacement = WorkspaceDocument(
+            viewport: CanvasViewport(x: -9, y: 12, zoom: 2.5), zones: [], lastActiveZoneId: zoneId)
+        var faultResults: [[String: Any]] = []
+        for seam in ["temporary-write", "temp-fsync", "temp-close", "atomic-rename",
+                     "directory-open", "directory-fsync", "directory-close", "permission-denied"] {
+            let root = support.appendingPathComponent("fault-\(seam)", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000001")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let before = try Data(contentsOf: normal.layout.canvasFile)
+            final class Counter: @unchecked Sendable { var opens = 0; var closes = 0 }
+            let counter = Counter()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                counter.opens += 1
+                if seam == "directory-open" && counter.opens == 2 { errno = EIO; return -1 }
+                return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if seam == "temp-fsync" && counter.opens == 1 { errno = EIO; return -1 }
+                if seam == "directory-fsync" && counter.opens == 2 { errno = EIO; return -1 }
+                return Darwin.fsync(fd)
+            }, close: { fd in
+                counter.closes += 1
+                if seam == "temp-close" && counter.opens == 1 { errno = EINTR; _ = Darwin.close(fd); return -1 }
+                if seam == "directory-close" && counter.opens == 2 { errno = EIO; _ = Darwin.close(fd); return -1 }
+                return Darwin.close(fd)
+            })
+            let files = AtomicWriterFileOperations(writeTemporary: { data, url in
+                if seam == "temporary-write" { throw POSIXError(.EIO) }
+                if seam == "permission-denied" { throw POSIXError(.EACCES) }
+                try data.write(to: url)
+            }, replace: { source, destination in
+                if seam == "atomic-rename" { throw POSIXError(.EXDEV) }
+                if Darwin.rename(source.path, destination.path) != 0 { throw POSIXError(.EIO) }
+            })
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors, fileOperations: files)
+            let controller = WorkspaceDocumentSaveController(store: store)
+            let generation = controller.scheduleZoneLayoutSave(replacement)
+            var failed = false
+            do { try controller.flush(through: generation) } catch { failed = true }
+            let after = try Data(contentsOf: normal.layout.canvasFile)
+            if seam == "directory-close" {
+                let closeFaultReload = try normal.load()
+                try expect(!failed && controller.state == .saved,
+                    "post-commit directory close noise became save failure")
+                try expect(controller.acknowledgedGeneration == generation,
+                    "post-commit directory close did not acknowledge generation")
+                try expect(after != before && closeFaultReload == replacement,
+                    "post-commit directory close did not preserve cold truth")
+            } else {
+                try expect(failed, "\(seam) did not fail")
+                try expect(controller.state == .saveFailed, "\(seam) did not expose failure")
+                try expect(controller.acknowledgedGeneration < generation, "\(seam) falsely advanced generation")
+                try expect(after == before, "\(seam) changed prior bytes")
+                _ = try normal.load()
+            }
+            if seam == "temp-close" {
+                try expect(counter.closes == 1, "close EINTR was blindly retried")
+            }
+            let recovery = WorkspaceDocumentSaveController(store: normal)
+            let recoveryGeneration = recovery.scheduleZoneLayoutSave(replacement)
+            try recovery.flush(through: recoveryGeneration)
+            let recoveredDocument = try normal.load()
+            try expect(recoveredDocument == replacement, "\(seam) recovery failed")
+            faultResults.append(["seam": seam, "priorValidByteExact": seam != "directory-close",
+                "loadable": true, "successReported": seam == "directory-close", "failedGeneration": generation,
+                "acknowledgedGeneration": controller.acknowledgedGeneration, "recoveryGeneration": recoveryGeneration,
+                "mountedSceneUnchanged": seam != "directory-close", "closeAttempts": counter.closes])
+        }
+
+        // Post-commit maintenance is not part of acknowledgement. Enumeration
+        // failure after the target rename+directory fsync must leave the new
+        // durable document loadable and report success.
+        do {
+            let root = support.appendingPathComponent("fault-post-commit-prune", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000011")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let files = AtomicWriterFileOperations(listDirectory: { _ in throw POSIXError(.EIO) })
+            let maintenanceFault = WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: root, fileOperations: files)
+            try maintenanceFault.save(replacement)
+            let maintenanceReload = try normal.load()
+            try expect(maintenanceReload == replacement, "post-commit prune failure changed acknowledgement truth")
+            faultResults.append(["seam": "post-commit-prune", "successReported": true,
+                "loadable": true, "maintenanceFailureNonTransactional": true])
+        }
+
+        // True cross-process writers have independent in-memory counters. Pin
+        // their backup clocks to the same millisecond and prove a collision is
+        // preserved with distinct history and newest-first retention ordering.
+        do {
+            let root = support.appendingPathComponent("fault-backup-name-collision", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000017")!
+            let fixedDate = Date(timeIntervalSince1970: 1_900_000_000.123)
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 4, backupDate: { fixedDate })
+            try store.save(valid)
+            try store.save(replacement) // process-local suffix 1
+            for childGeneration in [201, 202, 203] {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                process.arguments = ["--atomic-writer-lock-child", "--support", root.path,
+                    "--workspace-id", workspaceId.uuidString, "--fixed-backup-date",
+                    "--generation", String(childGeneration)]
+                try process.run(); process.waitUntilExit()
+                try expect(process.terminationStatus == 0, "backup collision child failed")
+            }
+            let backups = try FileManager.default.contentsOfDirectory(
+                at: store.layout.backupsDirectory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("array-backup-v2-") }
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            try expect(backups.count == 4, "same-timestamp backup collision lost or overwrote history")
+            let backupDocuments: [WorkspaceDocument] = try backups.map {
+                try JSONDecoder().decode(WorkspaceDocument.self, from: Data(contentsOf: $0))
+            }
+            try expect(backupDocuments.map(\.viewport.x) == [202, 201, -9, 1],
+                "same-timestamp backup retention/order was not newest-first and byte-distinct")
+            let collisionReload = try store.load()
+            try expect(collisionReload.viewport.x == 203,
+                "latest cross-process collision writer was not durable truth")
+            faultResults.append(["seam": "cross-process-same-timestamp-backups",
+                "successReported": true, "backupCount": backups.count,
+                "orderedViewportX": backupDocuments.map(\.viewport.x),
+                "existingBackupNeverOverwritten": true])
+        }
+
+        // Identical predecessor/candidate witness: T3 -> T1 -> T2 must order by
+        // durable on-disk generation, not timestamp. With retention two, corrupt
+        // primary D3 recovers D2, the newest prior generation.
+        do {
+            let root = support.appendingPathComponent("fault-backward-clock", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000018")!
+            let dates = [1_900_000_300.0, 1_900_000_100.0, 1_900_000_200.0]
+            let documents = [valid,
+                WorkspaceDocument(viewport: .init(x: 301, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil),
+                WorkspaceDocument(viewport: .init(x: 302, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil),
+                WorkspaceDocument(viewport: .init(x: 303, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil)]
+            try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 2).save(documents[0])
+            for index in 0..<3 {
+                let writer = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                    retainedBackups: 2, backupDate: { Date(timeIntervalSince1970: dates[index]) })
+                try writer.save(documents[index + 1])
+            }
+            let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
+            let names = try FileManager.default.contentsOfDirectory(atPath: layout.backupsDirectory.path).sorted()
+            try expect(names.count == 2 && names.contains { $0.contains("00000000000000000002") }
+                && names.contains { $0.contains("00000000000000000003") },
+                "backward clock did not retain exact generations 2 and 3")
+            try Data("corrupt".utf8).write(to: layout.canvasFile)
+            let recovered: WorkspaceDocument = try AtomicWriter(
+                backupsDirectory: layout.backupsDirectory, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated).read(at: layout.canvasFile)
+            try expect(recovered == documents[2], "backward clock recovery did not choose D2")
+            faultResults.append(["seam":"backward-clock-generations", "dates":dates,
+                "writeBytesX":[301,302,303], "retainedGenerations":[3,2],
+                "primaryBeforeCorruption":303, "recoveryChoice":302, "filenames":names])
+        }
+
+        // Legacy names remain behind all v2 generations, while malformed and
+        // similarly-prefixed targets are excluded exactly.
+        do {
+            let root = support.appendingPathComponent("fault-legacy-target-isolation", isDirectory: true)
+            let backups = root.appendingPathComponent("shared-backups", isDirectory: true)
+            try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+            let target = root.appendingPathComponent("canvas.prod.json")
+            let other = root.appendingPathComponent("canvas.prod.extra.json")
+            let dLegacy1 = WorkspaceDocument(viewport:.init(x:401,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let dLegacy2 = WorkspaceDocument(viewport:.init(x:402,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let encoder = JSONCodec.makeEncoder(prettyPrinted: true)
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("canvas.prod.2030-01-01T00-00-00.000Z.000001.json"))
+            try encoder.encode(dLegacy2).write(to: backups.appendingPathComponent("canvas.prod.2031-01-01T00-00-00.000Z.000002.json"))
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("canvas.prod.extra.2099-01-01T00-00-00.000Z.000999.json"))
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("array-backup-v2-00-malformed"))
+            let writer = AtomicWriter(backupsDirectory: backups, retainedBackups: 3,
+                backupDate: { Date(timeIntervalSince1970: 1_000) }, legacyBackupPolicy: .targetDedicated)
+            try encoder.encode(valid).write(to: target)
+            try writer.write(replacement, to: target)
+            try encoder.encode(valid).write(to: other)
+            try AtomicWriter(backupsDirectory: backups, retainedBackups: 3).write(dLegacy1, to: other)
+            try Data("corrupt".utf8).write(to: target)
+            let recovered: WorkspaceDocument = try writer.read(at: target)
+            try expect(recovered == valid, "new generation did not sort ahead of legacy corpus")
+            let targetRecovery: WorkspaceDocument = try AtomicWriter(backupsDirectory: backups).read(at: target)
+            try expect(targetRecovery == valid, "similarly-prefixed target entered recovery")
+            let legacyOnly = root.appendingPathComponent("archive.json")
+            try encoder.encode(dLegacy1).write(to: backups.appendingPathComponent("archive.2030-01-01T00-00-00.000Z.000001.json"))
+            try encoder.encode(dLegacy2).write(to: backups.appendingPathComponent("archive.2031-01-01T00-00-00.000Z.000002.json"))
+            try Data("corrupt".utf8).write(to: legacyOnly)
+            let legacyRecovered: WorkspaceDocument = try AtomicWriter(
+                backupsDirectory: backups, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated).read(at: legacyOnly)
+            try expect(legacyRecovered == dLegacy2, "legacy newest-first recovery changed")
+            try encoder.encode(valid).write(to: legacyOnly)
+            let legacyAger = AtomicWriter(backupsDirectory: backups, retainedBackups: 2,
+                legacyBackupPolicy: .targetDedicated)
+            try legacyAger.write(dLegacy1, to: legacyOnly)
+            try legacyAger.write(dLegacy2, to: legacyOnly)
+            let archiveEntries = try FileManager.default.contentsOfDirectory(atPath: backups.path)
+                .filter { $0.hasPrefix("archive.") }
+            try expect(archiveEntries.isEmpty, "legacy entries did not age out under normal retention")
+            faultResults.append(["seam":"legacy-and-target-isolation", "legacyRecoverable":true,
+                "newAheadOfLegacy":true, "legacyNewestChoice":402, "legacyAgedOut":true,
+                "dottedTargetExact":true, "malformedExcluded":true])
+        }
+
+        // Alternating extreme clock jumps cannot perturb generation retention.
+        do {
+            let root = support.appendingPathComponent("fault-alternating-clock", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000019")!
+            let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
+            let canonical = URL(fileURLWithPath: AtomicWriter.stablePrivatePrefix(
+                layout.canvasFile.deletingLastPathComponent().resolvingSymlinksInPath().path))
+                .appendingPathComponent(layout.canvasFile.lastPathComponent)
+            let identity = SHA256.hash(data: Data(canonical.path.utf8)).map { String(format:"%02x",$0) }.joined()
+            let prefix = "array-backup-v2-\(identity)-"
+            try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                retainedBackups: 3).save(valid)
+            let dates = [4_000_000_000.0, 10.0, 3_900_000_000.0, 20.0, 3_800_000_000.0, 30.0]
+            var states: [[String:Any]] = []
+            for (index, epoch) in dates.enumerated() {
+                let document = WorkspaceDocument(viewport:.init(x:Double(500 + index),y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+                try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                    retainedBackups: 3, backupDate: { Date(timeIntervalSince1970:epoch) }).save(document)
+                let names = try FileManager.default.contentsOfDirectory(atPath: layout.backupsDirectory.path).sorted()
+                let generations = names.compactMap { name -> Int? in
+                    guard name.hasPrefix(prefix) else { return nil }
+                    return Int(name.dropFirst(prefix.count).prefix(20))
+                }.sorted()
+                let expectedGenerations = Array(max(1, index - 1)...(index + 1))
+                try expect(generations == expectedGenerations,
+                    "alternating clock retained wrong generations \(generations), expected \(expectedGenerations); prefix=\(prefix) canonical=\(canonical.path) names=\(names)")
+                states.append(["write":index+1,"epoch":epoch,"retainedCount":names.count,
+                    "primaryX":500+index,"retainedGenerations":generations])
+            }
+            faultResults.append(["seam":"alternating-clock-retention", "states":states,
+                "retention":3, "generationAuthoritative":true])
+        }
+
+        // Generation overflow fails before replacement. Malformed tokens do not
+        // inflate the sequence; a committed primary remains exact.
+        do {
+            let root = support.appendingPathComponent("fault-generation-overflow", isDirectory: true)
+            let backups = root.appendingPathComponent("backups", isDirectory: true)
+            let target = root.appendingPathComponent("overflow.json")
+            try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+            try JSONCodec.makeEncoder(prettyPrinted:true).encode(valid).write(to: target)
+            let canonical = target.deletingLastPathComponent().standardizedFileURL
+                .resolvingSymlinksInPath().appendingPathComponent(target.lastPathComponent)
+            let identity = SHA256.hash(data: Data(canonical.path.utf8)).map { String(format:"%02x",$0) }.joined()
+            let malformed = [
+                "array-backup-v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z-junk",
+                "array-backup-v2-\(identity)-1844674407370955161-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-184467440737095516150-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-18446744073709551615-not-a-timestamp",
+                "array_backup_v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity.uppercased())-00000000000000000042-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2023-02-29T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-02-30T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-02-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-04-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-06-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-09-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-11-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-00-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-13-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-00T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-32T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T24-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-60-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-60.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-026-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-02026-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.00Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.0000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026_01_01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01t00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00:00:00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.000z"
+            ]
+            for name in malformed { try Data("junk".utf8).write(to: backups.appendingPathComponent(name)) }
+            try AtomicWriter(backupsDirectory: backups, retainedBackups: 4,
+                backupDate: { Date(timeIntervalSince1970: 1_000) }).write(replacement, to: target)
+            let generated = try FileManager.default.contentsOfDirectory(atPath: backups.path)
+                .first { $0.hasPrefix("array-backup-v2-\(identity)-00000000000000000001-") }!
+            let generatedBytes = Array(generated.utf8)
+            let maxName = String(decoding: generatedBytes.dropLast(45), as: UTF8.self)
+                + "18446744073709551615-2030-01-01T00-00-00.000Z"
+            try Data("sentinel".utf8).write(to: backups.appendingPathComponent(maxName))
+            try expect(FileManager.default.fileExists(atPath: backups.appendingPathComponent(maxName).path)
+                && maxName.contains(identity), "valid exact-ID max fixture was not constructed")
+            let overflowWriter = AtomicWriter(backupsDirectory: backups)
+            let validLeap = "array-backup-v2-\(identity)-00000000000000000042-2024-02-29T00-00-00.000Z"
+            try expect(overflowWriter.validBackupGeneration(named: validLeap, for: target) == 42,
+                "strict production parser rejected valid Gregorian leap day")
+            try expect(malformed.allSatisfy { overflowWriter.validBackupGeneration(named: $0, for: target) == nil },
+                "strict production parser accepted malformed identity/generation/calendar input")
+            try expect(overflowWriter.validBackupGeneration(named: maxName, for: target) == UInt64.max,
+                "production parser did not classify the derived valid-max fixture")
+            var overflowed = false
+            do { try overflowWriter.write(replacement, to: target) }
+            catch { overflowed = true }
+            let primary: WorkspaceDocument = try JSONCodec.makeDecoder().decode(
+                WorkspaceDocument.self, from: Data(contentsOf: target))
+            try expect(overflowed && primary == replacement,
+                "generation overflow did not fail closed overflowed=\(overflowed) primaryX=\(primary.viewport.x)")
+            faultResults.append(["seam":"generation-overflow", "successReported":false,
+                "primaryByteTruth":"replacement", "malformedLookalikesIgnored":malformed.count,
+                "existingBackupPreserved":true])
+        }
+
+        // Same basename under different canonical parents shares neither lock
+        // nor backup namespace, even with one shared backup directory.
+        do {
+            let root = support.appendingPathComponent("fault-canonical-target-namespace", isDirectory:true)
+            let shared = root.appendingPathComponent("shared", isDirectory:true)
+            let a = root.appendingPathComponent("a/canvas.ü.json")
+            let b = root.appendingPathComponent("b/canvas.ü.json")
+            try FileManager.default.createDirectory(at: a.deletingLastPathComponent(), withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at: b.deletingLastPathComponent(), withIntermediateDirectories:true)
+            let encoder = JSONCodec.makeEncoder(prettyPrinted:true)
+            try encoder.encode(valid).write(to:a); try encoder.encode(replacement).write(to:b)
+            let wa = AtomicWriter(backupsDirectory:shared, retainedBackups:3,
+                backupDate:{ Date(timeIntervalSince1970:1_900_000_000) })
+            let wb = AtomicWriter(backupsDirectory:shared, retainedBackups:3,
+                backupDate:{ Date(timeIntervalSince1970:1_900_000_000) })
+            let da = WorkspaceDocument(viewport:.init(x:701,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let db = WorkspaceDocument(viewport:.init(x:702,y:0,zoom:1),zones:[],lastActiveZoneId:nil)
+            let group = DispatchGroup(); final class Errors: @unchecked Sendable { let lock=NSLock(); var values:[Error]=[] }
+            let errors=Errors()
+            group.enter(); DispatchQueue.global().async { defer { group.leave() }; do { try wa.write(da,to:a) } catch { errors.lock.lock(); errors.values.append(error); errors.lock.unlock() } }
+            group.enter(); DispatchQueue.global().async { defer { group.leave() }; do { try wb.write(db,to:b) } catch { errors.lock.lock(); errors.values.append(error); errors.lock.unlock() } }
+            try expect(group.wait(timeout:.now()+5) == .success && errors.values.isEmpty,
+                "same-basename canonical targets collided")
+            try Data("corrupt".utf8).write(to:a); try Data("corrupt".utf8).write(to:b)
+            let ra:WorkspaceDocument = try wa.read(at:a); let rb:WorkspaceDocument = try wb.read(at:b)
+            try expect(ra == valid && rb == replacement, "same-basename targets cross-recovered")
+            let names = try FileManager.default.contentsOfDirectory(atPath:shared.path)
+            let namespaces = Set(names.compactMap { $0.split(separator:"-").dropFirst(3).first.map(String.init) })
+            try expect(names.count == 2 && namespaces.count == 2, "canonical namespace IDs were not independent")
+            faultResults.append(["seam":"canonical-target-namespace", "namespaceCount":namespaces.count,
+                "concurrent":true,"sameBasename":true,"independentRecovery":[1,-9]])
+        }
+
+        do {
+            let root = support.appendingPathComponent("fault-ambiguous-legacy", isDirectory:true)
+            let shared = root.appendingPathComponent("shared", isDirectory:true)
+            let target = root.appendingPathComponent("parent/canvas.json")
+            try FileManager.default.createDirectory(at: shared, withIntermediateDirectories:true)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories:true)
+            try Data("corrupt".utf8).write(to: target)
+            try JSONCodec.makeEncoder(prettyPrinted:true).encode(valid).write(
+                to: shared.appendingPathComponent("canvas.2030-01-01T00-00-00.000Z.000001.json"))
+            var failedClosed = false
+            do { let _:WorkspaceDocument = try AtomicWriter(backupsDirectory:shared).read(at:target) }
+            catch AtomicWriterError.noValidBackup { failedClosed = true }
+            try expect(failedClosed, "ambiguous shared-directory legacy cross-recovered")
+            faultResults.append(["seam":"ambiguous-legacy-policy","policy":"disabled","failedClosed":true])
+        }
+
+        // An unreadable existing target is not the same state as ENOENT. It is
+        // rejected before replacement, leaving the prior bytes exact.
+        do {
+            let root = support.appendingPathComponent("fault-unreadable-prior", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000012")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let before = try Data(contentsOf: normal.layout.canvasFile)
+            let files = AtomicWriterFileOperations(readExisting: { _ in throw POSIXError(.EACCES) })
+            let unreadable = WorkspaceStore(
+                workspaceId: workspaceId, applicationSupportDirectory: root, fileOperations: files)
+            do { try unreadable.save(replacement); throw RestartFaultError(message: "unreadable prior unexpectedly saved") }
+            catch AtomicWriterError.priorTargetUnreadable {}
+            let unreadableAfter = try Data(contentsOf: normal.layout.canvasFile)
+            try expect(unreadableAfter == before,
+                "unreadable prior target was mutated")
+            faultResults.append(["seam": "unreadable-prior", "successReported": false,
+                "priorValidByteExact": true, "loadable": true])
+        }
+
+        // No-prior rollback removes the unacknowledged rename and durably syncs
+        // that removal. A physical rollback failure is surfaced distinctly as
+        // indeterminate rather than claiming ordinary byte-exact failure.
+        for rollbackRemovalFails in [false, true] {
+            let root = support.appendingPathComponent(
+                rollbackRemovalFails ? "fault-rollback-removal" : "fault-no-prior-rollback", isDirectory: true)
+            let workspaceId = UUID(uuidString: rollbackRemovalFails
+                ? "72000000-0000-0000-0000-000000000013"
+                : "72000000-0000-0000-0000-000000000014")!
+            final class OpenCounter: @unchecked Sendable { var value = 0 }
+            let opens = OpenCounter()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                opens.value += 1; return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if opens.value == 2 { errno = EIO; return -1 }
+                return Darwin.fsync(fd)
+            })
+            let files = AtomicWriterFileOperations(remove: { url in
+                if rollbackRemovalFails { throw POSIXError(.EACCES) }
+                try FileManager.default.removeItem(at: url)
+            })
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors, fileOperations: files)
+            var caught: Error?
+            do { try store.save(replacement) } catch { caught = error }
+            if rollbackRemovalFails {
+                try expect(caught as? AtomicWriterError == .rollbackIndeterminate,
+                    "rollback operation failure was not classified indeterminate")
+            } else {
+                try expect(caught != nil && !FileManager.default.fileExists(atPath: store.layout.canvasFile.path),
+                    "no-prior rollback did not remove the unacknowledged target")
+            }
+            faultResults.append(["seam": rollbackRemovalFails ? "rollback-removal" : "no-prior-rollback",
+                "successReported": false, "indeterminate": rollbackRemovalFails])
+        }
+
+        // Cross-process semantics are provided by the same-volume flock. This
+        // deterministic two-writer schedule proves B cannot enter while A is
+        // paused after rename, and that B's later acknowledged bytes win after
+        // A rolls back and releases the target lock.
+        do {
+            let root = support.appendingPathComponent("fault-concurrent-writers", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000015")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let aAtDirectorySync = DispatchSemaphore(value: 0)
+            let releaseA = DispatchSemaphore(value: 0)
+            let bFinished = DispatchSemaphore(value: 0)
+            final class ConcurrentOutcome: @unchecked Sendable {
+                let lock = NSLock(); var aFailed = false; var bSucceeded = false; var opens = 0; var events: [String] = []
+                func nextOpen() -> Int { lock.lock(); defer { lock.unlock() }; opens += 1; return opens }
+                func openCount() -> Int { lock.lock(); defer { lock.unlock() }; return opens }
+                func mark(_ event: String) { lock.lock(); events.append(event); lock.unlock() }
+                func setA() { lock.lock(); aFailed = true; events.append("A-failed-after-rollback"); lock.unlock() }
+                func setB() { lock.lock(); bSucceeded = true; events.append("B-acknowledged"); lock.unlock() }
+                func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return events }
+            }
+            let outcome = ConcurrentOutcome()
+            let aDescriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                _ = outcome.nextOpen(); return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if outcome.openCount() == 2 {
+                    outcome.mark("A-post-rename")
+                    aAtDirectorySync.signal(); _ = releaseA.wait(timeout: .now() + 5)
+                    errno = EIO; return -1
+                }
+                return Darwin.fsync(fd)
+            })
+            let writerA = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: aDescriptors)
+            let writerB = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            DispatchQueue.global().async {
+                do { try writerA.save(replacement) } catch { outcome.setA() }
+            }
+            try expect(aAtDirectorySync.wait(timeout: .now() + 5) == .success,
+                "writer A never reached post-rename directory sync")
+            outcome.mark("B-attempted")
+            let finalB = WorkspaceDocument(
+                viewport: .init(x: 77, y: 88, zoom: 1.1), zones: [], lastActiveZoneId: nil)
+            DispatchQueue.global().async {
+                do { try writerB.save(finalB); outcome.setB() } catch {}
+                bFinished.signal()
+            }
+            try expect(bFinished.wait(timeout: .now() + 0.05) == .timedOut,
+                "writer B entered the same-target transaction while writer A held the lock")
+            releaseA.signal()
+            try expect(bFinished.wait(timeout: .now() + 5) == .success,
+                "writer B did not finish after writer A released the lock")
+            let concurrentReload = try normal.load()
+            try expect(outcome.aFailed && outcome.bSucceeded && concurrentReload == finalB,
+                "concurrent writer acknowledgement was clobbered by rollback")
+            faultResults.append(["seam": "concurrent-writers", "writerAFailed": true,
+                "writerBSucceeded": true, "acknowledgedWinnerReloaded": true,
+                "orderedEvents": outcome.snapshot()])
+        }
+
+        // Repeat the lock contention with a separate process. The child cannot
+        // pass the fcntl lock while this process is paused post-rename.
+        do {
+            let root = support.appendingPathComponent("fault-cross-process-writers", isDirectory: true)
+            let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000016")!
+            let normal = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root)
+            try normal.save(valid)
+            let atSync = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+            final class CrossState: @unchecked Sendable {
+                let lock = NSLock(); var opens = 0; var failed = false
+                func next() -> Int { lock.lock(); defer { lock.unlock() }; opens += 1; return opens }
+                func count() -> Int { lock.lock(); defer { lock.unlock() }; return opens }
+                func markFailed() { lock.lock(); failed = true; lock.unlock() }
+            }
+            let state = CrossState()
+            let descriptors = AtomicWriterDescriptorOperations(open: { path, flags in
+                _ = state.next(); return Darwin.open(path, flags)
+            }, fsync: { fd in
+                if state.count() == 2 {
+                    atSync.signal(); _ = release.wait(timeout: .now() + 5); errno = EIO; return -1
+                }
+                return Darwin.fsync(fd)
+            })
+            let writerA = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
+                descriptorOperations: descriptors)
+            DispatchQueue.global().async { do { try writerA.save(replacement) } catch { state.markFailed() } }
+            try expect(atSync.wait(timeout: .now() + 5) == .success, "cross-process A did not reach barrier")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            process.arguments = ["--atomic-writer-lock-child", "--support", root.path,
+                "--workspace-id", workspaceId.uuidString]
+            try process.run()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            try expect(process.isRunning, "child writer bypassed cross-process target lock")
+            release.signal()
+            process.waitUntilExit()
+            try expect(process.terminationStatus == 0 && state.failed,
+                "cross-process writer schedule did not complete A-fail/B-success")
+            let expectedChild = WorkspaceDocument(
+                viewport: .init(x: 177, y: 188, zoom: 1.2), zones: [], lastActiveZoneId: nil)
+            let childReload = try normal.load()
+            try expect(childReload == expectedChild,
+                "cross-process acknowledged child bytes were not reload truth")
+            faultResults.append(["seam": "cross-process-writers", "writerAFailed": true,
+                "childExit": process.terminationStatus, "acknowledgedWinnerReloaded": true,
+                "orderedEvents": ["A-post-rename", "child-attempted-and-blocked", "A-rollback", "child-acknowledged"]])
+        }
+        let artifact = support.appendingPathComponent("manifest.json")
+        let payload: [String: Any] = [
+            "check": "workspace-restart-fault", "repetitions": 20,
+            "closeOffsetsMs": closeOffsets, "repetitionsPerOffset": repetitionCount, "results": repetitions,
+            "faults": faultResults, "status": "passed"
+        ]
+        try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: artifact)
+        return artifact
+    }
+
     static func runPersistenceCrashSafeSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -23951,6 +25174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let appSupport: URL
         if let env = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"], !env.isEmpty {
             appSupport = URL(fileURLWithPath: env, isDirectory: true)
+                .appendingPathComponent("persistence-crash-safe-\(UUID().uuidString)", isDirectory: true)
         } else {
             appSupport = fm.temporaryDirectory
                 .appendingPathComponent("continuum-persistence-crash-safe-\(UUID().uuidString)", isDirectory: true)
@@ -23969,16 +25193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             retainedBackups: 64
         )
 
-        func backupFileCount() -> Int {
+        func exactBackupGenerationNames() -> [String] {
             guard let entries = try? fm.contentsOfDirectory(
                 at: store.layout.backupsDirectory,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
-            ) else { return 0 }
-            return entries.filter { entry in
+            ) else { return [] }
+            let productionParser = AtomicWriter(backupsDirectory: store.layout.backupsDirectory)
+            return entries.compactMap { entry in
                 let name = entry.lastPathComponent
-                return name.hasPrefix("canvas.") && name.hasSuffix(".json")
-            }.count
+                return productionParser.validBackupGeneration(named: name, for: store.layout.canvasFile) != nil ? name : nil
+            }.sorted()
         }
 
         // Build D1: viewport (5, 7, 1.5), one project zone + one group zone.
@@ -24060,11 +25285,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         suite.set("10", forKey: AutosaveConfig.debounceMsKey)  // 10 ms window (post-fix)
 
         let saveController = WorkspaceDocumentSaveController(store: store, defaults: suite)
-        let nBackupsBefore = backupFileCount()
+        let backupsBefore = exactBackupGenerationNames()
+        let malformedForeignBackup = store.layout.backupsDirectory
+            .appendingPathComponent("array-backup-v2-foreign-invalid-timestamp")
+        try Data("foreign".utf8).write(to: malformedForeignBackup)
 
         // Schedule 5 documents without flushing.
+        var scheduledGeneration: UInt64 = 0
         for x in [10.0, 11.0, 12.0, 13.0, 14.0] {
-            saveController.scheduleZoneLayoutSave(
+            scheduledGeneration = saveController.scheduleZoneLayoutSave(
                 WorkspaceDocument(
                     viewport: CanvasViewport(x: x, y: 0, zoom: 1.0),
                     zones: [],
@@ -24078,9 +25307,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // (Pre-fix: controller ignores suite, uses 0.2s; 0.3s covers it. Post-fix: 10ms fires sooner.)
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.30))
 
-        let nBackupsAfter = backupFileCount()
-        let delta = nBackupsAfter - nBackupsBefore
+        let backupsAfter = exactBackupGenerationNames()
+        let delta = backupsAfter.count - backupsBefore.count
         try expect(delta == 1, "D10: coalesced N=5 schedules must create exactly 1 backup (got delta=\(delta))")
+        try expect(saveController.acknowledgedGeneration == scheduledGeneration,
+                   "D10: coalesced generation must be acknowledged exactly")
         let afterCoalesce = try store.load()
         try expect(afterCoalesce.viewport.x == 14.0, "D10: primary must hold last-scheduled doc (x=14), got \(afterCoalesce.viewport.x)")
 
@@ -24155,6 +25386,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "recoveredViewportZoom": recovered.viewport.zoom,
             "backupDelta": delta,
             "coalesceCount": delta,
+            "fixtureRoot": appSupport.path,
+            "backupGenerationsBefore": backupsBefore,
+            "backupGenerationsAfter": backupsAfter,
+            "coalescedGenerationNames": Array(Set(backupsAfter).subtracting(backupsBefore)).sorted(),
+            "scheduledGeneration": scheduledGeneration,
+            "acknowledgedGeneration": saveController.acknowledgedGeneration,
+            "coalescedGenerationAcknowledged": saveController.acknowledgedGeneration == scheduledGeneration,
             "postCoalesceViewportX": afterCoalesce.viewport.x,
             "flushViewportX": afterFlush.viewport.x,
             "status": "passed",

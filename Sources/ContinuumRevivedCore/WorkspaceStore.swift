@@ -33,14 +33,21 @@ public struct WorkspaceStore: Sendable {
     public init(
         workspaceId: UUID,
         applicationSupportDirectory: URL? = nil,
-        retainedBackups: Int = 3
+        retainedBackups: Int = 3,
+        descriptorOperations: AtomicWriterDescriptorOperations = .live,
+        fileOperations: AtomicWriterFileOperations = .live,
+        backupDate: @escaping @Sendable () -> Date = { Date() }
     ) {
         let baseDir = applicationSupportDirectory ?? Self.defaultApplicationSupportDirectory()
         let layout = WorkspaceStoreLayout(applicationSupportDirectory: baseDir, workspaceId: workspaceId)
         self.layout = layout
         self.writer = AtomicWriter(
             backupsDirectory: layout.backupsDirectory,
-            retainedBackups: retainedBackups
+            retainedBackups: retainedBackups,
+            descriptorOperations: descriptorOperations,
+            fileOperations: fileOperations,
+            backupDate: backupDate,
+            legacyBackupPolicy: .targetDedicated
         )
     }
 

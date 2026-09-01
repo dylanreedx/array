@@ -12,6 +12,19 @@ import Foundation
 /// is T08; viewport tier transitions are T10.
 @MainActor
 final class WorkspaceRuntime {
+    enum LifecycleEvent: Equatable {
+        case processLaunched
+        case bootMounted
+        case firstHydrationPhase
+        case settled
+        case switchCompleted(UUID)
+        case saveGenerationAcknowledged(UInt64)
+        case closeFlushCompleted
+    }
+
+    /// QA-only observation point. Nil in production, so it cannot alter flow.
+    var lifecycleObserver: ((LifecycleEvent) -> Void)?
+    var lifecycleSnapshotObserver: ((LifecycleEvent, CanvasNSView) -> Void)?
     private(set) var workspaceId: UUID
     private(set) var document: WorkspaceDocument
     private let registry: ZoneRuntimeRegistry
@@ -26,6 +39,8 @@ final class WorkspaceRuntime {
     /// nil and uses WorkspaceStore's atomic read/write paths.
     var _workspaceDocumentLoader: ((UUID) throws -> WorkspaceDocument?)?
     var _workspaceDocumentSaver: ((UUID, WorkspaceDocument) throws -> Void)?
+    private(set) var qaLastScheduledWorkspaceGeneration: UInt64 = 0
+    private(set) var qaLastAcknowledgedWorkspaceGeneration: UInt64 = 0
 
     // Tracks which projectIds this runtime acquired (for closeAll).
     private var acquiredProjectIds: [UUID] = []
@@ -388,6 +403,17 @@ final class WorkspaceRuntime {
     /// QA: the armed zone as the document records it.
     var qaArmedZoneId: UUID? { document.lastActiveZoneId }
 
+    /// QA chronology seam for the long-lived ambient-arming debounce. These are
+    /// deliberately read-only: close checks must observe the controller that
+    /// production actually drains, rather than manufacture a fresh controller.
+    var qaArmingScheduledGeneration: UInt64 {
+        armingSaveController?.scheduledGeneration ?? 0
+    }
+
+    var qaArmingAcknowledgedGeneration: UInt64 {
+        armingSaveController?.acknowledgedGeneration ?? 0
+    }
+
     /// QA: drain the debounced arming write so a check can assert on disk.
     func flushPendingArmingSave() {
         try? armingSaveController?.flushPendingSave()
@@ -678,6 +704,10 @@ final class WorkspaceRuntime {
             layers,
             documentZones: Self.zoneRenderModels(for: mountableZones, layers: layers))
         installedLayers = layers
+        // Cold boot and in-process switching share the workspace document as
+        // camera owner. The boot canvas originates in a project canvas file and
+        // therefore must not retain that project's stale viewport.
+        canvasView.setViewport(document.viewport)
 
         // Declare the spawn target BEFORE anything can spawn into it.
         canvasView.setActiveProjectZone(document.lastActiveZoneId)
@@ -696,6 +726,17 @@ final class WorkspaceRuntime {
         for projectId in acquiredProjectIds {
             registry.controller(for: projectId)?.flushPendingSaves()
         }
+    }
+
+    /// Persist every acknowledged register owned by the mounted scene before
+    /// any layer or controller is released. A failed write deliberately leaves
+    /// the scene mounted so callers can surface the failure and retry or cancel.
+    func flushMountedWorkspaceState() throws {
+        let focus = departingFocusSnapshot(from: canvasView)
+        flushAll()
+        flushPendingArmingSave()
+        try persistDepartingWorkspaceState(focus: focus)
+        lifecycleObserver?(.closeFlushCompleted)
     }
 
     /// Release every acquired controller via the registry (ref-count → close-at-zero),
@@ -828,7 +869,13 @@ final class WorkspaceRuntime {
         zone: ZonePlacement,
         document: WorkspaceDocument
     ) -> CanvasNSView.ZoneLayer {
-        let memberTiles = document.tiles(forZone: zone.zoneId)
+        let memberTiles = document.tiles(forZone: zone.zoneId).map { tile -> Tile in
+            var local = tile
+            // Workspace ambient tiles, like project canvas tiles, are durable in
+            // WORLD coordinates. A ZoneLayer owns LOCAL coordinates.
+            local.frame = CanvasEngine.worldToZoneLocal(tile.frame, zoneOrigin: zone.origin)
+            return local
+        }
         var tileViews: [UUID: TileNSView] = [:]
         for tile in memberTiles {
             tileViews[tile.id] = DescriptorTileNSView(tile: tile)
@@ -1127,9 +1174,14 @@ final class WorkspaceRuntime {
             return
         }
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        try WorkspaceStore(
+        let controller = WorkspaceDocumentSaveController(store: WorkspaceStore(
             workspaceId: workspaceId,
-            applicationSupportDirectory: appSupport).save(document)
+            applicationSupportDirectory: appSupport))
+        let generation = controller.scheduleZoneLayoutSave(document)
+        qaLastScheduledWorkspaceGeneration = generation
+        try controller.flush(through: generation)
+        qaLastAcknowledgedWorkspaceGeneration = controller.acknowledgedGeneration
+        lifecycleObserver?(.saveGenerationAcknowledged(generation))
     }
 
     // MARK: - Workspace Switch (T09)
@@ -1178,9 +1230,7 @@ final class WorkspaceRuntime {
 
         // Capture every visible register and synchronously save it while the
         // departing scene is still mounted and interactive.
-        let departingFocus = departingFocusSnapshot(from: canvasView)
-        flushAll()
-        try persistDepartingWorkspaceState(focus: departingFocus)
+        try flushMountedWorkspaceState()
 
         // 3. Diff project sets.
         let currentProjectIds = Set(acquiredProjectIds)
@@ -1314,6 +1364,7 @@ final class WorkspaceRuntime {
         } else {
             _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         }
+        lifecycleObserver?(.switchCompleted(targetWorkspaceId))
     }
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {

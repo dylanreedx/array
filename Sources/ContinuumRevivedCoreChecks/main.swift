@@ -88,6 +88,8 @@ private final class AtomicWriterOpenFaultState: @unchecked Sendable {
     var failDirectoryFsync = false
     var failTempClose = false
     var failDirectoryClose = false
+    var directoryCloseAttempts = 0
+    var failedDirectoryCloseFD: Int32?
     var pathsByFD: [Int32: String] = [:]
 }
 
@@ -665,7 +667,10 @@ do {
                     errno = EIO
                     return -1
                 }
-                if atomicFaultState.failDirectoryClose && path == atomicFaultRoot.path {
+                if atomicFaultState.failDirectoryClose
+                    && (path == atomicFaultRoot.path || fd == atomicFaultState.failedDirectoryCloseFD) {
+                    atomicFaultState.directoryCloseAttempts += 1
+                    atomicFaultState.failedDirectoryCloseFD = fd
                     _ = Darwin.close(fd)
                     errno = EIO
                     return -1
@@ -693,8 +698,13 @@ do {
            "AtomicWriter must throw when temp descriptor close fails")
     atomicFaultState.failTempClose = false
     atomicFaultState.failDirectoryClose = true
-    expect((try? atomicFaultWriter.write(["value": "dir-close"], to: atomicFaultFile)) == nil,
-           "AtomicWriter must throw when parent directory descriptor close fails")
+    try atomicFaultWriter.write(["value": "dir-close"], to: atomicFaultFile)
+    let liveDirectoryCloseReader = AtomicWriter(backupsDirectory: nil, retainedBackups: 0)
+    let directoryCloseDecoded: [String: String] = try liveDirectoryCloseReader.read(at: atomicFaultFile)
+    expect(directoryCloseDecoded["value"] == "dir-close",
+           "post-fsync directory close failure must report success with requested durable bytes")
+    expect(atomicFaultState.directoryCloseAttempts == 1,
+           "post-fsync directory close must be attempted exactly once")
     atomicFaultState.failDirectoryClose = false
     try atomicFaultWriter.write(["value": "ok"], to: atomicFaultFile)
     let atomicFaultDecoded: [String: String] = try atomicFaultWriter.read(at: atomicFaultFile)
@@ -3858,6 +3868,49 @@ do {
     let backupsDir = scratch.appendingPathComponent("backups")
     let writer = AtomicWriter(backupsDirectory: backupsDir, retainedBackups: 2)
 
+    // Backup identity must not depend on how a path is SPELLED or on whether
+    // its directory exists yet. `resolvingSymlinksInPath()` applies the macOS
+    // `/private` abbreviation only once the path is real, so
+    // `/private/tmp/x` hashed one way before its directory existed and another
+    // way after -- a file's first backup landed in a different namespace from
+    // every later one, and retention then saw an empty history and kept
+    // nothing. Reproduced end to end by --workspace-restart-fault-check, which
+    // failed under every /private/tmp support directory and passed under /tmp.
+    do {
+        let privateRoot = "/private/tmp/array-canonical-\(UUID().uuidString)"
+        let aliasRoot = AtomicWriter.stablePrivatePrefix(privateRoot)
+        expect(aliasRoot == privateRoot.replacingOccurrences(of: "/private", with: "", options: .anchored),
+               "stablePrivatePrefix must abbreviate /private/tmp: got \(aliasRoot)")
+        expect(AtomicWriter.stablePrivatePrefix(aliasRoot) == aliasRoot,
+               "stablePrivatePrefix must be idempotent")
+        expect(AtomicWriter.stablePrivatePrefix("/private/var/folders/x") == "/var/folders/x",
+               "stablePrivatePrefix must abbreviate /private/var too")
+        expect(AtomicWriter.stablePrivatePrefix("/Users/x/private/tmp/y") == "/Users/x/private/tmp/y",
+               "stablePrivatePrefix must only strip a LEADING /private")
+        expect(AtomicWriter.stablePrivatePrefix("/privatestuff/tmp") == "/privatestuff/tmp",
+               "stablePrivatePrefix must not strip a partial component match")
+
+        // The property that actually matters: the canonical identity must not
+        // change when the target's directory comes into existence. It did --
+        // `/private/tmp/x` resolved to itself while missing and to `/tmp/x`
+        // once created -- so a file's identity, and with it its backup
+        // namespace and lock path, shifted underneath it.
+        let canonRoot = URL(fileURLWithPath: privateRoot)
+        defer { try? FileManager.default.removeItem(at: canonRoot) }
+        let canonTarget = canonRoot.appendingPathComponent("nested/doc.json")
+        let identityBefore = AtomicWriter.canonicalIdentityPath(for: canonTarget)
+        try FileManager.default.createDirectory(
+            at: canonTarget.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let identityAfter = AtomicWriter.canonicalIdentityPath(for: canonTarget)
+        expect(identityBefore == identityAfter,
+               "canonical identity must not change when the directory appears: before=\(identityBefore) after=\(identityAfter)")
+
+        // ...and both spellings of the same file must agree.
+        let aliasTarget = URL(fileURLWithPath: aliasRoot).appendingPathComponent("nested/doc.json")
+        expect(AtomicWriter.canonicalIdentityPath(for: aliasTarget) == identityAfter,
+               "/tmp and /private/tmp spellings must share one identity")
+    }
+
     func makeProject(name: String) -> Project {
         Project(
             name: name,
@@ -3884,13 +3937,13 @@ do {
     try writer.write(makeProject(name: "v2"), to: url)
     let v2Read: Project = try writer.read(at: url)
     expect(v2Read.name == "v2", "AtomicWriter advances to v2")
-    let backupsAfter2 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    let backupsAfter2 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("array-backup-v2-") }
     expect(backupsAfter2.count == 1, "After 2 writes there is 1 backup, got \(backupsAfter2)")
 
     // Third and fourth writes: backup count capped at retainedBackups (2).
     try writer.write(makeProject(name: "v3"), to: url)
     try writer.write(makeProject(name: "v4"), to: url)
-    let backupsAfter4 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    let backupsAfter4 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("array-backup-v2-") }
     expect(backupsAfter4.count == 2, "Backup retention caps at 2, got \(backupsAfter4)")
 
     // Corrupt the main file; reader must fall back to the most recent backup.
@@ -4071,9 +4124,10 @@ do {
         editorPreference: project.editorPreference,
         settings: project.settings
     )
+    let backupsBeforeProjectResave = Set(try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path))
     try store.saveProject(updated)
     let backupContents = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path)
-    let projectBackups = backupContents.filter { $0.hasPrefix("project.") }
+    let projectBackups = Array(Set(backupContents).subtracting(backupsBeforeProjectResave))
     expect(!projectBackups.isEmpty, "Resaving project leaves a backup in backups/, got \(backupContents)")
 
     // loadProject when nothing is on disk returns nil via tryLoad.

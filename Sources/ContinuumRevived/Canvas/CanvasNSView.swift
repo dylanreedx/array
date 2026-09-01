@@ -6154,6 +6154,17 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneChromeViews[zoneId]?.frame
     }
 
+    /// QA raster contract: concrete installed view rectangles in canvas points.
+    func qaZoneChromeRectInCanvas(for zoneId: UUID) -> CGRect? {
+        guard let view = zoneChromeViews[zoneId] else { return nil }
+        return convert(view.bounds, from: view)
+    }
+
+    func qaTileRectInCanvas(for tileId: UUID) -> CGRect? {
+        guard let view = tileView(for: tileId) else { return nil }
+        return convert(view.bounds, from: view)
+    }
+
     /// QA (M1.10): exactly one chrome view per zone, no orphan from a departed
     /// workspace and no duplicate from a layer install.
     var qaZoneChromeViewCount: Int { zoneChromeViews.count }
@@ -6309,6 +6320,18 @@ final class CanvasNSView: NSView, TokenThemed {
                 }
             }
             .filter { seen.insert($0.id).inserted }
+    }
+
+    /// QA/persistence observation of one installed layer, including ambient
+    /// layers which have no project id. Like the project projection above, the
+    /// returned frames are WORLD frames even though the live layer owns LOCAL.
+    func tilesInWorldFrames(forZoneId zoneId: UUID) -> [Tile]? {
+        guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
+        return layer.tiles.map { tile in
+            var world = tile
+            world.frame = CanvasEngine.zoneLocalToWorld(tile.frame, zoneOrigin: layer.placement.origin)
+            return world
+        }
     }
 
     /// Whether the flat boot scene still owns the active project. False from the
