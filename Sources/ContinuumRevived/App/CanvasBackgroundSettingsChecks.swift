@@ -21,12 +21,106 @@ enum CanvasBackgroundSettingsChecks {
         if !condition { throw Failure(description: message()) }
     }
 
+    /// WS7 F3: the reference-aware deferred sweep, driven through the PRODUCTION
+    /// entry point (`AppDelegate.sweepCanvasBackgroundAssets`).
+    ///
+    /// `cleanup(referencedIDs:)` had no production caller at all: every imported
+    /// background stayed on disk forever and "Remove Image" freed nothing. A
+    /// witness that called `cleanup` directly would have stayed green through
+    /// exactly that bug, so this drives the delegate's own method.
+    ///
+    /// It also pins the two ways this fix could be quietly wrong: sweeping
+    /// against only the ACTIVE workspace would delete an image another workspace
+    /// still names, and sweeping when a workspace document cannot be read would
+    /// delete assets we cannot prove are unreferenced.
+    private static func checkProductionAssetSweep() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ws7-sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = CanvasBackgroundAssetStore(applicationSupportDirectory: root)
+        func importBytes(_ byte: UInt8, _ name: String) throws -> CanvasBackgroundAssetID {
+            let url = root.appendingPathComponent(name)
+            try Data(repeating: byte, count: 2048).write(to: url)
+            return try store.importImage(at: url)
+        }
+        let globalID = try importBytes(1, "g.png")
+        let workspaceID = try importBytes(2, "w.png")
+        let orphanID = try importBytes(3, "orphan.png")
+
+        let wsGlobal = UUID(), wsOverride = UUID()
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        var registry = Registry.empty()
+        registry.workspaces = [
+            WorkspaceEntry(id: wsGlobal, name: "inheriting", projectIds: [], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: wsOverride, name: "overriding", projectIds: [], createdAt: now, updatedAt: now),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: root)
+        try registryStore.save(registry)
+
+        // The inheriting workspace names nothing; the other overrides with its own image.
+        try WorkspaceStore(workspaceId: wsGlobal, applicationSupportDirectory: root)
+            .save(WorkspaceDocument(viewport: .init(x: 0, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil))
+        var overrideConfig = CanvasBackgroundConfiguration.systemDefault
+        overrideConfig.image = CanvasBackgroundImageSpec(assetID: workspaceID)
+        var overrideDoc = WorkspaceDocument(viewport: .init(x: 0, y: 0, zoom: 1), zones: [], lastActiveZoneId: nil)
+        overrideDoc.canvasBackground = .override(overrideConfig)
+        try WorkspaceStore(workspaceId: wsOverride, applicationSupportDirectory: root).save(overrideDoc)
+
+        var globalConfig = CanvasBackgroundConfiguration.systemDefault
+        globalConfig.image = CanvasBackgroundImageSpec(assetID: globalID)
+        let defaultsSuite = "continuum.test.ws7sweep.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        _ = CanvasBackgroundGlobalStore.save(globalConfig, defaults: defaults)
+
+        let delegate = AppDelegate()
+        delegate.registryStore = registryStore
+        delegate.qaCanvasBackgroundSweepDefaults = defaults
+        setenv("CONTINUUM_APP_SUPPORT", root.path, 1)
+        defer { unsetenv("CONTINUUM_APP_SUPPORT") }
+
+        func exists(_ id: CanvasBackgroundAssetID) -> Bool {
+            FileManager.default.fileExists(atPath: store.directory.appendingPathComponent(id.fileName).path)
+        }
+        guard exists(globalID), exists(workspaceID), exists(orphanID) else {
+            throw Failure(description: "sweep witness: the three seeded assets were not all imported")
+        }
+
+        guard let result = delegate.sweepCanvasBackgroundAssets(grace: 0) else {
+            throw Failure(description: "sweep witness: the production sweep declined to run")
+        }
+        // Positive control: it must have actually scanned, or every assertion
+        // below is satisfied vacuously by a sweep that did nothing.
+        try expect(result.scanned >= 3,
+                   "sweep witness: the sweep scanned \(result.scanned) files; it never ran over the store")
+        try expect(!exists(orphanID),
+                   "sweep witness: the ORPHANED asset survived — this is the leak the fix exists to close")
+        try expect(exists(globalID),
+                   "sweep witness: the asset named by the GLOBAL configuration was deleted")
+        try expect(exists(workspaceID),
+                   "sweep witness: the asset named by a NON-ACTIVE workspace's override was deleted — "
+                   + "the sweep must span every workspace, not just the mounted one")
+
+        // An unreadable workspace document must abort the sweep entirely rather
+        // than delete assets it cannot prove are unreferenced.
+        let orphan2 = try importBytes(4, "orphan2.png")
+        try Data("not json".utf8).write(
+            to: WorkspaceStore(workspaceId: wsOverride, applicationSupportDirectory: root).layout.canvasFile)
+        try expect(delegate.sweepCanvasBackgroundAssets(grace: 0) == nil,
+                   "sweep witness: an unreadable workspace document must abort the sweep")
+        try expect(exists(orphan2),
+                   "sweep witness: an aborted sweep still deleted an asset")
+    }
+
     static func run() throws {
         try checkEditorAccessibilityAndKeyboardOrder()
         try checkEditorWritesTheSelectedScopeOnly()
         try checkImportAndRemoveSemantics()
         try checkPrecedenceOnRealWorkspaces()
-        print("canvas-background-settings: AX/keyboard order, scope writes, import/cancel/remove, live A→B→A precedence and relaunch")
+        try checkProductionAssetSweep()
+        print("canvas-background-settings: AX/keyboard order, scope writes, import/cancel/remove, live A→B→A precedence and relaunch, and the production reference-aware asset sweep")
     }
 
     // MARK: - Editor harness

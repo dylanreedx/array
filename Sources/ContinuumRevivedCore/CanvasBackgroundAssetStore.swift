@@ -149,6 +149,16 @@ public struct CanvasBackgroundAssetStore {
     /// every workspace document — a cleanup that saw only the active workspace
     /// would delete the image of every other one.
     @discardableResult
+    /// Every asset id a set of configurations names. The sweep's `referencedIDs`
+    /// MUST be built from this over the global configuration AND every
+    /// workspace's override — a sweep that sees only the active workspace would
+    /// delete an image another workspace still uses.
+    public static func referencedAssetIDs(
+        in configurations: some Sequence<CanvasBackgroundConfiguration>
+    ) -> Set<CanvasBackgroundAssetID> {
+        Set(configurations.compactMap { $0.image?.assetID })
+    }
+
     public func cleanup(
         referencedIDs: Set<CanvasBackgroundAssetID>,
         now: Date = Date(),

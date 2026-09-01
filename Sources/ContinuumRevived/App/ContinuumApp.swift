@@ -3761,7 +3761,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceRuntime: WorkspaceRuntime?
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
-    private var registryStore: RegistryStore?
+    /// Internal, not private: the WS7 asset-sweep witness drives
+    /// `sweepCanvasBackgroundAssets` and must supply a scratch registry.
+    var registryStore: RegistryStore?
     /// The spawner built at launch for the BOOT project. It is only the fallback:
     /// `WorkspaceRuntime.switchWorkspace` builds a new spawner for the arriving
     /// project, and an app action that captured this one would install tiles into the
@@ -8972,6 +8974,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// writer — and through the channel-local global store. Nothing here
     /// persists a picked URL: `importImage` copies the bytes into the managed
     /// directory and returns a content-digest id.
+    /// WS7: the reference-aware deferred sweep the locked contract calls for.
+    ///
+    /// Without this, `cleanup(referencedIDs:)` had NO production caller: every
+    /// imported background stayed on disk forever, and "Remove Image" — whose own
+    /// comment promised a deferred sweep — freed nothing. Imports are bounded at
+    /// 64 MB each, so the directory grows without limit.
+    ///
+    /// The referenced set spans the channel-local global AND every workspace's
+    /// override, read straight from disk rather than from the mounted runtime:
+    /// sweeping against only the active workspace would delete an image another
+    /// workspace still names. A workspace whose document cannot be read is
+    /// treated as referencing everything — it contributes no ids, so the grace
+    /// window keeps its assets rather than risking deletion on a transient read
+    /// failure.
+    /// QA seam: which defaults the sweep reads the global configuration from.
+    /// Production leaves this nil and uses the channel's standard domain.
+    var qaCanvasBackgroundSweepDefaults: UserDefaults?
+
+    @discardableResult
+    func sweepCanvasBackgroundAssets(
+        grace: TimeInterval = CanvasBackgroundAssetStore.cleanupGrace
+    ) -> CanvasBackgroundAssetStore.CleanupResult? {
+        guard let registryStore else { return nil }
+        // `resolveAppSupportDir` returns nil in production — it answers only for a
+        // QA override or a smoke test — so a `guard let` on it would have made
+        // this sweep dead code in the shipping app, which is precisely the bug it
+        // exists to fix. Fall through to the canonical directory the way
+        // `resolveAuthDirectory` does.
+        let appSupport = Self.resolveAppSupportDir(smokeTest: false)
+            ?? RegistryStore.defaultApplicationSupportDirectory()
+        let registry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
+        var configurations: [CanvasBackgroundConfiguration] = [
+            qaCanvasBackgroundSweepDefaults.map { CanvasBackgroundGlobalStore.load(defaults: $0) }
+                ?? CanvasBackgroundGlobalStore.load()
+        ]
+        var unreadableWorkspaces = 0
+        for workspace in registry.workspaces {
+            guard let document = try? WorkspaceStore(
+                workspaceId: workspace.id, applicationSupportDirectory: appSupport).load() else {
+                unreadableWorkspaces += 1
+                continue
+            }
+            if let override = document.canvasBackground.overrideConfiguration {
+                configurations.append(override)
+            }
+        }
+        // A document we could not read might name an asset. Refuse to sweep at
+        // all rather than delete something we cannot prove is unreferenced.
+        guard unreadableWorkspaces == 0 else { return nil }
+        let referenced = CanvasBackgroundAssetStore.referencedAssetIDs(in: configurations)
+        return CanvasBackgroundAssetStore(applicationSupportDirectory: appSupport)
+            .cleanup(referencedIDs: referenced, grace: grace)
+    }
+
     private func makeCanvasBackgroundSettingsView() -> NSView {
         let assetStore = CanvasBackgroundAssetStore()
         let environment = CanvasBackgroundSettingsView.Environment(
@@ -8979,10 +9035,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             saveGlobal: { [weak self] config in
                 CanvasBackgroundGlobalStore.save(config)
                 self?.workspaceRuntime?.applyCanvasBackground()
+                // Changing a configuration is the only way an asset becomes
+                // orphaned, so it is the only place worth sweeping. The store's
+                // grace window means a file orphaned by THIS write is retained
+                // now and collected by a later sweep, which is what makes the
+                // cleanup "deferred" rather than destructive.
+                self?.sweepCanvasBackgroundAssets()
             },
             loadWorkspace: { [weak self] in self?.workspaceRuntime?.document.canvasBackground ?? .inherit },
             saveWorkspace: { [weak self] value in
                 try? self?.workspaceRuntime?.setWorkspaceCanvasBackground(value)
+                self?.sweepCanvasBackgroundAssets()
             },
             importImage: { try assetStore.importImage(at: $0) },
             chooseImageURL: {
