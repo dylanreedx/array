@@ -24033,7 +24033,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ], groups: [], lastActiveTileId: tb))
             let ambientTileValue = tile(ambientTile, zone: ambient,
                 frame: .init(x: -2100.25, y: -299.75, width: 280.5, height: 155.25), rank: 8)
-            let docA = WorkspaceDocument(viewport: .init(x: -127.5, y: 88.25, zoom: 1.375), zones: [
+            // The persisted nonzero camera deliberately fits the primary zone
+            // and hydrated tile inside the 1600×1000 evidence canvas.
+            let docA = WorkspaceDocument(viewport: .init(x: -1050.5, y: 200.25, zoom: 0.8), zones: [
                 zone(za1, project: pa, x: -913.25, y: 407.75, name: "A primary", rank: 3),
                 zone(za2, project: pa, x: 1800.5, y: -722.125, name: "A lower tier", rank: 7),
                 zone(ambient, project: nil, x: -2200.75, y: -400.5, name: "Ambient", rank: 9)
@@ -24076,8 +24078,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         runtime.lifecycleObserver = { event in readiness.append(String(describing: event)) }
         let bootState = try bootStore.loadCanvas()
         let canvas = CanvasNSView(canvasState: bootState, activeZone: initialDocument.zones.first,
-            zoneRenderModels: initialDocument.zones.map { .init(placement: $0, displayName: $0.name) }, showsZoneChrome: false)
+            zoneRenderModels: initialDocument.zones.map { .init(placement: $0, displayName: $0.name) }, showsZoneChrome: true)
         canvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        // Deterministic offscreen host for first-frame evidence. It is never
+        // ordered onto the physical desktop; the explicit bitmap below locks 2×.
+        let renderWindow = NSWindow(contentRect: canvas.frame, styleMask: [.borderless],
+            backing: .buffered, defer: false)
+        renderWindow.isReleasedWhenClosed = false
+        renderWindow.contentView = canvas
         delegate.qaPrepareForBootMountCheck(canvas: canvas, browserEngine: browser, runtime: runtime, registryStore: registryStore)
         let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browser, projectStore: bootStore, project: bootProject)
         func snapshot(_ phase: String) throws -> [String: Any] {
@@ -24145,13 +24153,165 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         var firstHydrated: [String: Any]?
         var bootSettled: [String: Any]?
+        var visualEvidence: [[String: Any]] = []
+        var visualCaptureFailures: [String] = []
+        var visualCaptureSequence = 0
+        func captureVisual(_ phase: String, appearanceName: NSAppearance.Name, slug: String) {
+            guard ProcessInfo.processInfo.environment["CONTINUUM_WS2_CAPTURE_VISUALS"] == "1" else { return }
+            visualCaptureSequence += 1
+            let sequence = visualCaptureSequence
+            let prior = canvas.appearance
+            let priorViewport = canvas.viewport
+            defer {
+                canvas.setViewport(priorViewport)
+                canvas.appearance = prior
+                canvas.layoutSubtreeIfNeeded()
+            }
+            canvas.appearance = NSAppearance(named: appearanceName)
+
+            // The persisted camera deliberately frames only the primary zone, so
+            // capturing through it renders one zone against empty canvas and
+            // proves nothing about topology. Fit the whole seeded scene for the
+            // image, then restore the document camera in `defer` so every
+            // viewport assertion still reads the persisted value. This fit is
+            // evidence framing, never persisted state - it is recorded as
+            // `cameraFit` so the image can never be misread as the saved camera.
+            guard var fitted = canvas.fitAllToViewport() else {
+                visualCaptureFailures.append("\(phase)-\(slug): no fitted camera for seeded scene")
+                return
+            }
+            let visibleWorldWidth = canvas.bounds.width / fitted.zoom
+            let visibleWorldHeight = canvas.bounds.height / fitted.zoom
+            let centerWorldX = fitted.x + visibleWorldWidth / 2
+            let centerWorldY = fitted.y + visibleWorldHeight / 2
+            let margined = fitted.zoom * 0.88
+            fitted = CanvasViewport(
+                x: centerWorldX - canvas.bounds.width / margined / 2,
+                y: centerWorldY - canvas.bounds.height / margined / 2,
+                zoom: margined)
+            canvas.setViewport(fitted)
+            canvas.layoutSubtreeIfNeeded()
+
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3200, pixelsHigh: 2000,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+                visualCaptureFailures.append("\(phase)-\(slug): bitmap allocation")
+                return
+            }
+            rep.size = NSSize(width: 1600, height: 1000)
+            canvas.cacheDisplay(in: canvas.bounds, to: rep)
+
+            // Every seeded zone must be COMPLETELY inside the raster with a real
+            // margin. A rectangle that merely intersects the bounds is the
+            // clipped-corner false-green this check was rejected for twice.
+            let margin: CGFloat = 8
+            let safe = canvas.bounds.insetBy(dx: margin, dy: margin)
+            var expectedRects: [[String: Any]] = []
+            var missing: [String] = []
+            var clipped: [String] = []
+            func requireInside(_ label: String, _ rect: CGRect?, minWidth: CGFloat, minHeight: CGFloat) {
+                guard let rect else { missing.append(label); return }
+                expectedRects.append(["label": label, "x": rect.minX, "y": rect.minY,
+                    "width": rect.width, "height": rect.height, "insideSafeArea": safe.contains(rect)])
+                if !safe.contains(rect) || rect.width < minWidth || rect.height < minHeight {
+                    clipped.append("\(label)=\(rect)")
+                }
+            }
+            requireInside("zone:A-primary", canvas.qaZoneChromeRectInCanvas(for: za1), minWidth: 120, minHeight: 90)
+            requireInside("zone:A-lower-tier", canvas.qaZoneChromeRectInCanvas(for: za2), minWidth: 120, minHeight: 90)
+            requireInside("zone:ambient", canvas.qaZoneChromeRectInCanvas(for: ambient), minWidth: 120, minHeight: 90)
+            requireInside("tile:focused", canvas.qaTileRectInCanvas(for: ta1), minWidth: 24, minHeight: 16)
+            // Tiles in zones below the live hydration tier legitimately have no
+            // view; assert only the ones that are actually installed.
+            for (label, id) in [("tile:retained-lower", ta2), ("tile:ambient", ambientTile)] {
+                if let rect = canvas.qaTileRectInCanvas(for: id) {
+                    requireInside(label, rect, minWidth: 24, minHeight: 16)
+                }
+            }
+            guard missing.isEmpty, clipped.isEmpty else {
+                visualCaptureFailures.append(
+                    "\(phase)-\(slug): scene not completely framed missing=\(missing) clipped=\(clipped) bounds=\(canvas.bounds) camera=\(fitted)")
+                return
+            }
+
+            let path = output.deletingLastPathComponent().appendingPathComponent("\(phase)-\(slug).png")
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                visualCaptureFailures.append("\(phase)-\(slug): PNG encoding")
+                return
+            }
+            do { try png.write(to: path, options: .atomic) }
+            catch {
+                visualCaptureFailures.append("\(phase)-\(slug): PNG write \(error)")
+                return
+            }
+            guard let bitmapData = rep.bitmapData else {
+                visualCaptureFailures.append("\(phase)-\(slug): missing bitmap bytes")
+                return
+            }
+            let byteCount = rep.bytesPerRow * rep.pixelsHigh
+            let bytes = UnsafeBufferPointer(start: bitmapData, count: byteCount)
+            let minimum = bytes.min() ?? 0
+            let maximum = bytes.max() ?? 0
+
+            // cacheDisplay writes row 0 at the top of the rep. Canvas points are
+            // only top-left-origin when the view is flipped, so convert rather
+            // than assume - a silently mirrored probe reads background as body.
+            func rgba(at point: CGPoint) -> [Int] {
+                let px = max(0, min(rep.pixelsWide - 1, Int(point.x * 2)))
+                let canvasY = canvas.isFlipped ? point.y : (canvas.bounds.height - point.y)
+                let py = max(0, min(rep.pixelsHigh - 1, Int(canvasY * 2)))
+                let offset = py * rep.bytesPerRow + px * 4
+                return (0..<4).map { Int(bitmapData[offset + $0]) }
+            }
+            let primaryZone = canvas.qaZoneChromeRectInCanvas(for: za1)!
+            let lowerZone = canvas.qaZoneChromeRectInCanvas(for: za2)!
+            let focusedTile = canvas.qaTileRectInCanvas(for: ta1)!
+            let probes: [String: [Int]] = [
+                "background": rgba(at: CGPoint(x: safe.minX + 2, y: safe.minY + 2)),
+                "primaryZoneBorder": rgba(at: CGPoint(x: primaryZone.minX + 1, y: primaryZone.midY)),
+                "primaryZoneHeader": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.maxY - 6)),
+                "primaryZoneBody": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.midY)),
+                "lowerZoneBody": rgba(at: CGPoint(x: lowerZone.midX, y: lowerZone.midY)),
+                "tileBorder": rgba(at: CGPoint(x: focusedTile.minX + 1, y: focusedTile.midY)),
+                "tileBody": rgba(at: CGPoint(x: focusedTile.midX, y: focusedTile.midY))]
+            let distinctProbeColors = Set(probes.values.map { $0.map(String.init).joined(separator: ",") })
+            if minimum == maximum || distinctProbeColors.count < 4 {
+                visualCaptureFailures.append(
+                    "\(phase)-\(slug): semantic raster probes lack background/border/body transitions probes=\(probes)")
+                return
+            }
+            visualEvidence.append(["phase": phase, "appearance": slug, "path": path.path,
+                "captureSequence": sequence, "lifecycleEvent": phase,
+                "points": ["width": canvas.bounds.width, "height": canvas.bounds.height],
+                "pixels": ["width": rep.pixelsWide, "height": rep.pixelsHigh],
+                "backingScale": 2.0, "pixelMinimum": minimum, "pixelMaximum": maximum,
+                "cameraFit": ["x": fitted.x, "y": fitted.y, "zoom": fitted.zoom,
+                    "note": "evidence framing only; document camera restored after capture"],
+                "documentCamera": ["x": priorViewport.x, "y": priorViewport.y, "zoom": priorViewport.zoom],
+                "expectedRects": expectedRects, "safeArea": ["x": safe.minX, "y": safe.minY,
+                    "width": safe.width, "height": safe.height],
+                "semanticProbes": probes])
+        }
         runtime.lifecycleSnapshotObserver = { event, _ in
-            if event == .firstHydrationPhase { firstHydrated = try? snapshot("first-hydrated") }
-            if event == .settled { bootSettled = try? snapshot("settled") }
+            if event == .firstHydrationPhase {
+                firstHydrated = try? snapshot("first-hydrated")
+                captureVisual("first-hydrated", appearanceName: .aqua, slug: "aqua")
+                captureVisual("first-hydrated", appearanceName: .darkAqua, slug: "dark-aqua")
+            }
+            if event == .settled {
+                bootSettled = try? snapshot("settled")
+                captureVisual("settled", appearanceName: .aqua, slug: "aqua")
+                captureVisual("settled", appearanceName: .darkAqua, slug: "dark-aqua")
+            }
         }
         try delegate.mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: spawner, projectStore: bootStore,
             canvasState: bootState, installsGlobalEventMonitors: false)
         canvas.layoutSubtreeIfNeeded()
+        if ProcessInfo.processInfo.environment["CONTINUUM_WS2_CAPTURE_VISUALS"] == "1" {
+            guard visualCaptureFailures.isEmpty, visualEvidence.count == 4 else {
+                throw Failure.message("offscreen visual capture failed: \(visualCaptureFailures), count=\(visualEvidence.count)")
+            }
+        }
         guard let firstHydrated, let bootSettled else { throw Failure.message("production hydration observations missing") }
         let firstViewport = firstHydrated["viewport"] as! [String: Double]
         guard firstViewport["x"] == initialDocument.viewport.x,
@@ -24163,37 +24323,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var settled = try snapshot("settled")
         var mountedSceneContinuity = false
         var closeWitness: [String: Bool] = [:]
+        var closeChronology: [String: Any] = [:]
         if mode == "seed-mutate-close" {
-            var placement = canvas.zonePlacement(for: za1)!
-            placement.origin = .init(x: -1001.375, y: 333.625)
-            placement.size = .init(width: 1111.75, height: 777.125)
-            canvas.setZonePlacement(placement)
-            delegate.canvasDidChange(canvas)
-            try runtime.commitZonePlacement(placement)
-            canvas.setViewport(.init(x: -255.125, y: 144.875, zoom: 1.625))
-            _ = runtime.setActiveZone(za1, reason: .explicit)
-            _ = delegate.qaFocusBroker.requestFocus(.tile(ta1), reason: .userClick)
+            // Keep switch coverage separate from the timed close witness. The
+            // close clock starts only after returning to A and driving the live
+            // mutation path below.
             switchSnapshots.append(try snapshot("A-before-switch"))
-            let beforeFailedSave = try snapshot("before-failed-save")
-            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected departing save") }
-            var saveFailed = false
-            do { try runtime.switchWorkspace(to: wb) } catch { saveFailed = true }
-            runtime._workspaceDocumentSaver = nil
-            let afterFailedSave = try snapshot("after-failed-save")
-            func normalized(_ value: [String: Any]) throws -> Data {
-                var copy = value; copy["phase"] = nil
-                return try JSONSerialization.data(withJSONObject: copy, options: [.sortedKeys])
-            }
-            let beforeFailureCanonical = try normalized(beforeFailedSave)
-            let afterFailureCanonical = try normalized(afterFailedSave)
-            mountedSceneContinuity = saveFailed && beforeFailureCanonical == afterFailureCanonical
-            guard mountedSceneContinuity else { throw Failure.message("failed save changed mounted scene") }
             try runtime.switchWorkspace(to: wb)
             switchSnapshots.append(try snapshot("B-after-switch"))
             try runtime.switchWorkspace(to: wa)
-            switchSnapshots.append(try snapshot("A-after-return"))
-            settled = try snapshot("settled")
-            if closeOffset > 0 { usleep(closeOffset * 1_000) }
+            switchSnapshots.append(try snapshot("A-after-return-before-mutation"))
+
+            // Window construction/order is fixture setup, not close latency.
+            // In particular the 0 ms leg has no work between the end of the
+            // pending mutation and its first and only performClose request.
             let closeWindow = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
                 styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -24201,18 +24344,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             closeWindow.delegate = delegate
             delegate.window = closeWindow
             closeWindow.orderFront(nil)
-            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected close save") }
-            closeWindow.performClose(nil)
-            let failedCloseVetoed = delegate.workspaceRuntime === runtime
-                && closeWindow.delegate === delegate && closeWindow.isVisible
-            guard failedCloseVetoed else {
-                throw Failure.message("failed close attempt tore down the mounted scene")
+
+            let mutationStartTick = DispatchTime.now().uptimeNanoseconds
+            var placement = canvas.zonePlacement(for: za1)!
+            placement.origin = .init(x: -1001.375, y: 333.625)
+            placement.size = .init(width: 1111.75, height: 777.125)
+            canvas.setZonePlacement(placement)
+            // Geometry persistence is intentionally synchronous in production.
+            canvas.onZoneMoved?(placement)
+            canvas.setViewport(.init(x: -255.125, y: 144.875, zoom: 1.625))
+            // Change arming via the real ambient path. This schedules the
+            // runtime's long-lived arming controller and remains pending until
+            // close drains it; viewport is captured by the departing write.
+            _ = runtime.setActiveZone(za2, reason: .click)
+            _ = delegate.qaFocusBroker.requestFocus(.tile(ta1), reason: .userClick)
+            delegate.canvasDidChange(canvas)
+            let scheduledGeneration = runtime.qaArmingScheduledGeneration
+            let acknowledgedBeforeClose = runtime.qaArmingAcknowledgedGeneration
+            guard scheduledGeneration > acknowledgedBeforeClose else {
+                throw Failure.message("ambient arming save was not pending at mutation end")
             }
-            runtime._workspaceDocumentSaver = nil
+            settled = try snapshot("settled")
+            switchSnapshots.append(settled.merging(["phase":"A-after-return-and-mutation"]) { _, new in new })
+            // All fixture inspection is complete before this boundary. From
+            // mutationEndTick onward the only operations are the requested
+            // delay, the adjacent request timestamp, and performClose itself.
+            let mutationEndTick = DispatchTime.now().uptimeNanoseconds
+            if closeOffset > 0 { usleep(closeOffset * 1_000) }
+            // Timestamp the actual request, immediately adjacent to it.
+            let closeRequestTick = DispatchTime.now().uptimeNanoseconds
             closeWindow.performClose(nil)
-            let recoveredCloseCompleted = delegate.workspaceRuntime == nil && !closeWindow.isVisible
-            guard recoveredCloseCompleted else {
-                throw Failure.message("recovered close did not tear down exactly once")
+            let acknowledgedGeneration = runtime.qaArmingAcknowledgedGeneration
+            let closeCompleted = delegate.workspaceRuntime == nil && !closeWindow.isVisible
+            guard closeCompleted else {
+                throw Failure.message("timed close did not tear down exactly once")
+            }
+            closeWitness = ["timedCloseCompleted": closeCompleted]
+            let elapsedMS = Double(closeRequestTick - mutationEndTick) / 1_000_000
+            closeChronology = ["phase":"close-chronology", "requestedOffsetMs":closeOffset,
+                "mutationStartTick":mutationStartTick, "mutationEndTick":mutationEndTick,
+                "closeRequestTick":closeRequestTick, "observedElapsedMs":elapsedMS,
+                "scheduledGeneration":scheduledGeneration,
+                "acknowledgedGenerationAtMutationEnd":acknowledgedBeforeClose,
+                "acknowledgedGenerationBeforeTeardown":acknowledgedGeneration,
+                "departingWriteScheduledGeneration":runtime.qaLastScheduledWorkspaceGeneration,
+                "departingWriteAcknowledgedGeneration":runtime.qaLastAcknowledgedWorkspaceGeneration]
+        } else if mode == "failure-continuity" {
+            // Fault continuity is intentionally untimed. It must never pollute
+            // the mutation-to-close clock exercised by seed-mutate-close.
+            func normalized(_ value: [String: Any]) throws -> Data {
+                var copy = value
+                copy["phase"] = nil
+                return try JSONSerialization.data(withJSONObject: copy, options: [.sortedKeys])
+            }
+            let beforeFailedSwitch = try snapshot("before-failed-switch")
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected departing save") }
+            var switchFailed = false
+            do { try runtime.switchWorkspace(to: wb) } catch { switchFailed = true }
+            runtime._workspaceDocumentSaver = nil
+            let afterFailedSwitch = try snapshot("after-failed-switch")
+            let beforeFailedSwitchCanonical = try normalized(beforeFailedSwitch)
+            let afterFailedSwitchCanonical = try normalized(afterFailedSwitch)
+            mountedSceneContinuity = switchFailed
+                && beforeFailedSwitchCanonical == afterFailedSwitchCanonical
+            guard mountedSceneContinuity else {
+                throw Failure.message("failed switch changed mounted scene")
+            }
+
+            let faultWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            faultWindow.isReleasedWhenClosed = false
+            faultWindow.delegate = delegate
+            delegate.window = faultWindow
+            faultWindow.orderFront(nil)
+            runtime._workspaceDocumentSaver = { _, _ in throw Failure.message("injected close save") }
+            faultWindow.performClose(nil)
+            let failedCloseVetoed = delegate.workspaceRuntime === runtime
+                && faultWindow.delegate === delegate && faultWindow.isVisible
+            runtime._workspaceDocumentSaver = nil
+            faultWindow.performClose(nil)
+            let recoveredCloseCompleted = delegate.workspaceRuntime == nil && !faultWindow.isVisible
+            guard failedCloseVetoed && recoveredCloseCompleted else {
+                throw Failure.message("failed close continuity/recovery mismatch")
             }
             closeWitness = ["failedCloseVetoed": failedCloseVetoed,
                 "recoveredCloseCompleted": recoveredCloseCompleted]
@@ -24220,7 +24434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let payload: [String: Any] = ["mode": mode, "closeOffsetMs": closeOffset, "readiness": readiness,
             "firstHydrated": firstHydrated, "bootSettled": bootSettled, "settled": settled,
             "mountedSceneContinuityOnSaveFailure": mountedSceneContinuity, "switchSnapshots": switchSnapshots,
-            "closeWitness": closeWitness]
+            "closeWitness": closeWitness, "closeChronology": closeChronology,
+            "visualEvidence": visualEvidence]
         try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]).write(to: output)
         print("WS2_ACK \(mode) \(output.path)")
     }
@@ -24243,19 +24458,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var repetitions: [[String: Any]] = []
         let repetitionCount = Int(ProcessInfo.processInfo.environment["CONTINUUM_WS2_REPETITIONS"] ?? "20") ?? 20
         let closeOffsets = ProcessInfo.processInfo.environment["CONTINUUM_WS2_CLOSE_OFFSETS"]
-            .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [0, 25, 75, 150]
+            .map { $0.split(separator: ",").compactMap { Int($0) } } ?? [0, 10, 50, 190]
+        try expect(closeOffsets == [0, 10, 50, 190],
+            "restart/fault offset inventory must be exactly 0/10/50/190, got \(closeOffsets)")
         for closeOffset in closeOffsets {
           for iteration in 1...repetitionCount {
             let root = support.appendingPathComponent("close-\(closeOffset)-iteration-\(iteration)", isDirectory: true)
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
             var childResults: [[String: Any]] = []
-            for mode in ["seed-mutate-close", "cold-reload"] {
+            for mode in ["seed-mutate-close", "failure-continuity", "cold-reload"] {
                 let output = root.appendingPathComponent("\(mode).json")
                 let log = root.appendingPathComponent("\(mode).log")
                 let process = Process(); process.executableURL = executable
                 process.arguments = ["--workspace-restart-fault-child-check", "--mode", mode, "--output", output.path,
                     "--close-offset-ms", String(closeOffset)]
                 var environment = ProcessInfo.processInfo.environment; environment["CONTINUUM_APP_SUPPORT"] = root.path
+                if closeOffset == 0 && iteration == 1 && mode == "seed-mutate-close" {
+                    environment["CONTINUUM_WS2_CAPTURE_VISUALS"] = "1"
+                }
                 process.environment = environment
                 fm.createFile(atPath: log.path, contents: nil)
                 let handle = try FileHandle(forWritingTo: log); process.standardOutput = handle; process.standardError = handle
@@ -24274,15 +24494,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     "output": output.path, "outputSha256": try sha256(output), "readiness": readiness])
             }
             let seedObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("seed-mutate-close.json"))) as! [String: Any]
+            let failureObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("failure-continuity.json"))) as! [String: Any]
             let reloadObject = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("cold-reload.json"))) as! [String: Any]
-            try expect(seedObject["mountedSceneContinuityOnSaveFailure"] as? Bool == true,
-                "iteration \(iteration) save failure changed mounted scene")
+            try expect(failureObject["mountedSceneContinuityOnSaveFailure"] as? Bool == true,
+                "iteration \(iteration) failed switch changed mounted scene")
+            let faultClose = failureObject["closeWitness"] as! [String: Bool]
+            try expect(faultClose["failedCloseVetoed"] == true && faultClose["recoveredCloseCompleted"] == true,
+                "iteration \(iteration) failed-close continuity/recovery mismatch")
+            let chronology = seedObject["closeChronology"] as! [String: Any]
+            let elapsed = chronology["observedElapsedMs"] as! Double
+            let scheduled = chronology["scheduledGeneration"] as! UInt64
+            let acknowledgedAtMutation = chronology["acknowledgedGenerationAtMutationEnd"] as! UInt64
+            let acknowledged = chronology["acknowledgedGenerationBeforeTeardown"] as! UInt64
+            try expect(elapsed >= Double(closeOffset) && elapsed <= Double(closeOffset + 50),
+                "iteration \(iteration) close chronology outside tolerance requested=\(closeOffset) observed=\(elapsed)")
+            try expect(scheduled > acknowledgedAtMutation && acknowledged == scheduled,
+                "iteration \(iteration) close did not acknowledge scheduled generation \(scheduled)/\(acknowledged)")
+            try expect(chronology["departingWriteScheduledGeneration"] as! UInt64
+                    == chronology["departingWriteAcknowledgedGeneration"] as! UInt64,
+                "iteration \(iteration) final departing-document generation was not acknowledged")
             let switched = seedObject["switchSnapshots"] as! [[String: Any]]
             func canonical(_ value: [String: Any]) throws -> Data {
                 var normalized = value; normalized["phase"] = nil
                 return try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys])
             }
-            try expect(switched.count == 3, "iteration \(iteration) missing A-B-A snapshots")
+            try expect(switched.count == 4, "iteration \(iteration) missing A-B-A plus mutated snapshots")
             let beforeSwitchCanonical = try canonical(switched[0])
             let afterReturnCanonical = try canonical(switched[2])
             try expect(beforeSwitchCanonical == afterReturnCanonical, "iteration \(iteration) A-before/A-after canonical diff")
@@ -24527,8 +24763,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let root = support.appendingPathComponent("fault-alternating-clock", isDirectory: true)
             let workspaceId = UUID(uuidString: "72000000-0000-0000-0000-000000000019")!
             let layout = WorkspaceStoreLayout(applicationSupportDirectory: root, workspaceId: workspaceId)
-            let canonical = layout.canvasFile.deletingLastPathComponent().standardizedFileURL
-                .resolvingSymlinksInPath().appendingPathComponent(layout.canvasFile.lastPathComponent)
+            let canonical = URL(fileURLWithPath: AtomicWriter.stablePrivatePrefix(
+                layout.canvasFile.deletingLastPathComponent().resolvingSymlinksInPath().path))
+                .appendingPathComponent(layout.canvasFile.lastPathComponent)
             let identity = SHA256.hash(data: Data(canonical.path.utf8)).map { String(format:"%02x",$0) }.joined()
             let prefix = "array-backup-v2-\(identity)-"
             try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: root,
@@ -24546,7 +24783,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }.sorted()
                 let expectedGenerations = Array(max(1, index - 1)...(index + 1))
                 try expect(generations == expectedGenerations,
-                    "alternating clock retained wrong generations \(generations), expected \(expectedGenerations)")
+                    "alternating clock retained wrong generations \(generations), expected \(expectedGenerations); prefix=\(prefix) canonical=\(canonical.path) names=\(names)")
                 states.append(["write":index+1,"epoch":epoch,"retainedCount":names.count,
                     "primaryX":500+index,"retainedGenerations":generations])
             }
@@ -24571,7 +24808,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 "array-backup-v2-\(identity)-184467440737095516150-2030-01-01T00-00-00.000Z",
                 "array-backup-v2-\(identity)-18446744073709551615-not-a-timestamp",
                 "array_backup_v2-\(identity)-18446744073709551615-2030-01-01T00-00-00.000Z",
-                "array-backup-v2-\(identity.uppercased())-00000000000000000042-2030-01-01T00-00-00.000Z"
+                "array-backup-v2-\(identity.uppercased())-00000000000000000042-2030-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2023-02-29T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-02-30T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-02-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-04-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-06-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-09-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-11-31T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-00-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-13-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-00T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-32T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T24-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-60-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-60.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-026-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-02026-01-01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.00Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.0000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026_01_01T00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01t00-00-00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00:00:00.000Z",
+                "array-backup-v2-\(identity)-00000000000000000042-2026-01-01T00-00-00.000z"
             ]
             for name in malformed { try Data("junk".utf8).write(to: backups.appendingPathComponent(name)) }
             try AtomicWriter(backupsDirectory: backups, retainedBackups: 4,
@@ -24585,6 +24844,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect(FileManager.default.fileExists(atPath: backups.appendingPathComponent(maxName).path)
                 && maxName.contains(identity), "valid exact-ID max fixture was not constructed")
             let overflowWriter = AtomicWriter(backupsDirectory: backups)
+            let validLeap = "array-backup-v2-\(identity)-00000000000000000042-2024-02-29T00-00-00.000Z"
+            try expect(overflowWriter.validBackupGeneration(named: validLeap, for: target) == 42,
+                "strict production parser rejected valid Gregorian leap day")
+            try expect(malformed.allSatisfy { overflowWriter.validBackupGeneration(named: $0, for: target) == nil },
+                "strict production parser accepted malformed identity/generation/calendar input")
             try expect(overflowWriter.validBackupGeneration(named: maxName, for: target) == UInt64.max,
                 "production parser did not classify the derived valid-max fixture")
             var overflowed = false

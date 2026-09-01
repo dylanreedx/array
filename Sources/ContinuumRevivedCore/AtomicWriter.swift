@@ -137,7 +137,7 @@ public struct AtomicWriter: Sendable {
             } catch {
                 // The replacement is already durable. Report maintenance
                 // separately without lying to the caller about its commit.
-                fputs("AtomicWriter: post-commit backup maintenance failed\n", stderr)
+                fputs("AtomicWriter: post-commit backup maintenance failed: \(error)\n", stderr)
             }
         }
     }
@@ -203,9 +203,43 @@ public struct AtomicWriter: Sendable {
         return try body()
     }
 
+    /// Canonical identity for a target file. This string is hashed into every
+    /// backup filename and the lock path, so it MUST be identical for every
+    /// spelling of the same file.
+    ///
+    /// `standardizedFileURL` is deliberately not used: on macOS it abbreviates
+    /// `/private/tmp` back to `/tmp` (and `/private/var` to `/var`), so the same
+    /// directory hashed to two different namespaces depending on how the caller
+    /// spelled it and on whether the directory existed yet. That silently split
+    /// a file's backups in two -- retention then saw an empty history and kept
+    /// nothing. `resolvingSymlinksInPath` alone is idempotent and maps every
+    /// spelling onto the one real path.
     private func canonicalTarget(for url: URL) -> URL {
-        url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
-            .appendingPathComponent(url.lastPathComponent)
+        URL(fileURLWithPath: Self.canonicalIdentityPath(for: url))
+    }
+
+    /// The exact string hashed into every backup filename and the lock path.
+    /// Public so a witness can assert the one property that matters: it must not
+    /// change when the target's directory comes into existence.
+    public static func canonicalIdentityPath(for url: URL) -> String {
+        let directory = url.deletingLastPathComponent().resolvingSymlinksInPath()
+        return URL(fileURLWithPath: stablePrivatePrefix(directory.path))
+            .appendingPathComponent(url.lastPathComponent).path
+    }
+
+    /// `resolvingSymlinksInPath()` applies the macOS `/private` abbreviation
+    /// ONLY once the path exists: `/private/tmp/x` resolves to itself while the
+    /// directory is missing and to `/tmp/x` once it is there. That made the
+    /// canonical path -- and therefore the backup namespace and the lock path --
+    /// change between a file's first save and every later one, so retention
+    /// looked at an empty history and kept nothing. Apply the abbreviation
+    /// unconditionally so identity is stable from the first write.
+    public static func stablePrivatePrefix(_ path: String) -> String {
+        for prefix in ["/private/tmp", "/private/var"]
+        where path == prefix || path.hasPrefix(prefix + "/") {
+            return String(path.dropFirst("/private".count))
+        }
+        return path
     }
 
     private func targetNamespace(for url: URL) -> String {
@@ -449,7 +483,10 @@ public struct AtomicWriter: Sendable {
             else if bytes[index] < 48 || bytes[index] > 57 { return false }
         }
         func number(_ range: Range<Int>) -> Int { range.reduce(0) { $0 * 10 + Int(bytes[$1] - 48) } }
-        guard (1...12).contains(number(5..<7)), (1...31).contains(number(8..<10)),
+        let year = number(0..<4), month = number(5..<7), day = number(8..<10)
+        let leap = year % 400 == 0 || (year % 4 == 0 && year % 100 != 0)
+        let days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        guard (1...12).contains(month), (1...days[month - 1]).contains(day),
               number(11..<13) < 24, number(14..<16) < 60, number(17..<19) < 60 else { return false }
         return true
     }

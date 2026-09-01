@@ -5520,6 +5520,17 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneChromeViews[zoneId]?.frame
     }
 
+    /// QA raster contract: concrete installed view rectangles in canvas points.
+    func qaZoneChromeRectInCanvas(for zoneId: UUID) -> CGRect? {
+        guard let view = zoneChromeViews[zoneId] else { return nil }
+        return convert(view.bounds, from: view)
+    }
+
+    func qaTileRectInCanvas(for tileId: UUID) -> CGRect? {
+        guard let view = tileView(for: tileId) else { return nil }
+        return convert(view.bounds, from: view)
+    }
+
     /// QA (M1.10): exactly one chrome view per zone, no orphan from a departed
     /// workspace and no duplicate from a layer install.
     var qaZoneChromeViewCount: Int { zoneChromeViews.count }

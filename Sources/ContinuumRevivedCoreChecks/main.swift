@@ -3834,6 +3834,49 @@ do {
     let backupsDir = scratch.appendingPathComponent("backups")
     let writer = AtomicWriter(backupsDirectory: backupsDir, retainedBackups: 2)
 
+    // Backup identity must not depend on how a path is SPELLED or on whether
+    // its directory exists yet. `resolvingSymlinksInPath()` applies the macOS
+    // `/private` abbreviation only once the path is real, so
+    // `/private/tmp/x` hashed one way before its directory existed and another
+    // way after -- a file's first backup landed in a different namespace from
+    // every later one, and retention then saw an empty history and kept
+    // nothing. Reproduced end to end by --workspace-restart-fault-check, which
+    // failed under every /private/tmp support directory and passed under /tmp.
+    do {
+        let privateRoot = "/private/tmp/array-canonical-\(UUID().uuidString)"
+        let aliasRoot = AtomicWriter.stablePrivatePrefix(privateRoot)
+        expect(aliasRoot == privateRoot.replacingOccurrences(of: "/private", with: "", options: .anchored),
+               "stablePrivatePrefix must abbreviate /private/tmp: got \(aliasRoot)")
+        expect(AtomicWriter.stablePrivatePrefix(aliasRoot) == aliasRoot,
+               "stablePrivatePrefix must be idempotent")
+        expect(AtomicWriter.stablePrivatePrefix("/private/var/folders/x") == "/var/folders/x",
+               "stablePrivatePrefix must abbreviate /private/var too")
+        expect(AtomicWriter.stablePrivatePrefix("/Users/x/private/tmp/y") == "/Users/x/private/tmp/y",
+               "stablePrivatePrefix must only strip a LEADING /private")
+        expect(AtomicWriter.stablePrivatePrefix("/privatestuff/tmp") == "/privatestuff/tmp",
+               "stablePrivatePrefix must not strip a partial component match")
+
+        // The property that actually matters: the canonical identity must not
+        // change when the target's directory comes into existence. It did --
+        // `/private/tmp/x` resolved to itself while missing and to `/tmp/x`
+        // once created -- so a file's identity, and with it its backup
+        // namespace and lock path, shifted underneath it.
+        let canonRoot = URL(fileURLWithPath: privateRoot)
+        defer { try? FileManager.default.removeItem(at: canonRoot) }
+        let canonTarget = canonRoot.appendingPathComponent("nested/doc.json")
+        let identityBefore = AtomicWriter.canonicalIdentityPath(for: canonTarget)
+        try FileManager.default.createDirectory(
+            at: canonTarget.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let identityAfter = AtomicWriter.canonicalIdentityPath(for: canonTarget)
+        expect(identityBefore == identityAfter,
+               "canonical identity must not change when the directory appears: before=\(identityBefore) after=\(identityAfter)")
+
+        // ...and both spellings of the same file must agree.
+        let aliasTarget = URL(fileURLWithPath: aliasRoot).appendingPathComponent("nested/doc.json")
+        expect(AtomicWriter.canonicalIdentityPath(for: aliasTarget) == identityAfter,
+               "/tmp and /private/tmp spellings must share one identity")
+    }
+
     func makeProject(name: String) -> Project {
         Project(
             name: name,

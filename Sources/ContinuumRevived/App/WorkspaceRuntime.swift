@@ -39,6 +39,8 @@ final class WorkspaceRuntime {
     /// nil and uses WorkspaceStore's atomic read/write paths.
     var _workspaceDocumentLoader: ((UUID) throws -> WorkspaceDocument?)?
     var _workspaceDocumentSaver: ((UUID, WorkspaceDocument) throws -> Void)?
+    private(set) var qaLastScheduledWorkspaceGeneration: UInt64 = 0
+    private(set) var qaLastAcknowledgedWorkspaceGeneration: UInt64 = 0
 
     // Tracks which projectIds this runtime acquired (for closeAll).
     private var acquiredProjectIds: [UUID] = []
@@ -373,6 +375,17 @@ final class WorkspaceRuntime {
 
     /// QA: the armed zone as the document records it.
     var qaArmedZoneId: UUID? { document.lastActiveZoneId }
+
+    /// QA chronology seam for the long-lived ambient-arming debounce. These are
+    /// deliberately read-only: close checks must observe the controller that
+    /// production actually drains, rather than manufacture a fresh controller.
+    var qaArmingScheduledGeneration: UInt64 {
+        armingSaveController?.scheduledGeneration ?? 0
+    }
+
+    var qaArmingAcknowledgedGeneration: UInt64 {
+        armingSaveController?.acknowledgedGeneration ?? 0
+    }
 
     /// QA: drain the debounced arming write so a check can assert on disk.
     func flushPendingArmingSave() {
@@ -1133,7 +1146,9 @@ final class WorkspaceRuntime {
             workspaceId: workspaceId,
             applicationSupportDirectory: appSupport))
         let generation = controller.scheduleZoneLayoutSave(document)
+        qaLastScheduledWorkspaceGeneration = generation
         try controller.flush(through: generation)
+        qaLastAcknowledgedWorkspaceGeneration = controller.acknowledgedGeneration
         lifecycleObserver?(.saveGenerationAcknowledged(generation))
     }
 
