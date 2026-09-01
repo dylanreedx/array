@@ -17,6 +17,25 @@ count ContinuumRevivedRelayIntegrationChecks 0
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 11
 count ContinuumRevivedSyncIntegrationChecks 1
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --tool-path-bootstrap-check
+count ContinuumRevivedAgentContentChecks 22
+count ContinuumRevivedAgentUIChecks 19
+count ContinuumRevivedCoreChecks 109
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncIntegrationChecks 1
 check --add-zone-check
 check --agent-awareness-check
 check --agent-display-name-check
@@ -60,6 +79,7 @@ check --canvas-persistence-model-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
 check --companion-sync-health-check
+check --completion-awareness-check
 check --component-lab-check
 check --composer-image-components-check
 check --conductor-queue-tile-check
@@ -152,8 +172,8 @@ check --tile-surface-residency-check
 check --tile-world-bounds-check
 check --topology-migration-check
 check --transcript-delta-index-oracle-check
-check --transcript-rhythm-check
 check --transcript-provider-parity-check
+check --transcript-rhythm-check
 check --ui-baseline-check
 check --ui-contrast-check
 check --ui-geometry-check
@@ -246,6 +266,7 @@ leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
+leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
@@ -337,8 +358,8 @@ leg run_app_check .build/debug/Array --tile-surface-residency-check
 leg run_app_check .build/debug/Array --tile-world-bounds-check
 leg run_app_check .build/debug/Array --topology-migration-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
-leg run_app_check .build/debug/Array --transcript-rhythm-check
 leg run_app_check .build/debug/Array --transcript-provider-parity-check
+leg run_app_check .build/debug/Array --transcript-rhythm-check
 leg run_app_check .build/debug/Array --ui-baseline-check
 leg run_app_check .build/debug/Array --ui-contrast-check
 leg run_app_check .build/debug/Array --ui-geometry-check

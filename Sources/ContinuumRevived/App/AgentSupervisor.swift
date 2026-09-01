@@ -4545,6 +4545,37 @@ final class AgentSupervisor {
     /// clearing on hover would empty the inbox by sweeping the mouse across it.
     private(set) var focusedAgentID: AgentID?
 
+    // MARK: - WS4 · arrival-time active-view facts
+
+    /// Live facts about whether a human is looking at this agent RIGHT NOW.
+    ///
+    /// Installed by the app (`AppDelegate.installAgentAwarenessHooks`) and read at
+    /// the instant a terminal event arrives. Absent — a headless supervisor, a
+    /// fixture that never wired the app — answers `.away`, so a completion stays
+    /// unread. `focusedAgentID` deliberately plays NO part: it is a remembered
+    /// value that survives app resignation, window ordering and modal restoration,
+    /// and using it here is precisely the false-read defect.
+    var activeViewFactsProvider: ((AgentID) -> AgentActiveViewFacts)?
+
+    /// Fires for every terminal arrival that the facts said was actively viewed,
+    /// carrying the decision so the live/visual half is applied by one owner.
+    var onWatchedTerminalArrival: ((AgentID, UUID?, AgentTerminalArrivalKind, AgentAwarenessDecision) -> Void)?
+
+    /// Every terminal arrival this supervisor has seen. The POSITIVE CONTROL for
+    /// every "…and it stayed unread" assertion: without it, a witness that broke
+    /// the delivery path entirely would read as a pass.
+    private(set) var qaTerminalArrivalCount = 0
+    /// Terminal arrivals the facts accepted as watched.
+    private(set) var qaWatchedTerminalArrivalCount = 0
+    /// The facts and decision from the most recent terminal arrival, for the
+    /// semantic record a check writes out.
+    private(set) var qaLastArrivalFacts: AgentActiveViewFacts?
+    private(set) var qaLastArrivalDecision: AgentAwarenessDecision?
+
+    func activeViewFacts(for id: AgentID) -> AgentActiveViewFacts {
+        activeViewFactsProvider?(id) ?? .away
+    }
+
     /// A deliberate focus or open: the tile was activated, or the inbox row was
     /// revealed (P3.9). Record the maximum watermark for that agent. The in-memory
     /// value moves immediately, while disk writes are throttled except when this
@@ -4553,8 +4584,17 @@ final class AgentSupervisor {
     /// Pass nil when focus leaves for something that is not an agent; from then on a
     /// later completion is unread again. `now` is injectable for deterministic
     /// supervisor checks and defaults to the real visit instant in production.
-    func focus(agentID id: AgentID?, now: Date = Date()) {
+    ///
+    /// WS4: `deliberate` is the difference between a human going to look at an
+    /// agent and the app putting focus back where it was (app activation, modal
+    /// dismissal, recovery). A non-deliberate focus still arms `focusedAgentID`
+    /// — the sidebar, lineage overlay and z-order all depend on knowing where
+    /// focus sits — but it must NOT move the read watermark, or coming back to
+    /// Array would silently clear every completion that landed while you were
+    /// away.
+    func focus(agentID id: AgentID?, now: Date = Date(), deliberate: Bool = true) {
         focusedAgentID = id
+        guard deliberate else { return }
         guard let id, var record = records[id] else { return }
         let wasUnread = record.isUnread
         let previous = record.lastVisitedAt
@@ -4576,8 +4616,8 @@ final class AgentSupervisor {
     /// The same thing keyed by TILE, which is how focus actually arrives on the
     /// desktop (`FocusBroker` speaks tile ids). A tile showing no agent focuses
     /// nothing rather than leaving the previous agent armed.
-    func focusTile(_ tileId: UUID?) {
-        focus(agentID: tileId.flatMap { agent(forTile: $0) })
+    func focusTile(_ tileId: UUID?, deliberate: Bool = true) {
+        focus(agentID: tileId.flatMap { agent(forTile: $0) }, deliberate: deliberate)
     }
 
     /// This agent's attention axis, resolved (`InboxAttention.resolve`). Durable
@@ -5380,6 +5420,10 @@ final class AgentSupervisor {
         // model relied on.
         ingestTranscriptEvent(event, for: id)
 
+        // WS4: stamped inside the record block, fired once the record is stored
+        // and persisted, so the live/visual half can never run against a record
+        // the durable half has not finished writing.
+        var pendingWatchedArrival: (AgentID, UUID?, AgentTerminalArrivalKind, AgentAwarenessDecision)?
         if var record = records[id] {
             record.lastActivityAt = max(record.lastActivityAt, now)
             // Context telemetry rides the record so a resumed session can seed
@@ -5392,26 +5436,54 @@ final class AgentSupervisor {
                 record.lastContextWindow = snapshot
                 contextTelemetryChanged = true
             }
-            // A completion watched in the focused agent is a visit at the moment
-            // it lands. Keep the watermark monotonic and persist this write even
-            // though ordinary focus writes are throttled; otherwise the just-read
-            // completion would reappear after a relaunch.
+            // WS4 · A terminal event that lands while a human is ACTIVELY LOOKING
+            // at this agent is a visit at the moment it lands: it counts as read
+            // without demanding an exit and re-entry. Keep the watermark monotonic
+            // and persist this write even though ordinary focus writes are
+            // throttled; otherwise the just-read completion would reappear after a
+            // relaunch.
+            //
+            // "Actively looking" is decided by facts sampled HERE, at arrival, from
+            // live AppKit state — never by the remembered `focusedAgentID`, which
+            // outlives app resignation, window ordering and modal restoration and
+            // therefore marked background completions read. See
+            // `AgentActiveViewFacts`.
             let watchedCompletion: Bool
-            let isTerminalArrival: Bool
+            let arrivalKind: AgentTerminalArrivalKind?
             switch event {
-            case .turnCompleted, .runtimeError: isTerminalArrival = true
-            default: isTerminalArrival = false
-            }
-            if isTerminalArrival, focusedAgentID == id {
-                watchedCompletion = record.isUnread
-                let visited = record.lastVisitedAt.map { max($0, now) } ?? now
-                record.lastVisitedAt = visited
-                if let terminal = record.latestTerminalEvent {
-                    record.acknowledgedTerminalSequence = max(
-                        record.acknowledgedTerminalSequence, terminal.sequence)
+            case .turnCompleted(_, _, let outcome, _):
+                switch outcome {
+                case .completed: arrivalKind = .completed
+                case .failed: arrivalKind = .failed
+                case .interrupted, .cancelled: arrivalKind = nil
                 }
-                if watchedCompletion { lastVisitedPersistAt[id] = now }
+            case .runtimeError: arrivalKind = .failed
+            default: arrivalKind = nil
+            }
+            if let arrivalKind {
+                qaTerminalArrivalCount &+= 1
+                let facts = activeViewFacts(for: id)
+                let decision = AgentAwarenessTransition.decide(arrival: arrivalKind, facts: facts)
+                qaLastArrivalFacts = facts
+                qaLastArrivalDecision = decision
+                if decision.advancesReadWatermark {
+                    qaWatchedTerminalArrivalCount &+= 1
+                    watchedCompletion = record.isUnread
+                    let visited = record.lastVisitedAt.map { max($0, now) } ?? now
+                    record.lastVisitedAt = visited
+                    if let terminal = record.latestTerminalEvent {
+                        record.acknowledgedTerminalSequence = max(
+                            record.acknowledgedTerminalSequence, terminal.sequence)
+                    }
+                    if watchedCompletion { lastVisitedPersistAt[id] = now }
+                } else {
+                    watchedCompletion = false
+                }
+                pendingWatchedArrival = (id, record.tileId, arrivalKind, decision)
             } else {
+                // Deliberately does NOT clear `qaLastArrival*`: the events that
+                // trail a completion (`.sessionStateChanged(.ready)`) would erase
+                // the record of the arrival a witness is about to read.
                 watchedCompletion = false
             }
             // P4.4: real work un-settles the agent. Narrower than the stamp above —
@@ -5436,6 +5508,11 @@ final class AgentSupervisor {
             // next launch.
             if Self.isPersistWorthy(event) || unsettled || watchedCompletion
                 || contextTelemetryChanged { persist(record) }
+        }
+        if let pendingWatchedArrival, pendingWatchedArrival.3 != AgentAwarenessDecision.none {
+            onWatchedTerminalArrival?(
+                pendingWatchedArrival.0, pendingWatchedArrival.1,
+                pendingWatchedArrival.2, pendingWatchedArrival.3)
         }
 
         for continuation in (subscribers[id] ?? [:]).values {
@@ -10591,7 +10668,7 @@ func runAgentRestoreChecks() async throws {
     // The signature carries P3.9's `agentID:` — revealing a headless agent wires an
     // agent that already exists into a fresh tile. Still an EXACT match, so a rename
     // still turns this scan red rather than blind.
-    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {")
+    let wiring = try paletteAgentSpawnBranch("func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {")
     guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("rehydratePreviousSessionOrNotice(") else {
         throw fail("wireManagedAgentTile does not route a restored agent through rehydration/notice, so a restored agent renders as a blank tile:\n\(wiring)")
     }
@@ -14624,6 +14701,18 @@ private func checkReadState(
         throw fail("read-state: the subscriber never registered")
     }
 
+    // WS4: this check is HEADLESS — no window, no canvas, no responder — so it
+    // supplies the active-view facts the app supplies in production. `watchedAgent`
+    // is this fixture's statement of "the human is looking at this one"; that the
+    // APP derives those facts from real AppKit state (and refuses after a real
+    // resign) is what `--completion-awareness-check` proves.
+    var watchedAgent: AgentID?
+    let viewedFacts = AgentActiveViewFacts(
+        appActive: true, windowNotUpstaged: true, windowVisible: true,
+        windowOcclusionVisible: true, tileMounted: true, responderInTile: true,
+        focusScopeIsTile: true, modalPresented: false)
+    supervisor.activeViewFactsProvider = { id in id == watchedAgent ? viewedFacts : .away }
+
     var turnsRun = 0
     func runOneTurn(_ prompt: String) async throws {
         let before = inbox.events.count
@@ -14641,7 +14730,9 @@ private func checkReadState(
     guard supervisor.attention(for: agentId) == .none else {
         throw fail("read-state: a freshly spawned agent is already \(supervisor.attention(for: agentId).rawValue)")
     }
+    watchedAgent = agentId
     supervisor.focus(agentID: agentId)
+    watchedAgent = nil
     supervisor.focus(agentID: nil)
     try await runOneTurn("first prompt")
     guard supervisor.attention(for: agentId) == .unread else {
@@ -14679,12 +14770,14 @@ private func checkReadState(
     }
 
     // 3 · a turn completing while you are here is not unread.
+    watchedAgent = agentId
     try await runOneTurn("second prompt")
     guard supervisor.attention(for: agentId) == .none else {
         throw fail("read-state: a turn you watched finish was marked \(supervisor.attention(for: agentId).rawValue) — the mark would then mean `has ever finished a turn`")
     }
 
     // 4 · focus leaves, and the next turn is unread again.
+    watchedAgent = nil
     supervisor.focus(agentID: nil)
     try await runOneTurn("third prompt")
     guard supervisor.attention(for: agentId) == .unread else {
@@ -14695,12 +14788,14 @@ private func checkReadState(
     guard supervisor.agent(forTile: tileId) == agentId else {
         throw fail("read-state: the agent is not bound to its tile, so the tile-keyed focus is untested")
     }
+    watchedAgent = agentId
     supervisor.focusTile(tileId)
     guard supervisor.focusedAgentID == agentId, supervisor.attention(for: agentId) == .none else {
         throw fail("read-state: focusing the agent's TILE left it \(supervisor.attention(for: agentId).rawValue)")
     }
     // A tile that shows no agent focuses nothing, rather than leaving the previous
     // agent armed — otherwise clicking a terminal would keep an agent's turns read.
+    watchedAgent = nil
     supervisor.focusTile(UUID())
     guard supervisor.focusedAgentID == nil else {
         throw fail("read-state: focusing an unrelated tile left \(String(describing: supervisor.focusedAgentID)) armed")

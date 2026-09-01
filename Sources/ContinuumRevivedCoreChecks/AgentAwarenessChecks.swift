@@ -171,3 +171,104 @@ func runAgentAwarenessChecks() throws {
 
     print("Agent awareness checks: signals, deduplication, priorities, sound defaults/overrides, privacy-safe Git classification, and Claude/Codex/Pi success semantics passed")
 }
+
+/// WS4 · the PURE half of completion awareness: the active-view predicate, the
+/// arrival decision table, the deliberate-visit classification, and the finite
+/// acknowledgment plan. The AppKit half (`--completion-awareness-check`) drives
+/// the same types through the real window/supervisor/tile path.
+func runCompletionAwarenessCoreChecks() throws {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() {
+            fputs("FAIL: Completion awareness core: \(message)\n", stderr)
+            exit(1)
+        }
+    }
+
+    // 1 · the predicate is a conjunction of live facts, and every single one of
+    // them can refuse on its own. Written as "flip exactly one field of a fully
+    // viewed set" so that adding a field to the struct without adding it to the
+    // predicate cannot pass here unnoticed.
+    let viewed = AgentActiveViewFacts(
+        appActive: true, windowNotUpstaged: true, windowVisible: true,
+        windowOcclusionVisible: true, tileMounted: true, responderInTile: true,
+        focusScopeIsTile: true, modalPresented: false)
+    expect(viewed.isActivelyViewed, "a fully established set of facts must be actively viewed")
+    expect(viewed.blockingReasons.isEmpty, "a viewed set must report no blocking reason")
+    expect(!AgentActiveViewFacts.away.isActivelyViewed, "the default facts must be away")
+
+    var flips: [(String, AgentActiveViewFacts)] = []
+    var f = viewed; f.appActive = false; flips.append(("appActive", f))
+    f = viewed; f.windowNotUpstaged = false; flips.append(("windowNotUpstaged", f))
+    f = viewed; f.windowVisible = false; flips.append(("windowVisible", f))
+    f = viewed; f.windowOcclusionVisible = false; flips.append(("windowOcclusionVisible", f))
+    f = viewed; f.tileMounted = false; flips.append(("tileMounted", f))
+    f = viewed; f.responderInTile = false; flips.append(("responderInTile", f))
+    f = viewed; f.focusScopeIsTile = false; flips.append(("focusScopeIsTile", f))
+    f = viewed; f.modalPresented = true; flips.append(("modalPresented", f))
+    for (name, facts) in flips {
+        expect(!facts.isActivelyViewed, "\(name) alone must be able to refuse active viewing")
+        expect(facts.blockingReasons.count == 1, "\(name) alone must report exactly one blocking reason — got \(facts.blockingReasons)")
+    }
+
+    // 2 · the decision table. Away changes nothing at all; watched success is the
+    // only thing that earns the visual acknowledgment; watched failure is read
+    // but keeps its live signal and never borrows the success treatment.
+    let away = AgentActiveViewFacts.away
+    for kind in [AgentTerminalArrivalKind.completed, .failed] {
+        let decision = AgentAwarenessTransition.decide(arrival: kind, facts: away)
+        expect(decision == AgentAwarenessDecision.none,
+               "an arrival while away must change nothing — \(kind.rawValue) gave \(decision)")
+    }
+    let watchedSuccess = AgentAwarenessTransition.decide(arrival: .completed, facts: viewed)
+    expect(watchedSuccess.advancesReadWatermark && watchedSuccess.clearsLiveSignal
+           && watchedSuccess.acknowledgesVisually,
+           "a watched completion must read, clear and acknowledge — got \(watchedSuccess)")
+    let watchedFailure = AgentAwarenessTransition.decide(arrival: .failed, facts: viewed)
+    expect(watchedFailure.advancesReadWatermark, "a watched failure was still watched")
+    expect(!watchedFailure.clearsLiveSignal,
+           "a watched failure must keep its live signal — failure may not collapse into success")
+    expect(!watchedFailure.acknowledgesVisually,
+           "a watched failure must not play the success acknowledgment")
+
+    // 2b · the table's own invariant, which the app relies on: nothing may ask
+    // for the visual acknowledgment without also retiring the live signal.
+    // `AppDelegate.applyPendingWatchedArrival` mirrors these two fields in that
+    // order, so a table that violated this would leave a green glow sitting on
+    // top of a live attention signal.
+    for facts in [viewed, away] {
+        for kind in [AgentTerminalArrivalKind.completed, .failed] {
+            let decision = AgentAwarenessTransition.decide(arrival: kind, facts: facts)
+            expect(!decision.acknowledgesVisually || decision.clearsLiveSignal,
+                   "a decision that acknowledges must also clear — \(kind.rawValue) gave \(decision)")
+            expect(!decision.clearsLiveSignal || decision.advancesReadWatermark,
+                   "a decision that clears the live signal must also have counted as read — \(kind.rawValue) gave \(decision)")
+        }
+    }
+
+    // 3 · restoration is not a visit.
+    for reason in [FocusRequest.appActivated, .modalDismissed, .recovery] {
+        expect(!reason.isDeliberateVisit, "\(reason.rawValue) is restoration, not a visit")
+    }
+    for reason in [FocusRequest.userClick, .tileSpawned, .modalOpened, .tileClosed, .runtimeExited] {
+        expect(reason.isDeliberateVisit, "\(reason.rawValue) must stay a deliberate visit")
+    }
+
+    // 4 · the acknowledgment plan is finite, inside the contract window, and
+    // static (never persistent, never repeating) under Reduce Motion.
+    let motion = AgentCompletionAcknowledgmentPlan.plan(reduceMotion: false)
+    let still = AgentCompletionAcknowledgmentPlan.plan(reduceMotion: true)
+    expect(motion.isWithinContractWindow && still.isWithinContractWindow,
+           "both plans must fall in 1.2–1.6s — got \(motion.duration) / \(still.duration)")
+    expect(motion.duration == still.duration,
+           "Reduce Motion keeps the same finite window, it does not shorten or extend it")
+    expect(motion.pulseCount > 0 && !motion.isStatic, "the ordinary plan pulses")
+    expect(still.pulseCount == 0 && still.isStatic, "the Reduce Motion plan is static")
+    expect(AgentCompletionAcknowledgmentPlan(duration: 99, pulseCount: 2).duration
+           == AgentCompletionAcknowledgmentPlan.maximumDuration,
+           "an out-of-contract duration is clamped, never honoured")
+    expect(AgentCompletionAcknowledgmentPlan(duration: 0.1, pulseCount: 2).duration
+           == AgentCompletionAcknowledgmentPlan.minimumDuration,
+           "a too-short duration is clamped up")
+
+    print("Completion awareness core checks passed: 8 refusing facts, decision table, visit classification, finite plans")
+}
