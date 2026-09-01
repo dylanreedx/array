@@ -1072,6 +1072,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--zone-unacquired-project-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneUnacquiredProjectChecks.run()
+                print("ContinuumRevivedZoneUnacquiredProjectChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("zone-unacquired-project check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--zone-arming-check") {
             do {
                 _ = NSApplication.shared
@@ -14278,9 +14289,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnerForFilesystemCreation() -> TileSpawner? {
-        if let projectId = resolvedCreationScope()?.projectId,
-           let scoped = workspaceRuntime?.controller(for: projectId)?.tileSpawner {
-            return scoped
+        if let projectId = resolvedCreationScope()?.projectId {
+            // The resolved scope names a project, so ONLY that project's spawner
+            // may serve it. The fallback below used to run whenever the scoped
+            // controller was missing, which is exactly the case where it is
+            // wrong: the creation scope resolves from the app registry and is
+            // happily correct for an unacquired project, so a tile created in a
+            // second zone was framed and stamped for ITS project while being
+            // persisted into the active project's canvas and its managed session
+            // written under the active project's `.array/`.
+            //
+            // Refusing here surfaces the creation-scope picker instead, which is
+            // the same contract `spawnerAndScope(forProject:)` already keeps.
+            return workspaceRuntime?.controller(for: projectId)?.tileSpawner
         }
         return tileSpawner
     }
@@ -14348,6 +14369,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (T2): drive the click-arming route the canvas fires, without synthesizing
     /// an NSEvent (`postToPid` does not reach a check's canvas).
     func qaActivateZoneByClick(_ zoneId: UUID) { canvasView?.onZoneActivated?(zoneId) }
+
+    /// QA (WS9): the project whose spawner a filesystem-backed creation would
+    /// actually use. The creation SCOPE and the SPAWNER are resolved separately
+    /// -- the scope from the app registry, the spawner from the live controller
+    /// -- and the bug this witnesses is precisely the two disagreeing: the scope
+    /// named the armed zone's project while the spawner silently fell back to
+    /// the active one, so the tile was stamped for one project and persisted
+    /// into another. nil means creation refuses, which is the correct answer
+    /// when the scope's project cannot be acquired.
+    var qaCreationSpawnerProjectId: UUID? { spawnerForFilesystemCreation()?.qaProjectId }
 
     /// QA (T2): drive the focus-arming route with the reason production passes.
     func qaAcceptTileFocus(_ tileId: UUID, reason: FocusRequest) {

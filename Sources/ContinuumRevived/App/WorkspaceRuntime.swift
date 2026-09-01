@@ -39,9 +39,14 @@ final class WorkspaceRuntime {
     var activeController: ZoneRuntimeController? {
         if let lastActiveZoneId = document.lastActiveZoneId,
            let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
-           let projectId = zone.projectId,
-           let controller = registry.controller(for: projectId) {
-            return controller
+           let projectId = zone.projectId {
+            // The armed zone's project is the ONLY correct answer, so return it
+            // even when it has no controller yet. Falling through to the
+            // single-acquired-project fallback below is how a second zone
+            // silently created and persisted tiles into the FIRST zone's
+            // project: `controller(for:)` was nil for the unacquired project and
+            // the fallback answered with the other one.
+            return registry.controller(for: projectId)
         }
         // Production can intentionally close the visible project zone while the
         // project remains the active backing store for bare/group-zone tiles.
@@ -290,8 +295,30 @@ final class WorkspaceRuntime {
         // empty canvas, or clicking a group zone, is not a request to disarm.
         guard let zoneId,
               let zone = document.zones.first(where: { $0.zoneId == zoneId }),
-              zone.projectId != nil
+              let zoneProjectId = zone.projectId
         else { return false }
+
+        // Arming a zone must make its project usable RIGHT NOW. Acquisition used
+        // to happen only in the mount pass, so a zone that was not live at boot
+        // had no controller and creation into it silently fell back to whatever
+        // project WAS acquired. Doing it here rather than only in
+        // `reconcileHydration` matters: that pass rides the camera debounce, so
+        // clicking a zone without panning would not have acquired anything.
+        //
+        // Failure is not fatal to the arming: the user did click this zone, so it
+        // arms. `activeController` then answers nil for it, creation refuses and
+        // offers the picker, and the report below lets the app say why. That is
+        // the documented contract — refuse, never land somewhere wrong.
+        if registry.controller(for: zoneProjectId) == nil {
+            do {
+                _ = try registry.acquire(projectId: zoneProjectId)
+                if !acquiredProjectIds.contains(zoneProjectId) {
+                    acquiredProjectIds.append(zoneProjectId)
+                }
+            } catch {
+                onZoneProjectUnavailable?(zoneProjectId, error)
+            }
+        }
 
         let previousProjectId = activeController?.project.id
         guard document.lastActiveZoneId != zoneId else {
@@ -819,6 +846,11 @@ final class WorkspaceRuntime {
     /// wire its app-owned handlers onto the arriving spawner instead of only onto
     /// the one it built at boot.
     var onSpawnerCreated: ((TileSpawner) -> Void)?
+
+    /// A zone's project could not be acquired — its `.array/` lock is held by
+    /// another install, or its root is gone. Creation into that zone refuses
+    /// rather than silently using a different project.
+    var onZoneProjectUnavailable: ((UUID, Error) -> Void)?
 
     /// The three construction inputs `attachActiveControllerUI` used to omit, now
     /// injectable. M1.3b (`.plans/46`).
@@ -1423,10 +1455,37 @@ final class WorkspaceRuntime {
             focusedTileZone: focusedTileZone,
             maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
         )
+        // A CONTROLLER and a LIVE TIER are different things, and conflating them
+        // is what made this bug unreachable by any amount of panning or clicking.
+        // The armed zone must always own a controller, because creation resolves
+        // its store, its canvas and its managed-session store through it. Its
+        // TIER still follows the camera like every other zone -- pinning it live
+        // would defeat the hydration budget and keep a zone hot forever.
+        let armedZoneId = document.lastActiveZoneId
         for zone in document.zones {
             guard let projectId = zone.projectId,
-                  let controller = registry.controller(for: projectId),
                   let plannedTier = plan.tier(for: zone.zoneId) else { continue }
+            guard let controller = registry.controller(for: projectId) else {
+                // No controller for this project. Acquisition used to happen ONLY
+                // in `install`, so a zone that was not live at mount could never
+                // gain one afterwards no matter how far the camera moved or how
+                // often it was clicked -- and creation into it fell back to the
+                // active project's spawner, persisting the tile into the wrong
+                // project entirely.
+                guard plannedTier == .live || zone.zoneId == armedZoneId else { continue }
+                do {
+                    let acquired = try registry.acquire(projectId: projectId)
+                    if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
+                    try? acquired.setTier(plannedTier, allowDehydratingFocusedZone: false)
+                } catch {
+                    // Its `.array/` is held by another install (hazard 10), or the
+                    // root is gone. Leave it unacquired: creation refuses and asks
+                    // which project, rather than landing in one the user did not
+                    // point at.
+                    onZoneProjectUnavailable?(projectId, error)
+                }
+                continue
+            }
             guard plannedTier != controller.hydrationTier else { continue }
             try? controller.setTier(plannedTier, allowDehydratingFocusedZone: false)
         }
