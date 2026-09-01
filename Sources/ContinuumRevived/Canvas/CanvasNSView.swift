@@ -11827,14 +11827,26 @@ final class CanvasNSView: NSView, TokenThemed {
         // header rect, which `zoneHeaderScreenRect` derives from the same
         // placement. Adaptive chrome means the rectangle you see is not the one you
         // can grab. Now that `setZones` owns Model B there is one answer.
-        let expectedChromeScreenFrame = CanvasEngine.tileScreenFrame(
-            CanvasEngine.zoneWorldFrame(layerB2.placement), viewport: vpB)
+        // `zoneLayerChromeFrame` is the chrome view's frame in its superview, the
+        // world plane: a WORLD rect, camera-free by design. Compare it against
+        // the placement's WORLD frame, not a screen frame. These agreed only
+        // because `vpB` sits at the origin, and the identical accident in the
+        // workspace-runtime leg turned into a false failure the moment a mount
+        // adopted a non-zero camera.
+        let expectedChromeWorldFrame = Self.cgRect(from: CanvasEngine.zoneWorldFrame(layerB2.placement))
         let actualChromeFrame = canvasB.zoneLayerChromeFrame(for: gzId)
-        try expect(actualChromeFrame == expectedChromeScreenFrame,
-                   "assertion 11: chrome screen frame after move must equal the stored placement's screen frame; expected \(expectedChromeScreenFrame), got \(String(describing: actualChromeFrame))")
-        if let grab = canvasB.qaZoneHeaderGrabRect(gzId), let chrome = actualChromeFrame {
-            try expect(abs(grab.origin.x - chrome.origin.x) < 0.5 && abs(grab.width - chrome.width) < 0.5,
-                       "assertion 11b: the move-grab header must sit on the visible chrome; header \(grab) vs chrome \(chrome)")
+        try expect(actualChromeFrame == expectedChromeWorldFrame,
+                   "assertion 11: chrome WORLD frame after move must equal the stored placement's world frame; expected \(expectedChromeWorldFrame), got \(String(describing: actualChromeFrame))")
+        // The grab header is a SCREEN rect, so compare it against the installed
+        // chrome view converted into canvas points — the space a click arrives
+        // in. `origin.y` is included; omitting it let a vertical displacement of
+        // the grab target pass unnoticed.
+        if let grab = canvasB.qaZoneHeaderGrabRect(gzId),
+           let chromeOnScreen = canvasB.qaZoneChromeRectInCanvas(for: gzId) {
+            try expect(abs(grab.origin.x - chromeOnScreen.origin.x) < 0.5
+                       && abs(grab.origin.y - chromeOnScreen.origin.y) < 0.5
+                       && abs(grab.width - chromeOnScreen.width) < 0.5,
+                       "assertion 11b: the move-grab header must sit on the visible chrome; header \(grab) vs chrome on screen \(chromeOnScreen)")
         }
 
         // ── Assertion 12: no drag-snap side effects ───────────────────────────────
