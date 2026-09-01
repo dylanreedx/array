@@ -49,7 +49,15 @@ final class AssistantProseView: NSView {
     /// the result is prose and card edges aligned, with card text indented within
     /// its own fill — which is what containment should look like.
     static let horizontalReadingInset: CGFloat = 0
-    private static let blockSpacing = CGFloat(Space.m)
+    /// WS5 companion. The zero-argument `static let` above is referenced from
+    /// `UIProbeGeometry` and `TranscriptRhythmChecks`, so it stays exactly as it
+    /// is; production reads this instead. Zero scales to zero at every rung —
+    /// the companion exists so the reading inset cannot silently become a
+    /// hardcoded metric if the value ever stops being 0.
+    static func horizontalReadingInset(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(0))
+    }
+    private static func blockSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
 
     private(set) var textFields: [RichInlineTextView] = []
     /// Pre-built marker glyphs by row index, and the frames to draw them beside.
@@ -86,8 +94,12 @@ final class AssistantProseView: NSView {
 
     /// Gutter width per list nesting level, and the width reserved for the marker
     /// itself. Both are grid values so the reading column stays on the 2pt grid.
-    private static let listIndentPerLevel = CGFloat(Space.l)
-    private static let markerGutter = CGFloat(Space.l)
+    private static func listIndentPerLevel(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Space.l))
+    }
+    private static func markerGutter(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Space.l))
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -105,7 +117,10 @@ final class AssistantProseView: NSView {
     func apply(block: AgentBlock, context: AgentRenderContext) {
         renderContext = context
         textFields.forEach { $0.removeFromSuperview() }
-        rows = Self.rows(for: block)
+        // WS5: the row set carries the ZOOMED indents and leading, so a recycled
+        // view rebuilt at another rung re-derives every metric here rather than
+        // keeping the ones it was born with.
+        rows = Self.rows(for: block, zoom: context.pageZoom)
         textFields = rows.map { row in
             let view = RichInlineTextView(frame: .zero)
             view.apply(
@@ -121,7 +136,7 @@ final class AssistantProseView: NSView {
         markerFrames.removeAll(keepingCapacity: true)
         markerRuns = rows.enumerated().compactMap { index, row in
             guard !row.marker.isEmpty else { return nil }
-            let font = NSFont.token(row.textRole)
+            let font = NSFont.token(row.textRole, zoom: context.pageZoom)
             return (index, NSAttributedString(string: row.marker, attributes: [
                 .font: font,
                 .foregroundColor: context.tokens.secondaryText.color.nsColor(for: context.appearance),
@@ -181,7 +196,9 @@ final class AssistantProseView: NSView {
 
     override func layout() {
         super.layout()
-        let availableWidth = max(1, bounds.width - Self.horizontalReadingInset * 2)
+        let zoom = renderContext.pageZoom
+        let readingInset = Self.horizontalReadingInset(zoom: zoom)
+        let availableWidth = max(1, bounds.width - readingInset * 2)
         if abs(cachedWidth - availableWidth) > Self.measureWidthHysteresis
             || cachedRowHeights.count != rows.count {
             Self.qaLastMeasureTrigger = String(
@@ -207,14 +224,14 @@ final class AssistantProseView: NSView {
         let rowWidth = cachedWidth > 0 ? cachedWidth : availableWidth
         for (index, pair) in zip(rows, textFields).enumerated() {
             let height = cachedRowHeights[index]
-            let frame = NSRect(x: Self.horizontalReadingInset, y: y, width: rowWidth, height: height)
+            let frame = NSRect(x: readingInset, y: y, width: rowWidth, height: height)
             // An unchanged frame still costs a TextKit glyph-bounds pass, and it
             // re-dirties the view — which is what kept the display cycle spinning.
             if pair.1.frame != frame { pair.1.frame = frame }
             markerFrames[index] = frame
             y += height
             if index + 1 < rows.count {
-                y += Self.blockSpacing + rows[index + 1].spacingAbove
+                y += Self.blockSpacing(zoom: zoom) + rows[index + 1].spacingAbove
             }
         }
         if !markerRuns.isEmpty { needsDisplay = true }
@@ -234,7 +251,7 @@ final class AssistantProseView: NSView {
             guard let frame = markerFrames[index] else { continue }
             let indent = rows[index].style.firstLineHeadIndent
             let size = marker.size()
-            let x = frame.minX + indent - Self.markerGutter
+            let x = frame.minX + indent - Self.markerGutter(zoom: renderContext.pageZoom)
             // Baseline-align the marker with the first line of its row rather than
             // centring it in the row: a two-line item would otherwise float its
             // bullet into the middle of the text.
@@ -249,9 +266,11 @@ final class AssistantProseView: NSView {
         width: CGFloat,
         context: AgentRenderContext
     ) -> CGFloat {
-        let rows = rows(for: block)
+        // Exactly the metrics `apply`/`layout` paint with, from the same zoom.
+        let zoom = context.pageZoom
+        let rows = rows(for: block, zoom: zoom)
         guard !rows.isEmpty else { return 0 }
-        let availableWidth = max(1, width - horizontalReadingInset * 2)
+        let availableWidth = max(1, width - horizontalReadingInset(zoom: zoom) * 2)
         let text = rows.reduce(CGFloat.zero) {
             $0 + RichInlineTextView.measuredHeight(
                 for: $1.runs,
@@ -265,10 +284,15 @@ final class AssistantProseView: NSView {
         // height, or a heading's extra air would be laid out and never measured —
         // which clips the last row of the block.
         let leading = rows.dropFirst().reduce(CGFloat.zero) { $0 + $1.spacingAbove }
-        return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing + leading)
+        return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing(zoom: zoom) + leading)
     }
 
-    private static func rows(for block: AgentBlock, listDepth: Int = 0, itemNumber: Int? = nil) -> [Row] {
+    private static func rows(
+        for block: AgentBlock,
+        zoom: AgentPageZoom,
+        listDepth: Int = 0,
+        itemNumber: Int? = nil
+    ) -> [Row] {
         switch block.payload {
         case let .paragraph(content):
             let marker = itemMarker(number: itemNumber)
@@ -278,12 +302,12 @@ final class AssistantProseView: NSView {
                 role: itemNumber == nil ? .staticText : listItemRole,
                 headingLevel: nil,
                 textRole: .body,
-                style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty),
+                style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
                 marker: marker
-            )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
+            )] + block.children.flatMap { rows(for: $0, zoom: zoom, listDepth: listDepth) }
         case let .heading(level, content):
             let clampedLevel = max(1, min(6, Int(level)))
-            let ladder = headingLadder(level: clampedLevel)
+            let ladder = headingLadder(level: clampedLevel, zoom: zoom)
             return [Row(
                 blockID: block.id,
                 runs: content,
@@ -292,11 +316,11 @@ final class AssistantProseView: NSView {
                 textRole: ladder.role,
                 style: ladder.style,
                 spacingAbove: ladder.spaceAbove
-            )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
+            )] + block.children.flatMap { rows(for: $0, zoom: zoom, listDepth: listDepth) }
         case let .list(payload):
             let start = payload.start ?? 1
             return block.children.enumerated().flatMap { index, child in
-                rows(for: child, listDepth: listDepth + 1, itemNumber: payload.ordered ? start + index : 0)
+                rows(for: child, zoom: zoom, listDepth: listDepth + 1, itemNumber: payload.ordered ? start + index : 0)
             }
         case .listItem:
             let marker = itemMarker(number: itemNumber)
@@ -307,19 +331,19 @@ final class AssistantProseView: NSView {
                     role: listItemRole,
                     headingLevel: nil,
                     textRole: .body,
-                    style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty),
+                    style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
                     marker: marker
                 )]
             }
             return block.children.enumerated().flatMap { index, child in
                 let childNumber = index == 0 ? itemNumber : nil
-                return rows(for: child, listDepth: listDepth, itemNumber: childNumber)
+                return rows(for: child, zoom: zoom, listDepth: listDepth, itemNumber: childNumber)
             }
         case .quote:
-            return block.children.flatMap { rows(for: $0, listDepth: listDepth) }.map { row in
+            return block.children.flatMap { rows(for: $0, zoom: zoom, listDepth: listDepth) }.map { row in
                 var style = row.style
-                style.firstLineHeadIndent += markerGutter
-                style.headIndent += markerGutter
+                style.firstLineHeadIndent += markerGutter(zoom: zoom)
+                style.headIndent += markerGutter(zoom: zoom)
                 style.secondary = true
                 return Row(
                     blockID: row.blockID,
@@ -332,7 +356,7 @@ final class AssistantProseView: NSView {
                 )
             }
         default:
-            return block.children.flatMap { rows(for: $0, listDepth: listDepth) }
+            return block.children.flatMap { rows(for: $0, zoom: zoom, listDepth: listDepth) }
         }
     }
 
@@ -347,10 +371,13 @@ final class AssistantProseView: NSView {
     /// Indents for a list row. `firstLineHeadIndent` and `headIndent` are equal
     /// because the marker is drawn in the gutter to the LEFT of both, so the
     /// first line and every wrapped line share one left edge.
-    private static func listStyle(depth: Int, hasMarker: Bool) -> AgentProseTextStyle {
+    private static func listStyle(depth: Int, hasMarker: Bool, zoom: AgentPageZoom) -> AgentProseTextStyle {
         guard depth > 0 else { return .plain }
-        let indent = CGFloat(max(0, depth - 1)) * listIndentPerLevel
-            + (hasMarker ? markerGutter : 0)
+        // `AgentProseTextStyle`'s indents are CGFloats this caller computes, so
+        // the zoomed value has to be baked in HERE or the text column stays at
+        // its 100% gutter while the glyphs grow.
+        let indent = CGFloat(max(0, depth - 1)) * listIndentPerLevel(zoom: zoom)
+            + (hasMarker ? markerGutter(zoom: zoom) : 0)
         return AgentProseTextStyle(headIndent: indent, firstLineHeadIndent: indent)
     }
 
@@ -362,15 +389,19 @@ final class AssistantProseView: NSView {
     /// which is also what `_DESIGN.md` §11 asks for ("soft hierarchy, not
     /// perimeter borders everywhere").
     private static func headingLadder(
-        level: Int
+        level: Int,
+        zoom: AgentPageZoom
     ) -> (role: TextRole, style: AgentProseTextStyle, spaceAbove: CGFloat) {
+        // The rung's SIZE follows the zoom through `TextRole` (every paint and
+        // measure resolves the font with `zoom:`); only the air above it is a
+        // length this ladder owns, so only that is scaled here.
         switch level {
-        case 1: return (.titleL, AgentProseTextStyle(bold: true), CGFloat(Space.l))
-        case 2: return (.title, AgentProseTextStyle(), CGFloat(Space.l))
-        case 3: return (.title, AgentProseTextStyle(secondary: true), CGFloat(Space.m))
-        case 4: return (.body, AgentProseTextStyle(bold: true), CGFloat(Space.m))
-        case 5: return (.body, AgentProseTextStyle(bold: true, secondary: true), CGFloat(Space.s))
-        default: return (.label, AgentProseTextStyle(bold: true, secondary: true), CGFloat(Space.s))
+        case 1: return (.titleL, AgentProseTextStyle(bold: true), CGFloat(zoom.scaled(Space.l)))
+        case 2: return (.title, AgentProseTextStyle(), CGFloat(zoom.scaled(Space.l)))
+        case 3: return (.title, AgentProseTextStyle(secondary: true), CGFloat(zoom.scaled(Space.m)))
+        case 4: return (.body, AgentProseTextStyle(bold: true), CGFloat(zoom.scaled(Space.m)))
+        case 5: return (.body, AgentProseTextStyle(bold: true, secondary: true), CGFloat(zoom.scaled(Space.s)))
+        default: return (.label, AgentProseTextStyle(bold: true, secondary: true), CGFloat(zoom.scaled(Space.s)))
         }
     }
 }

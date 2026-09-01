@@ -17,7 +17,12 @@ final class ThematicBreakRenderer: AgentBlockRendering {
     /// The rule sits in the middle of this box; the air around it is what makes a
     /// break read as a break. Kept below the 24pt the deferred renderer used, so
     /// adopting a real rule tightens the document rather than loosening it.
-    static let boxHeight = CGFloat(Space.xl)
+    ///
+    /// WS5: the air scales with the page zoom — a 150% document whose section
+    /// breaks kept a 16pt box would read as a tighter break than a 100% one.
+    static func boxHeight(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xl))
+    }
 
     func makeView() -> NSView { ThematicBreakView(frame: .zero) }
 
@@ -27,7 +32,7 @@ final class ThematicBreakRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        Self.boxHeight
+        Self.boxHeight(zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {

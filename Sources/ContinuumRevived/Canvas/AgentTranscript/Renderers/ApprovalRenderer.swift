@@ -15,7 +15,7 @@ final class ApprovalRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .approval(payload) = block.payload else { return 0 }
-        return AgentRequestView.measuredHeight(payload: payload, width: width)
+        return AgentRequestView.measuredHeight(payload: payload, width: width, zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -39,6 +39,13 @@ final class AgentRequestView: NSView, TokenThemed {
     static let bottomInset = CGFloat(Space.l)
     static let maximumChoices = 4
 
+    // WS5: the same four metrics at a tile's page zoom. The zero-argument
+    // properties above remain the 100% values.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.l)) }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func actionHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.xs)) }
+    static func bottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+
     private final class ChoiceToken: NSObject {
         let generation: UInt64
         let requestID: String
@@ -61,16 +68,16 @@ final class AgentRequestView: NSView, TokenThemed {
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
     private var status: AgentItemStatus = .pending
 
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled dock re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
+
     init(mode: Mode) {
         self.mode = mode
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
-        titleLabel.font = NSFont.token(.title)
-        statusLabel.font = NSFont.token(.caption)
         statusLabel.lineBreakMode = .byTruncatingTail
-        promptLabel.font = NSFont.token(.body)
         promptLabel.maximumNumberOfLines = 4
         promptLabel.lineBreakMode = .byWordWrapping
         promptLabel.isSelectable = true
@@ -79,6 +86,18 @@ final class AgentRequestView: NSView, TokenThemed {
         addSubview(promptLabel)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+        applyZoomMetrics()
+    }
+
+    /// Every construction-time metric, re-derived from the CURRENT context's
+    /// zoom. A recycled dock runs this again from `apply`.
+    private func applyZoomMetrics() {
+        let zoom = self.zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        titleLabel.font = NSFont.token(.title, zoom: zoom)
+        statusLabel.font = NSFont.token(.caption, zoom: zoom)
+        promptLabel.font = NSFont.token(.body, zoom: zoom)
+        choiceButtons.forEach { $0.applyZoom(zoom) }
     }
 
     @available(*, unavailable)
@@ -100,6 +119,7 @@ final class AgentRequestView: NSView, TokenThemed {
             "agent.\(mode == .approval ? "approval" : "question").\(blockID.rawValue)"
         )
         applyAccessibility(payload: payload)
+        applyZoomMetrics()
         applyTokens()
         needsLayout = true
     }
@@ -112,29 +132,31 @@ final class AgentRequestView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        let inset = Self.horizontalInset
-        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
+        let zoom = self.zoom
+        let inset = Self.horizontalInset(zoom: zoom)
+        let headerHeight = Self.headerHeight(zoom: zoom)
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(zoom.scaled(Space.s)), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
-            y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,
+            y: (headerHeight - statusLabel.intrinsicContentSize.height) / 2,
             width: statusWidth, height: statusLabel.intrinsicContentSize.height
         )
         titleLabel.frame = NSRect(
-            x: inset, y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
-            width: max(1, statusLabel.frame.minX - inset - CGFloat(Space.m)),
+            x: inset, y: (headerHeight - titleLabel.intrinsicContentSize.height) / 2,
+            width: max(1, statusLabel.frame.minX - inset - CGFloat(zoom.scaled(Space.m))),
             height: titleLabel.intrinsicContentSize.height
         )
-        let promptHeight = Self.promptHeight(promptLabel.stringValue, width: bounds.width)
+        let promptHeight = Self.promptHeight(promptLabel.stringValue, width: bounds.width, zoom: zoom)
         promptLabel.frame = NSRect(
-            x: inset, y: Self.headerHeight,
+            x: inset, y: headerHeight,
             width: max(1, bounds.width - inset * 2), height: promptHeight
         )
         guard !choiceButtons.isEmpty else { return }
-        let y = promptLabel.frame.maxY + CGFloat(Space.m)
-        let gap = CGFloat(Space.s)
+        let y = promptLabel.frame.maxY + CGFloat(zoom.scaled(Space.m))
+        let gap = CGFloat(zoom.scaled(Space.s))
         let width = max(1, (bounds.width - inset * 2 - gap * CGFloat(choiceButtons.count - 1)) / CGFloat(choiceButtons.count))
         for (index, button) in choiceButtons.enumerated() {
-            button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight)
+            button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight(zoom: zoom))
         }
     }
 
@@ -154,14 +176,16 @@ final class AgentRequestView: NSView, TokenThemed {
         choiceButtons.forEach { $0.applyTokens(theme: theme) }
     }
 
-    static func measuredHeight(payload: AgentRequestPayload, width: CGFloat) -> CGFloat {
+    static func measuredHeight(
+        payload: AgentRequestPayload, width: CGFloat, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
         let actionable = payload.requestID != nil
             && [.pending, .inProgress].contains(payload.status)
             && !payload.choices.isEmpty
-        return headerHeight
-            + promptHeight(agentPlainText(payload.prompt), width: width)
-            + (actionable ? CGFloat(Space.m) + actionHeight : 0)
-            + bottomInset
+        return headerHeight(zoom: zoom)
+            + promptHeight(agentPlainText(payload.prompt), width: width, zoom: zoom)
+            + (actionable ? CGFloat(zoom.scaled(Space.m)) + actionHeight(zoom: zoom) : 0)
+            + bottomInset(zoom: zoom)
     }
 
     private func rebuildChoices(payload: AgentRequestPayload) {
@@ -188,13 +212,15 @@ final class AgentRequestView: NSView, TokenThemed {
         context.actions.perform(.submitResponse(requestID: token.requestID, value: token.value))
     }
 
-    private static func promptHeight(_ value: String, width: CGFloat) -> CGFloat {
+    private static func promptHeight(
+        _ value: String, width: CGFloat, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
         let rect = (value as NSString).boundingRect(
-            with: NSSize(width: max(1, width - horizontalInset * 2), height: .greatestFiniteMagnitude),
+            with: NSSize(width: max(1, width - horizontalInset(zoom: zoom) * 2), height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(.body)]
+            attributes: [.font: NSFont.token(.body, zoom: zoom)]
         )
-        return max(CGFloat(Metrics.lineHeight(for: .body)), min(ceil(rect.height), CGFloat(Metrics.lineHeight(for: .body) * 4)))
+        return max(CGFloat(zoom.lineHeight(for: .body)), min(ceil(rect.height), CGFloat(zoom.lineHeight(for: .body) * 4)))
     }
 }
 
@@ -214,6 +240,7 @@ final class AgentRequestChoiceButton: NSButton {
         font = NSFont.token(.label)
         wantsLayer = true
         layer?.cornerRadius = CGFloat(Radius.card)
+        // WS5: identity at 100%; the owner re-derives both on every apply.
         // Keep the AppKit exterior keyboard focus ring outside the rounded fill.
         layer?.masksToBounds = false
         setButtonType(.momentaryChange)
@@ -246,6 +273,15 @@ final class AgentRequestChoiceButton: NSButton {
     override func mouseExited(with event: NSEvent) {
         hovered = false
         applyFill()
+    }
+
+    /// WS5: the font and capsule radius, re-derived from the owner's current
+    /// page zoom. A choice button is rebuilt per apply, but the error/notice
+    /// dock reuses two of them for the life of the view.
+    func applyZoom(_ zoom: AgentPageZoom) {
+        font = NSFont.token(.label, zoom: zoom)
+        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        invalidateIntrinsicContentSize()
     }
 
     func applyTokens(theme: TokenTheme) {

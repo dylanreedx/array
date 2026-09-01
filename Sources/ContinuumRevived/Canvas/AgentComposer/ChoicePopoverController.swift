@@ -28,9 +28,15 @@ enum ChoicePopoverLayout: Equatable {
 }
 
 @MainActor
-final class CompletionPopoverContentView: NSView, TokenThemed {
+final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScalable {
     static let headerHeight: CGFloat = 32
     static let footerHeight: CGFloat = 28
+
+    /// WS5: the same two metrics at a page zoom. The `static let`s above are kept
+    /// so callers outside a zoomed surface keep compiling; these are the same
+    /// values scaled, and exact identities at 100%.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(32)) }
+    static func footerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(28)) }
 
     let listView: ChoiceListView
     let scrollView = NSScrollView(frame: .zero)
@@ -41,13 +47,18 @@ final class CompletionPopoverContentView: NSView, TokenThemed {
     private let headerSeparator = NSView(frame: .zero)
     private let footerSeparator = NSView(frame: .zero)
     private var positionedInitialScroll = false
+    /// WS5: the page zoom this panel draws at. A panel is not a subview of the
+    /// tile, so the rung arrives through this initializer, not through the walk.
+    private(set) var pageZoom: AgentPageZoom = .default
 
-    init(listView: ChoiceListView, layout: CompletionPopoverLayout) {
+    init(listView: ChoiceListView, layout: CompletionPopoverLayout, zoom: AgentPageZoom = .default) {
         self.listView = listView
         self.breadcrumbText = layout.breadcrumb
+        self.pageZoom = zoom
         super.init(frame: .zero)
+        listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
         layer?.masksToBounds = true
 
         breadcrumbLabel.lineBreakMode = .byTruncatingMiddle
@@ -61,7 +72,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed {
         locationIcon.setAccessibilityElement(false)
 
         footerLabel.stringValue = layout.footer
-        footerLabel.font = .token(.caption)
+        footerLabel.font = .token(.caption, zoom: pageZoom)
         footerLabel.alignment = .center
         footerLabel.lineBreakMode = .byTruncatingTail
 
@@ -90,28 +101,33 @@ final class CompletionPopoverContentView: NSView, TokenThemed {
     override func layout() {
         super.layout()
         let hairline = LineWidth.hairline
-        footerLabel.frame = NSRect(x: 10, y: 0, width: max(0, bounds.width - 20), height: Self.footerHeight)
-        footerSeparator.frame = NSRect(x: 0, y: Self.footerHeight, width: bounds.width, height: hairline)
+        let headerHeight = Self.headerHeight(zoom: pageZoom)
+        let footerHeight = Self.footerHeight(zoom: pageZoom)
+        let footerInset = CGFloat(pageZoom.scaled(10))
+        footerLabel.frame = NSRect(x: footerInset, y: 0, width: max(0, bounds.width - footerInset * 2), height: footerHeight)
+        footerSeparator.frame = NSRect(x: 0, y: footerHeight, width: bounds.width, height: hairline)
         scrollView.frame = NSRect(
             x: 0,
-            y: Self.footerHeight,
+            y: footerHeight,
             width: bounds.width,
-            height: max(0, bounds.height - Self.headerHeight - Self.footerHeight)
+            height: max(0, bounds.height - headerHeight - footerHeight)
         )
-        headerSeparator.frame = NSRect(x: 0, y: bounds.height - Self.headerHeight, width: bounds.width, height: hairline)
-        let headerOriginY = bounds.height - Self.headerHeight
-        let headerCenterY = headerOriginY + Self.headerHeight / 2
+        headerSeparator.frame = NSRect(x: 0, y: bounds.height - headerHeight, width: bounds.width, height: hairline)
+        let headerOriginY = bounds.height - headerHeight
+        let headerCenterY = headerOriginY + headerHeight / 2
+        let glyphSide = CGFloat(pageZoom.scaled(14))
         locationIcon.frame = NSRect(
-            x: 12,
-            y: floor(headerCenterY - 14 / 2),
-            width: 14,
-            height: 14
+            x: CGFloat(pageZoom.scaled(12)),
+            y: floor(headerCenterY - glyphSide / 2),
+            width: glyphSide,
+            height: glyphSide
         )
         let breadcrumbHeight = ceil(breadcrumbLabel.intrinsicContentSize.height)
+        let breadcrumbX = CGFloat(pageZoom.scaled(36))
         breadcrumbLabel.frame = NSRect(
-            x: 36,
+            x: breadcrumbX,
             y: floor(headerCenterY - breadcrumbHeight / 2),
-            width: max(0, bounds.width - 48),
+            width: max(0, bounds.width - breadcrumbX - CGFloat(pageZoom.scaled(12))),
             height: breadcrumbHeight
         )
 
@@ -147,13 +163,26 @@ final class CompletionPopoverContentView: NSView, TokenThemed {
         listView.applyTokens()
     }
 
+    /// WS5: re-derive every zoom-owned metric from scratch, including the
+    /// breadcrumb's own attributed fonts, and pass the rung to the embedded list.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        footerLabel.font = .token(.caption, zoom: pageZoom)
+        listView.applyPageZoom(pageZoom)
+        applyBreadcrumb(theme: effectiveTokenTheme)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     private func applyBreadcrumb(theme: TokenTheme) {
         let segments = breadcrumbText.components(separatedBy: "  ›  ")
         let result = NSMutableAttributedString()
         let secondary = TextToken.textSecondary.color.nsColor(for: theme)
         let primary = TextToken.textPrimary.color.nsColor(for: theme)
-        let regular = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        let current = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        let breadcrumbSize = CGFloat(pageZoom.scaled(Double(NSFont.smallSystemFontSize)))
+        let regular = NSFont.systemFont(ofSize: breadcrumbSize, weight: .medium)
+        let current = NSFont.systemFont(ofSize: breadcrumbSize, weight: .semibold)
         for (index, segment) in segments.enumerated() {
             if index > 0 {
                 result.append(NSAttributedString(
@@ -174,15 +203,20 @@ final class CompletionPopoverContentView: NSView, TokenThemed {
 }
 
 @MainActor
-final class CommandPopoverContentView: NSView, TokenThemed {
+final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalable {
     let listView: ChoiceListView
     let scrollView = NSScrollView(frame: .zero)
+    /// WS5: the page zoom this panel draws at, delivered through the initializer
+    /// because a panel is not a subview of the tile.
+    private(set) var pageZoom: AgentPageZoom = .default
 
-    init(listView: ChoiceListView) {
+    init(listView: ChoiceListView, zoom: AgentPageZoom = .default) {
         self.listView = listView
+        self.pageZoom = zoom
         super.init(frame: .zero)
+        listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
         layer?.masksToBounds = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -217,6 +251,16 @@ final class CommandPopoverContentView: NSView, TokenThemed {
         applyTokens()
     }
 
+    /// WS5: re-derive every zoom-owned metric from scratch and pass the rung to
+    /// the embedded list.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        listView.applyPageZoom(pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
@@ -247,6 +291,13 @@ final class ChoicePopoverController {
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var anchorWindowObservation: NSKeyValueObservation?
     private var cancellationHandler: (() -> Void)?
+
+    /// WS5: the page zoom the presented surface draws at.
+    ///
+    /// A panel is NOT a subview of the tile, so `AgentPageZoomScaling.apply`
+    /// can never reach it. The anchoring view — which the walk DOES reach —
+    /// forwards its rung here before presenting.
+    var pageZoom: AgentPageZoom = .default
 
     var isPresented: Bool { panel?.isVisible == true }
 
@@ -282,6 +333,7 @@ final class ChoicePopoverController {
             presentation: presentation,
             chrome: layout == .intrinsic ? .standalone : .embedded
         )
+        list.applyPageZoom(pageZoom)
         listView = list
         guard let window = view.window else { return }
 
@@ -305,26 +357,29 @@ final class ChoicePopoverController {
             placementFrame = visibleFrame
         case .completion(let configuration):
             let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
-            let container = CompletionPopoverContentView(listView: list, layout: configuration)
+            let container = CompletionPopoverContentView(
+                listView: list, layout: configuration, zoom: pageZoom)
             completionContentView = container
             contentView = container
             contentSize = Self.completionContentSize(
                 list: list,
                 configuration: configuration,
                 screenAnchor: screenAnchor,
-                visibleFrame: safeFrame
+                visibleFrame: safeFrame,
+                zoom: pageZoom
             )
             container.frame = NSRect(origin: .zero, size: contentSize)
             container.layoutSubtreeIfNeeded()
             placementFrame = safeFrame
         case .commands(let configuration):
             let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
-            let container = CommandPopoverContentView(listView: list)
+            let container = CommandPopoverContentView(listView: list, zoom: pageZoom)
             contentView = container
             contentSize = Self.commandContentSize(
                 list: list,
                 configuration: configuration,
-                visibleFrame: safeFrame
+                visibleFrame: safeFrame,
+                zoom: pageZoom
             )
             container.frame = NSRect(origin: .zero, size: contentSize)
             container.layoutSubtreeIfNeeded()
@@ -346,7 +401,8 @@ final class ChoicePopoverController {
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
-            visibleFrame: placementFrame
+            visibleFrame: placementFrame,
+            zoom: pageZoom
         ), display: false)
 
         self.panel = panel
@@ -434,12 +490,13 @@ final class ChoicePopoverController {
         contentSize: NSSize,
         anchor: NSRect,
         relativeTo view: NSView,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        zoom: AgentPageZoom = .default
     ) -> NSRect {
         guard let window = view.window else { return NSRect(origin: .zero, size: contentSize) }
         let windowAnchor = view.convert(anchor, to: nil)
         let screenAnchor = window.convertToScreen(windowAnchor)
-        let gap = CGFloat(Space.s)
+        let gap = CGFloat(zoom.scaled(Space.s))
         let roomBelow = screenAnchor.minY - visibleFrame.minY
         let roomAbove = visibleFrame.maxY - screenAnchor.maxY
         let placeBelow = roomBelow >= contentSize.height + gap || roomBelow >= roomAbove
@@ -456,22 +513,27 @@ final class ChoicePopoverController {
         list: ChoiceListView,
         configuration: CompletionPopoverLayout,
         screenAnchor: NSRect,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        zoom: AgentPageZoom = .default
     ) -> NSSize {
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption)]
-        let breadcrumbWidth = ceil((configuration.breadcrumb as NSString).size(withAttributes: attributes).width) + 24
-        let footerWidth = ceil((configuration.footer as NSString).size(withAttributes: attributes).width) + 24
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.token(.caption, zoom: zoom)]
+        let padding = CGFloat(zoom.scaled(24))
+        let breadcrumbWidth = ceil((configuration.breadcrumb as NSString).size(withAttributes: attributes).width) + padding
+        let footerWidth = ceil((configuration.footer as NSString).size(withAttributes: attributes).width) + padding
         let availableWidth = max(1, visibleFrame.width)
-        let upperWidth = min(configuration.maximumWidth, availableWidth)
-        let lowerWidth = min(configuration.minimumWidth, upperWidth)
+        // The caller's width band is a CONTENT bound, so it scales with the rung;
+        // the screen's available width does not.
+        let upperWidth = min(CGFloat(zoom.scaled(Double(configuration.maximumWidth))), availableWidth)
+        let lowerWidth = min(CGFloat(zoom.scaled(Double(configuration.minimumWidth))), upperWidth)
         let width = min(upperWidth, max(lowerWidth, list.intrinsicContentSize.width, breadcrumbWidth, footerWidth))
 
         let visibleRows = min(max(1, configuration.maximumVisibleRows), max(1, list.items.count))
-        let desiredListHeight = CGFloat(visibleRows) * ChoiceListView.rowHeight + 8
-        let desiredHeight = CompletionPopoverContentView.headerHeight
+        let desiredListHeight = CGFloat(visibleRows) * ChoiceListView.rowHeight(zoom: zoom)
+            + CGFloat(zoom.scaled(8))
+        let desiredHeight = CompletionPopoverContentView.headerHeight(zoom: zoom)
             + desiredListHeight
-            + CompletionPopoverContentView.footerHeight
-        let gap = CGFloat(Space.s)
+            + CompletionPopoverContentView.footerHeight(zoom: zoom)
+        let gap = CGFloat(zoom.scaled(Space.s))
         let roomBelow = screenAnchor.minY - visibleFrame.minY
         let roomAbove = visibleFrame.maxY - screenAnchor.maxY
         let availableHeight = max(1, max(roomBelow, roomAbove) - gap)
@@ -481,15 +543,21 @@ final class ChoicePopoverController {
     private static func commandContentSize(
         list: ChoiceListView,
         configuration: CommandPopoverLayout,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        zoom: AgentPageZoom = .default
     ) -> NSSize {
+        // The caller's width band is a CONTENT bound, so it scales with the rung;
+        // the screen's available width does not.
         let width = min(
             visibleFrame.width,
-            max(configuration.minimumWidth, min(configuration.maximumWidth, list.intrinsicContentSize.width))
+            max(
+                CGFloat(zoom.scaled(Double(configuration.minimumWidth))),
+                min(CGFloat(zoom.scaled(Double(configuration.maximumWidth))), list.intrinsicContentSize.width)
+            )
         )
-        let rowHeight = ChoiceListView.commandRowHeight
+        let rowHeight = ChoiceListView.commandRowHeight(zoom: zoom)
         let maxHeight = CGFloat(configuration.maximumVisibleRows) * rowHeight
-            + ChoiceListView.verticalPadding * 2
+            + ChoiceListView.verticalPadding(zoom: zoom) * 2
         let height = min(maxHeight, max(1, list.intrinsicContentSize.height))
         return NSSize(width: max(1, width), height: max(1, height))
     }

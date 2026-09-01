@@ -74,23 +74,30 @@ enum ProviderModelGrouping {
 /// tooltip with the full name, hover/selected painted with the same surface
 /// roles as choice rows.
 @MainActor
-private final class ProviderRailButton: NSControl, TokenThemed {
+private final class ProviderRailButton: NSControl, TokenThemed, AgentPageZoomScalable {
     let groupID: String
     private let glyphLabel = NSTextField(labelWithString: "")
     private var isHovered = false
     private var trackingArea: NSTrackingArea?
     var isSelectedProvider = false { didSet { applyTokens() } }
     var onPick: ((String) -> Void)?
+    /// WS5: the rung this rail button draws at, pushed down by the picker.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     static let side: CGFloat = 36
 
-    init(group: ProviderModelGrouping.Group) {
+    /// WS5: the same metric at a page zoom. The `static let` above is kept so
+    /// callers outside a zoomed surface keep compiling; identity at 100%.
+    static func side(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(36)) }
+
+    init(group: ProviderModelGrouping.Group, zoom: AgentPageZoom = .default) {
         self.groupID = group.id
+        self.pageZoom = zoom
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         glyphLabel.stringValue = String(group.title.prefix(1)).uppercased()
-        glyphLabel.font = .token(.body)
+        glyphLabel.font = .token(.body, zoom: pageZoom)
         glyphLabel.alignment = .center
         addSubview(glyphLabel)
         toolTip = group.title
@@ -102,7 +109,19 @@ private final class ProviderRailButton: NSControl, TokenThemed {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: Self.side, height: Self.side) }
+    override var intrinsicContentSize: NSSize {
+        let side = Self.side(zoom: pageZoom)
+        return NSSize(width: side, height: side)
+    }
+
+    /// WS5: re-derive every zoom-owned metric from scratch. Idempotent.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        glyphLabel.font = .token(.body, zoom: pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
 
     override func layout() {
         super.layout()
@@ -153,8 +172,12 @@ private final class ProviderRailButton: NSControl, TokenThemed {
 /// real `ChoiceListView`. The panel is sized once for the WIDEST/TALLEST
 /// group so switching providers never resizes the popover under the pointer.
 @MainActor
-final class ProviderModelPickerView: NSView, TokenThemed {
+final class ProviderModelPickerView: NSView, TokenThemed, AgentPageZoomScalable {
     static let railWidth: CGFloat = 44
+
+    /// WS5: the same metric at a page zoom. The `static let` above is kept so
+    /// callers outside a zoomed surface keep compiling; identity at 100%.
+    static func railWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(44)) }
 
     private let groups: [ProviderModelGrouping.Group]
     private let selectedModelID: String?
@@ -162,40 +185,64 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     private let indicator = NSView()
     private let railDivider = NSView()
     private var listView: ChoiceListView?
-    private let listPaneSize: NSSize
+    private var listPaneSize: NSSize
     private(set) var selectedGroupID: String
+    /// WS5: the page zoom this surface draws at. It lives in a PANEL, not in the
+    /// tile's subtree, so the rung arrives through the initializer.
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    private var scaledRailWidth: CGFloat { Self.railWidth(zoom: pageZoom) }
+    private var scaledRailButtonSide: CGFloat { ProviderRailButton.side(zoom: pageZoom) }
+    /// The gap between two rail buttons.
+    private var scaledRailGap: CGFloat { CGFloat(pageZoom.scaled(4)) }
+    /// The rail's top inset.
+    private var scaledRailTopInset: CGFloat { CGFloat(pageZoom.scaled(6)) }
+
+    /// The pane is sized for the WIDEST/TALLEST group, measured at the rung the
+    /// rows will actually render at — a pane measured at 100% clips at 150%.
+    private static func paneSize(
+        for groups: [ProviderModelGrouping.Group], zoom: AgentPageZoom
+    ) -> NSSize {
+        var paneSize = NSSize(width: CGFloat(zoom.scaled(160)), height: CGFloat(zoom.scaled(44)))
+        for group in groups {
+            let list = ChoiceListView(items: group.models, selectedID: nil)
+            list.applyPageZoom(zoom)
+            let size = list.intrinsicContentSize
+            paneSize.width = max(paneSize.width, size.width)
+            paneSize.height = max(paneSize.height, size.height)
+        }
+        return paneSize
+    }
 
     var onSelection: ((ChoiceItem) -> Void)?
     var onDismiss: (() -> Void)?
 
-    init(items: [ChoiceItem], selectedID: String?) {
+    init(items: [ChoiceItem], selectedID: String?, zoom: AgentPageZoom = .default) {
         let groups = ProviderModelGrouping.groups(
             from: items,
             displayNames: AgentModelCatalog.shared.displayNamesSnapshot())
         self.groups = groups
         self.selectedModelID = selectedID
         self.selectedGroupID = selectedID.map(ProviderModelGrouping.provider(forID:)) ?? groups.first?.id ?? "other"
-        var paneSize = NSSize(width: 160, height: 44)
-        for group in groups {
-            let size = ChoiceListView(items: group.models, selectedID: nil).intrinsicContentSize
-            paneSize.width = max(paneSize.width, size.width)
-            paneSize.height = max(paneSize.height, size.height)
-        }
-        self.listPaneSize = paneSize
+        self.pageZoom = zoom
+        self.listPaneSize = ProviderModelPickerView.paneSize(for: groups, zoom: zoom)
         super.init(frame: .zero)
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
         layer?.masksToBounds = true
         layer?.borderWidth = 1
 
         indicator.wantsLayer = true
+        // NOT scaled: `AgentPageZoom.scaled` quantizes to a half point and 1.25
+        // does not survive that even at 100% (it lands on 1.5). The indicator is
+        // a 2.5pt-wide pill, so this is its half-width by construction.
         indicator.layer?.cornerRadius = 1.25
         railDivider.wantsLayer = true
         addSubview(railDivider)
         addSubview(indicator)
         for group in groups {
-            let button = ProviderRailButton(group: group)
+            let button = ProviderRailButton(group: group, zoom: pageZoom)
             button.onPick = { [weak self] id in self?.selectGroup(id: id) }
             railButtons.append(button)
             addSubview(button)
@@ -209,28 +256,48 @@ final class ProviderModelPickerView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        let railHeight = CGFloat(railButtons.count) * (ProviderRailButton.side + 4) + 8
+        let railHeight = CGFloat(railButtons.count) * (scaledRailButtonSide + scaledRailGap)
+            + CGFloat(pageZoom.scaled(8))
         return NSSize(
-            width: Self.railWidth + listPaneSize.width,
+            width: scaledRailWidth + listPaneSize.width,
             height: max(listPaneSize.height, railHeight)
         )
     }
 
+    /// WS5: re-derive every zoom-owned metric from scratch — including the pane
+    /// size the rows are measured against — and pass the rung down to the rail
+    /// buttons and the embedded list.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        // NOT scaled: `AgentPageZoom.scaled` quantizes to a half point and 1.25
+        // does not survive that even at 100% (it lands on 1.5). The indicator is
+        // a 2.5pt-wide pill, so this is its half-width by construction.
+        indicator.layer?.cornerRadius = 1.25
+        listPaneSize = Self.paneSize(for: groups, zoom: pageZoom)
+        for button in railButtons { button.applyPageZoom(pageZoom) }
+        listView?.applyPageZoom(pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
-        var y = bounds.height - 6 - ProviderRailButton.side
+        let railWidth = scaledRailWidth
+        let side = scaledRailButtonSide
+        var y = bounds.height - scaledRailTopInset - side
         for button in railButtons {
             button.frame = NSRect(
-                x: floor((Self.railWidth - ProviderRailButton.side) / 2),
+                x: floor((railWidth - side) / 2),
                 y: y,
-                width: ProviderRailButton.side,
-                height: ProviderRailButton.side
+                width: side,
+                height: side
             )
-            y -= ProviderRailButton.side + 4
+            y -= side + scaledRailGap
         }
         positionIndicator()
-        railDivider.frame = NSRect(x: Self.railWidth - 1, y: 0, width: 1, height: bounds.height)
-        listView?.frame = NSRect(x: Self.railWidth, y: 0, width: bounds.width - Self.railWidth, height: bounds.height)
+        railDivider.frame = NSRect(x: railWidth - 1, y: 0, width: 1, height: bounds.height)
+        listView?.frame = NSRect(x: railWidth, y: 0, width: bounds.width - railWidth, height: bounds.height)
         neutralizeInnerCard()
     }
 
@@ -240,11 +307,13 @@ final class ProviderModelPickerView: NSView, TokenThemed {
             return
         }
         indicator.isHidden = railButtons.count < 2
+        let indicatorWidth = CGFloat(pageZoom.scaled(2.5))
+        let indicatorHeight = CGFloat(pageZoom.scaled(20))
         indicator.frame = NSRect(
-            x: Self.railWidth - 2.5,
-            y: selected.frame.midY - 10,
-            width: 2.5,
-            height: 20
+            x: scaledRailWidth - indicatorWidth,
+            y: selected.frame.midY - indicatorHeight / 2,
+            width: indicatorWidth,
+            height: indicatorHeight
         )
     }
 
@@ -265,6 +334,7 @@ final class ProviderModelPickerView: NSView, TokenThemed {
             items: group.models,
             selectedID: group.models.contains(where: { $0.id == selectedModelID }) ? selectedModelID : nil
         )
+        list.applyPageZoom(pageZoom)
         list.onSelection = { [weak self] item in self?.onSelection?(item) }
         list.onDismiss = { [weak self] in self?.onDismiss?() }
         addSubview(list)
@@ -342,6 +412,12 @@ final class ProviderModelPopoverController {
     nonisolated(unsafe) private var localMonitor: Any?
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
 
+    /// WS5: the page zoom the picker surface draws at.
+    ///
+    /// The panel is NOT a subview of the tile, so the walk can never reach it.
+    /// `ProviderModelButton` — which the walk DOES reach — forwards its rung.
+    var pageZoom: AgentPageZoom = .default
+
     var isPresented: Bool { panel?.isVisible == true }
 
     deinit {
@@ -357,7 +433,7 @@ final class ProviderModelPopoverController {
     ) {
         dismiss()
         guard !items.isEmpty else { return }
-        let picker = ProviderModelPickerView(items: items, selectedID: selectedID)
+        let picker = ProviderModelPickerView(items: items, selectedID: selectedID, zoom: pageZoom)
         pickerView = picker
         guard let window = view.window else { return }
 
@@ -378,7 +454,8 @@ final class ProviderModelPopoverController {
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
-            visibleFrame: window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+            visibleFrame: window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame,
+            zoom: pageZoom
         ), display: false)
 
         self.panel = panel
@@ -451,10 +528,18 @@ final class ProviderModelButton: ChoiceButton {
     override var presentedPopoverIsVisible: Bool { providerPopover.isPresented }
     override func dismissPresentedPopover() { providerPopover.dismiss() }
 
+    /// WS5: the trigger's own metrics come from `ChoiceButton`; the surface it
+    /// presents is a panel the walk cannot reach, so the rung is forwarded here.
+    override func applyPageZoom(_ zoom: AgentPageZoom) {
+        super.applyPageZoom(zoom)
+        providerPopover.pageZoom = zoom
+    }
+
     override func presentPopover() {
         // A provider authed while the app runs reaches the NEXT open without
         // a relaunch (throttled; inert in QA, which never enables refresh).
         AgentModelCatalog.shared.requestRefresh()
+        providerPopover.pageZoom = pageZoom
         providerPopover.present(
             items: items, selectedID: selectedID, anchor: bounds, relativeTo: self
         ) { [weak self] item in

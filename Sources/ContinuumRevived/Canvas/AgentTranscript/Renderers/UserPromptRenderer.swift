@@ -54,9 +54,9 @@ final class UserPromptRenderer: AgentBlockRendering {
         // gutter would clip its last line.
         proseRenderer.measure(
             block: block,
-            width: max(1, width - UserPromptView.leadingInset),
+            width: max(1, width - UserPromptView.leadingInset(zoom: context.pageZoom)),
             context: context
-        ) + UserPromptView.verticalInset * 2
+        ) + UserPromptView.verticalInset(zoom: context.pageZoom) * 2
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -79,6 +79,20 @@ final class UserPromptView: NSView, TokenThemed {
     /// Rule width + breathing room before the first glyph. No trailing gutter:
     /// with no fill, a trailing inset is invisible and only narrows the measure.
     static let leadingInset = CGFloat(LineWidth.rule) + CGFloat(Space.m)
+
+    // WS5 companions. The two zero-argument properties above are read by
+    // `UIProbeGeometry`, `TranscriptRhythmChecks` and `AgentTranscriptListView`,
+    // so they keep their shipped 100% values; this view and its renderer read
+    // the zoomed ones.
+    static func verticalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    /// The gutter is rule + air, and both halves scale, so the prose column
+    /// still starts exactly one `Space.m` past the rule at every rung.
+    static func leadingInset(zoom: AgentPageZoom) -> CGFloat {
+        ruleWidth(zoom: zoom) + CGFloat(zoom.scaled(Space.m))
+    }
+    /// `LineWidth.rule` is an authorship EDGE, not the 0.5pt hairline the zoom
+    /// pass leaves alone: at 150% a 2pt bar beside 150% type reads as a hairline.
+    static func ruleWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(LineWidth.rule)) }
 
     private let proseRenderer: AssistantProseRenderer
     private(set) var proseView: AssistantProseView
@@ -110,9 +124,14 @@ final class UserPromptView: NSView, TokenThemed {
     override var isFlipped: Bool { true }
 
     private var theme: TokenTheme = .dark
+    /// The rung of the last `apply`, so a RECYCLED prompt lays its rule and
+    /// gutter out at the zoom it is currently showing rather than the one it was
+    /// constructed at. `layout()` has no context of its own to read.
+    private var pageZoom: AgentPageZoom = .default
 
     func apply(block: AgentBlock, context: AgentRenderContext) {
         theme = context.appearance
+        pageZoom = context.pageZoom
         proseRenderer.update(view: proseView, block: block, context: context)
         proseView.textFields.forEach { $0.stringPasteboardStyle = .plainText }
         identifier = NSUserInterfaceItemIdentifier("agent.userPrompt.\(block.id.rawValue)")
@@ -148,12 +167,16 @@ final class UserPromptView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        rule.frame = NSRect(x: bounds.minX, y: bounds.minY, width: CGFloat(LineWidth.rule), height: bounds.height)
+        let leadingInset = Self.leadingInset(zoom: pageZoom)
+        let verticalInset = Self.verticalInset(zoom: pageZoom)
+        rule.frame = NSRect(
+            x: bounds.minX, y: bounds.minY,
+            width: Self.ruleWidth(zoom: pageZoom), height: bounds.height)
         proseView.frame = NSRect(
-            x: bounds.minX + Self.leadingInset,
-            y: bounds.minY + Self.verticalInset,
-            width: max(1, bounds.width - Self.leadingInset),
-            height: max(0, bounds.height - Self.verticalInset * 2)
+            x: bounds.minX + leadingInset,
+            y: bounds.minY + verticalInset,
+            width: max(1, bounds.width - leadingInset),
+            height: max(0, bounds.height - verticalInset * 2)
         )
         proseView.layoutSubtreeIfNeeded()
     }

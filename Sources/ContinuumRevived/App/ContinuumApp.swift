@@ -2513,6 +2513,18 @@ enum ContinuumApp {
             }
         }
 
+        // WS5: per-managed-agent-tile page zoom.
+        if CommandLine.arguments.contains("--managed-agent-page-zoom-check") {
+            do {
+                _ = NSApplication.shared
+                try ManagedAgentPageZoomChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-first-paint-check") {
             do {
                 _ = NSApplication.shared
@@ -6853,6 +6865,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // WS5 page zoom. Routed HERE, from the resolved focus scope, rather than
+        // from a `performKeyEquivalent` override on the tile: AppKit walks the
+        // whole view tree for a key equivalent, so a tile-local override would
+        // let a background agent tile answer a chord meant for the focused one.
+        // `focusedTileView()` is the same scope every other tile action uses.
+        //
+        // Nothing is consumed unless the focused tile IS a managed agent, so the
+        // browser, the canvas, notes, terminals and every editable control keep
+        // these chords; and `AgentPageZoomShortcut` returns nil for every chord
+        // that is not one of the four, so nothing else is shadowed either.
+        if handleManagedAgentPageZoom(event) { return true }
+
         // Cmd-Backspace (key code 51): delete the active tile. Only fires when
         // the canvas itself is first responder so a Cmd-Backspace inside an
         // NSTextView, terminal, or WKWebView form field still gets its native
@@ -7681,6 +7705,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             note.exportToFile()
             return true
         }
+    }
+
+    /// WS5: route a page-zoom chord to the FOCUSED managed-agent tile.
+    ///
+    /// Returns whether the event was consumed. A chord at an end stop is still
+    /// consumed — it is unambiguously ours, and letting it fall through mid-
+    /// gesture would hand a repeated Command-plus to some other owner the moment
+    /// the reader hit 150%.
+    func handleManagedAgentPageZoom(_ event: NSEvent) -> Bool {
+        guard AgentPageZoomShortcut.command(
+            characters: event.characters,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            modifiers: AgentPageZoomModifier.set(from: event.modifierFlags)
+        ) != nil else { return false }
+        guard let agent = focusedTileView() as? ManagedAgentTileNSView else { return false }
+        return agent.handlePageZoomKeyEquivalent(with: event)
     }
 
     /// The focused tile (from `reservedDispatchScope`'s `.tile(id)`) in the live

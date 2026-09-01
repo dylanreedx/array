@@ -20,7 +20,7 @@ final class AgentFileReferenceRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .fileReferences(payload) = block.payload, !payload.files.isEmpty else { return 0 }
-        return AgentFileReferenceRailView.railHeight
+        return AgentFileReferenceRailView.railHeight(zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -34,6 +34,12 @@ final class AgentFileReferenceRenderer: AgentBlockRendering {
 final class AgentFileReferenceRailView: NSView {
     static let railHeight: CGFloat = 40
 
+    /// The rail's reserved height at `zoom`. The un-parameterised `railHeight`
+    /// stays for callers that reserve space at 100%.
+    static func railHeight(zoom: AgentPageZoom = .default) -> CGFloat {
+        CGFloat(zoom.scaled(40))
+    }
+
     private let stack = NSStackView(frame: .zero)
     private var files: [AgentFileReferenceMetadata] = []
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
@@ -44,7 +50,8 @@ final class AgentFileReferenceRailView: NSView {
         layer?.masksToBounds = true
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = CGFloat(Space.s)
+        // Re-derived in `apply` — the rail view is recycled across blocks.
+        applyStackMetrics(.default)
         addSubview(stack)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -63,11 +70,17 @@ final class AgentFileReferenceRailView: NSView {
             stack.removeArrangedSubview(child)
             child.removeFromSuperview()
         }
+        applyStackMetrics(context.pageZoom)
         for file in files {
+            // A chip is minted per apply, so it is born at the incoming zoom.
             stack.addArrangedSubview(AgentFileReferenceChipView(file: file, context: context))
         }
         applyAccessibility(files: files)
         needsLayout = true
+    }
+
+    private func applyStackMetrics(_ zoom: AgentPageZoom) {
+        stack.spacing = CGFloat(zoom.scaled(Space.s))
     }
 
     func applyAccessibility(files: [AgentFileReferenceMetadata]) {
@@ -94,21 +107,22 @@ private final class AgentFileReferenceChipView: NSView {
     private let nameLabel = NSTextField(labelWithString: "")
 
     init(file: AgentFileReferenceMetadata, context: AgentRenderContext) {
+        let zoom = context.pageZoom
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
         layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: context.appearance)
         layer?.borderColor = context.tokens.decorativeLine.color.cgColor(for: context.appearance)
         layer?.borderWidth = 1
 
-        glyphLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        glyphLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
         glyphLabel.textColor = context.tokens.secondaryText.color.nsColor(for: context.appearance)
         glyphLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glyphLabel)
 
         let name = safeName(file.displayName)
         nameLabel.stringValue = name
-        nameLabel.font = .token(.caption)
+        nameLabel.font = .token(.caption, zoom: zoom)
         nameLabel.textColor = context.tokens.primaryText.color.nsColor(for: context.appearance)
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -122,13 +136,13 @@ private final class AgentFileReferenceChipView: NSView {
         toolTip = "\(name) — \(typeName)"
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Space.s)),
+            heightAnchor.constraint(equalToConstant: CGFloat(zoom.scaled(26))),
+            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(zoom.scaled(Space.s))),
             glyphLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameLabel.leadingAnchor.constraint(equalTo: glyphLabel.trailingAnchor, constant: CGFloat(Space.xs)),
-            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.s)),
+            nameLabel.leadingAnchor.constraint(equalTo: glyphLabel.trailingAnchor, constant: CGFloat(zoom.scaled(Space.xs))),
+            nameLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(zoom.scaled(Space.s))),
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
+            nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: CGFloat(zoom.scaled(200))),
         ])
     }
 

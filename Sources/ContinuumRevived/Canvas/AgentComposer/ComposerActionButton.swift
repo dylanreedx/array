@@ -4,10 +4,13 @@ import ContinuumRevivedAgentUI
 /// Custom composer action control. `NSControl` retains target/action, keyboard
 /// focus and accessibility semantics without exposing an Aqua button bezel.
 @MainActor
-final class ComposerActionButton: NSControl, TokenThemed {
+final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let iconView = NSImageView(frame: .zero)
     private let titleLabel = NSTextField(labelWithString: "")
     private var isPressed = false
+    /// WS5: the tile's page zoom. Every metric below derives from it, so 100%
+    /// reproduces the shipped numbers exactly.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     var presentation: AgentComposerPresentation {
         didSet { applyPresentation() }
@@ -17,15 +20,26 @@ final class ComposerActionButton: NSControl, TokenThemed {
     static let horizontalPadding = CGFloat(Space.m)
     static let itemSpacing = CGFloat(Space.s)
 
+    /// WS5: the control height at a tile's page zoom. The `static let` above is
+    /// kept so callers outside the zoomed tile keep compiling; this is the same
+    /// value scaled, and an exact identity at 100%.
+    static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(32)) }
+
+    private var scaledControlHeight: CGFloat { Self.controlHeight(zoom: pageZoom) }
+    private var scaledHorizontalPadding: CGFloat { CGFloat(pageZoom.scaled(Space.m)) }
+    private var scaledItemSpacing: CGFloat { CGFloat(pageZoom.scaled(Space.s)) }
+    private var scaledIconSide: CGFloat { CGFloat(pageZoom.scaled(14)) }
+    private var scaledTitleHeight: CGFloat { CGFloat(pageZoom.scaled(18)) }
+
     init(presentation: AgentComposerPresentation, target: AnyObject? = nil, action: Selector? = nil) {
         self.presentation = presentation
         super.init(frame: .zero)
         self.target = target
         self.action = action
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         iconView.imageScaling = .scaleProportionallyDown
-        titleLabel.font = .token(.label)
+        titleLabel.font = .token(.label, zoom: pageZoom)
         titleLabel.alignment = .center
         addSubview(iconView)
         addSubview(titleLabel)
@@ -41,24 +55,26 @@ final class ComposerActionButton: NSControl, TokenThemed {
     /// The raw string width plus the label cell's own horizontal padding, which
     /// `NSString.size` does not include — without it the cell truncates the title.
     private var measuredTitleWidth: CGFloat {
-        ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+        ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width)
+            + CGFloat(pageZoom.scaled(4))
     }
 
     override var intrinsicContentSize: NSSize {
         NSSize(
-            width: Self.horizontalPadding * 2 + 14 + Self.itemSpacing + measuredTitleWidth,
-            height: Self.controlHeight
+            width: scaledHorizontalPadding * 2 + scaledIconSide + scaledItemSpacing + measuredTitleWidth,
+            height: scaledControlHeight
         )
     }
 
     override func layout() {
         super.layout()
-        let iconSize: CGFloat = 14
+        let iconSize = scaledIconSide
         let titleWidth = measuredTitleWidth
-        let contentWidth = iconSize + Self.itemSpacing + titleWidth
+        let contentWidth = iconSize + scaledItemSpacing + titleWidth
         let start = floor((bounds.width - contentWidth) / 2)
         iconView.frame = NSRect(x: start, y: floor((bounds.height - iconSize) / 2), width: iconSize, height: iconSize)
-        titleLabel.frame = NSRect(x: iconView.frame.maxX + Self.itemSpacing, y: floor((bounds.height - 18) / 2), width: titleWidth, height: 18)
+        let titleHeight = scaledTitleHeight
+        titleLabel.frame = NSRect(x: iconView.frame.maxX + scaledItemSpacing, y: floor((bounds.height - titleHeight) / 2), width: titleWidth, height: titleHeight)
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -121,6 +137,16 @@ final class ComposerActionButton: NSControl, TokenThemed {
         titleLabel.textColor = foreground.nsColor(for: theme)
         iconView.contentTintColor = foreground.nsColor(for: theme)
         alphaValue = isPressed ? 0.78 : 1
+    }
+
+    /// WS5: re-derive every zoom-owned metric from scratch. Idempotent, and safe
+    /// on a button already showing a presentation — same contract as `applyTokens`.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        titleLabel.font = .token(.label, zoom: pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     private func applyPresentation() {

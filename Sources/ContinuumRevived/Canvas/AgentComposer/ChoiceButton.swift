@@ -8,13 +8,16 @@ import ContinuumRevivedAgentUI
 /// — so `ProviderModelButton` can swap the flat list for the provider>model
 /// picker while trigger paint, items, selection, and QA seams stay shared.
 @MainActor
-class ChoiceButton: NSControl, TokenThemed {
+class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let titleLabel = NSTextField(labelWithString: "")
     private let chevronView = NSImageView(frame: .zero)
     private let popoverController = ChoicePopoverController()
     private var isHovered = false
     private var isPressed = false
     private var trackingArea: NSTrackingArea?
+    /// WS5: the tile's page zoom. Every metric below derives from it, so 100%
+    /// reproduces the shipped numbers exactly.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     var items: [ChoiceItem] = [] {
         didSet {
@@ -58,6 +61,12 @@ class ChoiceButton: NSControl, TokenThemed {
 
     static let controlHeight: CGFloat = 32
     static let horizontalPadding = CGFloat(Space.l)
+
+    /// WS5: the same two metrics at a tile's page zoom. The `static let`s above
+    /// are kept so callers outside a zoomed tile keep compiling; these are the
+    /// same values scaled, and exact identities at 100%.
+    static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(32)) }
+    static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
     /// Owner correction (P4.10): idle is a quiet fill with no outline; keyboard
     /// focus and the open state use a 0.5 pt accent line plus a soft accent glow
     /// rather than a thick permanent border.
@@ -68,9 +77,9 @@ class ChoiceButton: NSControl, TokenThemed {
     init(title: String = "Choose") {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         titleLabel.stringValue = title
-        titleLabel.font = .token(.label)
+        titleLabel.font = .token(.label, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
         chevronView.image = CanvasSymbolImage.image(named: "chevron.up.chevron.down")
         chevronView.imageScaling = .scaleProportionallyDown
@@ -88,6 +97,14 @@ class ChoiceButton: NSControl, TokenThemed {
     override var acceptsFirstResponder: Bool { isEnabled && items.contains(where: \.enabled) }
 
     private static let chevronSize: CGFloat = 12
+    private static func chevronSize(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(12)) }
+
+    private var scaledControlHeight: CGFloat { Self.controlHeight(zoom: pageZoom) }
+    private var scaledHorizontalPadding: CGFloat { Self.horizontalPadding(zoom: pageZoom) }
+    private var scaledChevronSize: CGFloat { Self.chevronSize(zoom: pageZoom) }
+    /// The gap between the title and the chevron.
+    private var scaledTitleGap: CGFloat { CGFloat(pageZoom.scaled(Space.m)) }
+    private var scaledTitleHeight: CGFloat { CGFloat(pageZoom.scaled(18)) }
 
     /// The raw string width plus the label cell's own horizontal padding, which
     /// `NSString.size` does not include — without it the cell truncates the title
@@ -96,38 +113,42 @@ class ChoiceButton: NSControl, TokenThemed {
     /// expression for both `intrinsicContentSize` and `layout()`, so the two
     /// cannot disagree by a chevron metric again.
     private var measuredTitleWidth: CGFloat {
-        ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+        ceil((titleLabel.stringValue as NSString).size(
+            withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width) + CGFloat(pageZoom.scaled(4))
     }
 
     /// What a button showing `title` needs, measured the way the button measures
     /// itself — for callers (the footer's fit decision) that must reason about a
     /// title BEFORE installing it.
-    static func fittingWidth(forTitle title: String) -> CGFloat {
-        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
-        return horizontalPadding * 2 + titleWidth + CGFloat(Space.m) + chevronSize
+    static func fittingWidth(forTitle title: String, zoom: AgentPageZoom = .default) -> CGFloat {
+        let titleWidth = ceil((title as NSString).size(
+            withAttributes: [.font: NSFont.token(.label, zoom: zoom)]).width) + CGFloat(zoom.scaled(4))
+        return horizontalPadding(zoom: zoom) * 2 + titleWidth + CGFloat(zoom.scaled(Space.m))
+            + chevronSize(zoom: zoom)
     }
 
     override var intrinsicContentSize: NSSize {
         NSSize(
-            width: Self.horizontalPadding * 2 + measuredTitleWidth + CGFloat(Space.m) + Self.chevronSize,
-            height: Self.controlHeight
+            width: scaledHorizontalPadding * 2 + measuredTitleWidth + scaledTitleGap + scaledChevronSize,
+            height: scaledControlHeight
         )
     }
 
     override func layout() {
         super.layout()
-        let chevronSize = Self.chevronSize
+        let chevronSize = scaledChevronSize
         chevronView.frame = NSRect(
-            x: bounds.width - Self.horizontalPadding - chevronSize,
+            x: bounds.width - scaledHorizontalPadding - chevronSize,
             y: floor((bounds.height - chevronSize) / 2),
             width: chevronSize,
             height: chevronSize
         )
+        let titleHeight = scaledTitleHeight
         titleLabel.frame = NSRect(
-            x: Self.horizontalPadding,
-            y: floor((bounds.height - 18) / 2),
-            width: max(0, chevronView.frame.minX - CGFloat(Space.m) - Self.horizontalPadding),
-            height: 18
+            x: scaledHorizontalPadding,
+            y: floor((bounds.height - titleHeight) / 2),
+            width: max(0, chevronView.frame.minX - scaledTitleGap - scaledHorizontalPadding),
+            height: titleHeight
         )
     }
 
@@ -192,6 +213,19 @@ class ChoiceButton: NSControl, TokenThemed {
         return accepted
     }
 
+    /// WS5: re-derive every zoom-owned metric from scratch. Idempotent, and safe
+    /// on a button already showing a selection — same contract as `applyTokens`.
+    /// The presented surface is a PANEL, not a subview, so the walk cannot reach
+    /// it; the trigger forwards the rung to its own controller instead.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        titleLabel.font = .token(.label, zoom: pageZoom)
+        popoverController.pageZoom = pageZoom
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     func applyTokens() {
         let theme = effectiveTokenTheme
         let focused = window?.firstResponder === self
@@ -242,6 +276,7 @@ class ChoiceButton: NSControl, TokenThemed {
     /// One presentation seam for mouse, keyboard, VoiceOver, and deterministic
     /// selection. Client-specific width is applied here, never in a QA-only branch.
     func presentPopover() {
+        popoverController.pageZoom = pageZoom
         popoverController.present(
             items: items, selectedID: selectedID,
             presentation: popoverPresentation,
@@ -295,7 +330,8 @@ class ChoiceButton: NSControl, TokenThemed {
     }
     var qaTitleFrameWidth: CGFloat { titleLabel.frame.width }
     var qaMeasuredTitleWidth: CGFloat {
-        ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+        ceil((titleLabel.stringValue as NSString).size(
+            withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width) + CGFloat(pageZoom.scaled(4))
     }
     var qaTitleDrawsWithoutTruncation: Bool {
         titleLabel.frame.width + 0.5 >= qaMeasuredTitleWidth

@@ -39,6 +39,13 @@ final class AgentToolClusterHeaderItem: NSCollectionViewItem {
 @MainActor
 final class AgentToolClusterHeaderView: NSView {
     static let fixedHeight = ToolCallView.rowHeight
+    /// WS5: the same row height at a tile's page zoom. `fixedHeight` above stays
+    /// as it is — the list asks for it by name from outside this file.
+    static func fixedHeight(zoom: AgentPageZoom) -> CGFloat { ToolCallView.rowHeight(zoom: zoom) }
+
+    /// The zoom of the last `apply`, re-read on every layout pass so a recycled
+    /// header never keeps the metrics it was built at.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     private(set) var disclosureButton = AgentDisclosureButton(frame: .zero)
     private(set) var iconView = NSImageView(frame: .zero)
@@ -67,11 +74,21 @@ final class AgentToolClusterHeaderView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func apply(clusterID: AgentNodeID, summary: String, expanded: Bool, theme: TokenTheme, tokens: AgentRenderTokens) {
+    func apply(
+        clusterID: AgentNodeID,
+        summary: String,
+        expanded: Bool,
+        theme: TokenTheme,
+        tokens: AgentRenderTokens,
+        zoom: AgentPageZoom = .default
+    ) {
         self.clusterID = clusterID
         isExpanded = expanded
+        pageZoom = zoom
+        // Re-derived per apply: this view is list-owned and reused.
+        summaryLabel.font = NSFont.token(.body, zoom: zoom)
         setSummaryText(summary)
-        disclosureButton.apply(expanded: expanded, title: summary)
+        disclosureButton.apply(expanded: expanded, title: summary, zoom: zoom)
         disclosureButton.contentTintColor = tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = tokens.secondaryText.color.nsColor(for: theme)
         summaryLabel.textColor = tokens.secondaryText.color.nsColor(for: theme)
@@ -104,17 +121,19 @@ final class AgentToolClusterHeaderView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = ToolCallView.horizontalInset
-        let side = CGFloat(Space.xxl)
+        let zoom = pageZoom
+        let height = Self.fixedHeight(zoom: zoom)
+        let inset = ToolCallView.horizontalInset(zoom: zoom)
+        let side = CGFloat(zoom.scaled(Space.xxl))
         disclosureButton.frame = NSRect(
-            x: inset, y: (Self.fixedHeight - side) / 2, width: side, height: side)
+            x: inset, y: (height - side) / 2, width: side, height: side)
         iconView.frame = NSRect(
-            x: disclosureButton.frame.maxX + CGFloat(Space.s),
-            y: (Self.fixedHeight - side) / 2, width: side, height: side)
+            x: disclosureButton.frame.maxX + CGFloat(zoom.scaled(Space.s)),
+            y: (height - side) / 2, width: side, height: side)
         let labelHeight = summaryLabel.intrinsicContentSize.height
-        let labelX = iconView.frame.maxX + CGFloat(Space.m)
+        let labelX = iconView.frame.maxX + CGFloat(zoom.scaled(Space.m))
         summaryLabel.frame = NSRect(
-            x: labelX, y: (Self.fixedHeight - labelHeight) / 2,
+            x: labelX, y: (height - labelHeight) / 2,
             width: max(1, bounds.width - labelX - inset), height: labelHeight)
     }
 }

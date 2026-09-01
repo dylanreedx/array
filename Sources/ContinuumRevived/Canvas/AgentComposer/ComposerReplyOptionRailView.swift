@@ -15,8 +15,19 @@ import ContinuumRevivedAgentUI
 /// token surfaces, the rail itself leaves its resting background unpainted (nil,
 /// never `.clear`) so the appearance census owns no literal here.
 @MainActor
-final class ComposerReplyOptionRailView: NSView, TokenThemed {
+final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScalable {
     static let railHeight: CGFloat = 34
+
+    /// The rail's reserved height at `zoom`. The un-parameterised `railHeight`
+    /// stays for callers that reserve space at 100%.
+    static func railHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(34))
+    }
+
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    /// This rail's reserved height at its own zoom.
+    var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
@@ -34,7 +45,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: options.isEmpty ? 0 : Self.railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: options.isEmpty ? 0 : railHeight)
     }
 
     func setOptions(_ newOptions: [String]) {
@@ -46,7 +57,9 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed {
         }
         let theme = effectiveTokenTheme
         for option in newOptions {
-            let chip = ComposerReplyOptionChipButton(title: option)
+            // A chip minted after a zoom apply is born scaled: the rail's own
+            // rung is handed to the initializer.
+            let chip = ComposerReplyOptionChipButton(title: option, zoom: pageZoom)
             chip.target = self
             chip.action = #selector(chipPressed(_:))
             chip.applyTokens(theme: theme)
@@ -67,9 +80,27 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed {
         }
     }
 
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        applyStackMetrics()
+        for case let chip as ComposerReplyOptionChipButton in stack.arrangedSubviews {
+            chip.applyPageZoom(zoom)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    private func applyStackMetrics() {
+        stack.spacing = CGFloat(pageZoom.scaled(Space.s))
+        stack.edgeInsets = NSEdgeInsets(
+            top: CGFloat(pageZoom.scaled(Space.xs)), left: 0,
+            bottom: CGFloat(pageZoom.scaled(Space.xs)), right: 0
+        )
     }
 
     private func configureViews() {
@@ -84,8 +115,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed {
 
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = CGFloat(Space.s)
-        stack.edgeInsets = NSEdgeInsets(top: CGFloat(Space.xs), left: 0, bottom: CGFloat(Space.xs), right: 0)
+        applyStackMetrics()
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.borderType = .noBorder
@@ -138,17 +168,19 @@ final class ComposerReplyOptionChipButton: NSButton {
     private var hovered = false
     private var theme: TokenTheme = .dark
     private var tracking: NSTrackingArea?
+    private(set) var pageZoom: AgentPageZoom
 
-    init(title: String) {
+    init(title: String, zoom: AgentPageZoom = .default) {
         optionValue = title
+        pageZoom = zoom
         super.init(frame: .zero)
         self.title = title
         isBordered = false
         bezelStyle = .inline
         focusRingType = .exterior
-        font = NSFont.token(.caption)
+        font = NSFont.token(.caption, zoom: zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
         // Keep the AppKit exterior keyboard focus ring outside the rounded fill.
         layer?.masksToBounds = false
         setButtonType(.momentaryChange)
@@ -163,9 +195,17 @@ final class ComposerReplyOptionChipButton: NSButton {
 
     override var intrinsicContentSize: NSSize {
         var size = super.intrinsicContentSize
-        size.width += CGFloat(Space.m) * 2
-        size.height = 26
+        size.width += CGFloat(pageZoom.scaled(Space.m)) * 2
+        size.height = CGFloat(pageZoom.scaled(26))
         return size
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        font = NSFont.token(.caption, zoom: zoom)
+        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     override func updateTrackingAreas() {

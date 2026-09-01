@@ -7,15 +7,29 @@ import ContinuumRevivedAgentUI
 /// zero-length progress arc. Warning and critical states carry text/glyph markers
 /// as well as colour so the state does not depend on hue alone.
 @MainActor
-final class AgentRadialContextMeterView: NSView, TokenThemed {
+final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScalable {
     /// The meter's fixed drawn size. Not private: the compact row pins the view
     /// to it so priority arbitration can never collapse the glyph.
     static let side: CGFloat = 20
+
+    /// The same fixed drawn size at one rung of the tile's page zoom. Exact
+    /// identity with `side` at 100%.
+    static func side(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(20)) }
+
     private static let lineWidth: CGFloat = 2.2
+
+    private static func lineWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(2.2)) }
+
+    /// This meter's rung of the tile's page zoom, delivered by the tile's
+    /// subtree walk. Identity at 100%.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     private var presentation = AgentRadialContextMeterPresenter.present(nil)
 
-    override var intrinsicContentSize: NSSize { NSSize(width: Self.side, height: Self.side) }
+    override var intrinsicContentSize: NSSize {
+        let side = Self.side(zoom: pageZoom)
+        return NSSize(width: side, height: side)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -47,6 +61,16 @@ final class AgentRadialContextMeterView: NSView, TokenThemed {
         needsDisplay = true
     }
 
+    /// Every metric this meter owns is derived inside `draw(_:)` and
+    /// `intrinsicContentSize`, so re-deriving them is a matter of invalidating
+    /// both. Idempotent, and it touches no presentation state.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        needsDisplay = true
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
@@ -55,7 +79,7 @@ final class AgentRadialContextMeterView: NSView, TokenThemed {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let theme = effectiveTokenTheme
-        let diameter = min(bounds.width, bounds.height) - Self.lineWidth
+        let diameter = min(bounds.width, bounds.height) - Self.lineWidth(zoom: pageZoom)
         guard diameter > 2 else { return }
         let rect = NSRect(
             x: bounds.midX - diameter / 2,
@@ -72,9 +96,9 @@ final class AgentRadialContextMeterView: NSView, TokenThemed {
 
     private func drawTrack(in rect: NSRect, theme: TokenTheme) {
         let track = NSBezierPath(ovalIn: rect)
-        track.lineWidth = Self.lineWidth
+        track.lineWidth = Self.lineWidth(zoom: pageZoom)
         if presentation.state == .unknown || presentation.state == .stale {
-            track.setLineDash([1.6, 2.2], count: 2, phase: 0)
+            track.setLineDash([CGFloat(pageZoom.scaled(1.6)), CGFloat(pageZoom.scaled(2.2))], count: 2, phase: 0)
         }
         LineToken.separator.color.nsColor(for: theme).setStroke()
         track.stroke()
@@ -82,7 +106,7 @@ final class AgentRadialContextMeterView: NSView, TokenThemed {
 
     private func drawArc(in rect: NSRect, fraction: Double, color: NSColor) {
         let path = NSBezierPath()
-        path.lineWidth = Self.lineWidth
+        path.lineWidth = Self.lineWidth(zoom: pageZoom)
         path.lineCapStyle = .round
         let clamped = min(1, max(0, fraction))
         guard clamped > 0 else { return }
@@ -111,7 +135,8 @@ final class AgentRadialContextMeterView: NSView, TokenThemed {
             marker = "•"
         }
         guard let marker else { return }
-        let font = NSFont.systemFont(ofSize: presentation.state == .unknown ? 9 : 8, weight: .bold)
+        let font = NSFont.systemFont(
+            ofSize: CGFloat(pageZoom.scaled(presentation.state == .unknown ? 9 : 8)), weight: .bold)
         let color = markerColor(for: presentation.state, theme: theme)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,

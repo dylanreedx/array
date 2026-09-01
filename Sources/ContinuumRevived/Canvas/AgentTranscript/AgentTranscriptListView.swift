@@ -393,7 +393,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.isBordered = false
         button.bezelStyle = .recessed
-        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.font = .token(.label, zoom: renderContext.pageZoom)
         button.setAccessibilityRole(.button)
         button.setAccessibilityLabel("Jump to latest transcript content")
         button.setAccessibilityChildren([])
@@ -462,6 +462,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         toolDetailRefreshTask?.cancel()
     }
 
+    /// WS5: the jump button's inset from the transcript's own edge, held so the
+    /// page zoom can move it. A literal in an activated constraint is a metric
+    /// nothing can rescale.
+    private lazy var jumpToLatestTrailing: NSLayoutConstraint =
+        jumpToLatestButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)
+    private lazy var jumpToLatestBottom: NSLayoutConstraint =
+        jumpToLatestButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+
     private func configureCollectionView() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
@@ -504,8 +512,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            jumpToLatestButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            jumpToLatestButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            jumpToLatestTrailing,
+            jumpToLatestBottom,
         ])
 
         transcriptLayout.itemCount = { [weak self] in
@@ -519,7 +527,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // much weight as the next paragraph.
         transcriptLayout.spacingBefore = { [weak self] index in
             guard let self else { return nil }
-            return displayStartsTurn(at: index) ? AgentTranscriptLayout.interTurnSpacing : nil
+            return displayStartsTurn(at: index) ? transcriptLayout.scaledInterTurnSpacing : nil
         }
         transcriptLayout.boundarySignature = { [weak self] in
             guard let self else { return 0 }
@@ -540,7 +548,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             switch displayItems[index] {
             case .header:
                 // Fixed constant: no measurement, no cache entry (S4.3).
-                return AgentToolClusterHeaderView.fixedHeight
+                // WS5: fixed at a RUNG, not absolutely — the header is a row in
+                // the same column as everything else it groups.
+                return AgentToolClusterHeaderView.fixedHeight(zoom: renderContext.pageZoom)
             case let .row(semanticIndex):
                 rowIndex = semanticIndex
             }
@@ -555,6 +565,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                         width: width,
                         context: renderContext,
                         entryRole: row.role,
+                        // WS5: the zoom rung is part of the measurement identity.
+                        // Without it a 150% row reuses the 100% height and the
+                        // transcript clips — and the default `.standard` bucket
+                        // made that failure silent.
+                        contentSizePolicy: pageZoomSizePolicy,
                         renderer: registry.renderer(for: presented.kind, entryRole: row.role)
                     )
                 case let .completedReasoning(entry):
@@ -593,7 +608,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     summary: clusterSummaryText(header),
                     expanded: header.isExpanded,
                     theme: renderContext.appearance,
-                    tokens: renderContext.tokens
+                    tokens: renderContext.tokens,
+                    zoom: renderContext.pageZoom
                 )
                 view.onToggle = { [weak self] in self?.toggleCluster(header.id) }
                 presentArrival(of: id, in: item)
@@ -1165,7 +1181,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if !survivingChanged.isEmpty {
             let width = max(
                 0, collectionView.bounds.width
-                    - transcriptLayout.contentInsets.left - transcriptLayout.contentInsets.right
+                    - transcriptLayout.scaledContentInsets.left
+                    - transcriptLayout.scaledContentInsets.right
             )
             for id in survivingChanged {
                 let oldHeight = try oldRowsByID[id].map { try measuredHeight(for: $0, width: width) }
@@ -1226,14 +1243,65 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // (`remeasureDisclosure`, `toggleCluster`, tail visibility) already
         // restores the anchor; this now agrees with them.
         var thrown: Error?
-        scrollController.applyPreservingReaderAnchor(
-            in: scrollView,
-            idAtY: { [weak self] y in self?.transcriptID(at: y) },
-            yForID: { [weak self] id in self?.transcriptY(for: id) },
-            update: { [weak self] in
+        let zoomMoves = renderContext.pageZoom != context.pageZoom
+        let appearanceMoved = renderContext.appearance != context.appearance
+        let tokensMoved = renderContext.tokens != context.tokens
+        // WS5. A rung change while the reader is TAILING a live turn must keep
+        // them tailing. The reader-anchor policy alone cannot: at a bigger rung
+        // every row above the anchor grows, so holding the top row still pushes
+        // the bottom of the document past the viewport and the live answer walks
+        // off the screen — which is the "it jumped away mid-stream" failure.
+        // So: pinned readers stick, everyone else keeps their anchor. A theme or
+        // appearance change keeps the shipped anchor-only behaviour untouched.
+        let stickToBottom = zoomMoves && scrollController.isNearBottom(in: scrollView)
+        let apply: (@escaping () -> Void) -> Void = { [weak self] update in
+            guard let self else { return }
+            if stickToBottom {
+                scrollController.apply(
+                    in: scrollView,
+                    idAtY: { [weak self] y in self?.transcriptID(at: y) },
+                    yForID: { [weak self] id in self?.transcriptY(for: id) },
+                    // A rung change is not a content arrival, so a live selection
+                    // must not suppress the stick the way a streaming delta does.
+                    isSelecting: { false },
+                    update: update
+                )
+            } else {
+                scrollController.applyPreservingReaderAnchor(
+                    in: scrollView,
+                    idAtY: { [weak self] y in self?.transcriptID(at: y) },
+                    yForID: { [weak self] id in self?.transcriptY(for: id) },
+                    update: update
+                )
+            }
+        }
+        apply({ [weak self] in
                 guard let self else { return }
+                let zoomMoved = zoomMoves
                 renderContext = contextWithDisclosureState(context)
-                measurementCache.removeAll()
+                // WS5: the layout's geometry and the measurement identity both
+                // read the rung, so both are updated INSIDE the anchored
+                // transaction — the anchor restore below reads the re-measured
+                // geometry immediately after this closure returns.
+                transcriptLayout.pageZoom = context.pageZoom
+                if zoomMoved {
+                    qaPageZoomTransitionCount += 1
+                    applyPageZoomToOwnChrome(context.pageZoom)
+                }
+                // WS5. A rung change does NOT drop the cache. The rung is part
+                // of the measurement key (`AgentContentSizePolicy.scaleBucket`),
+                // so a 150% row can never read a 100% height, and returning to a
+                // rung the reader has already visited costs no measurement at
+                // all. Dropping it here would make that key dead code — and a
+                // dead key is exactly how the shipped default `.standard` bucket
+                // stayed invisible.
+                //
+                // Every OTHER context change still drops it, unchanged: the key
+                // carries `appearance`, but the shipped behaviour on a theme flip
+                // is a full re-measure and this ticket is not the one to change it.
+                let contextMovedBeyondZoom =
+                    appearanceMoved || tokensMoved || !zoomMoved
+                if contextMovedBeyondZoom { measurementCache.removeAll() }
                 transcriptLayout.invalidateForStructureChange()
                 do { try updateVisibleHosts(ids: Set(rowsByID.keys)) }
                 catch { thrown = error }
@@ -1241,8 +1309,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 // this closure; the re-measured geometry has to be current for
                 // that to be a position rather than a guess.
                 layoutSubtreeIfNeeded()
-            }
-        )
+        })
         if let thrown { throw thrown }
     }
 
@@ -1416,6 +1483,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     width: width,
                     context: renderContext,
                     entryRole: row.role,
+                    contentSizePolicy: pageZoomSizePolicy,
                     renderer: renderer
                 )
             } catch {
@@ -1928,7 +1996,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         hoverTimeLayer.string = NSAttributedString(
             string: Self.hoverTimeFormatter.string(from: date),
             attributes: [
-                .font: NSFont.token(.caption),
+                .font: NSFont.token(.caption, zoom: renderContext.pageZoom),
                 .foregroundColor: renderContext.tokens.secondaryText.color
                     .nsColor(for: renderContext.appearance),
             ])
@@ -1943,7 +2011,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // user prose just beyond the rule. It still never participates in text
         // layout or reflows a line.
         hoverTimeLayer.frame = CGRect(
-            x: frame.minX + UserPromptView.leadingInset,
+            x: frame.minX + UserPromptView.leadingInset(zoom: renderContext.pageZoom),
             y: max(0, frame.minY - size.height),
             width: size.width,
             height: size.height)
@@ -3104,6 +3172,25 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     // Deterministic fixture observations; no production owner depends on these.
     var qaSemanticRowCount: Int { rows.count }
+    /// WS5 anchor readback. The SAME derivation the anchor policy uses, read
+    /// from the live scroll view — not a re-derivation that could agree with a
+    /// policy nothing consults.
+    var qaScrollViewForChecks: NSScrollView { scrollView }
+    /// The version this view has actually painted — a fixture must patch FROM it,
+    /// not from a version it assumed.
+    var qaAppliedVersion: UInt64 { appliedVersion ?? 0 }
+    var qaTopSemanticID: AgentNodeID? { transcriptID(at: scrollView.contentView.bounds.minY) }
+    var qaTopSemanticOffset: CGFloat? {
+        guard let id = qaTopSemanticID, let y = transcriptY(for: id) else { return nil }
+        return scrollView.contentView.bounds.minY - y
+    }
+    var qaIsNearBottom: Bool { scrollController.isNearBottom(in: scrollView) }
+    func qaMeasuredRowHeights() -> [CGFloat] {
+        transcriptLayout.prepare()
+        return (0..<transcriptLayout.itemCount()).compactMap { index in
+            transcriptLayout.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.height
+        }
+    }
     func qaDisclosureState(for blockID: AgentNodeID) -> Bool? {
         disclosureStateStore.explicitState(for: ToolDisclosureKey(
             agentID: disclosureOwnerID, blockID: blockID
@@ -3244,6 +3331,52 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         qaReuseWitnessItem = item
     }
+    /// WS5: the measurement identity contributed by the page zoom. One place,
+    /// so a new measurement call site cannot silently fall back to `.standard`.
+    private var pageZoomSizePolicy: AgentContentSizePolicy {
+        AgentContentSizePolicy(scaleBucket: renderContext.pageZoom.percent)
+    }
+
+    /// The transcript's OWN chrome — the parts that are not a renderer's.
+    private func applyPageZoomToOwnChrome(_ zoom: AgentPageZoom) {
+        jumpToLatestButton.font = .token(.label, zoom: zoom)
+        jumpToLatestTrailing.constant = -CGFloat(zoom.scaled(Double(Space.l)))
+        jumpToLatestBottom.constant = -CGFloat(zoom.scaled(Double(Space.l)))
+        tailStatusLabel.font = .token(.label, zoom: zoom)
+        // A cluster header is NOT an `AgentBlockHostView`, so the visible-host
+        // refresh below never reaches it. A visible header would otherwise keep
+        // the previous rung's font until AppKit happened to recycle it.
+        for case let item as AgentToolClusterHeaderItem in collectionView.visibleItems() {
+            guard let view = item.headerView,
+                  let clusterID = view.clusterID,
+                  let header = clusterHeadersByID[clusterID] else { continue }
+            view.apply(
+                clusterID: clusterID,
+                summary: clusterSummaryText(header),
+                expanded: header.isExpanded,
+                theme: renderContext.appearance,
+                tokens: renderContext.tokens,
+                zoom: zoom
+            )
+        }
+    }
+
+    /// WS5 positive control. Counts the times the tile actually pushed a NEW
+    /// rung through this view — a witness that asserts "nothing moved" is
+    /// worthless without proof the path ran at all.
+    private(set) var qaPageZoomTransitionCount = 0
+    var qaPageZoomPercent: Int { renderContext.pageZoom.percent }
+    var qaLayoutPageZoomPercent: Int { transcriptLayout.pageZoom.percent }
+    var qaMeasurementMissCount: Int { measurementCache.measurementMissCount }
+    /// The scale bucket this view hands the measurement cache. Read back rather
+    /// than re-derived: the failure this exists for is the SHIPPED default
+    /// (`.standard`, 100) being used at every rung, which no height comparison
+    /// can see while the scaled content insets also move the width bucket.
+    var qaMeasurementScaleBucket: Int { pageZoomSizePolicy.scaleBucket }
+    var qaScaledRowSpacing: CGFloat { transcriptLayout.scaledRowSpacing }
+    var qaScaledInterTurnSpacing: CGFloat { transcriptLayout.scaledInterTurnSpacing }
+    var qaScaledContentInsets: NSEdgeInsets { transcriptLayout.scaledContentInsets }
+    var qaJumpToLatestFontSize: CGFloat { jumpToLatestButton.font?.pointSize ?? 0 }
     var qaCachedMeasurementCount: Int { measurementCache.cachedMeasurementCount }
     var qaLayoutPreparePassCount: Int { transcriptLayout.preparePassCount }
     var qaShowsJumpToLatest: Bool { !jumpToLatestButton.isHidden }

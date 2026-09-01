@@ -71,7 +71,7 @@ enum ChoiceListCommand {
 /// Token-painted choice rows with one keyboard and accessibility selection path.
 /// Disabled rows remain visible but are never focusable or actionable.
 @MainActor
-final class ChoiceListView: NSView, TokenThemed {
+final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     private(set) var items: [ChoiceItem]
     private(set) var selectedID: String?
     private(set) var focusedID: String?
@@ -84,6 +84,9 @@ final class ChoiceListView: NSView, TokenThemed {
     private var rows: [ChoiceRowView] = []
     private let destructiveSeparator = NSView(frame: .zero)
     private var typeahead = ""
+    /// WS5: the page zoom this list draws at. The list lives in a PANEL, not in
+    /// the tile's subtree, so its owner forwards the rung explicitly.
+    private(set) var pageZoom: AgentPageZoom = .default
     private var lastTypeaheadTime: TimeInterval = 0
 
     static let rowHeight: CGFloat = 36
@@ -94,6 +97,16 @@ final class ChoiceListView: NSView, TokenThemed {
     /// Owner correction (P4.10): the panel keeps exactly one subtle boundary and
     /// no border anywhere in the app exceeds 0.5 pt.
     static let panelBorderWidth: CGFloat = 0.5
+
+    /// WS5: the same metrics at a page zoom. The `static let`s above are kept so
+    /// callers outside a zoomed surface keep compiling; these are the same
+    /// values scaled, and exact identities at 100%. `panelBorderWidth` has no
+    /// zoomed form on purpose — a hairline is a device property, not a metric.
+    static func rowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(36)) }
+    static func commandRowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
+    static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func verticalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func minimumWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(220)) }
 
     init(
         items: [ChoiceItem], selectedID: String?,
@@ -108,7 +121,7 @@ final class ChoiceListView: NSView, TokenThemed {
             ?? items.first(where: \.enabled)?.id
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.container)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
         layer?.masksToBounds = true
         destructiveSeparator.wantsLayer = true
         destructiveSeparator.isHidden = true
@@ -126,17 +139,20 @@ final class ChoiceListView: NSView, TokenThemed {
 
     override var intrinsicContentSize: NSSize {
         let textWidth = items.map { item -> CGFloat in
-            let title = ceil((item.title as NSString).size(withAttributes: [.font: NSFont.token(.body)]).width)
+            let title = ceil((item.title as NSString).size(
+                withAttributes: [.font: NSFont.token(.body, zoom: pageZoom)]).width)
             let detail = item.detail.map {
-                ceil(($0 as NSString).size(withAttributes: [.font: NSFont.token(.caption)]).width)
+                ceil(($0 as NSString).size(
+                    withAttributes: [.font: NSFont.token(.caption, zoom: pageZoom)]).width)
             } ?? 0
             return max(title, detail)
         }.max() ?? 0
         let hasLeadingSlot = presentation != .commands || items.contains { $0.icon != nil }
-        let leadingWidth: CGFloat = hasLeadingSlot ? 26 : 0
-        let minimumWidth = presentation == .commands ? 184 : Self.minimumWidth
+        let leadingWidth: CGFloat = hasLeadingSlot ? CGFloat(pageZoom.scaled(26)) : 0
+        let minimumWidth = presentation == .commands
+            ? CGFloat(pageZoom.scaled(184)) : Self.minimumWidth(zoom: pageZoom)
         return NSSize(
-            width: max(minimumWidth, textWidth + Self.horizontalPadding * 2 + leadingWidth),
+            width: max(minimumWidth, textWidth + renderedHorizontalPadding * 2 + leadingWidth),
             height: CGFloat(items.count) * renderedRowHeight + renderedVerticalPadding * 2
                 + destructiveSeparatorGap
         )
@@ -145,19 +161,21 @@ final class ChoiceListView: NSView, TokenThemed {
     override func layout() {
         super.layout()
         var y = bounds.height - renderedVerticalPadding - renderedRowHeight
+        let rowInset = renderedRowInset
         for (index, row) in rows.enumerated() {
             if index == destructiveSeparatorIndex {
                 y -= destructiveSeparatorGap
+                let separatorInset = rowInset + CGFloat(pageZoom.scaled(4))
                 destructiveSeparator.frame = NSRect(
-                    x: Self.verticalPadding + 4,
+                    x: separatorInset,
                     y: y + renderedRowHeight + floor(destructiveSeparatorGap / 2),
-                    width: max(0, bounds.width - (Self.verticalPadding + 4) * 2),
+                    width: max(0, bounds.width - separatorInset * 2),
                     height: LineWidth.hairline)
             }
             row.frame = NSRect(
-                x: Self.verticalPadding,
+                x: rowInset,
                 y: y,
-                width: max(0, bounds.width - Self.verticalPadding * 2),
+                width: max(0, bounds.width - rowInset * 2),
                 height: renderedRowHeight
             )
             y -= renderedRowHeight
@@ -165,12 +183,21 @@ final class ChoiceListView: NSView, TokenThemed {
     }
 
     private var renderedRowHeight: CGFloat {
-        presentation == .commands ? Self.commandRowHeight : Self.rowHeight
+        presentation == .commands
+            ? Self.commandRowHeight(zoom: pageZoom) : Self.rowHeight(zoom: pageZoom)
     }
 
     private var renderedVerticalPadding: CGFloat {
-        presentation == .completions ? 4 : Self.verticalPadding
+        presentation == .completions
+            ? CGFloat(pageZoom.scaled(4)) : Self.verticalPadding(zoom: pageZoom)
     }
+
+    /// The horizontal inset `layout()` gives every row. It has always been the
+    /// VERTICAL padding token (not `horizontalPadding`); the name is preserved
+    /// here so the scaled form cannot quietly change which token it reads.
+    private var renderedRowInset: CGFloat { Self.verticalPadding(zoom: pageZoom) }
+
+    private var renderedHorizontalPadding: CGFloat { Self.horizontalPadding(zoom: pageZoom) }
 
     private var destructiveSeparatorIndex: Int? {
         guard presentation == .commands,
@@ -179,7 +206,7 @@ final class ChoiceListView: NSView, TokenThemed {
     }
 
     private var destructiveSeparatorGap: CGFloat {
-        destructiveSeparatorIndex == nil ? 0 : 9
+        destructiveSeparatorIndex == nil ? 0 : CGFloat(pageZoom.scaled(9))
     }
 
     override func keyDown(with event: NSEvent) {
@@ -292,6 +319,16 @@ final class ChoiceListView: NSView, TokenThemed {
         updateRows()
     }
 
+    /// WS5: re-derive every zoom-owned metric from scratch and pass the rung down
+    /// to the rows, which own their own text and glyph metrics.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        for row in rows { row.applyPageZoom(pageZoom) }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     private func choose(_ item: ChoiceItem) {
         selectedID = item.id
         focusedID = item.id
@@ -340,6 +377,7 @@ final class ChoiceListView: NSView, TokenThemed {
                 self.updateRows()
                 self.scrollFocusedRowToVisible()
             }
+            row.applyPageZoom(pageZoom)
             addSubview(row)
             return row
         }
@@ -357,7 +395,7 @@ final class ChoiceListView: NSView, TokenThemed {
 }
 
 @MainActor
-private final class ChoiceRowView: NSControl, TokenThemed {
+private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable {
     let item: ChoiceItem
     let presentation: ChoiceListPresentation
     let reservesLeadingSlot: Bool
@@ -370,6 +408,8 @@ private final class ChoiceRowView: NSControl, TokenThemed {
     private var selected = false
     private var focused = false
     private var trackingArea: NSTrackingArea?
+    /// WS5: the rung this row draws at, pushed down by its list.
+    private(set) var pageZoom: AgentPageZoom = .default
 
     var qaSelected: Bool { selected }
     var qaFocused: Bool { focused }
@@ -385,12 +425,12 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         self.reservesLeadingSlot = reservesLeadingSlot
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         titleLabel.stringValue = item.title
-        titleLabel.font = .token(.body)
+        titleLabel.font = .token(.body, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
         detailLabel.stringValue = item.detail ?? ""
-        detailLabel.font = .token(.caption)
+        detailLabel.font = .token(.caption, zoom: pageZoom)
         detailLabel.lineBreakMode = presentation == .completions
             ? .byTruncatingMiddle : .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
@@ -414,14 +454,24 @@ private final class ChoiceRowView: NSControl, TokenThemed {
 
     override func layout() {
         super.layout()
+        let glyphSide = CGFloat(pageZoom.scaled(14))
+        let leadingX = CGFloat(pageZoom.scaled(8))
         leadingImageView.frame = NSRect(
-            x: 8, y: floor((bounds.height - 14) / 2), width: 14, height: 14)
-        let textX: CGFloat = reservesLeadingSlot ? 30 : 10
+            x: leadingX, y: floor((bounds.height - glyphSide) / 2), width: glyphSide, height: glyphSide)
+        let textX: CGFloat = reservesLeadingSlot
+            ? CGFloat(pageZoom.scaled(30)) : CGFloat(pageZoom.scaled(10))
+        let trailingInset = CGFloat(pageZoom.scaled(8))
+        let textWidth = max(0, bounds.width - textX - trailingInset)
         if detailLabel.isHidden {
-            titleLabel.frame = NSRect(x: textX, y: floor((bounds.height - 20) / 2), width: max(0, bounds.width - textX - 8), height: 20)
+            let singleHeight = CGFloat(pageZoom.scaled(20))
+            titleLabel.frame = NSRect(x: textX, y: floor((bounds.height - singleHeight) / 2), width: textWidth, height: singleHeight)
         } else {
-            titleLabel.frame = NSRect(x: textX, y: bounds.height - 20, width: max(0, bounds.width - textX - 8), height: 17)
-            detailLabel.frame = NSRect(x: textX, y: 2, width: max(0, bounds.width - textX - 8), height: 14)
+            let titleHeight = CGFloat(pageZoom.scaled(17))
+            let detailHeight = CGFloat(pageZoom.scaled(14))
+            let titleTopInset = CGFloat(pageZoom.scaled(20))
+            let detailBaseline = CGFloat(pageZoom.scaled(2))
+            titleLabel.frame = NSRect(x: textX, y: bounds.height - titleTopInset, width: textWidth, height: titleHeight)
+            detailLabel.frame = NSRect(x: textX, y: detailBaseline, width: textWidth, height: detailHeight)
         }
     }
 
@@ -445,6 +495,17 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         guard item.enabled else { return false }
         onChoose?(item.id)
         return true
+    }
+
+    /// WS5: re-derive every zoom-owned metric from scratch. Idempotent, and safe
+    /// on a row already showing its item.
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        titleLabel.font = .token(.body, zoom: pageZoom)
+        detailLabel.font = .token(.caption, zoom: pageZoom)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     func update(selected: Bool, focused: Bool) {

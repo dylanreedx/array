@@ -25,7 +25,7 @@ final class CodeBlockRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .fencedCode(payload) = block.payload else { return 0 }
-        return CodeBlockView.measuredHeight(for: payload.code)
+        return CodeBlockView.measuredHeight(for: payload.code, zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -41,6 +41,15 @@ final class CodeBlockView: NSView {
     static let maximumExpandedHeight: CGFloat = 320
     static let minimumCodeHeight = CGFloat(Metrics.lineHeight(for: .bodyMono)) + CGFloat(Space.m) * 2
 
+    // WS5: the same three metrics at a tile's page zoom. The zero-argument
+    // properties above are the 100% values other call sites (and the UI probes)
+    // still read, so they stay exactly as they are.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.s)) }
+    static func maximumExpandedHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(320)) }
+    static func minimumCodeHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.lineHeight(for: .bodyMono)) + CGFloat(zoom.scaled(Space.m)) * 2
+    }
+
     private(set) var codeTextView: CodeTextView
     private(set) var scrollView = CodeBlockScrollView(frame: .zero)
     private(set) var languageLabel = NSTextField(labelWithString: "Code")
@@ -50,17 +59,18 @@ final class CodeBlockView: NSView {
     private var blockID: AgentNodeID?
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled block re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
+
     init(highlighter: any CodeHighlighting = PlainCodeHighlighter()) {
         codeTextView = CodeTextView(highlighter: highlighter)
         super.init(frame: .zero)
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
 
-        languageLabel.font = NSFont.token(.label)
         languageLabel.lineBreakMode = .byTruncatingTail
-        streamingLabel.font = NSFont.token(.caption)
         streamingLabel.isHidden = true
 
         copyButton.target = self
@@ -83,7 +93,18 @@ final class CodeBlockView: NSView {
         addSubview(scrollView)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+        applyZoomMetrics()
         applyTokens()
+    }
+
+    /// Every construction-time metric, re-derived from the CURRENT context's
+    /// zoom. A recycled block runs this again from `apply`.
+    private func applyZoomMetrics() {
+        let zoom = self.zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        languageLabel.font = NSFont.token(.label, zoom: zoom)
+        streamingLabel.font = NSFont.token(.caption, zoom: zoom)
+        copyButton.applyZoom(zoom)
     }
 
     @available(*, unavailable)
@@ -100,6 +121,7 @@ final class CodeBlockView: NSView {
         codeTextView.apply(code: payload.code, language: language, context: context)
         identifier = NSUserInterfaceItemIdentifier("agent.codeBlock.\(blockID.rawValue)")
         applyAccessibility(language: language, isComplete: payload.isComplete)
+        applyZoomMetrics()
         applyTokens()
         needsLayout = true
     }
@@ -115,29 +137,31 @@ final class CodeBlockView: NSView {
 
     override func layout() {
         super.layout()
-        let side = CGFloat(Space.l)
+        let zoom = self.zoom
+        let headerHeight = Self.headerHeight(zoom: zoom)
+        let side = CGFloat(zoom.scaled(Space.l))
         let copyWidth = copyButton.intrinsicContentSize.width
         copyButton.frame = NSRect(
-            x: max(side, bounds.maxX - side - copyWidth), y: CGFloat(Space.s),
-            width: copyWidth, height: Self.headerHeight - CGFloat(Space.m)
+            x: max(side, bounds.maxX - side - copyWidth), y: CGFloat(zoom.scaled(Space.s)),
+            width: copyWidth, height: headerHeight - CGFloat(zoom.scaled(Space.m))
         )
         let streamingWidth = streamingLabel.isHidden ? 0 : streamingLabel.intrinsicContentSize.width
         streamingLabel.frame = NSRect(
-            x: max(side, copyButton.frame.minX - CGFloat(Space.m) - streamingWidth),
-            y: CGFloat(Space.m), width: streamingWidth,
+            x: max(side, copyButton.frame.minX - CGFloat(zoom.scaled(Space.m)) - streamingWidth),
+            y: CGFloat(zoom.scaled(Space.m)), width: streamingWidth,
             height: streamingLabel.intrinsicContentSize.height
         )
         languageLabel.frame = NSRect(
-            x: side, y: CGFloat(Space.m),
-            width: max(1, streamingLabel.frame.minX - side - CGFloat(Space.m)),
+            x: side, y: CGFloat(zoom.scaled(Space.m)),
+            width: max(1, streamingLabel.frame.minX - side - CGFloat(zoom.scaled(Space.m))),
             height: languageLabel.intrinsicContentSize.height
         )
         scrollView.frame = NSRect(
-            x: 0, y: Self.headerHeight, width: bounds.width,
-            height: max(0, bounds.height - Self.headerHeight)
+            x: 0, y: headerHeight, width: bounds.width,
+            height: max(0, bounds.height - headerHeight)
         )
         scrollView.layoutSubtreeIfNeeded()
-        let measuredCodeSize = CodeTextView.measuredCodeSize(codeTextView.string)
+        let measuredCodeSize = CodeTextView.measuredCodeSize(codeTextView.string, zoom: zoom)
         let needsVerticalScroll = measuredCodeSize.height > scrollView.contentSize.height + 0.5
         if scrollView.hasVerticalScroller != needsVerticalScroll {
             scrollView.hasVerticalScroller = needsVerticalScroll
@@ -146,8 +170,12 @@ final class CodeBlockView: NSView {
         codeTextView.sizeDocument(toFit: scrollView.contentSize)
     }
 
-    static func measuredHeight(for code: String) -> CGFloat {
-        min(maximumExpandedHeight, headerHeight + max(minimumCodeHeight, CodeTextView.measuredCodeSize(code).height))
+    static func measuredHeight(for code: String, zoom: AgentPageZoom = .default) -> CGFloat {
+        min(
+            maximumExpandedHeight(zoom: zoom),
+            headerHeight(zoom: zoom)
+                + max(minimumCodeHeight(zoom: zoom), CodeTextView.measuredCodeSize(code, zoom: zoom).height)
+        )
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -218,6 +246,13 @@ final class CodeCopyButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// WS5: re-derived on every `apply`, because the button outlives the zoom it
+    /// was constructed at.
+    func applyZoom(_ zoom: AgentPageZoom) {
+        font = NSFont.token(.label, zoom: zoom)
+        invalidateIntrinsicContentSize()
+    }
 
     override func accessibilityChildren() -> [Any]? { [] }
 }

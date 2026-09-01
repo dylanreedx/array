@@ -539,6 +539,12 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# WS5: per-managed-agent-tile page zoom. Six discrete rungs reflowing REAL AppKit
+# geometry — the tile's composition constraints, the transcript's measurement
+# identity and prepared layout, the composer and every rail — while the tile's
+# world frame, title bar, zone stamp and the canvas viewport stay byte-identical,
+# nothing reaches persistence, and two tiles hold different rungs at once.
+run_app_check .build/debug/Array --managed-agent-page-zoom-check
 # The composer's paste/drop intake: image decoding, thumbnail cache, attachment
 # rail, cross-agent rebind isolation, and the shared mixed image/file-reference
 # route through the real managed attachment store. It shipped with 44fbe73 but

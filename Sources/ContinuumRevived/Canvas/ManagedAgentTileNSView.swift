@@ -71,6 +71,37 @@ final class ManagedAgentTileNSView: TileNSView {
         view.wantsLayer = true
         return view
     }()
+
+    // MARK: - WS5 page zoom
+    //
+    // The scale boundary is `contentBackdrop` and everything below it. That is
+    // the narrowest view that contains every inner surface the contract names —
+    // header, transcript, status row, composer, rails, footer, action — and
+    // excludes every part of `TileNSView` the contract freezes: the title bar,
+    // the resize/corner overlays, the tile's world frame and its zone stamp.
+    // Those are the base class's views and siblings of the content slot, so a
+    // change confined to this subtree cannot reach them.
+    //
+    // The value is a plain stored property on the MOUNTED view. It is
+    // deliberately not in `tile.metadata`, not in `canvas.json`, not in the
+    // workspace document and not in UserDefaults: a recreated tile builds a new
+    // `ManagedAgentTileNSView`, which starts at `.default`, because there is
+    // nowhere the old rung could have been read back from.
+    private(set) var pageZoom: AgentPageZoom = .default
+    /// Positive control: how many times a NEW rung was pushed through this tile.
+    private(set) var qaPageZoomApplyCount = 0
+    /// Positive control: how many `AgentPageZoomScalable` views the last apply
+    /// reached. A witness that asserts "the title bar did not move" is vacuous
+    /// if the walk reached nothing.
+    private(set) var qaPageZoomScaledViewCount = 0
+    private var agentHeaderHeight: NSLayoutConstraint?
+    private var compactStatusRowHeight: NSLayoutConstraint?
+    private var providerFooterHeight: NSLayoutConstraint?
+    private var actionButtonHeight: NSLayoutConstraint?
+    private var composerWidthInset: NSLayoutConstraint?
+    private var footerRowWidthInset: NSLayoutConstraint?
+    private var compactStatusWidthInset: NSLayoutConstraint?
+    private var statusProviderSpacerHeight: NSLayoutConstraint?
     private let header: NSStackView = {
         let stack = NSStackView()
         stack.wantsLayer = true
@@ -603,6 +634,123 @@ final class ManagedAgentTileNSView: TileNSView {
 
     var qaAwarenessSignal: AgentSignal? { awarenessBadge.signal }
 
+    // MARK: - WS5 page zoom
+
+    /// The one writer of this tile's rung.
+    ///
+    /// Returns whether the rung actually moved, so a caller at an end stop can
+    /// tell "nothing to do" from "done" — and so a witness can assert that a
+    /// disabled command is inert rather than merely idempotent.
+    @discardableResult
+    func setPageZoom(_ next: AgentPageZoom) -> Bool {
+        guard next != pageZoom else { return false }
+        pageZoom = next
+        qaPageZoomApplyCount += 1
+        applyPageZoomToContent()
+        return true
+    }
+
+    @discardableResult
+    func performPageZoomCommand(_ command: AgentPageZoomCommand) -> Bool {
+        setPageZoom(command.apply(to: pageZoom))
+    }
+
+    /// Push the current rung through the content subtree.
+    ///
+    /// Order matters. The Auto Layout constants and the scalable views are
+    /// updated first so that when the transcript re-measures — inside
+    /// `updateRenderContext`, which preserves the reader's semantic anchor — the
+    /// widths it measures against are already the new ones. Doing it the other
+    /// way round anchors the reader against a width that is about to change.
+    private func applyPageZoomToContent() {
+        let zoom = pageZoom
+        agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)
+        compactStatusRowHeight?.constant = AgentCompactStatusRowView.preferredHeight(zoom: zoom)
+        providerFooterHeight?.constant = AgentComposerFooterView.height(zoom: zoom)
+        actionButtonHeight?.constant = ComposerActionButton.controlHeight(zoom: zoom)
+        let horizontalInset = -CGFloat(zoom.scaled(Inset.row).horizontal)
+        composerWidthInset?.constant = horizontalInset
+        footerRowWidthInset?.constant = horizontalInset
+        compactStatusWidthInset?.constant = horizontalInset
+        statusProviderSpacerHeight?.constant = CGFloat(zoom.scaled(Space.l))
+        v2ComposeColumn?.spacing = CGFloat(zoom.scaled(Space.m))
+        v2ComposeColumn?.edgeInsets = NSEdgeInsets(Inset.row, zoom: zoom)
+        v2FooterRow?.spacing = CGFloat(zoom.scaled(Space.m))
+        qaPageZoomScaledViewCount = AgentPageZoomScaling.apply(zoom, in: contentBackdrop)
+        // The transcript is not on the scalable walk: it is a renderer host, and
+        // its rung travels in the render context so that a REUSED row adopts the
+        // current rung when it materializes. This is also the transaction that
+        // preserves the reader's anchor, the selection and the disclosures.
+        do {
+            try transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+        } catch {
+            v2RenderError = error
+        }
+        contentBackdrop.needsLayout = true
+        contentBackdrop.layoutSubtreeIfNeeded()
+    }
+
+    /// The zoom submenu, offered on the title-bar menu and the tile context menu
+    /// (they are the same menu — `TileNSView` builds one from this seam).
+    private func makePageZoomMenuItems() -> [NSMenuItem] {
+        let root = NSMenuItem(title: "Zoom", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Zoom")
+        // The current percentage, always visible so the rung is discoverable
+        // without stepping. Disabled: it is a readout, not a command.
+        let readout = NSMenuItem(
+            title: "Page Zoom \(pageZoom.displayPercentage)", action: nil, keyEquivalent: "")
+        readout.isEnabled = false
+        readout.identifier = NSUserInterfaceItemIdentifier("agentTile.pageZoom.readout")
+        menu.addItem(readout)
+        menu.addItem(.separator())
+        menu.addItem(pageZoomItem(title: "Zoom In", command: .zoomIn, keyEquivalent: "+"))
+        menu.addItem(pageZoomItem(title: "Zoom Out", command: .zoomOut, keyEquivalent: "-"))
+        menu.addItem(pageZoomItem(title: "Actual Size", command: .reset, keyEquivalent: "0"))
+        root.submenu = menu
+        return [root]
+    }
+
+    private func pageZoomItem(
+        title: String, command: AgentPageZoomCommand, keyEquivalent: String
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title, action: #selector(performPageZoomMenuItem(_:)), keyEquivalent: keyEquivalent)
+        item.keyEquivalentModifierMask = [.command]
+        item.target = self
+        item.representedObject = command.rawValue
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.pageZoom.\(command.rawValue)")
+        // The end stops are DISABLED, not hidden: a command that cannot move the
+        // value must not look available.
+        item.isEnabled = command.isEnabled(for: pageZoom)
+        return item
+    }
+
+    @objc private func performPageZoomMenuItem(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let command = AgentPageZoomCommand(rawValue: raw) else { return }
+        // Re-checked here and not only on the item: AppKit will send a disabled
+        // item's action if something else validates it, and the value must be
+        // inert at an end stop however it is reached.
+        guard command.isEnabled(for: pageZoom) else { return }
+        performPageZoomCommand(command)
+    }
+
+    /// Route one key equivalent. Returns whether it was consumed — nil-shaped
+    /// chords are never consumed, which is what leaves the browser, the canvas
+    /// and every editable control's own shortcuts untouched.
+    @discardableResult
+    func handlePageZoomKeyEquivalent(with event: NSEvent) -> Bool {
+        guard let command = AgentPageZoomShortcut.command(
+            characters: event.characters,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            modifiers: AgentPageZoomModifier.set(from: event.modifierFlags)
+        ) else { return false }
+        // A chord at an end stop is still OURS — consuming it stops it falling
+        // through to some other Command-plus owner mid-gesture.
+        performPageZoomCommand(command)
+        return true
+    }
+
     override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
         let root = NSMenuItem(title: "Sounds", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "Sounds")
@@ -629,7 +777,7 @@ final class ManagedAgentTileNSView: TileNSView {
             menu.addItem(item)
         }
         root.submenu = menu
-        return [root]
+        return makePageZoomMenuItems() + [root]
     }
 
     private func soundOverrideItem(title: String, kind: AgentSignalKind, value: String) -> NSMenuItem {
@@ -1767,7 +1915,7 @@ final class ManagedAgentTileNSView: TileNSView {
         v2FooterRow = footerRow
         footerRow.orientation = .horizontal
         footerRow.alignment = .centerY
-        footerRow.spacing = CGFloat(Space.m)
+        footerRow.spacing = CGFloat(pageZoom.scaled(Space.m))
         footerRow.translatesAutoresizingMaskIntoConstraints = false
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -1785,15 +1933,18 @@ final class ManagedAgentTileNSView: TileNSView {
             composeViews = [compactStatusRow, composer, footerRow]
         case .belowComposer:
             composeViews = [composer, compactStatusRow, statusSpacer, footerRow]
-            statusSpacer.heightAnchor.constraint(equalToConstant: CGFloat(Space.l)).isActive = true
+            let spacerHeight = statusSpacer.heightAnchor.constraint(
+                equalToConstant: CGFloat(pageZoom.scaled(Space.l)))
+            spacerHeight.isActive = true
+            statusProviderSpacerHeight = spacerHeight
         }
         let composeColumn = NSStackView(views: composeViews)
         composeColumn.identifier = NSUserInterfaceItemIdentifier("agentTile.composeColumn")
         v2ComposeColumn = composeColumn
         composeColumn.orientation = .vertical
         composeColumn.alignment = .leading
-        composeColumn.spacing = CGFloat(Space.m)
-        composeColumn.edgeInsets = NSEdgeInsets(Inset.row)
+        composeColumn.spacing = CGFloat(pageZoom.scaled(Space.m))
+        composeColumn.edgeInsets = NSEdgeInsets(Inset.row, zoom: pageZoom)
         composeColumn.translatesAutoresizingMaskIntoConstraints = false
         compactStatusRow.identifier = NSUserInterfaceItemIdentifier("agentTile.statusRow")
         composer.identifier = NSUserInterfaceItemIdentifier("agentTile.composer")
@@ -1806,12 +1957,39 @@ final class ManagedAgentTileNSView: TileNSView {
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(layout)
+        // WS5: every constraint whose constant is a METRIC is held, because a
+        // literal baked into an activated anchor constraint is a number nothing
+        // can rescale afterwards.
+        let headerHeight = agentHeader.heightAnchor.constraint(
+            equalToConstant: AgentTileHeaderView.preferredHeight(zoom: pageZoom))
+        let statusHeight = compactStatusRow.heightAnchor.constraint(
+            equalToConstant: AgentCompactStatusRowView.preferredHeight(zoom: pageZoom))
+        let footerHeight = providerFooter.heightAnchor.constraint(
+            equalToConstant: AgentComposerFooterView.height(zoom: pageZoom))
+        let actionHeight = actionButton.heightAnchor.constraint(
+            equalToConstant: ComposerActionButton.controlHeight(zoom: pageZoom))
+        let composerWidth = composer.widthAnchor.constraint(
+            equalTo: composeColumn.widthAnchor,
+            constant: -CGFloat(pageZoom.scaled(Inset.row).horizontal))
+        let footerWidth = footerRow.widthAnchor.constraint(
+            equalTo: composeColumn.widthAnchor,
+            constant: -CGFloat(pageZoom.scaled(Inset.row).horizontal))
+        let statusWidth = compactStatusRow.widthAnchor.constraint(
+            equalTo: composeColumn.widthAnchor,
+            constant: -CGFloat(pageZoom.scaled(Inset.row).horizontal))
+        agentHeaderHeight = headerHeight
+        compactStatusRowHeight = statusHeight
+        providerFooterHeight = footerHeight
+        actionButtonHeight = actionHeight
+        composerWidthInset = composerWidth
+        footerRowWidthInset = footerWidth
+        compactStatusWidthInset = statusWidth
         NSLayoutConstraint.activate([
             layout.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             layout.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            agentHeader.heightAnchor.constraint(equalToConstant: AgentTileHeaderView.preferredHeight),
+            headerHeight,
             agentHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcript.widthAnchor.constraint(equalTo: layout.widthAnchor),
@@ -1820,12 +1998,12 @@ final class ManagedAgentTileNSView: TileNSView {
             composeColumn.trailingAnchor.constraint(equalTo: composeBackdrop.trailingAnchor),
             composeColumn.topAnchor.constraint(equalTo: composeBackdrop.topAnchor),
             composeColumn.bottomAnchor.constraint(equalTo: composeBackdrop.bottomAnchor),
-            composer.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
-            footerRow.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
-            compactStatusRow.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
-            compactStatusRow.heightAnchor.constraint(equalToConstant: AgentCompactStatusRowView.preferredHeight),
-            providerFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
-            actionButton.heightAnchor.constraint(equalToConstant: ComposerActionButton.controlHeight),
+            composerWidth,
+            footerWidth,
+            statusWidth,
+            statusHeight,
+            footerHeight,
+            actionHeight,
         ])
         composeBackdrop.setContentHuggingPriority(.required, for: .vertical)
         composeBackdrop.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -2153,6 +2331,7 @@ final class ManagedAgentTileNSView: TileNSView {
             },
             tokens: .transcript,
             appearance: effectiveTokenTheme,
+            pageZoom: pageZoom,
             imageResources: managedImageResourceProvider,
             agentStatus: agentReferenceStatusSource
         )
@@ -2569,6 +2748,48 @@ final class ManagedAgentTileNSView: TileNSView {
         refreshTranscriptThinkingIndicator()
     }
     var qaTranscriptForChecks: AgentTranscriptListView? { transcriptCollectionFixture }
+
+    // MARK: - WS5 page-zoom QA seams
+    //
+    // These read back what the tile ACTUALLY laid out — frames, constants,
+    // resolved font point sizes — never what a policy would have returned.
+
+    /// The scale boundary itself. Everything under it scales; the title bar and
+    /// the resize overlays are siblings of it and do not.
+    var qaPageZoomContentRoot: NSView { contentBackdrop }
+    var qaPageZoomComposeBackdrop: NSView { composeBackdrop }
+    var qaPageZoomHeaderView: AgentTileHeaderView { agentHeader }
+    var qaPageZoomComposerView: AgentComposerView? { v2Composer }
+    var qaPageZoomActionButton: ComposerActionButton? { v2ActionButton }
+    /// The constants Auto Layout is currently solving with.
+    var qaPageZoomHeaderHeightConstant: CGFloat { agentHeaderHeight?.constant ?? -1 }
+    var qaPageZoomStatusHeightConstant: CGFloat { compactStatusRowHeight?.constant ?? -1 }
+    var qaPageZoomFooterHeightConstant: CGFloat { providerFooterHeight?.constant ?? -1 }
+    var qaPageZoomActionHeightConstant: CGFloat { actionButtonHeight?.constant ?? -1 }
+    var qaPageZoomComposerWidthInset: CGFloat { composerWidthInset?.constant ?? 1 }
+    var qaPageZoomComposeColumnInsets: NSEdgeInsets {
+        v2ComposeColumn?.edgeInsets ?? NSEdgeInsets()
+    }
+    var qaPageZoomComposeColumnSpacing: CGFloat { v2ComposeColumn?.spacing ?? -1 }
+    /// Every menu item the zoom submenu offers, as (identifier, title, enabled).
+    func qaPageZoomMenuEntries() -> [(id: String, title: String, enabled: Bool)] {
+        guard let submenu = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.title == "Zoom" })?.submenu else { return [] }
+        return submenu.items.compactMap { item in
+            guard let id = item.identifier?.rawValue else { return nil }
+            return (id: id, title: item.title, enabled: item.isEnabled)
+        }
+    }
+    /// Invoke a zoom menu item exactly as AppKit would, target and all.
+    @discardableResult
+    func qaInvokePageZoomMenuItem(_ identifier: String) -> Bool {
+        guard let submenu = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.title == "Zoom" })?.submenu,
+            let item = submenu.items.first(where: { $0.identifier?.rawValue == identifier }),
+            let action = item.action, let target = item.target else { return false }
+        _ = target.perform(action, with: item)
+        return true
+    }
     var qaDocumentForChecks: AgentDocument { model.document }
     var qaStatusThinkingIndicatorVisible: Bool { compactStatusRow.qaThinkingSlotVisible }
     var qaCompactStatusPhase: AgentCompactActivityPhase? { compactStatusResolution.phase }

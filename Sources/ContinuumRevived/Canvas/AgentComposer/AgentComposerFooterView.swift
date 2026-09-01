@@ -11,7 +11,7 @@ private final class FooterAlphaSamples: @unchecked Sendable {
 }
 
 @MainActor
-final class AgentComposerFooterView: NSView, TokenThemed {
+final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable {
     typealias SettingsWriter = (_ model: String?, _ thinking: String?) -> Bool
     typealias LaunchSelectionWriter = (_ harness: AgentHarness, _ model: String, _ thinking: String) -> Bool
 
@@ -27,11 +27,23 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     private var usesCondensedModelTrigger = false
     private var hidesEffort = false
     private var contrastObservations: [NSKeyValueObservation] = []
+    /// WS5: the tile's page-zoom rung, delivered by the subtree walk.
+    private(set) var pageZoom: AgentPageZoom = .default
+    private var buttonRow: NSStackView?
+    private var buttonHeightConstraints: [NSLayoutConstraint] = []
 
     var onSettingsWrite: SettingsWriter?
     var onLaunchSelectionWrite: LaunchSelectionWriter?
 
     static let height = ChoiceButton.controlHeight
+
+    /// `height` at a page-zoom rung. An exact identity with `height` at 100%.
+    static func height(zoom: AgentPageZoom) -> CGFloat {
+        ChoiceButton.controlHeight(zoom: zoom)
+    }
+
+    /// This footer's row height at the rung it is currently showing.
+    var rowHeight: CGFloat { Self.height(zoom: pageZoom) }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -74,18 +86,23 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         let stack = NSStackView(views: [harnessButton, modelButton, effortButton, spacer])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = CGFloat(Space.m)
+        stack.spacing = CGFloat(pageZoom.scaled(Space.m))
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        buttonRow = stack
+        // Held so `applyPageZoom` can rescale them: a constant baked into an
+        // activated anchor cannot be re-derived any other way.
+        buttonHeightConstraints = [
+            harnessButton.heightAnchor.constraint(equalToConstant: Self.height(zoom: pageZoom)),
+            modelButton.heightAnchor.constraint(equalToConstant: Self.height(zoom: pageZoom)),
+            effortButton.heightAnchor.constraint(equalToConstant: Self.height(zoom: pageZoom)),
+        ]
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            harnessButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            modelButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            effortButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-        ])
+        ] + buttonHeightConstraints)
 
         installContrastObservers()
         apply(settings)
@@ -96,7 +113,17 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: Self.height)
+        NSSize(width: NSView.noIntrinsicMetric, height: rowHeight)
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        buttonRow?.spacing = CGFloat(pageZoom.scaled(Space.m))
+        for constraint in buttonHeightConstraints {
+            constraint.constant = Self.height(zoom: pageZoom)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     override func layout() {
@@ -155,10 +182,11 @@ final class AgentComposerFooterView: NSView, TokenThemed {
             : (compact ? Self.abbreviatedModel(settings.model) : (AgentModelCatalog.shared.displayName(for: settings.model, harness: recordHarness) ?? settings.model))
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
         let harnessTitle = compact ? Self.abbreviatedHarness(recordHarness) : recordHarness.rawValue
-        let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle)
-            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: modelTitle)
+        let gap = CGFloat(pageZoom.scaled(Space.m))
+        let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle, zoom: pageZoom)
+            + gap + ChoiceButton.fittingWidth(forTitle: modelTitle, zoom: pageZoom)
         return includeEffort
-            ? providerAndModel + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
+            ? providerAndModel + gap + ChoiceButton.fittingWidth(forTitle: effortTitle, zoom: pageZoom)
             : providerAndModel
     }
 
@@ -354,9 +382,10 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     /// true, both buttons must sit at (or above) their intrinsic width and render
     /// their selected titles without ellipsis — the truncation gate's precondition.
     var qaFitsCurrentTitles: Bool {
-        let needed = harnessButton.intrinsicContentSize.width + CGFloat(Space.m)
+        let gap = CGFloat(pageZoom.scaled(Space.m))
+        let needed = harnessButton.intrinsicContentSize.width + gap
             + modelButton.intrinsicContentSize.width
-            + (effortButton.isHidden ? 0 : CGFloat(Space.m) + effortButton.intrinsicContentSize.width)
+            + (effortButton.isHidden ? 0 : gap + effortButton.intrinsicContentSize.width)
         return bounds.width > 0 && needed <= bounds.width + 0.5
     }
     @discardableResult func qaPickModel(_ value: String) -> Bool {

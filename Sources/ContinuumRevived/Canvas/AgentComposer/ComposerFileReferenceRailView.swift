@@ -10,8 +10,19 @@ import UniformTypeIdentifiers
 /// itself leaves its resting background unpainted (nil, never `.clear`) so the
 /// appearance census owns no literal here.
 @MainActor
-final class ComposerFileReferenceRailView: NSView, TokenThemed {
+final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomScalable {
     static let railHeight: CGFloat = 40
+
+    /// The rail's reserved height at `zoom`. The un-parameterised `railHeight`
+    /// stays for callers that reserve space at 100%.
+    static func railHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(40))
+    }
+
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    /// This rail's reserved height at its own zoom.
+    var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
@@ -29,7 +40,7 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty ? 0 : Self.railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: references.isEmpty ? 0 : railHeight)
     }
 
     func setReferences(_ newReferences: [AgentPromptFileReference]) {
@@ -40,7 +51,9 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed {
         }
         let theme = effectiveTokenTheme
         for reference in newReferences {
-            let chip = ComposerFileReferenceChipView(reference: reference) { [weak self] removed in
+            // A chip minted after a zoom apply is born scaled: the rail's own
+            // rung is handed to the initializer.
+            let chip = ComposerFileReferenceChipView(reference: reference, zoom: pageZoom) { [weak self] removed in
                 self?.onRemove?(removed)
             }
             chip.applyTokens(theme: theme)
@@ -61,9 +74,27 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed {
         }
     }
 
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        applyStackMetrics()
+        for case let chip as ComposerFileReferenceChipView in stack.arrangedSubviews {
+            chip.applyPageZoom(zoom)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    private func applyStackMetrics() {
+        stack.spacing = CGFloat(pageZoom.scaled(Space.s))
+        stack.edgeInsets = NSEdgeInsets(
+            top: CGFloat(pageZoom.scaled(Space.xs)), left: 0,
+            bottom: CGFloat(pageZoom.scaled(Space.xs)), right: 0
+        )
     }
 
     private func configureViews() {
@@ -75,10 +106,7 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed {
 
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = CGFloat(Space.s)
-        stack.edgeInsets = NSEdgeInsets(
-            top: CGFloat(Space.xs), left: 0, bottom: CGFloat(Space.xs), right: 0
-        )
+        applyStackMetrics()
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.borderType = .noBorder
@@ -126,8 +154,26 @@ private final class ComposerFileReferenceChipView: NSView {
     private let reference: AgentPromptFileReference
     private let onRemove: (AgentPromptFileReference) -> Void
 
-    init(reference: AgentPromptFileReference, onRemove: @escaping (AgentPromptFileReference) -> Void) {
+    private(set) var pageZoom: AgentPageZoom
+
+    // Metrics baked into an activated anchor cannot be re-derived, so every
+    // zoom-dependent constant is held.
+    private var heightConstraint: NSLayoutConstraint!
+    private var glyphLeadingConstraint: NSLayoutConstraint!
+    private var nameLeadingConstraint: NSLayoutConstraint!
+    private var maxNameWidthConstraint: NSLayoutConstraint!
+    private var removeLeadingConstraint: NSLayoutConstraint!
+    private var removeTrailingConstraint: NSLayoutConstraint!
+    private var removeWidthConstraint: NSLayoutConstraint!
+    private var removeHeightConstraint: NSLayoutConstraint!
+
+    init(
+        reference: AgentPromptFileReference,
+        zoom: AgentPageZoom = .default,
+        onRemove: @escaping (AgentPromptFileReference) -> Void
+    ) {
         self.reference = reference
+        self.pageZoom = zoom
         self.onRemove = onRemove
         super.init(frame: .zero)
         configureViews()
@@ -140,16 +186,13 @@ private final class ComposerFileReferenceChipView: NSView {
 
     private func configureViews() {
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         setAccessibilityRole(.group)
 
         glyphLabel.stringValue = "▤"
-        glyphLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         glyphLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glyphLabel)
 
         nameLabel.stringValue = ComposerImageDisplay.sanitizedFilename(reference.displayName)
-        nameLabel.font = .token(.caption)
         nameLabel.lineBreakMode = .byTruncatingMiddle
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -158,31 +201,61 @@ private final class ComposerFileReferenceChipView: NSView {
         removeButton.isBordered = false
         removeButton.bezelStyle = .regularSquare
         removeButton.setButtonType(.momentaryPushIn)
-        removeButton.font = .systemFont(ofSize: 13, weight: .semibold)
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.translatesAutoresizingMaskIntoConstraints = false
         removeButton.setAccessibilityLabel("Remove file attachment")
         addSubview(removeButton)
 
-        let maxNameWidth = nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 200)
-        maxNameWidth.priority = .required
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        glyphLeadingConstraint = glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        nameLeadingConstraint = nameLabel.leadingAnchor.constraint(
+            equalTo: glyphLabel.trailingAnchor, constant: 0
+        )
+        maxNameWidthConstraint = nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
+        maxNameWidthConstraint.priority = .required
+        removeLeadingConstraint = removeButton.leadingAnchor.constraint(
+            equalTo: nameLabel.trailingAnchor, constant: 0
+        )
+        removeTrailingConstraint = removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0)
+        removeWidthConstraint = removeButton.widthAnchor.constraint(equalToConstant: 0)
+        removeHeightConstraint = removeButton.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Space.s)),
+            heightConstraint,
+            glyphLeadingConstraint,
             glyphLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameLabel.leadingAnchor.constraint(equalTo: glyphLabel.trailingAnchor, constant: CGFloat(Space.xs)),
+            nameLeadingConstraint,
             nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            maxNameWidth,
-            removeButton.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: CGFloat(Space.xs)),
-            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.xs)),
+            maxNameWidthConstraint,
+            removeLeadingConstraint,
+            removeTrailingConstraint,
             removeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            removeButton.widthAnchor.constraint(equalToConstant: 18),
-            removeButton.heightAnchor.constraint(equalToConstant: 18),
+            removeWidthConstraint,
+            removeHeightConstraint,
         ])
+
+        applyPageZoom(pageZoom)
 
         toolTip = accessibilityChipLabel()
         setAccessibilityLabel(accessibilityChipLabel())
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        glyphLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
+        nameLabel.font = .token(.caption, zoom: zoom)
+        removeButton.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
+        heightConstraint.constant = CGFloat(zoom.scaled(26))
+        glyphLeadingConstraint.constant = CGFloat(zoom.scaled(Space.s))
+        nameLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        maxNameWidthConstraint.constant = CGFloat(zoom.scaled(200))
+        removeLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        removeTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        removeWidthConstraint.constant = CGFloat(zoom.scaled(18))
+        removeHeightConstraint.constant = CGFloat(zoom.scaled(18))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     func applyTokens(theme: TokenTheme) {

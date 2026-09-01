@@ -14,7 +14,7 @@ final class AgentUnknownBlockRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        AgentUnknownBlockView.height
+        AgentUnknownBlockView.height(zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -25,15 +25,22 @@ final class AgentUnknownBlockRenderer: AgentBlockRendering {
 @MainActor
 final class AgentUnknownBlockView: NSView {
     static let height = CGFloat(Space.xxl + Space.l)
+    /// WS5: the same box at a page zoom. The zero-arg `height` above is kept
+    /// because two files outside this one pin it as the 100% value.
+    static func height(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Space.xxl + Space.l))
+    }
     private(set) var summaryLabel = NSTextField(labelWithString: "Unsupported content")
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
-        summaryLabel.font = NSFont.token(.label)
+        // WS5: the radius and the font are re-derived in `apply` from the
+        // context's rung — this view is recycled, so whatever it was born with
+        // is only a starting point.
+        applyPageZoomMetrics(context.pageZoom)
         summaryLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.isSelectable = true
         addSubview(summaryLabel)
@@ -48,6 +55,7 @@ final class AgentUnknownBlockView: NSView {
 
     func apply(block: AgentBlock, context: AgentRenderContext) {
         self.context = context
+        applyPageZoomMetrics(context.pageZoom)
         summaryLabel.stringValue = block.safeFallbackSummary
         setAccessibilityLabel(block.safeFallbackAccessibilityLabel)
         setAccessibilityChildren([summaryLabel])
@@ -56,9 +64,17 @@ final class AgentUnknownBlockView: NSView {
         needsLayout = true
     }
 
+    /// Every zoom-derived metric this view owns, assigned from scratch. Called
+    /// from `init` and again from every `apply`, because a view built at 100%
+    /// is reused for a row at 150%.
+    private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        summaryLabel.font = NSFont.token(.label, zoom: zoom)
+    }
+
     override func layout() {
         super.layout()
-        let inset = CGFloat(Space.l)
+        let inset = CGFloat(context.pageZoom.scaled(Space.l))
         summaryLabel.frame = NSRect(
             x: inset,
             y: (bounds.height - summaryLabel.intrinsicContentSize.height) / 2,

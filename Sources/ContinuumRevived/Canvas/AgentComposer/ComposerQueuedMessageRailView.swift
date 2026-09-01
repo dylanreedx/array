@@ -8,8 +8,19 @@ import Foundation
 /// the primary composer control keeps ONE meaning, "interrupt the current
 /// turn". Modeled on `ComposerFileReferenceRailView`'s chip-rail shape.
 @MainActor
-final class ComposerQueuedMessageRailView: NSView, TokenThemed {
+final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomScalable {
     static let railHeight: CGFloat = 40
+
+    /// The rail's reserved height at `zoom`. The un-parameterised `railHeight`
+    /// stays for callers that reserve space at 100%.
+    static func railHeight(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(40))
+    }
+
+    private(set) var pageZoom: AgentPageZoom = .default
+
+    /// This rail's reserved height at its own zoom.
+    var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
@@ -33,7 +44,7 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: messages.isEmpty ? 0 : Self.railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: messages.isEmpty ? 0 : railHeight)
     }
 
     /// `paused` reflects `AgentSupervisor.isQueuePaused(for:)` — held after an
@@ -48,7 +59,11 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed {
         }
         let theme = effectiveTokenTheme
         for message in newMessages {
-            let chip = ComposerQueuedMessageChipView(message: message, paused: isPaused) { [weak self] removed in
+            // A chip minted after a zoom apply is born scaled: the rail's own
+            // rung is handed to the initializer.
+            let chip = ComposerQueuedMessageChipView(
+                message: message, paused: isPaused, zoom: pageZoom
+            ) { [weak self] removed in
                 self?.onRemove?(removed)
             }
             chip.applyTokens(theme: theme)
@@ -77,9 +92,28 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed {
         clearButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
     }
 
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        applyStackMetrics()
+        clearButton.font = .token(.caption, zoom: zoom)
+        for case let chip as ComposerQueuedMessageChipView in stack.arrangedSubviews {
+            chip.applyPageZoom(zoom)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    private func applyStackMetrics() {
+        stack.spacing = CGFloat(pageZoom.scaled(Space.s))
+        stack.edgeInsets = NSEdgeInsets(
+            top: CGFloat(pageZoom.scaled(Space.xs)), left: 0,
+            bottom: CGFloat(pageZoom.scaled(Space.xs)), right: 0
+        )
     }
 
     private func configureViews() {
@@ -91,14 +125,13 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed {
 
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = CGFloat(Space.s)
-        stack.edgeInsets = NSEdgeInsets(top: CGFloat(Space.xs), left: 0, bottom: CGFloat(Space.xs), right: 0)
+        applyStackMetrics()
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         clearButton.isBordered = false
         clearButton.bezelStyle = .regularSquare
         clearButton.setButtonType(.momentaryPushIn)
-        clearButton.font = .token(.caption)
+        clearButton.font = .token(.caption, zoom: pageZoom)
         clearButton.target = self
         clearButton.action = #selector(clearPressed(_:))
         clearButton.setAccessibilityLabel("Clear queued messages")
@@ -150,8 +183,27 @@ private final class ComposerQueuedMessageChipView: NSView {
     private let messageID: UUID
     private let onRemove: (UUID) -> Void
 
-    init(message: AgentComposerQueuedMessage, paused: Bool, onRemove: @escaping (UUID) -> Void) {
+    private(set) var pageZoom: AgentPageZoom
+
+    // Metrics baked into an activated anchor cannot be re-derived, so every
+    // zoom-dependent constant is held.
+    private var heightConstraint: NSLayoutConstraint!
+    private var glyphLeadingConstraint: NSLayoutConstraint!
+    private var previewLeadingConstraint: NSLayoutConstraint!
+    private var maxWidthConstraint: NSLayoutConstraint!
+    private var removeLeadingConstraint: NSLayoutConstraint!
+    private var removeTrailingConstraint: NSLayoutConstraint!
+    private var removeWidthConstraint: NSLayoutConstraint!
+    private var removeHeightConstraint: NSLayoutConstraint!
+
+    init(
+        message: AgentComposerQueuedMessage,
+        paused: Bool,
+        zoom: AgentPageZoom = .default,
+        onRemove: @escaping (UUID) -> Void
+    ) {
         self.messageID = message.id
+        self.pageZoom = zoom
         self.onRemove = onRemove
         super.init(frame: .zero)
         configureViews(previewText: Self.preview(for: message), paused: paused)
@@ -172,16 +224,13 @@ private final class ComposerQueuedMessageChipView: NSView {
 
     private func configureViews(previewText: String, paused: Bool) {
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         setAccessibilityRole(.group)
 
         glyphLabel.stringValue = paused ? "⏸" : "⏳"
-        glyphLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         glyphLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glyphLabel)
 
         previewLabel.stringValue = previewText
-        previewLabel.font = .token(.caption)
         previewLabel.lineBreakMode = .byTruncatingTail
         previewLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -190,34 +239,64 @@ private final class ComposerQueuedMessageChipView: NSView {
         removeButton.isBordered = false
         removeButton.bezelStyle = .regularSquare
         removeButton.setButtonType(.momentaryPushIn)
-        removeButton.font = .systemFont(ofSize: 13, weight: .semibold)
         removeButton.target = self
         removeButton.action = #selector(removePressed(_:))
         removeButton.translatesAutoresizingMaskIntoConstraints = false
         removeButton.setAccessibilityLabel("Remove queued message")
         addSubview(removeButton)
 
-        let maxWidth = previewLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 200)
-        maxWidth.priority = .required
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        glyphLeadingConstraint = glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        previewLeadingConstraint = previewLabel.leadingAnchor.constraint(
+            equalTo: glyphLabel.trailingAnchor, constant: 0
+        )
+        maxWidthConstraint = previewLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
+        maxWidthConstraint.priority = .required
+        removeLeadingConstraint = removeButton.leadingAnchor.constraint(
+            equalTo: previewLabel.trailingAnchor, constant: 0
+        )
+        removeTrailingConstraint = removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0)
+        removeWidthConstraint = removeButton.widthAnchor.constraint(equalToConstant: 0)
+        removeHeightConstraint = removeButton.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(Space.s)),
+            heightConstraint,
+            glyphLeadingConstraint,
             glyphLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            previewLabel.leadingAnchor.constraint(equalTo: glyphLabel.trailingAnchor, constant: CGFloat(Space.xs)),
+            previewLeadingConstraint,
             previewLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            maxWidth,
-            removeButton.leadingAnchor.constraint(equalTo: previewLabel.trailingAnchor, constant: CGFloat(Space.xs)),
-            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -CGFloat(Space.xs)),
+            maxWidthConstraint,
+            removeLeadingConstraint,
+            removeTrailingConstraint,
             removeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            removeButton.widthAnchor.constraint(equalToConstant: 18),
-            removeButton.heightAnchor.constraint(equalToConstant: 18),
+            removeWidthConstraint,
+            removeHeightConstraint,
         ])
+
+        applyPageZoom(pageZoom)
 
         let label = paused
             ? "Queued message, held after interrupt: \(previewText)"
             : "Queued message: \(previewText)"
         toolTip = label
         setAccessibilityLabel(label)
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        glyphLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
+        previewLabel.font = .token(.caption, zoom: zoom)
+        removeButton.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
+        heightConstraint.constant = CGFloat(zoom.scaled(26))
+        glyphLeadingConstraint.constant = CGFloat(zoom.scaled(Space.s))
+        previewLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        maxWidthConstraint.constant = CGFloat(zoom.scaled(200))
+        removeLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
+        removeTrailingConstraint.constant = -CGFloat(zoom.scaled(Space.xs))
+        removeWidthConstraint.constant = CGFloat(zoom.scaled(18))
+        removeHeightConstraint.constant = CGFloat(zoom.scaled(18))
+        invalidateIntrinsicContentSize()
+        needsLayout = true
     }
 
     func applyTokens(theme: TokenTheme) {

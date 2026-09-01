@@ -17,7 +17,7 @@ final class PlanRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .plan(payload) = block.payload else { return 0 }
-        return AgentPlanView.measuredHeight(payload: payload, width: width)
+        return AgentPlanView.measuredHeight(payload: payload, width: width, zoom: context.pageZoom)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -43,6 +43,18 @@ final class AgentPlanView: NSView {
     static let bottomInset = CGFloat(Space.s)
     static let maximumRows = 100
 
+    // WS5: the same four metrics at a tile's page zoom. The zero-argument
+    // properties above keep their shipped 100% values so nothing outside this
+    // renderer has to change; every path in here reads the companions.
+    static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xxl + Space.xs)) }
+    static func rowBaseHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xl + Space.s)) }
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
+    static func bottomInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s)) }
+
+    /// The page zoom of the last `apply`. Every metric below reads it, so a
+    /// recycled plan re-derives rather than keeping the zoom it was built at.
+    private var zoom: AgentPageZoom { context.pageZoom }
+
     private(set) var titleLabel = NSTextField(labelWithString: "Plan")
     private(set) var statusLabel = NSTextField(labelWithString: "")
     private(set) var rows: [Row] = []
@@ -53,6 +65,9 @@ final class AgentPlanView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        // These three are the 100% values a freshly built view starts with;
+        // `applyZoomedMetrics()` re-assigns all of them on every `apply`,
+        // because this view is RECYCLED and may be handed a row at another rung.
         layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
         layer?.masksToBounds = true
         // Same call as the diffstat: the steps are the subject, the word
@@ -74,6 +89,7 @@ final class AgentPlanView: NSView {
 
     func apply(blockID: AgentNodeID, payload: AgentPlanPayload, context: AgentRenderContext) {
         self.context = context
+        applyZoomedMetrics()
         payloadStatus = payload.status
         titleLabel.stringValue = Self.safeSingleLine(payload.title, fallback: "Plan")
         let status = payload.status.agentToolStatusPresentation
@@ -86,6 +102,16 @@ final class AgentPlanView: NSView {
         needsLayout = true
     }
 
+    /// Every metric this view assigns at construction time, re-derived from the
+    /// context's page zoom. Called from `apply`, never from `init`, so a reused
+    /// view can never keep the rung it was born with.
+    private func applyZoomedMetrics() {
+        let zoom = self.zoom
+        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        titleLabel.font = NSFont.token(.label, zoom: zoom)
+        statusLabel.font = NSFont.token(.caption, zoom: zoom)
+    }
+
     func applyAccessibility(payload: AgentPlanPayload) {
         let status = payload.status.agentToolStatusPresentation.label
         setAccessibilityLabel("Plan, \(Self.safeSingleLine(payload.title, fallback: "Plan")), \(status)")
@@ -94,23 +120,25 @@ final class AgentPlanView: NSView {
 
     override func layout() {
         super.layout()
-        let inset = Self.horizontalInset
-        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
+        let zoom = self.zoom
+        let inset = Self.horizontalInset(zoom: zoom)
+        let headerHeight = Self.headerHeight(zoom: zoom)
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(zoom.scaled(Space.s)), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
-            y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,
+            y: (headerHeight - statusLabel.intrinsicContentSize.height) / 2,
             width: statusWidth,
             height: statusLabel.intrinsicContentSize.height
         )
         titleLabel.frame = NSRect(
             x: inset,
-            y: (Self.headerHeight - titleLabel.intrinsicContentSize.height) / 2,
-            width: max(1, statusLabel.frame.minX - inset - CGFloat(Space.m)),
+            y: (headerHeight - titleLabel.intrinsicContentSize.height) / 2,
+            width: max(1, statusLabel.frame.minX - inset - CGFloat(zoom.scaled(Space.m))),
             height: titleLabel.intrinsicContentSize.height
         )
-        var y = Self.headerHeight
+        var y = headerHeight
         for (index, rowView) in rowViews.enumerated() {
-            let height = Self.rowHeight(for: rows[index], width: bounds.width)
+            let height = Self.rowHeight(for: rows[index], width: bounds.width, zoom: zoom)
             rowView.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height)
             layoutRow(rowView, row: rows[index])
             y += height
@@ -136,8 +164,12 @@ final class AgentPlanView: NSView {
         }
     }
 
-    static func measuredHeight(payload: AgentPlanPayload, width: CGFloat) -> CGFloat {
-        headerHeight + flatten(payload.steps).reduce(0) { $0 + rowHeight(for: $1, width: width) } + bottomInset
+    static func measuredHeight(
+        payload: AgentPlanPayload, width: CGFloat, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
+        headerHeight(zoom: zoom)
+            + flatten(payload.steps).reduce(0) { $0 + rowHeight(for: $1, width: width, zoom: zoom) }
+            + bottomInset(zoom: zoom)
     }
 
     static func flatten(_ steps: [AgentPlanStep]) -> [Row] {
@@ -161,14 +193,14 @@ final class AgentPlanView: NSView {
             let container = AgentPlanRowView(frame: .zero)
             let status = row.step.status.agentToolStatusPresentation
             let title = NSTextField(labelWithString: "\(row.ordinal)  \(status.glyph) \(Self.safeSingleLine(row.step.title, fallback: "Step"))")
-            title.font = NSFont.token(.label)
+            title.font = NSFont.token(.label, zoom: zoom)
             title.lineBreakMode = .byTruncatingTail
             title.setAccessibilityLabel("Step \(row.ordinal), \(Self.safeSingleLine(row.step.title, fallback: "Step")), \(status.label)")
             container.addSubview(title)
             if row.step.status != .completed,
                let detail = Self.safeDetail(row.step.detail), !detail.isEmpty {
                 let detailLabel = NSTextField(wrappingLabelWithString: detail)
-                detailLabel.font = NSFont.token(.caption)
+                detailLabel.font = NSFont.token(.caption, zoom: zoom)
                 detailLabel.maximumNumberOfLines = 2
                 detailLabel.lineBreakMode = .byWordWrapping
                 detailLabel.isSelectable = true
@@ -183,30 +215,33 @@ final class AgentPlanView: NSView {
     }
 
     private func layoutRow(_ rowView: NSView, row: Row) {
-        let indent = min(CGFloat(row.depth), 5) * CGFloat(Space.l)
+        let zoom = self.zoom
+        let indent = min(CGFloat(row.depth), 5) * CGFloat(zoom.scaled(Space.l))
         let width = max(1, rowView.bounds.width - indent)
         guard let title = rowView.subviews.first as? NSTextField else { return }
-        title.frame = NSRect(x: indent, y: CGFloat(Space.xs), width: width, height: title.intrinsicContentSize.height)
+        title.frame = NSRect(x: indent, y: CGFloat(zoom.scaled(Space.xs)), width: width, height: title.intrinsicContentSize.height)
         if rowView.subviews.count > 1, let detail = rowView.subviews[1] as? NSTextField {
             detail.frame = NSRect(
-                x: indent + CGFloat(Space.xxl), y: title.frame.maxY + CGFloat(Space.xs),
-                width: max(1, width - CGFloat(Space.xxl)),
-                height: max(0, rowView.bounds.height - title.frame.maxY - CGFloat(Space.s))
+                x: indent + CGFloat(zoom.scaled(Space.xxl)), y: title.frame.maxY + CGFloat(zoom.scaled(Space.xs)),
+                width: max(1, width - CGFloat(zoom.scaled(Space.xxl))),
+                height: max(0, rowView.bounds.height - title.frame.maxY - CGFloat(zoom.scaled(Space.s)))
             )
         }
     }
 
-    private static func rowHeight(for row: Row, width: CGFloat) -> CGFloat {
+    private static func rowHeight(
+        for row: Row, width: CGFloat, zoom: AgentPageZoom = .default
+    ) -> CGFloat {
         guard row.step.status != .completed,
-              let detail = safeDetail(row.step.detail), !detail.isEmpty else { return rowBaseHeight }
-        let indent = min(CGFloat(row.depth), 5) * CGFloat(Space.l)
-        let available = max(1, width - horizontalInset * 2 - indent - CGFloat(Space.xxl))
+              let detail = safeDetail(row.step.detail), !detail.isEmpty else { return rowBaseHeight(zoom: zoom) }
+        let indent = min(CGFloat(row.depth), 5) * CGFloat(zoom.scaled(Space.l))
+        let available = max(1, width - horizontalInset(zoom: zoom) * 2 - indent - CGFloat(zoom.scaled(Space.xxl)))
         let rect = (detail as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(.caption)]
+            attributes: [.font: NSFont.token(.caption, zoom: zoom)]
         )
-        return rowBaseHeight + min(ceil(rect.height), CGFloat(Metrics.lineHeight(for: .caption) * 2))
+        return rowBaseHeight(zoom: zoom) + min(ceil(rect.height), CGFloat(zoom.lineHeight(for: .caption) * 2))
     }
 
     private static func safeSingleLine(_ value: String?, fallback: String) -> String {

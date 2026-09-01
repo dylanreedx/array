@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 
 /// Owns width-sensitive TextKit measurement for the composer. It changes frames
 /// and scroller state in place; Auto Layout constraints remain owned by the shell.
@@ -19,9 +20,19 @@ final class ComposerHeightController {
         self.maximumVisibleLines = maximumVisibleLines
     }
 
+    /// WS5: `zoom` scales only the fallback font this controller substitutes when
+    /// the text view has no font of its own. Every other metric here is derived
+    /// from the text view's OWN font and TextKit layout, both of which the
+    /// composer has already scaled, so scaling them again would double-apply.
+    /// Defaulted so out-of-scope callers keep compiling unchanged.
     @discardableResult
-    func update(textView: NSTextView, scrollView: NSScrollView, width: CGFloat) -> Measurement {
-        let measured = measure(textView: textView, width: width)
+    func update(
+        textView: NSTextView,
+        scrollView: NSScrollView,
+        width: CGFloat,
+        zoom: AgentPageZoom = .default
+    ) -> Measurement {
+        let measured = measure(textView: textView, width: width, zoom: zoom)
         measurement = measured
 
         // Overlay scrollers do not change the TextKit width when the threshold is
@@ -52,8 +63,13 @@ final class ComposerHeightController {
         return measured
     }
 
-    func measure(textView: NSTextView, width: CGFloat) -> Measurement {
-        let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    func measure(
+        textView: NSTextView,
+        width: CGFloat,
+        zoom: AgentPageZoom = .default
+    ) -> Measurement {
+        let font = textView.font
+            ?? NSFont.systemFont(ofSize: CGFloat(zoom.scaled(Double(NSFont.systemFontSize))))
         let lineHeight = textView.layoutManager?.defaultLineHeight(for: font) ?? ceil(font.ascender - font.descender + font.leading)
         let safeWidth = max(1, width)
 

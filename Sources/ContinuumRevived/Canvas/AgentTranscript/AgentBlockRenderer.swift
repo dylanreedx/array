@@ -307,6 +307,14 @@ struct AgentRenderContext {
     var actions: AgentRenderActions
     var tokens: AgentRenderTokens
     var appearance: TokenTheme
+    /// WS5: the page zoom of the managed-agent tile this content is rendering
+    /// INSIDE. Every renderer derives its fonts and metrics from this rather
+    /// than from the shared `Typography`/`Space` statics, so two tiles at
+    /// different zooms can render the same document at the same instant.
+    ///
+    /// It is part of the context, not a global, precisely so that it cannot
+    /// bleed: a renderer has no other way to learn it.
+    var pageZoom: AgentPageZoom = .default
     var imageResources: AgentImageResourceProvider = .unavailable
     /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
     /// outside the semantic document (see `AgentReferenceStatusSource`).
