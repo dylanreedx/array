@@ -36,6 +36,10 @@ public struct ClaudeEventTranslator {
     private var itemKinds: [String: ItemKind] = [:]
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var seenItemIds = Set<String>()
+    /// Provider-owned Claude children currently inside their one mirrored turn,
+    /// keyed by the announcing Agent/Task tool-use id. The top-level matching
+    /// tool_result is their authoritative terminal boundary.
+    private var activeSubagentToolUseIDs = Set<String>()
     /// B6.2 — a compaction boundary has no tool_use id of its own, so this
     /// mints a stable-enough one for the item's begin/finish pair.
     private var compactionCounter: Int = 0
@@ -323,12 +327,18 @@ public struct ClaudeEventTranslator {
             // The tool call IS the announcement. `id` is what every one of that
             // child's frames carries in `parent_tool_use_id`, so it is the only
             // stable way to tie the child's work back to the call that made it.
-            if let onSpawnRequest,
-               let request = SpawnRequest.parseClaudeAgentTool(
-                   toolName: name,
-                   args: block["input"] as? [String: Any] ?? [:],
-                   toolUseID: id) {
-                onSpawnRequest(request)
+            if let request = SpawnRequest.parseClaudeAgentTool(
+                toolName: name,
+                args: block["input"] as? [String: Any] ?? [:],
+                toolUseID: id
+            ) {
+                onSpawnRequest?(request)
+                if activeSubagentToolUseIDs.insert(id).inserted {
+                    emitSubagentEvents([.turnStarted(
+                        threadId: threadId,
+                        turnId: subagentTurnID(for: id)
+                    )], for: id)
+                }
             }
             let kind = Self.itemKind(forTool: name)
             itemKinds[id] = kind
@@ -391,6 +401,14 @@ public struct ClaudeEventTranslator {
                 kind: kind,
                 status: isError ? .failed : .completed
             ))
+            if !isSubagent, activeSubagentToolUseIDs.remove(toolUseId) != nil {
+                emitSubagentEvents([.turnCompleted(
+                    threadId: threadId,
+                    turnId: subagentTurnID(for: toolUseId),
+                    outcome: isError ? .failed : .completed,
+                    errorMessage: nil
+                )], for: toolUseId)
+            }
             let semantics = semanticSignalsByItemID.removeValue(forKey: toolUseId) ?? []
             if !isError {
                 events += semantics.sorted { $0.rawValue < $1.rawValue }.map {
@@ -399,6 +417,10 @@ public struct ClaudeEventTranslator {
             }
         }
         return events
+    }
+
+    private func subagentTurnID(for toolUseID: String) -> String {
+        "\(currentTurnId)#subagent-\(toolUseID)"
     }
 
     // MARK: - system/compact_boundary (context reset)

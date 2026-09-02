@@ -2551,6 +2551,7 @@ final class AgentSupervisor {
         // stopping the parent kills them. Keeping a watcher polling their run
         // directories afterwards would poll files nothing will ever write again.
         stopObservedRuns(for: id)
+        interruptWorkingClaudeMirroredChildren(of: id)
         notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
     }
@@ -2666,6 +2667,10 @@ final class AgentSupervisor {
         /// again — see that function.
         var lastKnownPid: Int?
         var lastKnownStatus: RunArtifact.Status?
+        /// Set when the translated artifact stream itself supplied a terminal
+        /// boundary. Every non-stream terminal path consults this before minting
+        /// its fallback, so a child receives exactly one completion.
+        var terminalDelivered = false
         /// Per child, because a `PiEventTranslator` carries stream state (thread id,
         /// turn counter). One shared translator would interleave two children's
         /// turns into one.
@@ -2759,14 +2764,11 @@ final class AgentSupervisor {
             // is exactly the bug this replaces. Close instead: losing a few
             // post-compaction lines beats duplicating a transcript.
             if snapshot.events.rewrote {
-                // Removed rather than kept as a closed tombstone: a runId is
-                // never reused, so nothing will ever look this entry up again,
-                // and a tombstone is exactly what would keep the liveness sweep
-                // timer (B) alive for the rest of the app's life over a run that
-                // finished minutes ago.
-                observedRunBindings.removeValue(forKey: runId)
-                refreshObservedRunWatchers()
-                stopObservedRunLivenessSweepIfIdle()
+                // The compacted file is a new history and must not be replayed,
+                // but terminal run.json is still authoritative. Close the child
+                // before dropping the only binding that knows its destination.
+                finishObservedRun(
+                    runId: runId, binding: binding, status: snapshot.run.status)
                 continue
             }
             if events.count > binding.consumedEventCount {
@@ -2775,6 +2777,7 @@ final class AgentSupervisor {
                 // so it arrives at this same index on the next read.
                 for artifact in events[binding.consumedEventCount..<events.count] {
                     for event in binding.translator.translate(line: artifact.rawJSON) {
+                        if case .turnCompleted = event { binding.terminalDelivered = true }
                         deliverSubagentEvent(
                             event, parent: parent, toolUseID: binding.toolUseID)
                     }
@@ -2784,13 +2787,55 @@ final class AgentSupervisor {
             binding.lastKnownPid = snapshot.run.pid
             binding.lastKnownStatus = snapshot.run.status
             if snapshot.run.isFinished() {
-                observedRunBindings.removeValue(forKey: runId)
+                finishObservedRun(
+                    runId: runId, binding: binding, status: snapshot.run.status)
             } else {
                 observedRunBindings[runId] = binding
             }
         }
         refreshObservedRunWatchers()
         stopObservedRunLivenessSweepIfIdle()
+    }
+
+    /// Deliver the terminal boundary owed by one observed Pi run, then remove
+    /// its binding. All live closure paths converge here so status mapping and
+    /// exactly-once behavior cannot drift.
+    private func finishObservedRun(
+        runId: String,
+        binding: ObservedRunBinding,
+        status: RunArtifact.Status,
+        errorMessage: String? = nil
+    ) {
+        if !binding.terminalDelivered {
+            let outcome = Self.observedRunOutcome(for: status)
+            deliverSubagentEvent(.turnCompleted(
+                threadId: Self.threadId(for: binding.childID),
+                turnId: "\(Self.threadId(for: binding.childID))#observed-\(runId)",
+                outcome: outcome,
+                errorMessage: errorMessage ?? Self.observedRunErrorMessage(
+                    status: status, outcome: outcome)
+            ), parent: binding.parent, toolUseID: binding.toolUseID)
+        }
+        observedRunBindings.removeValue(forKey: runId)
+        refreshObservedRunWatchers()
+        stopObservedRunLivenessSweepIfIdle()
+    }
+
+    private nonisolated static func observedRunOutcome(
+        for status: RunArtifact.Status
+    ) -> TurnOutcome {
+        switch status {
+        case .done: return .completed
+        case .failed: return .failed
+        case .queued, .running, .killed, .stale, .unknown: return .interrupted
+        }
+    }
+
+    private nonisolated static func observedRunErrorMessage(
+        status: RunArtifact.Status, outcome: TurnOutcome
+    ) -> String? {
+        guard outcome != .completed else { return nil }
+        return "This delegated run ended with status \(status.rawValue)."
     }
 
     /// Narrow every watcher to the runs still open, and stop the ones with none —
@@ -2836,14 +2881,12 @@ final class AgentSupervisor {
             default: continue
             }
             guard !RunArtifact.processIsAlive(pid) else { continue }
-            observedRunBindings.removeValue(forKey: runId)
             didClose = true
-            deliver(.turnCompleted(
-                threadId: Self.threadId(for: binding.childID),
-                turnId: "\(Self.threadId(for: binding.childID))#observed-\(runId)",
-                outcome: .interrupted,
-                errorMessage: "This delegated run ended unexpectedly (its process is no longer running)."
-            ), to: binding.childID)
+            finishObservedRun(
+                runId: runId,
+                binding: binding,
+                status: .stale,
+                errorMessage: "This delegated run ended unexpectedly (its process is no longer running).")
         }
         if didClose {
             refreshObservedRunWatchers()
@@ -2932,12 +2975,12 @@ final class AgentSupervisor {
         childID: AgentID, status: RunArtifact.Status
     ) {
         guard observedRunsReconciled.insert(childID).inserted else { return }
-        let outcome: TurnOutcome = status == .done ? .completed : .interrupted
+        let outcome = Self.observedRunOutcome(for: status)
         deliver(.turnCompleted(
             threadId: Self.threadId(for: childID),
             turnId: "\(Self.threadId(for: childID))#observed",
             outcome: outcome,
-            errorMessage: status == .done
+            errorMessage: outcome == .completed
                 ? nil
                 : "This delegated run ended with the previous session (\(status.rawValue))."
         ), to: childID)
@@ -3054,7 +3097,19 @@ final class AgentSupervisor {
         }
         let childID = AgentID(rawValue: AgentRecord.observedChildID(
             parentAgentID: parentId.rawValue, toolUseID: toolUseID))
-        if records[childID] != nil { return childID }
+        let boundRunID = observedRunBindings.first(where: {
+            $0.value.parent == parentId
+                && $0.value.childID == childID
+                && $0.value.toolUseID == toolUseID
+        })?.key
+        if var existing = records[childID] {
+            if let boundRunID, existing.providerSessionId != boundRunID {
+                existing.providerSessionId = boundRunID
+                records[childID] = existing
+                persist(existing)
+            }
+            return childID
+        }
 
         // This child already exists inside the provider. Applying Array's spawn
         // caps here cannot prevent work; it only makes the running child
@@ -3091,6 +3146,10 @@ final class AgentSupervisor {
         )
         guard var child = records[childID] else { return nil }
         child.capabilities = .observedReadOnly
+        // `tool_execution_end` may bind before the announcing start reaches the
+        // main actor. Persist the binding's run identity in either order so a
+        // restored supervisor can reconcile terminal run.json.
+        child.providerSessionId = boundRunID ?? child.providerSessionId
         records[childID] = child
         persist(child)
         // Anything that arrived before the record existed replays now, in order.
@@ -5745,6 +5804,11 @@ final class AgentSupervisor {
         // Identity-checked: a `send` that started while the previous prompt was
         // finishing must not have its runner cleared by the old one's completion.
         if runners[id] === runner {
+            // Claude owns mirrored children inside this process. If it exits or
+            // crashes before their matching tool_result, no later transport can
+            // close them. Codex is deliberately excluded: its provider children
+            // can drain after the parent turn completes.
+            interruptWorkingClaudeMirroredChildren(of: id)
             runners[id] = nil
             if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
                 idleSessionRunners[id] = runner
@@ -5757,6 +5821,21 @@ final class AgentSupervisor {
             if let outcome = pendingQueueOutcome.removeValue(forKey: id) {
                 handleQueueOnTurnCompleted(outcome: outcome, for: id)
             }
+        }
+    }
+
+    private func interruptWorkingClaudeMirroredChildren(of parentID: AgentID) {
+        guard records[parentID]?.harness == .claudeCode else { return }
+        for childID in children(of: parentID) {
+            guard records[childID]?.capabilities == .observedReadOnly,
+                  records[childID]?.harness == .claudeCode,
+                  turnFacts[childID]?.execution == .working else { continue }
+            deliver(.turnCompleted(
+                threadId: Self.threadId(for: childID),
+                turnId: "\(Self.threadId(for: childID))#claude-parent-ended",
+                outcome: .interrupted,
+                errorMessage: "The Claude parent ended before this mirrored child reported a result."
+            ), to: childID)
         }
     }
 
@@ -13645,6 +13724,21 @@ private func checkSpawnFromToolCall(
     }
     guard observedTitles.allSatisfy({ !$0.contains("read notes.txt") && !$0.contains(root.path) }) else {
         throw fail("I5: an observed-child event echoes the model-authored prompt or a host path: \(observedTitles)")
+    }
+
+    // If Claude's parent stops/crashes before its top-level tool_result, the
+    // mirrored child has no independent transport left to close it. This fallback
+    // is Claude-only; the Codex positive control above must still drain late.
+    supervisor.qaDeliver(.turnStarted(
+        threadId: AgentSupervisor.threadId(for: adopted),
+        turnId: "claude-unclosed-child"), to: adopted)
+    guard supervisor.turnSnapshot(for: adopted)?.state == .working else {
+        throw fail("the mirrored Claude child did not enter Working before parent-stop fallback")
+    }
+    supervisor.stop(observedParent)
+    guard supervisor.turnSnapshot(for: adopted)?.state != .working,
+          supervisor.turnSnapshot(for: adopted)?.turnStartedAt == nil else {
+        throw fail("stopping a Claude parent left its still-open mirrored child Working")
     }
 
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
