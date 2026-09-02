@@ -71,7 +71,22 @@ final class CanvasBackgroundImageCache {
         self.store = store
     }
 
-    func resetStats() { stats = Stats() }
+    func resetStats() { stats = Stats(); qaIssuedRequests = [] }
+
+    /// QA: every request issued since the last `resetStats`, with the generation
+    /// token it carried. A witness needs these to land a SUPERSEDED completion
+    /// LAST — which is the only ordering the token defends against, and the one
+    /// the decode queue can never produce on its own because it is FIFO. A
+    /// witness that merely waits for real decodes passes with the token check
+    /// deleted; that is exactly what happened here.
+    private(set) var qaIssuedRequests: [(key: Key, token: UInt64)] = []
+
+    /// QA: deliver a completion by hand, through the real `complete` path.
+    func qaLandCompletion(key: Key, token: UInt64, image: CGImage?) {
+        pending.insert(key)
+        pendingCount += 1
+        complete(key: key, token: token, image: image)
+    }
     var qaEntryCount: Int { entries.count }
     var qaPendingCount: Int { pendingCount }
     var qaGeneration: UInt64 { generation }
@@ -121,6 +136,7 @@ final class CanvasBackgroundImageCache {
         pendingCount += 1
         generation &+= 1
         let token = generation
+        qaIssuedRequests.append((key, token))
         stats.decodeRequests += 1
         let url = store.url(for: key.assetID)
         let target = key.targetPixels

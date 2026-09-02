@@ -463,7 +463,25 @@ enum CanvasBackgroundRenderChecks {
         var steps: [CanvasViewport] = []
         for i in 0..<20 { steps.append(CanvasViewport(x: Double(i) * 13 - 130, y: Double(i) * -7 + 40, zoom: 1)) }
         for i in 0..<20 { steps.append(CanvasViewport(x: -55.5, y: 12.25, zoom: 0.4 + Double(i) * 0.12)) }
-        for step in steps { world.canvas.setViewport(step) }
+        // WS7 F1. `cameraInvalidations` is incremented NEXT TO the invalidation,
+        // so it says only that the renderer believed it invalidated. Delete
+        // `needsDisplay = true` from `updateCamera` and the grid freezes during a
+        // pan while that counter is unchanged and every capture below still looks
+        // right — `displayIgnoringOpacity` forces `draw(_:)` regardless of the
+        // flag. So clear the flag before each step and count the steps that
+        // actually raised it.
+        var stepsThatRedrew = 0
+        for step in steps {
+            // Drain first: `displayIfNeeded` draws only what is actually
+            // invalidated, and a view that has never drawn reports
+            // `needsDisplay == true` no matter what you assign to it — which is
+            // why reading the flag directly is not the observation it looks like.
+            world.renderer.displayIfNeeded()
+            let passesBefore = world.renderer.qaStats.renderPasses
+            world.canvas.setViewport(step)
+            world.renderer.displayIfNeeded()
+            if world.renderer.qaStats.renderPasses > passesBefore { stepsThatRedrew += 1 }
+        }
         world.canvas.layoutSubtreeIfNeeded()
 
         let stats = world.renderer.qaStats
@@ -475,6 +493,10 @@ enum CanvasBackgroundRenderChecks {
                    "the canvas made \(stats.cameraUpdates) background camera updates for \(steps.count) viewport commits")
         try expect(stats.cameraInvalidations > 20,
                    "only \(stats.cameraInvalidations) of \(steps.count) camera steps invalidated the background — the zero-cost assertions below would be vacuous")
+        try expect(stepsThatRedrew == stats.cameraInvalidations,
+                   "\(stats.cameraInvalidations) camera step(s) were counted as invalidating but only "
+                   + "\(stepsThatRedrew) actually redrew the background — the counter and the "
+                   + "invalidation have come apart, and the grid freezes during a pan")
 
         // ...and cost nothing it must not cost.
         try expect(stats.imageRequests == 0,
@@ -697,6 +719,65 @@ enum CanvasBackgroundRenderChecks {
                    "the superseded decode was not dropped: \(world.renderer.imageCache.stats.staleCompletionDrops) drop(s)")
         try expect(world.renderer.currentConfiguration.image?.assetID == secondID,
                    "the NEWEST asset is not the one in effect")
+        // WS7 F2, THE assertion. Everything above counts events; none of it looks
+        // at the picture, and none of it produces the ordering the token exists
+        // to defend against. The decode queue is FIFO, so waiting for real
+        // decodes always lands them in request order and the second image wins by
+        // accident — remove BOTH stale-image guards (the cache's generation token
+        // and the renderer's `pendingImageKey`) and every counter above still
+        // reads correctly.
+        //
+        // So land the SUPERSEDED first request by hand, last, and then look at
+        // the picture. The two fixtures differ only in their centre block:
+        // magenta for the first, cyan for the second.
+        try expect(world.renderer.imageCache.qaIssuedRequests.count == 2,
+                   "expected two issued requests to choose a superseded one from, got "
+                   + "\(world.renderer.imageCache.qaIssuedRequests.count)")
+        let superseded = world.renderer.imageCache.qaIssuedRequests[0]
+        let newest = world.renderer.imageCache.qaIssuedRequests[1]
+        try expect(superseded.token < newest.token,
+                   "the first request's token \(superseded.token) is not behind the second's "
+                   + "\(newest.token) — it is not superseded and this proves nothing")
+        try expect(superseded.key.assetID == corruptID && newest.key.assetID == secondID,
+                   "the two recorded requests are not the two images this scene set")
+
+        let firstBytes = try fixtureImageData()
+        guard let firstSource = CGImageSourceCreateWithData(firstBytes as CFData, nil),
+              let firstImage = CGImageSourceCreateImageAtIndex(firstSource, 0, nil) else {
+            throw Failure(description: "could not decode the first fixture image for the stale-landing probe")
+        }
+        let dropsBeforeLanding = world.renderer.imageCache.stats.staleCompletionDrops
+        world.renderer.imageCache.qaLandCompletion(
+            key: superseded.key, token: superseded.token, image: firstImage)
+        let raceCentre = try sample(try world.capture(), at: CGPoint(x: 400, y: 300))
+        try expect(raceCentre.g > raceCentre.r + 40 && raceCentre.b > raceCentre.r + 40,
+                   "the centre is \(raceCentre): the SUPERSEDED first image (magenta centre) is on "
+                   + "screen, not the second (cyan centre) — a stale decode landing last won the race")
+        try expect(world.renderer.currentConfiguration.image?.assetID == secondID,
+                   "a stale completion changed which asset is in effect")
+
+        // The two guards are redundant BY DESIGN — the cache's generation token
+        // and the renderer's `pendingImageKey` each stop a stale image on their
+        // own. That is why the pixel probe above only fires when both are gone,
+        // and why it cannot tell you that one layer has quietly stopped working.
+        // So probe each layer separately.
+
+        // Cache layer: a completion whose token is behind is DROPPED, never
+        // entered — otherwise the next cache hit serves the superseded picture.
+        try expect(world.renderer.imageCache.stats.staleCompletionDrops == dropsBeforeLanding + 1,
+                   "the late superseded completion was not counted as dropped: "
+                   + "\(world.renderer.imageCache.stats.staleCompletionDrops) drop(s), expected "
+                   + "\(dropsBeforeLanding + 1)")
+        try expect(world.renderer.imageCache.image(for: superseded.key) == nil,
+                   "the superseded decode was entered into the cache and will be served on the next hit")
+
+        // Renderer layer: an availability callback naming a key the renderer is
+        // not waiting on must not change what it draws.
+        world.renderer.imageCache.onImageAvailable?(superseded.key)
+        let afterStrayCallback = try sample(try world.capture(), at: CGPoint(x: 400, y: 300))
+        try expect(afterStrayCallback.isNear(raceCentre),
+                   "an availability callback for a key the renderer never requested changed the "
+                   + "picture from \(raceCentre) to \(afterStrayCallback)")
     }
 
     // MARK: - Deterministic fixture image

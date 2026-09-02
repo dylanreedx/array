@@ -25288,10 +25288,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             for name in malformed { try Data("junk".utf8).write(to: backups.appendingPathComponent(name)) }
             try AtomicWriter(backupsDirectory: backups, retainedBackups: 4,
                 backupDate: { Date(timeIntervalSince1970: 1_000) }).write(replacement, to: target)
-            let generated = try FileManager.default.contentsOfDirectory(atPath: backups.path)
-                .first { $0.hasPrefix("array-backup-v2-\(identity)-00000000000000000001-") }!
-            let generatedBytes = Array(generated.utf8)
-            let maxName = String(decoding: generatedBytes.dropLast(45), as: UTF8.self)
+            // Was a force-unwrap plus a magic `dropLast(45)`. A change to the v2
+            // naming scheme trapped the process (exit 133) instead of reporting a
+            // failed assertion, and a change to the timestamp format would have
+            // built a garbage fixture and asserted against it silently.
+            let generationOnePrefix = "array-backup-v2-\(identity)-00000000000000000001-"
+            guard let generated = try FileManager.default.contentsOfDirectory(atPath: backups.path)
+                .first(where: { $0.hasPrefix(generationOnePrefix) }) else {
+                throw RestartFaultError(message: "the writer produced no generation-1 v2 backup for this target; "
+                    + "the naming scheme changed. Directory holds "
+                    + "\(try FileManager.default.contentsOfDirectory(atPath: backups.path))")
+            }
+            let generatedTimestamp = String(generated.dropFirst(generationOnePrefix.count))
+            try expect(generatedTimestamp.count == 24 && generatedTimestamp.hasSuffix("Z"),
+                "the derived max-generation fixture assumes a 24-character Z-suffixed timestamp; "
+                + "the writer emitted \(generatedTimestamp.count) characters (\(generatedTimestamp))")
+            let maxName = String(generationOnePrefix.dropLast("00000000000000000001-".count))
                 + "18446744073709551615-2030-01-01T00-00-00.000Z"
             try Data("sentinel".utf8).write(to: backups.appendingPathComponent(maxName))
             try expect(FileManager.default.fileExists(atPath: backups.appendingPathComponent(maxName).path)
