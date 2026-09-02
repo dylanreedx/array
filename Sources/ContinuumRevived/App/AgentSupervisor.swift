@@ -4677,8 +4677,15 @@ final class AgentSupervisor {
     /// away.
     func focus(agentID id: AgentID?, now: Date = Date(), deliberate: Bool = true) {
         focusedAgentID = id
-        guard deliberate else { return }
-        guard let id, var record = records[id] else { return }
+        guard deliberate, let id else { return }
+        markVisited(agentID: id, now: now)
+    }
+
+    /// Record a deliberate view without changing keyboard-focus identity. Hover
+    /// dwell and Focus Mode clicks use this: the human has read the completion,
+    /// but merely looking must not retarget lineage, shortcuts, or spawn context.
+    func markVisited(agentID id: AgentID, now: Date = Date()) {
+        guard var record = records[id] else { return }
         let wasUnread = record.isUnread
         let previous = record.lastVisitedAt
         let visited = previous.map { max($0, now) } ?? now

@@ -181,7 +181,7 @@ enum CompletionAwarenessChecks {
         // =====================================================================
         try expect(!delegate.applicationIsActiveForAwareness,
                    "setup: a delegate built with Array inactive must start inactive")
-        var awayTurn = nextTurn()
+        let awayTurn = nextTurn()
         try expectValue(await deliverAndSettle(
             .turnStarted(threadId: "ws4", turnId: awayTurn), expectingSignal: false), "away turnStarted")
         try expectValue(await deliverAndSettle(
@@ -197,6 +197,8 @@ enum CompletionAwarenessChecks {
                    "a completion that landed while away must be UNREAD")
         try expect(delegate.agentSignalCenter.currentByTile[tileId]?.kind == .completed,
                    "the away completion must keep its live signal — got \(String(describing: delegate.agentSignalCenter.currentByTile[tileId]?.kind))")
+        try expect(tileView.qaAwarenessSignal?.kind == .completed && !tileView.qaAwarenessBorderIsHidden,
+                   "POSITIVE CONTROL: the away completion must actually paint its persistent green signal and border")
         try expect(tileView.qaAcknowledgmentPhase == .idle && delegate.qaCompletionAcknowledgmentCount == 0,
                    "an away completion must not play the acknowledgment")
 
@@ -246,6 +248,112 @@ enum CompletionAwarenessChecks {
                    "a deliberate visit must clear the unread mark")
         try expect(delegate.agentSignalCenter.currentByTile[tileId] == nil,
                    "a deliberate visit must clear the live signal")
+        try expect(tileView.qaAwarenessSignal == nil && tileView.qaAwarenessBorderIsHidden,
+                   "a deliberate visit must clear the rendered completion signal and green border")
+
+        // C2 · DIRECT KEYBOARD NAVIGATION IS ALSO A VISIT. Agent-cycle and
+        // spatial-navigation routes historically updated only the durable
+        // watermark, leaving the independently-owned live green border behind.
+        // Drive their shared production path and assert all three truths move.
+        window.makeFirstResponder(canvas)
+        delegate.focusBroker.acceptExistingFocus(.canvas, reason: .userClick)
+        let directTurn = nextTurn()
+        try expectValue(await deliverAndSettle(
+            .turnStarted(threadId: "ws4", turnId: directTurn), expectingSignal: false), "direct-navigation turnStarted")
+        try expectValue(await deliverAndSettle(
+            .turnCompleted(threadId: "ws4", turnId: directTurn, outcome: .completed, errorMessage: nil),
+            expectingSignal: true), "direct-navigation completion")
+        try expect(supervisor.records[agentId]?.isUnread == true
+                   && delegate.agentSignalCenter.currentByTile[tileId]?.kind == .completed
+                   && !tileView.qaAwarenessBorderIsHidden,
+                   "setup: direct navigation needs a durable unread completion with a visible green border")
+        delegate.qaDirectAgentNavigationVisit(tileId)
+        try expect(supervisor.records[agentId]?.isUnread == false,
+                   "direct keyboard navigation must clear the durable unread mark")
+        try expect(delegate.agentSignalCenter.currentByTile[tileId] == nil,
+                   "direct keyboard navigation must clear the live completion signal")
+        try expect(tileView.qaAwarenessSignal == nil && tileView.qaAwarenessBorderIsHidden,
+                   "direct keyboard navigation must clear the rendered completion signal and green border")
+
+        // C3 · HOVER IS DELIBERATE ONLY AFTER DWELL. A mouse crossing must leave
+        // completion intact; sustained presence clears durable, live and rendered
+        // state without stealing keyboard focus from its current owner.
+        window.makeFirstResponder(canvas)
+        delegate.focusBroker.acceptExistingFocus(.canvas, reason: .userClick)
+        let hoverTurn = nextTurn()
+        try expectValue(await deliverAndSettle(
+            .turnStarted(threadId: "ws4", turnId: hoverTurn), expectingSignal: false), "hover turnStarted")
+        try expectValue(await deliverAndSettle(
+            .turnCompleted(threadId: "ws4", turnId: hoverTurn, outcome: .completed, errorMessage: nil),
+            expectingSignal: true), "hover completion")
+        try expect(supervisor.records[agentId]?.isUnread == true
+                   && delegate.agentSignalCenter.currentByTile[tileId]?.kind == .completed
+                   && !tileView.qaAwarenessBorderIsHidden,
+                   "setup: hover needs a durable unread completion with a visible green border")
+        let focusBeforeHover = supervisor.focusedAgentID
+        delegate.qaAgentCompletionHoverChanged(tileId, hovered: true)
+        _ = await waitUntil(timeout: AppDelegate.completionHoverDwellDuration / 2, pollInterval: 0.02) { false }
+        try expect(delegate.agentSignalCenter.currentByTile[tileId]?.kind == .completed,
+                   "crossing the tile before the dwell threshold must not clear completion")
+        let hoverCleared = await waitUntil(timeout: 3, pollInterval: 0.02) {
+            delegate.agentSignalCenter.currentByTile[tileId] == nil
+        }
+        try expect(hoverCleared, "a sustained hover must clear completion after the dwell")
+        try expect(supervisor.records[agentId]?.isUnread == false,
+                   "hover dwell must clear the durable unread mark")
+        try expect(tileView.qaAwarenessSignal == nil && tileView.qaAwarenessBorderIsHidden,
+                   "hover dwell must clear the rendered completion signal and green border")
+        try expect(supervisor.focusedAgentID == focusBeforeHover,
+                   "hover dwell must not steal or retarget keyboard focus")
+        delegate.qaAgentCompletionHoverChanged(tileId, hovered: false)
+
+        // Cancellation is load-bearing: enter then exit before the threshold and
+        // wait beyond it. The completion must remain in all three representations.
+        let cancelledHoverTurn = nextTurn()
+        try expectValue(await deliverAndSettle(
+            .turnStarted(threadId: "ws4", turnId: cancelledHoverTurn), expectingSignal: false), "cancelled-hover turnStarted")
+        try expectValue(await deliverAndSettle(
+            .turnCompleted(threadId: "ws4", turnId: cancelledHoverTurn, outcome: .completed, errorMessage: nil),
+            expectingSignal: true), "cancelled-hover completion")
+        delegate.qaAgentCompletionHoverChanged(tileId, hovered: true)
+        delegate.qaAgentCompletionHoverChanged(tileId, hovered: false)
+        _ = await waitUntil(timeout: AppDelegate.completionHoverDwellDuration + 0.25, pollInterval: 0.02) { false }
+        try expect(supervisor.records[agentId]?.isUnread == true
+                   && delegate.agentSignalCenter.currentByTile[tileId]?.kind == .completed
+                   && !tileView.qaAwarenessBorderIsHidden,
+                   "leaving before hover dwell must preserve durable, live and rendered completion state")
+        delegate.qaDirectAgentNavigationVisit(tileId)
+
+        // C4 · FOCUS MODE CLICK. Its tile is reparented out of the ordinary
+        // canvas plane and the broker intentionally remains modal, so the local
+        // mouse-up monitor owns a separate overlay hit-test. Exercise that exact
+        // resolver and prove the visit does not require changing broker scope.
+        window.makeFirstResponder(canvas)
+        delegate.focusBroker.acceptExistingFocus(.modal(.focusMode), reason: .modalOpened)
+        let focusModeTurn = nextTurn()
+        try expectValue(await deliverAndSettle(
+            .turnStarted(threadId: "ws4", turnId: focusModeTurn), expectingSignal: false), "focus-mode turnStarted")
+        try expectValue(await deliverAndSettle(
+            .turnCompleted(threadId: "ws4", turnId: focusModeTurn, outcome: .completed, errorMessage: nil),
+            expectingSignal: true), "focus-mode completion")
+        let overlay = NSView(frame: canvas.bounds)
+        canvas.addSubview(overlay)
+        tileView.removeFromSuperview()
+        overlay.addSubview(tileView)
+        let focusModeClickPoint = tileView.convert(
+            NSPoint(x: tileView.bounds.midX, y: tileView.bounds.midY), to: nil)
+        try expect(delegate.qaVisitFocusModeTile(at: focusModeClickPoint, tileId: tileId),
+                   "Focus Mode click must resolve the reparented tile from the overlay hit-test")
+        try expect(delegate.focusBroker.activeSurface == .modal(.focusMode),
+                   "Focus Mode click must not escape or retarget modal broker scope")
+        try expect(supervisor.records[agentId]?.isUnread == false
+                   && delegate.agentSignalCenter.currentByTile[tileId] == nil
+                   && tileView.qaAwarenessSignal == nil
+                   && tileView.qaAwarenessBorderIsHidden,
+                   "Focus Mode click must clear durable, live and rendered completion state")
+        tileView.removeFromSuperview()
+        canvas.addSubview(tileView)
+        overlay.removeFromSuperview()
 
         // =====================================================================
         // D · DURABLE AND LIVE ARE SEPARATELY OBSERVABLE. Rewinding the durable

@@ -36,6 +36,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// this once at startup rather than at every TileSpawner install site.
     var onTileCloseRequested: ((UUID) -> Void)?
     var onTileStopRunRequested: ((UUID) -> Void)?
+    /// Pointer presence over a tile, independent of keyboard focus. The app uses
+    /// this for deliberate completion hover-dwell; the canvas still owns the one
+    /// TileNSView hover callback so relationship highlighting and acknowledgment
+    /// cannot overwrite each other.
+    var onTileHoverChanged: ((UUID, Bool) -> Void)?
     weak var focusBroker: FocusBroker? {
         didSet {
             guard oldValue !== focusBroker else { return }
@@ -2421,6 +2426,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 self.hoveredRelationshipEndpointId = nil
             }
             self.updateDocumentRelationshipOverlay()
+            self.onTileHoverChanged?(tileId, hovered)
         }
     }
 
