@@ -2583,11 +2583,27 @@ final class AgentSupervisor {
         // for the terminal event itself and closes the turn when the runner
         // returns or throws without having delivered one.
         let sawTurnCompleted = TerminalDeliveryLatch()
+        // Stop retires the live runner slot synchronously, so a provider event
+        // already emitted but still queued on the main actor is intentionally
+        // rejected by the generation gate. Preserve only Pi's run-local
+        // persistence fact across that handoff; otherwise an assistant frame
+        // emitted immediately before Stop is misreported as a discarded session.
+        let crossedPiPersistenceWatermark = TerminalDeliveryLatch()
         let harnessName = record.harness?.rawValue ?? "agent"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try runner.run(prompt: prompt) { event in
                     let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                    switch bound {
+                    case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
+                        crossedPiPersistenceWatermark.set()
+                    case .contentDelta:
+                        crossedPiPersistenceWatermark.set()
+                    case let .turnCompleted(_, _, outcome, _) where outcome == .completed:
+                        crossedPiPersistenceWatermark.set()
+                    default:
+                        break
+                    }
                     DispatchQueue.main.async {
                         if case .turnCompleted = bound { sawTurnCompleted.set() }
                         self?.deliver(
@@ -2639,6 +2655,14 @@ final class AgentSupervisor {
                     // the flag was set would still overwrite the stopped state. It
                     // also covers any runner that has not adopted `AgentRunStopped`.
                     if runnerSaidStopped || self.stopRequestedAgents.contains(id) {
+                        // An older stopped runner must not add a warning to the
+                        // replacement generation. For the current generation,
+                        // fold the run-local watermark before deciding whether
+                        // there was any conversation loss to report.
+                        guard self.runnerGenerationTokens[id] == runnerGeneration else { return }
+                        if crossedPiPersistenceWatermark.isSet {
+                            self.piPersistenceWatermarkReached.insert(id)
+                        }
                         self.noticePiConversationLoss(id)
                         self.deliver(
                             .turnCompleted(
@@ -7955,14 +7979,25 @@ func runAgentSupervisorChecks() async throws {
         thinking: config.thinking,
         projectId: originalProjectId)
     rejectHomeWrite = true
-    guard !failedWriteSupervisor.reassignProvisionalHome(
+    let failedWriteAccepted = failedWriteSupervisor.reassignProvisionalHome(
         agentID: failedWriteAgent,
         cwd: selectedHome,
-        projectId: selectedProjectId),
-          failedWriteSupervisor.records[failedWriteAgent]?.cwd == cwd.path,
-          failedWriteSupervisor.locationSnapshot(for: failedWriteAgent)?.home.checkoutRoot.path == cwd.path,
-          try failedWriteStore.load(id: failedWriteAgent)?.cwd == cwd.path else {
-        throw fail("failed Home persistence left live and durable authority split")
+        projectId: selectedProjectId)
+    let failedWriteLiveCWD = failedWriteSupervisor.records[failedWriteAgent]?.cwd
+    let failedWriteProjectedCWD = failedWriteSupervisor.locationSnapshot(
+        for: failedWriteAgent)?.home.checkoutRoot.path
+    let failedWriteDurableCWD = try failedWriteStore.load(id: failedWriteAgent)?.cwd
+    let expectedProjectedCWD = cwd.standardizedFileURL.path
+    guard !failedWriteAccepted,
+          failedWriteLiveCWD == cwd.path,
+          failedWriteProjectedCWD == expectedProjectedCWD,
+          failedWriteDurableCWD == cwd.path else {
+        throw fail(
+            "failed Home persistence left live and durable authority split "
+            + "(accepted=\(failedWriteAccepted), live=\(failedWriteLiveCWD ?? "nil"), "
+            + "projected=\(failedWriteProjectedCWD ?? "nil"), "
+            + "durable=\(failedWriteDurableCWD ?? "nil"), expected=\(cwd.path), "
+            + "expectedProjected=\(expectedProjectedCWD))")
     }
 
     // Queue 91 P2 — the runner's private observation reaches supervisor-owned
