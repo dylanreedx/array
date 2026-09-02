@@ -1082,6 +1082,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--ambient-tile-frame-space-check") {
+            do {
+                _ = NSApplication.shared
+                try AmbientTileFrameSpaceChecks.run()
+                print("ContinuumRevivedAmbientTileFrameSpaceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("ambient-tile-frame-space check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--zone-unacquired-project-check") {
             do {
                 _ = NSApplication.shared
@@ -3407,7 +3418,10 @@ enum ContinuumApp {
         // These eight are handled in `applicationDidFinishLaunching`, not here:
         // they are LIVE checks that need a booted app, so reaching this line is
         // correct for them and only for them. Keep this list in step with that
-        // method — `--live-check-flag-inventory-check` fails if it drifts.
+        // method BY HAND. NOTHING GATES IT: an earlier draft of this comment
+        // named a `--live-check-flag-inventory-check` that was never written.
+        // Omit a new live flag here and the guard below rejects it — which the
+        // matrix does catch, because every live leg runs through this path.
         let flagsHandledAfterLaunch: Set<String> = [
             "--agent-location-live-check",
             "--claude-agent-live-check",
@@ -4260,9 +4274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onZoneMoved = { [weak self] placement in
                 self?.persistMovedZone(placement)
-            }
-            canvasView.onLayoutCommitted = { [weak self] transaction in
-                self?.persistLayoutTransaction(transaction) ?? false
             }
             canvasView.onZoneCloseRequested = { [weak self] zoneId in
                 self?.presentZoneCloseConfirm(zoneId)
@@ -13679,14 +13690,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     document.zones[index] = placement
                 }
             }
+            // WS2 F2: store the WORLD frame verbatim. `transaction.tileFrames` is
+            // already world-space (`CanvasNSView.captureGeometry` converts every
+            // layer tile through `CanvasEngine.worldFrame(tile:in:)`), and
+            // `ambientTiles` is a WORLD register — the read
+            // (`WorkspaceRuntime.makeAmbientZoneLayer`) converts to zone-local on
+            // the way into the layer, and the pre-v3 migration flattened
+            // world-framed group-zone tiles into it untouched. Converting here as
+            // well subtracted the zone origin twice, so an ambient tile drifted by
+            // −zoneOrigin on every commit/remount cycle and the error accumulated.
+            // Witness: `--ambient-tile-frame-space-check`.
             for (tileId, worldFrame) in transaction.tileFrames {
                 guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
-                if let zoneId = document.ambientTiles[index].zoneId,
-                   let zone = document.zones.first(where: { $0.zoneId == zoneId }) {
-                    document.ambientTiles[index].frame = CanvasEngine.worldToZoneLocal(worldFrame, zoneOrigin: zone.origin)
-                } else {
-                    document.ambientTiles[index].frame = worldFrame
-                }
+                document.ambientTiles[index].frame = worldFrame
             }
 
             let registry = try registryStore.loadOrEmpty()
@@ -13695,18 +13711,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 if let projectId = zone.projectId { projectZones[projectId] = zone }
             }
             var projectWrites: [(store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
-            for (projectId, zone) in projectZones.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            for (projectId, _) in projectZones.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
                 guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
                 guard let original = try projectStore.tryLoadCanvas() else { continue }
                 var updated = original
                 var changed = false
+                // WS2 F2, same defect as the ambient register above: `canvas.json`
+                // holds WORLD frames (`WorkspaceRuntime.memberTiles` converts on the
+                // way into a ZoneLayer, `CanvasNSView.tilesInWorldFrames` on the way
+                // back out), so converting to zone-local here made this writer
+                // disagree with `canvasStateForPersistence`, the other writer of the
+                // same file. It was usually masked: a later debounced canvas save
+                // rewrote world frames over it. Quit before that save and every
+                // moved tile came back displaced by its zone origin.
                 for index in updated.tiles.indices {
                     guard let worldFrame = transaction.tileFrames[updated.tiles[index].id] else { continue }
-                    let owningZone = updated.tiles[index].zoneId.flatMap { tileZoneId in
-                        document.zones.first(where: { $0.zoneId == tileZoneId })
-                    } ?? zone
-                    updated.tiles[index].frame = CanvasEngine.worldToZoneLocal(worldFrame, zoneOrigin: owningZone.origin)
+                    updated.tiles[index].frame = worldFrame
                     changed = true
                 }
                 if changed { projectWrites.append((projectStore, original, updated)) }
@@ -14904,6 +14925,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // seven tickets passed against code the app never executed.
         canvasView.onZoneActivated = { [weak self] zoneId in
             self?.workspaceRuntime?.setActiveZone(zoneId, reason: .click)
+        }
+        // WS2 F2: wired HERE for the same reason `onZoneActivated` is. This is the
+        // ONLY production route from a committed canvas gesture to durable
+        // storage, and while it lived in the middle of
+        // `applicationDidFinishLaunching` no self-check could reach it — so the
+        // frame space it persists went unwitnessed in both directions, and an
+        // ambient tile drifted by its zone origin on every layout commit.
+        canvasView.onLayoutCommitted = { [weak self] transaction in
+            self?.persistLayoutTransaction(transaction) ?? false
         }
         configureCreationAndRuntimeRoutes(on: spawner)
         configureWorkspaceRuntimeHooks()

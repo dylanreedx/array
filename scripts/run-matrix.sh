@@ -511,6 +511,12 @@ run_app_check .build/debug/Array --zone-arming-check
 # project. Controllers were acquired only at mount, so such a zone had none and
 # creation silently fell back to the active project's spawner.
 run_app_check .build/debug/Array --zone-unacquired-project-check
+# WS2 F2: `persistLayoutTransaction` is the only route from a committed canvas
+# gesture to durable storage, and it converted world frames to zone-local before
+# writing them — while both durable stores (the workspace `ambientTiles` register
+# and `canvas.json`) hold WORLD. The origin was subtracted twice, so a moved tile
+# came back displaced by its zone origin, accumulating per cycle.
+run_app_check .build/debug/Array --ambient-tile-frame-space-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
 run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
