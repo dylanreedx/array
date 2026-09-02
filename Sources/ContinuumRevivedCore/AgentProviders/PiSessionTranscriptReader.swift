@@ -40,10 +40,10 @@ public enum PiSessionTranscriptReader {
         limits: RehydrationLimits = RehydrationLimits()
     ) -> RehydratedTranscript {
         ManagedTranscriptRehydrator.assemble(
-            normalize(lines: lines), threadId: threadId, truncated: truncated, limits: limits)
+            normalize(lines: lines, threadId: threadId), threadId: threadId, truncated: truncated, limits: limits)
     }
 
-    static func normalize(lines: [String]) -> [NormalizedTranscriptMessage] {
+    static func normalize(lines: [String], threadId: String) -> [NormalizedTranscriptMessage] {
         var out: [NormalizedTranscriptMessage] = []
         for line in lines {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
@@ -63,7 +63,13 @@ public enum PiSessionTranscriptReader {
                 out.append(NormalizedTranscriptMessage(
                     role: .compaction,
                     countsAsMessage: false,
-                    compactionTokensBefore: intValue(object["tokensBefore"])))
+                    compactionTokensBefore: intValue(object["tokensBefore"]),
+                    compactionBoundaryID: {
+                        let firstKept = (object["firstKeptEntryId"] as? String) ?? "unknown"
+                        let before = intValue(object["tokensBefore"]).map(String.init) ?? "unknown"
+                        return "pi:\(threadId):\(firstKept):\(before)"
+                    }(),
+                    compactionProvider: "pi"))
                 continue
             }
 

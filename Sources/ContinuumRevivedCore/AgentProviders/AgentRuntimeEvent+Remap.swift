@@ -38,10 +38,23 @@ extension AgentRuntimeEvent {
             return .tokenUsageUpdated(threadId: threadId, snapshot: snapshot)
         case let .contextWindowUpdated(_, snapshot):
             return .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
+        case let .compactionChanged(_, event):
+            return .compactionChanged(threadId: threadId, event: event)
         case let .childAgentSpawned(_, childAgentID, parentAgentID, displayName, sourceItemID, provider, spawnedAt):
             return .childAgentSpawned(threadId: threadId, childAgentID: childAgentID, parentAgentID: parentAgentID, displayName: displayName, sourceItemID: sourceItemID, provider: provider, spawnedAt: spawnedAt)
         case let .runtimeError(_, message):
             return .runtimeError(threadId: threadId, message: message)
         }
+    }
+
+    /// Tags provider telemetry with the context generation that owned the
+    /// operation. Providers do not report Array's epoch, so doing this at the
+    /// runner callback boundary is what lets the supervisor reject a delayed
+    /// pre-compaction meter update after the boundary has advanced.
+    public func withContextEpochIfMissing(_ epoch: UInt64) -> AgentRuntimeEvent {
+        guard case .contextWindowUpdated(let threadId, var snapshot) = self,
+              snapshot.contextEpoch == nil else { return self }
+        snapshot.contextEpoch = epoch
+        return .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
     }
 }

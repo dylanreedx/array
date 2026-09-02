@@ -27,6 +27,17 @@ public enum CodexSessionTranscriptReader {
                   let type = payload["type"] as? String else { continue }
 
             switch (envelope, type) {
+            case ("response_item", "context_compaction"),
+                 ("response_item", "compaction"):
+                guard let id = payload["id"] as? String else { continue }
+                out.append(.init(
+                    role: .compaction,
+                    countsAsMessage: false,
+                    compactionBoundaryID: id,
+                    // Rollout persistence does not retain whether this boundary
+                    // came from a manual request or provider policy.
+                    compactionTrigger: .unknown("persisted"),
+                    compactionProvider: "codex"))
             case ("event_msg", "user_message"):
                 if let text = cleanText(payload["message"] ?? payload["text"]) {
                     out.append(.init(role: .userPrompt, text: text))

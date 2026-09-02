@@ -42,6 +42,11 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
 
     public let config: Config
     public let sessionCapabilities: PiRpcSessionCapabilities = .full
+    public var compactionCapabilities: AgentCompactionCapabilities {
+        let policy = queue.sync { observedAutomaticCompactionPolicy }
+        return AgentCompactionCapabilities(
+            supportsManual: true, supportsFocus: true, automaticPolicy: policy)
+    }
 
     /// True only while the long-lived RPC child is available for another turn.
     /// The app uses this at the idle-session boundary so an unexpectedly exited
@@ -60,6 +65,9 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     /// widen that.
     private var turnSemaphore: DispatchSemaphore?
     private var turnOutcomeError: Error?
+    private var compactionSemaphore: DispatchSemaphore?
+    private var compactionOutcomeError: Error?
+    private var observedAutomaticCompactionPolicy: AgentAutomaticCompactionPolicy?
 
     public init(config: Config) {
         self.config = config
@@ -69,10 +77,17 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         }
         transport.onExit = { [weak self] _ in
             self?.queue.sync {
-                guard let self, let semaphore = self.turnSemaphore else { return }
-                self.turnOutcomeError = RunError.launchFailed("pi rpc process exited mid-turn")
-                self.turnSemaphore = nil
-                semaphore.signal()
+                guard let self else { return }
+                if let semaphore = self.turnSemaphore {
+                    self.turnOutcomeError = RunError.launchFailed("pi rpc process exited mid-turn")
+                    self.turnSemaphore = nil
+                    semaphore.signal()
+                }
+                if let semaphore = self.compactionSemaphore {
+                    self.compactionOutcomeError = RunError.launchFailed("pi rpc process exited during compaction")
+                    self.compactionSemaphore = nil
+                    semaphore.signal()
+                }
             }
         }
     }
@@ -94,6 +109,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             if stopRequested { throw AgentRunStopped(detail: "") }
         }
         try ensureStarted()
+        emitObservedAutomaticCompactionPolicy(to: onEvent)
 
         let semaphore = DispatchSemaphore(value: 0)
         queue.sync {
@@ -133,6 +149,50 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
     }
 
+    public func compact(
+        _ request: AgentCompactionRequest,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        try queue.sync {
+            if stopRequested { throw AgentRunStopped(detail: "") }
+            if turnSemaphore != nil || compactionSemaphore != nil {
+                throw RunError.commandFailed(command: "compact", message: "another operation is active")
+            }
+        }
+        try ensureStarted()
+        emitObservedAutomaticCompactionPolicy(to: onEvent)
+        let semaphore = DispatchSemaphore(value: 0)
+        queue.sync {
+            compactionSemaphore = semaphore
+            compactionOutcomeError = nil
+            currentOnEvent = { event in
+                if case .compactionChanged(let threadId, var lifecycle) = event {
+                    lifecycle.operationID = request.operationID
+                    lifecycle.trigger = .manual
+                    onEvent(.compactionChanged(threadId: threadId, event: lifecycle))
+                } else {
+                    onEvent(event)
+                }
+            }
+        }
+        var payload: [String: Any] = [:]
+        if let focus = request.focus?.trimmingCharacters(in: .whitespacesAndNewlines), !focus.isEmpty {
+            payload["customInstructions"] = focus
+        }
+        do {
+            _ = try transport.sendAndAwait(type: "compact", payload: payload)
+        } catch {
+            queue.sync { compactionSemaphore = nil; currentOnEvent = nil }
+            throw RunError.commandFailed(command: "compact", message: String(describing: error))
+        }
+        semaphore.wait()
+        let outcome = queue.sync { () -> Error? in
+            defer { currentOnEvent = nil }
+            return compactionOutcomeError
+        }
+        if let outcome { throw outcome }
+    }
+
     /// SIGTERM the group (never SIGINT, rpc has no handler for it) at the
     /// interactive grace. Unlike the one-shot runner, this does not merely
     /// end one turn -- it ends the whole session, because there is no
@@ -144,6 +204,11 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             if let semaphore = turnSemaphore {
                 turnOutcomeError = AgentRunStopped(detail: "")
                 turnSemaphore = nil
+                semaphore.signal()
+            }
+            if let semaphore = compactionSemaphore {
+                compactionOutcomeError = AgentRunStopped(detail: "")
+                compactionSemaphore = nil
                 semaphore.signal()
             }
         }
@@ -226,6 +291,15 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             throw RunError.launchFailed(String(describing: error))
         }
         queue.sync { started = true }
+        if let state = try? transport.sendAndAwait(type: "get_state") {
+            let enabled = (state["autoCompactionEnabled"] as? Bool)
+                ?? (state["state"] as? [String: Any])?["autoCompactionEnabled"] as? Bool
+            if enabled != nil {
+                queue.sync {
+                    observedAutomaticCompactionPolicy = AgentAutomaticCompactionPolicy(enabled: enabled)
+                }
+            }
+        }
     }
 
     /// Queue-confined: translate one raw rpc line, forward each resulting
@@ -239,7 +313,32 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
                 turnSemaphore = nil
                 semaphore.signal()
             }
+            if case .compactionChanged(_, let lifecycle) = event,
+               [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase),
+               let semaphore = compactionSemaphore {
+                if lifecycle.phase == .failed {
+                    compactionOutcomeError = RunError.commandFailed(
+                        command: "compact", message: lifecycle.errorMessage ?? "compaction failed")
+                } else if lifecycle.phase == .cancelled {
+                    compactionOutcomeError = AgentRunStopped(detail: "")
+                }
+                compactionSemaphore = nil
+                semaphore.signal()
+            }
         }
+    }
+
+    private func emitObservedAutomaticCompactionPolicy(
+        to onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) {
+        guard let policy = queue.sync(execute: { observedAutomaticCompactionPolicy }) else { return }
+        onEvent(.contextWindowUpdated(
+            threadId: config.sessionId ?? "pi-session",
+            snapshot: AgentContextWindowSnapshot(
+                automaticCompactionPolicy: policy,
+                observedAt: Date(),
+                source: .unknown("pi-get-state"),
+                freshness: .live)))
     }
 
     // MARK: - Pure argument/text shaping

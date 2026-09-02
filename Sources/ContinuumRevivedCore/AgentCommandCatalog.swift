@@ -302,7 +302,7 @@ public enum AgentCommandCatalog {
         AgentCommandDescriptor(id: "array:plan", name: "plan", detail: "Switch to planning mode", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.promptOnly]),
         AgentCommandDescriptor(id: "array:status", name: "status", detail: "Show agent and session status", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
         AgentCommandDescriptor(id: "array:model", name: "model", detail: "Choose the active model", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:compact", name: "compact", detail: "Compact the current conversation", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.promptOnly]),
+        AgentCommandDescriptor(id: "array:compact", name: "compact", detail: "Compact the current conversation", argumentHint: "optional focus", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
         AgentCommandDescriptor(id: "array:resume", name: "resume", detail: "Resume a saved agent session", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
         AgentCommandDescriptor(id: "array:fork", name: "fork", detail: "Fork the current conversation", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.localWrite], runsImmediately: true),
         AgentCommandDescriptor(id: "array:diff", name: "diff", detail: "Inspect the current working-tree diff", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
@@ -511,6 +511,14 @@ public struct AgentCommandCompletionProvider: AgentCompletionProvider {
         let arrayNames = Set(AgentCommandCatalog.arrayCommands().flatMap { [$0.name] + $0.aliases })
         return descriptors.compactMap { descriptor in
             guard descriptor.userInvocable else { return nil }
+            // `/compact` is an Array-owned typed operation for every provider.
+            // Keep the legacy provider descriptors addressable by ID for old
+            // persisted invocations, but do not offer duplicate menu rows that
+            // could be mistaken for prompt-delegated slash commands.
+            guard !(descriptor.name == "compact" && descriptor.harness != nil) else { return nil }
+            let compactionAvailability = descriptor.id == "array:compact"
+                ? query.context?.compaction
+                : nil
             let isActiveProvider = descriptor.harness != nil && descriptor.harness == active
             let collidesWithArray = isActiveProvider && arrayNames.contains(descriptor.name)
             let invocationName: String
@@ -527,7 +535,9 @@ public struct AgentCommandCompletionProvider: AgentCompletionProvider {
             let title = descriptor.name
             // The title already carries a harness prefix when disambiguation is
             // needed. Repeating it here made the useful explanation truncate.
-            let detail = [descriptor.detail, descriptor.disabledReason]
+            let effectiveDetail = compactionAvailability?.detail ?? descriptor.detail
+            let effectiveDisabledReason = compactionAvailability?.disabledReason ?? descriptor.disabledReason
+            let detail = [effectiveDetail, effectiveDisabledReason]
                 .compactMap { $0 }.joined(separator: " · ")
             let arguments: String
             if descriptor.supportsArguments,
@@ -556,8 +566,8 @@ public struct AgentCommandCompletionProvider: AgentCompletionProvider {
                     sourceIdentifier: descriptor.sourceIdentifier,
                     invocationName: invocationName
                 ),
-                isEnabled: descriptor.isEnabled,
-                disabledReason: descriptor.disabledReason
+                isEnabled: compactionAvailability?.isEnabled ?? descriptor.isEnabled,
+                disabledReason: effectiveDisabledReason
             )
         }.sorted { lhs, rhs in
             if lhs.isEnabled != rhs.isEnabled { return lhs.isEnabled }

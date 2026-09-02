@@ -391,16 +391,15 @@ enum AgentFirstPaintChecks {
 
         composer.composerRequestedSend(composer.textView)
         let deadline = Date().addingTimeInterval(2)
-        while (sink.receivedIntents.isEmpty || resolutions.isEmpty) && Date() < deadline {
+        while sink.receivedIntents.isEmpty && Date() < deadline {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
-        guard case let .providerCommand(sent)? = sink.receivedIntents.first,
-              sent.nativeSlashText == "/compact check auth with please" else {
-            throw fail("popover command submission: sink did not receive the whole contextual command: \(sink.receivedIntents)")
+        guard case let .compact(request)? = sink.receivedIntents.first,
+              request.focus == "check auth with please" else {
+            throw fail("popover command submission: sink did not receive the typed compaction intent with the whole contextual focus: \(sink.receivedIntents)")
         }
-        guard echoed.map(\.text) == ["/compact check auth with please"],
-              resolutions == [true], composer.textView.string.isEmpty else {
-            throw fail("popover command submission: acceptance did not resolve exactly once and clear the accepted draft; echo=\(echoed.map(\.text)) resolution=\(resolutions) draft='\(composer.textView.string)'")
+        guard echoed.isEmpty, resolutions.isEmpty, composer.textView.string.isEmpty else {
+            throw fail("popover command submission: typed compaction must clear the accepted draft without creating a synthetic prompt lifecycle; echo=\(echoed.map(\.text)) resolution=\(resolutions) draft='\(composer.textView.string)'")
         }
     }
 

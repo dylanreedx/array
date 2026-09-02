@@ -330,6 +330,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             scenario: [
                 .expectRequest(result: [:]),          // initialize
                 .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read automatic-compaction observation
                 .expectRequest(result: ["thread": ["id": "fixture-fresh-thread"]]),   // thread/start
                 .expectRequest(result: ["turn": ["id": "fixture-fresh-turn"]]),       // turn/start
                 .emit(method: "turn/started",
@@ -380,6 +381,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             scenario: [
                 .expectRequest(result: [:]),          // initialize
                 .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read automatic-compaction observation
                 .expectRequest(result: [:]),          // thread/resume (no thread/started notification — measured)
                 .expectRequest(result: ["turn": ["id": "fixture-resume-turn"]]),  // turn/start
                 .emit(method: "turn/completed",
@@ -427,11 +429,13 @@ private func runCodexAgentRunnerAppServerChecks() {
                 [
                     .expectRequest(result: [:]),          // initialize (resume attempt)
                     .expectNotification,                  // initialized
+                    .expectRequest(result: [:]),          // config/read automatic-compaction observation
                     .expectRequest(error: ["code": -32600, "message": "no rollout found for thread id stale-thread"]),  // thread/resume fails
                 ],
                 [
                     .expectRequest(result: [:]),          // initialize (fresh attempt)
                     .expectNotification,                  // initialized
+                    .expectRequest(result: [:]),          // config/read automatic-compaction observation
                     .expectRequest(result: ["thread": ["id": "fixture-healed-thread"]]),  // thread/start
                     .expectRequest(result: ["turn": ["id": "fixture-healed-turn"]]),      // turn/start
                     .emit(method: "turn/completed",
@@ -473,6 +477,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             scenario: [
                 .expectRequest(result: [:]),          // initialize
                 .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read automatic-compaction observation
                 .expectRequest(result: ["thread": ["id": "fixture-interrupt-thread"]]),  // thread/start
                 .expectRequest(result: ["turn": ["id": "fixture-interrupt-turn"]]),      // turn/start
                 .emit(method: "turn/started",
@@ -545,6 +550,7 @@ private func runCodexAgentRunnerAppServerChecks() {
             scenario: [
                 .expectRequest(result: [:]),
                 .expectNotification,
+                .expectRequest(result: [:]),          // config/read automatic-compaction observation
                 .expectRequest(result: ["thread": ["id": parentThread]]),
                 .expectRequest(result: ["turn": ["id": parentTurn]]),
                 .emit(method: "turn/started",

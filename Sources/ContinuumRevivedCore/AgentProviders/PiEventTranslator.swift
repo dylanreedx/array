@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import Foundation
 
 // Ticket: docs/38-tickets/88-provider-adapter-pi-gpt.md
@@ -34,6 +35,8 @@ public struct PiEventTranslator {
     private var runIsActive = false
     private var pendingRunOutcome: TurnOutcome = .completed
     private var pendingRunErrorMessage: String?
+    private var pendingCompactionTrigger: AgentCompactionTrigger = .unknown("")
+    private var compactionCounter = 0
     private var seenUsageSignatures = Set<String>()
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     /// Did the message currently being assembled already emit its text as deltas?
@@ -165,6 +168,19 @@ public struct PiEventTranslator {
 
         case "agent_start":
             return beginRun()
+
+        case "compaction_start":
+            pendingCompactionTrigger = AgentCompactionTrigger(
+                providerValue: object["reason"] as? String)
+            return [.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                phase: .running,
+                trigger: pendingCompactionTrigger,
+                provider: "pi",
+                observedAt: now()
+            ))]
+
+        case "compaction_end":
+            return translateCompactionEnd(object)
 
         case "turn_start":
             // One Pi agent run contains another turn after each tool result.
@@ -382,6 +398,60 @@ public struct PiEventTranslator {
             pendingRunOutcome = .completed
             pendingRunErrorMessage = nil
         }
+    }
+
+    private mutating func translateCompactionEnd(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+        let result = object["result"] as? [String: Any] ?? object
+        let aborted = (object["aborted"] as? Bool) ?? (result["aborted"] as? Bool) ?? false
+        let error = (object["errorMessage"] as? String) ?? (result["errorMessage"] as? String)
+        let phase: AgentCompactionPhase = error != nil ? .failed : (aborted ? .cancelled : .succeeded)
+        let before = Self.intValue(result["tokensBefore"])
+        let after = Self.intValue(result["estimatedTokensAfter"])
+        let firstKept = (result["firstKeptEntryId"] as? String) ?? "unknown"
+        compactionCounter += 1
+        let boundaryID = "pi:\(threadId):\(firstKept):\(before.map(String.init) ?? String(compactionCounter))"
+        let lifecycle = AgentRuntimeEvent.compactionChanged(
+            threadId: threadId,
+            event: AgentCompactionLifecycleEvent(
+                boundaryID: boundaryID,
+                phase: phase,
+                trigger: pendingCompactionTrigger,
+                beforeTokens: before.map { AgentCompactionTokenReading($0, precision: .exact) },
+                afterTokens: after.map { AgentCompactionTokenReading($0, precision: .estimated) },
+                provider: "pi",
+                errorMessage: error,
+                willRetryInterruptedTurn: (object["willRetry"] as? Bool) ?? (result["willRetry"] as? Bool),
+                observedAt: now()
+            ))
+        guard phase == .succeeded else { return [lifecycle] }
+        let automatic: Bool? = {
+                switch pendingCompactionTrigger {
+                case .manual: return false
+                case .threshold, .overflowRecovery, .providerAutomatic: return true
+                case .unknown: return nil
+                }
+            }()
+        let title = AgentCompactionPayload.encodeTitle(
+            preTokens: before,
+            postTokens: after,
+            automaticCompaction: automatic,
+            provider: "pi",
+            boundaryID: boundaryID,
+            trigger: {
+                switch pendingCompactionTrigger {
+                case .manual: return "manual"
+                case .threshold: return "threshold"
+                case .overflowRecovery: return "overflowRecovery"
+                case .providerAutomatic: return "providerAutomatic"
+                case .unknown(let raw): return raw
+                }
+            }(),
+            postTokensEstimated: after == nil ? nil : true)
+        return [
+            lifecycle,
+            .itemStarted(threadId: threadId, itemId: boundaryID, kind: .compaction, title: title),
+            .itemCompleted(threadId: threadId, itemId: boundaryID, kind: .compaction, status: .completed),
+        ]
     }
 
     /// Convenience: translate a whole stream (e.g. a captured `.log`).

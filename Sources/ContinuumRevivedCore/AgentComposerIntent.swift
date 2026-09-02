@@ -19,6 +19,7 @@ public enum AgentComposerIntent: Equatable, Sendable {
     /// A completion-selected provider or harness command. The invocation stays
     /// typed until the supervisor/adapter serializes it for the active runtime.
     case providerCommand(AgentCommandInvocation)
+    case compact(AgentCompactionRequest)
 }
 
 /// The sink owns execution and reports whether it actually took responsibility
@@ -107,6 +108,7 @@ public enum AgentTileOperationalState: Equatable, Sendable {
     /// contradiction the supervisor's own comments acknowledged.
     case starting
     case working
+    case compacting
     case queued
     case needsAction(AgentPendingRequest)
     case failed(message: String?)
@@ -123,6 +125,7 @@ public enum AgentTileOperationalState: Equatable, Sendable {
         case .ready: return "ready"
         case .starting: return "starting"
         case .working: return "working"
+        case .compacting: return "compacting"
         case .queued: return "queued"
         case .needsAction: return "needsAction"
         case .failed: return "failed"
@@ -188,7 +191,7 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
 
     public var executionState: AgentTurnExecutionState {
         switch state {
-        case .starting, .working, .queued, .needsAction:
+        case .starting, .working, .compacting, .queued, .needsAction:
             return .working
         case .ready, .failed, .restored:
             return .ready

@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import Foundation
 
 // Ticket: codex app-server parity harness (.plans/46, "Codex — the decision,
@@ -52,6 +53,8 @@ import Foundation
 // frames still produce events (see that check's file for the naive version
 // that failed RED first).
 public struct CodexAppServerEventTranslator {
+    private let compactionOperationID: UUID?
+    private let compactionTrigger: AgentCompactionTrigger
     /// The FIRST thread this translator observes via `thread/started` — codex
     /// app-server does not deliver its own `thread/started` for a spawned
     /// child in the captured fixtures, so "first" and "primary" coincide in
@@ -78,9 +81,13 @@ public struct CodexAppServerEventTranslator {
 
     public init(
         workingDirectory: URL? = nil,
+        compactionOperationID: UUID? = nil,
+        compactionTrigger: AgentCompactionTrigger = .providerAutomatic,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.workingDirectory = workingDirectory?.standardizedFileURL
+        self.compactionOperationID = compactionOperationID
+        self.compactionTrigger = compactionTrigger
         self.now = now
     }
 
@@ -167,6 +174,15 @@ public struct CodexAppServerEventTranslator {
         else { return [] }
 
         switch itemType {
+        case "contextCompaction":
+            return [.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                operationID: compactionOperationID,
+                boundaryID: itemId,
+                phase: .running,
+                trigger: compactionTrigger,
+                provider: "codex",
+                observedAt: now()
+            ))]
         case "subAgentActivity":
             guard (item["kind"] as? String) == "started",
                   let childThreadID = item["agentThreadId"] as? String,
@@ -248,6 +264,26 @@ public struct CodexAppServerEventTranslator {
         else { return [] }
 
         switch itemType {
+        case "contextCompaction":
+            return [
+                .compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                    operationID: compactionOperationID,
+                    boundaryID: itemId,
+                    phase: .succeeded,
+                    trigger: compactionTrigger,
+                    provider: "codex",
+                    observedAt: now()
+                )),
+                .itemStarted(threadId: threadId, itemId: itemId, kind: .compaction, title: AgentCompactionPayload.encodeTitle(
+                    preTokens: nil,
+                    postTokens: nil,
+                    automaticCompaction: compactionTrigger == .manual ? false : nil,
+                    provider: "codex",
+                    boundaryID: itemId,
+                    trigger: compactionTrigger.providerValue
+                )),
+                .itemCompleted(threadId: threadId, itemId: itemId, kind: .compaction, status: .completed),
+            ]
         case "agentMessage":
             // The text already crossed as streamed deltas (restructure #1) —
             // re-emitting the whole `item.text` here would double it in the

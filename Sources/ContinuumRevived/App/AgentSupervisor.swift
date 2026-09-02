@@ -99,15 +99,29 @@ protocol AgentSessionRunning: AgentRunning {
     func command(_ type: String, payload: [String: Any]) throws -> [String: Any]
 }
 
+/// Native provider context compaction. This is intentionally independent of
+/// `AgentSessionRunning`: Claude and Codex use one-shot processes while Pi
+/// keeps a session process alive.
+protocol AgentCompactionRunning: AgentRunning {
+    var compactionCapabilities: AgentCompactionCapabilities { get }
+    func compact(
+        _ request: AgentCompactionRequest,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws
+}
+
 extension PiAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentSessionRunning {}
+extension PiRpcAgentRunner: AgentCompactionRunning {}
 extension PiRpcAgentRunner {
     var keepsSessionAliveBetweenTurns: Bool { true }
     var canAcceptAnotherTurn: Bool { isSessionRunning }
 }
 extension ClaudeAgentRunner: AgentRunning {}
+extension ClaudeAgentRunner: AgentCompactionRunning {}
 extension CodexAgentRunner: AgentRunning {}
+extension CodexAgentRunner: AgentCompactionRunning {}
 
 private final class RefusingAgentRunner: AgentRunning,  Sendable {
     struct Refusal: Error, CustomStringConvertible { let description: String }
@@ -892,6 +906,13 @@ private final class TerminalDeliveryLatch: @unchecked Sendable {
     var isSet: Bool { lock.withLock { value } }
 }
 
+private final class CompactionTerminalLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: AgentCompactionLifecycleEvent?
+    func set(_ event: AgentCompactionLifecycleEvent) { lock.withLock { value = event } }
+    var event: AgentCompactionLifecycleEvent? { lock.withLock { value } }
+}
+
 @MainActor
 final class AgentSupervisor {
     /// How much of an agent's event history a late subscriber replays. Capped
@@ -976,13 +997,162 @@ final class AgentSupervisor {
     /// racing a successful confirmation and makes replay/rebind idempotent.
     private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
 
+    // MARK: - Compaction operation
+
+    @discardableResult
+    private func startCompaction(
+        _ request: AgentCompactionRequest,
+        for id: AgentID,
+        preferredRunner: AgentRunning? = nil
+    ) -> Bool {
+        guard var record = records[id], runners[id] == nil else { return false }
+        let runner = preferredRunner
+            ?? idleSessionRunners[id]
+            ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+        guard let compacting = runner as? AgentCompactionRunning,
+              compacting.compactionCapabilities.supportsManual else { return false }
+        if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
+
+        let now = Date()
+        let providerName = record.harness?.rawValue ?? "agent"
+        record.inFlightCompaction = AgentCompactionJournal(
+            operationID: request.operationID, phase: .requested, startedAt: now)
+        records[id] = record
+        persist(record)
+        runners[id] = runner
+        activeCompactionOperations.insert(id)
+        notifyTurnCapabilitiesChanged(id)
+
+        let threadId = Self.threadId(for: id)
+        let operationEpoch = record.contextEpoch
+        deliver(.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+            operationID: request.operationID,
+            phase: .requested,
+            trigger: .manual,
+            provider: providerName,
+            observedAt: now
+        )), from: runner, to: id, now: now)
+
+        runner.observeRuntimeObservations { [weak self] observation in
+            DispatchQueue.main.async {
+                guard let self, self.runners[id] === runner else { return }
+                self.ingestRuntimeObservation(observation, for: id)
+            }
+        }
+        let terminal = CompactionTerminalLatch()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try compacting.compact(request) { event in
+                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                    DispatchQueue.main.async {
+                        if case .compactionChanged(_, let lifecycle) = bound,
+                           [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
+                            terminal.set(lifecycle)
+                        }
+                        self?.deliver(bound, from: runner, to: id)
+                    }
+                }
+            } catch {
+                let stopped = error is AgentRunStopped
+                let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
+                DispatchQueue.main.async {
+                    guard let self, terminal.event == nil else { return }
+                    let lifecycle = AgentCompactionLifecycleEvent(
+                        operationID: request.operationID,
+                        phase: stopped ? .cancelled : .failed,
+                        trigger: .manual,
+                        provider: providerName,
+                        errorMessage: stopped ? nil : message,
+                        observedAt: Date())
+                    terminal.set(lifecycle)
+                    self.deliver(.compactionChanged(threadId: threadId, event: lifecycle), from: runner, to: id)
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if terminal.event == nil {
+                    let lifecycle = AgentCompactionLifecycleEvent(
+                        operationID: request.operationID,
+                        phase: .indeterminate,
+                        trigger: .manual,
+                        provider: providerName,
+                        errorMessage: "Provider returned without confirming a compaction boundary",
+                        observedAt: Date())
+                    terminal.set(lifecycle)
+                    self.deliver(
+                        .compactionChanged(threadId: threadId, event: lifecycle),
+                        from: runner, to: id)
+                }
+                self.finishCompaction(terminal.event, runner: runner, for: id)
+            }
+        }
+        return true
+    }
+
+    private func finishCompaction(
+        _ terminal: AgentCompactionLifecycleEvent?,
+        runner: AgentRunning,
+        for id: AgentID
+    ) {
+        guard runners[id] === runner else { return }
+        runners[id] = nil
+        activeCompactionOperations.remove(id)
+        compactingAgents.remove(id)
+        if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
+            idleSessionRunners[id] = runner
+        }
+        let phase = terminal?.phase ?? .indeterminate
+        if var record = records[id] {
+            if phase == .succeeded {
+                record.inFlightCompaction = nil
+            } else {
+                record.inFlightCompaction = AgentCompactionJournal(
+                    operationID: terminal?.operationID ?? record.inFlightCompaction?.operationID ?? UUID(),
+                    boundaryID: terminal?.boundaryID,
+                    phase: phase,
+                    startedAt: record.inFlightCompaction?.startedAt ?? Date(),
+                    errorMessage: terminal?.errorMessage)
+            }
+            records[id] = record
+            persist(record)
+        }
+        if phase != .succeeded, let terminal {
+            let itemID = terminal.boundaryID ?? "array-compaction-\(terminal.operationID?.uuidString ?? UUID().uuidString)"
+            let title = AgentCompactionPayload.encodeTitle(
+                preTokens: terminal.beforeTokens?.value,
+                postTokens: terminal.afterTokens?.value,
+                automaticCompaction: terminal.trigger == .manual ? false : nil,
+                provider: terminal.provider,
+                boundaryID: terminal.boundaryID,
+                phase: phase.rawValue,
+                trigger: terminal.trigger.providerValue,
+                postTokensEstimated: terminal.afterTokens?.precision == .estimated)
+            deliver(.itemStarted(
+                threadId: Self.threadId(for: id), itemId: itemID,
+                kind: .compaction, title: title), to: id)
+            deliver(.itemCompleted(
+                threadId: Self.threadId(for: id), itemId: itemID,
+                kind: .compaction,
+                status: phase == .cancelled ? .declined : .failed), to: id)
+        }
+        if phase == .succeeded {
+            if !pausedQueues.contains(id) { drainQueue(for: id) }
+        } else {
+            pausedQueues.insert(id)
+        }
+        notifyTurnCapabilitiesChanged(id)
+    }
+
     // MARK: - B4 follow-up queue
     //
     /// Mirrors `AgentComposerDraftStore`'s durable per-agent queue for
     /// synchronous UI reads (pending chips). The store is the source of truth;
     /// this cache is refreshed after every mutation this supervisor performs
     /// and hydrated lazily on first read for an agent restored across launch.
-    private var queuedMessagesCache: [AgentID: [AgentComposerQueuedMessage]] = [:]
+    private var queuedWorkItemsCache: [AgentID: [AgentComposerQueuedWorkItem]] = [:]
+    private var activeCompactionOperations: Set<AgentID> = []
+    private var compactingAgents: Set<AgentID> = []
+    private var seenCompactionBoundaryIDs: [AgentID: Set<String>] = [:]
     /// Queue mutations against the durable store are serialized per agent, the
     /// same reason `submissionRecoveryTasks` is: back-to-back UI actions and a
     /// `turnCompleted` drain must not race each other's read-modify-write.
@@ -1577,6 +1747,16 @@ final class AgentSupervisor {
                     persistBeforeAdoption(record)
                 }
             }
+            if let journal = record.inFlightCompaction,
+               journal.phase == .requested || journal.phase == .running {
+                record.inFlightCompaction = AgentCompactionJournal(
+                    operationID: journal.operationID,
+                    boundaryID: journal.boundaryID,
+                    phase: .indeterminate,
+                    startedAt: journal.startedAt,
+                    errorMessage: "Outcome unknown after Array quit")
+                persistBeforeAdoption(record)
+            }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 staleIDs.insert(record.id)
@@ -1585,6 +1765,11 @@ final class AgentSupervisor {
                 continue
             }
             records[record.id] = record
+            if record.inFlightCompaction?.phase == .indeterminate
+                || record.inFlightCompaction?.phase == .failed
+                || record.inFlightCompaction?.phase == .cancelled {
+                pausedQueues.insert(record.id)
+            }
             // A root that came back stops being stale. Without this an agent marked
             // on an earlier sweep would read as both stale and live to the Phase 3
             // inbox (from the cross-review).
@@ -1632,6 +1817,43 @@ final class AgentSupervisor {
     /// shown, and lets any tile that later attaches rehydrate the same content.
     func seedRehydratedTranscript(_ transcript: RehydratedTranscript, for id: AgentID) {
         rehydratedTranscripts[id] = transcript
+        guard var record = records[id],
+              let journal = record.inFlightCompaction,
+              journal.phase == .indeterminate,
+              let expectedBoundaryID = journal.boundaryID,
+              let recovered = transcript.events.compactMap({ event -> AgentCompactionLifecycleEvent? in
+                  guard case .compactionChanged(_, let lifecycle) = event,
+                        lifecycle.phase == .succeeded,
+                        lifecycle.boundaryID == expectedBoundaryID else { return nil }
+                  return lifecycle
+              }).last else { return }
+
+        // Display-only rehydration does not flow through `deliver`, so reconcile
+        // the durable uncertainty here without re-publishing transcript content.
+        record.contextEpoch &+= 1
+        if let after = recovered.afterTokens, after.precision == .exact {
+            let previous = record.lastContextWindow
+            record.lastContextWindow = AgentContextWindowSnapshot(
+                usedTokens: after.value,
+                maxTokens: previous?.maxTokens,
+                automaticCompaction: nil,
+                contextEpoch: record.contextEpoch,
+                automaticCompactionPolicy: previous?.automaticCompactionPolicy,
+                observedAt: recovered.observedAt,
+                source: previous?.source ?? .unknown("rehydrated-compaction-boundary"),
+                freshness: .stale)
+            contextWindowSnapshots[id] = record.lastContextWindow
+        } else {
+            record.lastContextWindow = nil
+            contextWindowSnapshots[id] = nil
+        }
+        record.inFlightCompaction = nil
+        records[id] = record
+        seenCompactionBoundaryIDs[id, default: []].insert(expectedBoundaryID)
+        persist(record)
+        // Keep the queue paused. Reconciliation resolves the outcome, but only
+        // the user's explicit Resume authorizes later queued work after relaunch.
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// The prior transcript seeded for `id`, if any. A tile pulls this on attach
@@ -2324,6 +2546,7 @@ final class AgentSupervisor {
             }
         }
         let threadId = Self.threadId(for: id)
+        let operationEpoch = record.contextEpoch
         // The translators mint `.turnCompleted` only from a provider result line.
         // A CLI that dies without one (crash mid-line, init never parsed, silent
         // exit 0) must not leave the turn open forever — the supervisor watches
@@ -2334,7 +2557,7 @@ final class AgentSupervisor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try runner.run(prompt: prompt) { event in
-                    let bound = event.withThreadId(threadId)
+                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
                     DispatchQueue.main.async {
                         if case .turnCompleted = bound { sawTurnCompleted.set() }
                         self?.deliver(bound, from: runner, to: id)
@@ -2548,6 +2771,18 @@ final class AgentSupervisor {
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
+        if activeCompactionOperations.contains(id), let runner = runners[id] {
+            runner.stop()
+            let lifecycle = AgentCompactionLifecycleEvent(
+                operationID: records[id]?.inFlightCompaction?.operationID,
+                phase: .cancelled,
+                trigger: .manual,
+                provider: records[id]?.harness?.rawValue ?? "agent")
+            deliver(.compactionChanged(
+                threadId: Self.threadId(for: id), event: lifecycle), from: runner, to: id)
+            finishCompaction(lifecycle, runner: runner, for: id)
+            return
+        }
         runners[id]?.stop()
         runners[id] = nil
         // Normally Stop is offered only for an active turn. Keeping teardown
@@ -3426,8 +3661,56 @@ final class AgentSupervisor {
             checkoutRoot: checkoutRoot,
             gitRoot: checkoutRoot,
             arrayProjectRoot: Self.repositoryRoot(of: record).standardizedFileURL,
-            trustState: .trusted
+            trustState: .trusted,
+            compaction: compactionCommandAvailability(for: agentID, record: record)
         )
+    }
+
+    private func compactionCommandAvailability(
+        for id: AgentID,
+        record: AgentRecord
+    ) -> AgentCompactionCommandAvailability {
+        func unavailable(_ reason: String) -> AgentCompactionCommandAvailability {
+            AgentCompactionCommandAvailability(
+                isEnabled: false, detail: "Compact the provider context", disabledReason: reason)
+        }
+        guard record.capabilities.locallyManaged else {
+            return unavailable("Mirrored agents do not own a controllable provider session")
+        }
+        guard record.latestTurnAt != nil || record.codexThreadId != nil
+                || record.providerSessionId != nil else {
+            return unavailable("Nothing to compact yet")
+        }
+        if compactingAgents.contains(id) {
+            return unavailable("Context compaction is already running")
+        }
+        if activeCompactionOperations.contains(id) {
+            return unavailable("Context compaction is already starting")
+        }
+        if queuedWorkItemsCache[id]?.contains(where: {
+            if case .compaction = $0 { return true }
+            return false
+        }) == true {
+            return unavailable("Context compaction is already queued")
+        }
+        if record.harness == .codex {
+            guard CodexCLIBackend.transportOverride() == .appServer else {
+                return unavailable("Codex compaction requires app-server transport")
+            }
+            guard record.codexThreadId?.isEmpty == false else {
+                return unavailable("Nothing to compact yet")
+            }
+            return AgentCompactionCommandAvailability(
+                isEnabled: true,
+                detail: runners[id] == nil
+                    ? "Runs immediately · Codex focus text is unsupported"
+                    : "Queues after the current turn · Codex focus text is unsupported")
+        }
+        return AgentCompactionCommandAvailability(
+            isEnabled: true,
+            detail: runners[id] == nil
+                ? "Runs immediately · optional focus supported"
+                : "Queues after the current turn · optional focus supported")
     }
 
     // MARK: - Fan-out (P2D.6)
@@ -4343,6 +4626,10 @@ final class AgentSupervisor {
             state = .failed(message: facts.failureMessage)
         } else if restoredIDs.contains(id) && (history[id]?.isEmpty ?? true) {
             state = .restored
+        } else if compactingAgents.contains(id) {
+            state = .compacting
+        } else if activeCompactionOperations.contains(id) {
+            state = .working
         } else if facts.execution == .working {
             state = .working
         } else if runners[id] != nil, facts.submittedAt != nil {
@@ -4454,6 +4741,13 @@ final class AgentSupervisor {
             stop(agentID)
             return .accepted
         case .providerCommand(let invocation):
+            if invocation.name == "compact" {
+                let focus = invocation.arguments.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return await accept(
+                    .compact(AgentCompactionRequest(focus: focus.isEmpty ? nil : focus)),
+                    for: agentID)
+            }
             guard invocation.surface != .cli else { return .refused(.unsupported) }
             // B5 — routed through the classifier instead of unconditionally
             // serializing and sending. `AgentCommandExecutionPlanner` decides per
@@ -4498,6 +4792,39 @@ final class AgentSupervisor {
                 // nothing to them in this mode.
                 return .refused(.unsupported)
             }
+        case .compact(let request):
+            guard let record = records[agentID], record.capabilities.locallyManaged,
+                  let store = submissionRecoveryStore else { return .refused(.unsupported) }
+            guard record.latestTurnAt != nil || record.codexThreadId != nil
+                    || record.providerSessionId != nil else {
+                return .refused(.unsupported)
+            }
+            let queued = await store.queuedWorkItems(for: agentID)
+            guard !activeCompactionOperations.contains(agentID),
+                  !queued.contains(where: { if case .compaction = $0 { return true }; return false })
+            else { return .refused(.turnNotReady) }
+
+            let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
+                ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID))))
+            guard let compacting = candidate as? AgentCompactionRunning,
+                  compacting.compactionCapabilities.supportsManual else {
+                return .refused(.unsupported)
+            }
+            if request.focus?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+               !compacting.compactionCapabilities.supportsFocus {
+                return .refused(.unsupported)
+            }
+            if runners[agentID] != nil {
+                _ = await store.enqueueCompaction(
+                    focus: request.focus, operationID: request.operationID, for: agentID)
+                queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
+                notifyTurnCapabilitiesChanged(agentID)
+                return .accepted
+            }
+            guard startCompaction(request, for: agentID, preferredRunner: candidate) else {
+                return .refused(.unsupported)
+            }
+            return .accepted
         case .queue(let draft):
             // B4 — this REVERSES the prohibition that used to sit here. That rule
             // was aimed at faking steering by silently replaying a send later; about
@@ -4535,7 +4862,7 @@ final class AgentSupervisor {
                 fileReferences: fileReferences,
                 for: agentID
             )
-            queuedMessagesCache[agentID] = await store.queuedMessages(for: agentID)
+            queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             return .accepted
         case .steer, .command:
@@ -4754,7 +5081,7 @@ final class AgentSupervisor {
         case .sessionStateChanged, .turnCompleted, .itemStarted, .itemCompleted,
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
              .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
-             .childAgentSpawned, .runtimeError, .semanticSignal:
+             .childAgentSpawned, .runtimeError, .semanticSignal, .compactionChanged:
             return false
         }
     }
@@ -4775,7 +5102,8 @@ final class AgentSupervisor {
         case .turnStarted, .requestOpened, .userInputRequested:
             return true
         case .turnCompleted, .itemStarted, .itemCompleted, .contentDelta,
-             .requestResolved, .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError:
+             .requestResolved, .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated, .runtimeError,
+             .compactionChanged:
             return false
         case .childAgentSpawned, .semanticSignal:
             return false
@@ -5290,8 +5618,28 @@ final class AgentSupervisor {
     /// Hydrates the cache from durable storage on first read for an agent this
     /// process has not queued anything for yet (e.g. restored across launch).
     func queuedMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
-        if queuedMessagesCache[id] == nil { hydrateQueueCache(for: id) }
-        return queuedMessagesCache[id] ?? []
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        return (queuedWorkItemsCache[id] ?? []).map {
+            switch $0 {
+            case .prompt(let message):
+                return message
+            case .compaction(let item):
+                return AgentComposerQueuedMessage(
+                    id: item.id,
+                    text: item.focus?.isEmpty == false
+                        ? "Compact context with focus"
+                        : "Compact context",
+                    queuedAt: item.queuedAt)
+            }
+        }
+    }
+
+    func queuedCompactions(for id: AgentID) -> [AgentComposerQueuedCompaction] {
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        return (queuedWorkItemsCache[id] ?? []).compactMap {
+            guard case .compaction(let item) = $0 else { return nil }
+            return item
+        }
     }
 
     /// Whether this agent's queue is held after an interrupted turn — the UI
@@ -5302,11 +5650,11 @@ final class AgentSupervisor {
 
     private func hydrateQueueCache(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
-        queuedMessagesCache[id] = []
+        queuedWorkItemsCache[id] = []
         Task { @MainActor [weak self] in
-            let messages = await store.queuedMessages(for: id)
+            let messages = await store.queuedWorkItems(for: id)
             guard let self else { return }
-            self.queuedMessagesCache[id] = messages
+            self.queuedWorkItemsCache[id] = messages
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
         }
     }
@@ -5316,7 +5664,7 @@ final class AgentSupervisor {
     /// primary control still means only "interrupt the current turn".
     func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
-        queuedMessagesCache[id]?.removeAll { $0.id == messageID }
+        queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
         notifyTurnCapabilitiesChanged(id)
         runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
     }
@@ -5325,7 +5673,7 @@ final class AgentSupervisor {
     /// flight.
     func clearQueuedMessages(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
-        queuedMessagesCache[id] = []
+        queuedWorkItemsCache[id] = []
         notifyTurnCapabilitiesChanged(id)
         runQueueOp(for: id) { await store.clearQueue(for: id) }
     }
@@ -5347,7 +5695,7 @@ final class AgentSupervisor {
             if let previous { await previous.value }
             await operation()
             guard let self else { return }
-            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             self.notifyTurnCapabilitiesChanged(id)
         }
     }
@@ -5373,9 +5721,41 @@ final class AgentSupervisor {
         queueOpTasks[id] = Task { @MainActor [weak self] in
             if let previous { await previous.value }
             guard let self else { return }
-            guard let message = await store.dequeueNextQueuedMessage(for: id) else { return }
-            self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+            guard let next = await store.nextWorkItem(for: id) else { return }
+            if case .compaction(let compact) = next {
+                // Write-ahead recovery: an app exit from this point onward must
+                // surface an uncertain operation, never silently replay it.
+                guard var record = self.records[id] else { return }
+                record.inFlightCompaction = AgentCompactionJournal(
+                    operationID: compact.operationID, phase: .requested, startedAt: Date())
+                self.records[id] = record
+                self.persist(record)
+            }
+            guard let workItem = await store.dequeueNextWorkItem(ifID: next.id, for: id) else {
+                if case .compaction = next, var record = self.records[id] {
+                    record.inFlightCompaction = nil
+                    self.records[id] = record
+                    self.persist(record)
+                }
+                self.pausedQueues.insert(id)
+                self.notifyTurnCapabilitiesChanged(id)
+                return
+            }
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             self.notifyTurnCapabilitiesChanged(id)
+            if case .compaction(let compact) = workItem {
+                guard self.startCompaction(
+                    AgentCompactionRequest(operationID: compact.operationID, focus: compact.focus),
+                    for: id) else {
+                    await store.requeueWorkItemAtFront(workItem, for: id)
+                    self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                    self.pausedQueues.insert(id)
+                    self.notifyTurnCapabilitiesChanged(id)
+                    return
+                }
+                return
+            }
+            guard case .prompt(let message) = workItem else { return }
             let prompt: AgentPrompt
             do {
                 let prepared = try await self.attachmentStore.preparePromptAttachments(
@@ -5398,8 +5778,8 @@ final class AgentSupervisor {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
-                await store.requeueMessageAtFront(message, for: id)
-                self.queuedMessagesCache[id] = await store.queuedMessages(for: id)
+                await store.requeueWorkItemAtFront(workItem, for: id)
+                self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
@@ -5457,7 +5837,63 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
     }
 
-    private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+    private func deliver(_ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+        var event = incomingEvent
+        if case .contextWindowUpdated(let threadId, var snapshot) = event,
+           let epoch = records[id]?.contextEpoch {
+            if let observedEpoch = snapshot.contextEpoch, observedEpoch != epoch { return }
+            snapshot.contextEpoch = epoch
+            event = .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
+        }
+        if case .compactionChanged(_, let lifecycle) = event {
+            if lifecycle.phase == .running {
+                compactingAgents.insert(id)
+                notifyTurnCapabilitiesChanged(id)
+            } else if [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
+                compactingAgents.remove(id)
+            }
+            if lifecycle.phase == .succeeded, let boundaryID = lifecycle.boundaryID {
+                var seen = seenCompactionBoundaryIDs[id] ?? []
+                guard seen.insert(boundaryID).inserted else { return }
+                seenCompactionBoundaryIDs[id] = seen
+            }
+            if var record = records[id] {
+                if lifecycle.phase == .succeeded {
+                    record.contextEpoch &+= 1
+                    if let after = lifecycle.afterTokens, after.precision == .exact {
+                        let previous = record.lastContextWindow
+                        let automatic: Bool?
+                        switch lifecycle.trigger {
+                        case .manual: automatic = false
+                        case .providerAutomatic, .threshold, .overflowRecovery: automatic = true
+                        case .unknown: automatic = nil
+                        }
+                        record.lastContextWindow = AgentContextWindowSnapshot(
+                            usedTokens: after.value,
+                            maxTokens: previous?.maxTokens,
+                            automaticCompaction: automatic,
+                            contextEpoch: record.contextEpoch,
+                            automaticCompactionPolicy: previous?.automaticCompactionPolicy,
+                            observedAt: lifecycle.observedAt,
+                            source: previous?.source ?? .unknown("compaction-boundary"),
+                            freshness: .live)
+                        contextWindowSnapshots[id] = record.lastContextWindow
+                    } else {
+                        record.lastContextWindow = nil
+                        contextWindowSnapshots[id] = nil
+                    }
+                    record.inFlightCompaction = nil
+                } else if lifecycle.phase == .requested || lifecycle.phase == .running {
+                    record.inFlightCompaction = AgentCompactionJournal(
+                        operationID: lifecycle.operationID ?? record.inFlightCompaction?.operationID ?? UUID(),
+                        boundaryID: lifecycle.boundaryID,
+                        phase: lifecycle.phase,
+                        startedAt: record.inFlightCompaction?.startedAt ?? lifecycle.observedAt)
+                }
+                records[id] = record
+                persist(record)
+            }
+        }
         // B1 — pi's persistence watermark, tracked because a stop before it costs
         // the user the whole conversation and Array is the only thing that can say
         // so. `SessionManager._persist()` (`session-manager.js:717-751`, shared by
@@ -5803,6 +6239,8 @@ final class AgentSupervisor {
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated,
              .contextWindowUpdated, .childAgentSpawned, .semanticSignal:
             break
+        case .compactionChanged:
+            break
         }
         // The invariant this file owns, asserted in `--agent-supervisor-check`: a
         // stamped start exists exactly while a turn is in flight, so a stale anchor
@@ -5814,7 +6252,8 @@ final class AgentSupervisor {
 
     nonisolated static func isPersistWorthy(_ event: AgentRuntimeEvent) -> Bool {
         switch event {
-        case .sessionStateChanged, .turnStarted, .turnCompleted, .childAgentSpawned, .runtimeError:
+        case .sessionStateChanged, .turnStarted, .turnCompleted, .childAgentSpawned, .runtimeError,
+             .compactionChanged:
             return true
         case .itemStarted, .itemCompleted, .contentDelta, .requestOpened,
              .requestResolved, .userInputRequested, .userInputResolved, .tokenUsageUpdated,
@@ -5930,6 +6369,8 @@ private extension AgentRuntimeEvent {
         case .turnCompleted, .runtimeError,
              .sessionStateChanged(.stopped), .sessionStateChanged(.error):
             return true
+        case .compactionChanged(_, let event):
+            return [.succeeded, .failed, .cancelled, .indeterminate].contains(event.phase)
         case .sessionStateChanged, .turnStarted, .itemStarted, .itemCompleted,
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
              .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
@@ -5943,7 +6384,7 @@ private extension AgentTileOperationalState {
     var acceptsNewTurn: Bool {
         switch self {
         case .ready, .failed, .restored: return true
-        case .starting, .working, .queued, .needsAction: return false
+        case .starting, .working, .compacting, .queued, .needsAction: return false
         }
     }
 }
@@ -8232,13 +8673,15 @@ func checkClearCommandTransaction(
     let liveSnapshot = AgentContextWindowSnapshot(
         usedTokens: 9_500, maxTokens: 10_000, observedAt: createdAt,
         source: .claudeAssistantUsage, freshness: .live)
+    var epochLiveSnapshot = liveSnapshot
+    epochLiveSnapshot.contextEpoch = 0
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot), to: parentID)
-    guard supervisor.contextWindowSnapshot(for: parentID) == liveSnapshot else {
+    guard supervisor.contextWindowSnapshot(for: parentID) == epochLiveSnapshot else {
         throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache")
     }
     var preClearReplay: [AgentRuntimeEvent] = []
     for await event in supervisor.events(for: parentID) { preClearReplay.append(event); break }
-    guard preClearReplay == [.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot)] else {
+    guard preClearReplay == [.contextWindowUpdated(threadId: "does-not-matter", snapshot: epochLiveSnapshot)] else {
         throw fail("clear-command fixture: the replay buffer did not carry the delivered event")
     }
 
@@ -8292,10 +8735,12 @@ func checkClearCommandTransaction(
     let sentinelSnapshot = AgentContextWindowSnapshot(
         usedTokens: 1, maxTokens: 2, observedAt: createdAt,
         source: .claudeAssistantUsage, freshness: .live)
+    var epochSentinelSnapshot = sentinelSnapshot
+    epochSentinelSnapshot.contextEpoch = 0
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot), to: parentID)
     var firstReplayedAfterClear: AgentRuntimeEvent?
     for await event in supervisor.events(for: parentID) { firstReplayedAfterClear = event; break }
-    guard firstReplayedAfterClear == .contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot) else {
+    guard firstReplayedAfterClear == .contextWindowUpdated(threadId: "sentinel", snapshot: epochSentinelSnapshot) else {
         throw fail("clear command: the replay buffer was not cleared — got \(String(describing: firstReplayedAfterClear)) before the post-clear sentinel")
     }
 
@@ -9846,10 +10291,12 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         observedAt: Date(timeIntervalSinceReferenceDate: 800_000_000),
         source: .piMessageUsage,
         freshness: .live)
+    var epochContextSnapshot = contextSnapshot
+    epochContextSnapshot.contextEpoch = 0
     supervisor.qaDeliver(.contextWindowUpdated(
         threadId: AgentSupervisor.threadId(for: id), snapshot: contextSnapshot), to: id)
-    guard supervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
-        throw fail("context-seam: delivered snapshot is not returned by the seam")
+    guard supervisor.contextWindowSnapshot(for: id) == epochContextSnapshot else {
+        throw fail("context-seam: delivered snapshot is returned with the current context epoch")
     }
     for index in 0..<(AgentSupervisor.replayCap + 8) {
         supervisor.qaDeliver(.contentDelta(
@@ -9870,7 +10317,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     guard !replayStillCarriesTelemetry else {
         throw fail("context-seam: flood was expected to evict telemetry from the replay buffer (witness precondition)")
     }
-    guard supervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
+    guard supervisor.contextWindowSnapshot(for: id) == epochContextSnapshot else {
         throw fail("context-seam: snapshot must survive replay-buffer eviction")
     }
     guard supervisor.contextWindowSnapshot(for: AgentID(rawValue: UUID())) == nil else {
@@ -9886,7 +10333,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     // since `24b1b00` gave the seam its record lookup — unnoticed, because this
     // leg halts earlier at the KNOWN-RED naming section.
     resumedSupervisor.restore()
-    guard resumedSupervisor.contextWindowSnapshot(for: id) == contextSnapshot else {
+    guard resumedSupervisor.contextWindowSnapshot(for: id) == epochContextSnapshot else {
         throw fail("context-seam: a restored supervisor must seed persisted telemetry from the record")
     }
 
@@ -16262,6 +16709,7 @@ private func eventLabel(_ event: AgentRuntimeEvent) -> String {
     case let .userInputResolved(threadId, requestId): return "userInputResolved:\(requestId)@\(threadId)"
     case let .tokenUsageUpdated(threadId, snapshot): return "tokenUsage:\(snapshot.inputTokens)/\(snapshot.outputTokens)@\(threadId)"
     case let .contextWindowUpdated(threadId, snapshot): return "contextWindow:\(String(describing: snapshot.occupancyPercentage))@\(threadId)"
+    case let .compactionChanged(threadId, lifecycle): return "compaction:\(lifecycle.phase.rawValue)@\(threadId)"
     case let .childAgentSpawned(threadId, childAgentID, _, _, sourceItemID, _, _):
         return "childAgentSpawned:\(childAgentID.uuidString)@\(sourceItemID):\(threadId)"
     case let .semanticSignal(threadId, itemId, kind): return "semantic:\(kind.rawValue):\(itemId)@\(threadId)"
@@ -16853,7 +17301,7 @@ func checkInboxStateAgreesWithTilePresenter<Failure: Error>(fail: (String) -> Fa
         switch snapshot.state {
         case .ready, .restored:
             expectedHeaderLabel = AgentStatusVocabulary.label(for: .idle)
-        case .working, .queued:
+        case .working, .compacting, .queued:
             expectedHeaderLabel = AgentStatusVocabulary.label(for: .working)
         case .needsAction:
             expectedHeaderLabel = AgentStatusVocabulary.label(for: .needsAttention)

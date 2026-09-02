@@ -1480,6 +1480,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-compaction-ui-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentCompactionUIChecks()
+                    print("AgentCompactionUIChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-spawn-limit-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -8277,6 +8292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch snapshot.state {
         case .ready: return (AgentStatusVocabulary.label(for: .idle), nil)
         case .working: return (AgentStatusVocabulary.label(for: .working), nil)
+        case .compacting: return ("Compacting context…", nil)
         case .queued: return ("Queued", nil)
         case let .needsAction(request):
             let attention: CommandCenterAttentionReason = request.kind == .approval ? .approval : .input

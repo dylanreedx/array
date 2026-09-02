@@ -62,6 +62,11 @@ if CommandLine.arguments.contains("--claude-context-occupancy-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-compaction-check") {
+    runAgentCompactionChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--canvas-background-model-check") {
     runCanvasBackgroundChecks()
     print("CanvasBackgroundModelChecks passed")

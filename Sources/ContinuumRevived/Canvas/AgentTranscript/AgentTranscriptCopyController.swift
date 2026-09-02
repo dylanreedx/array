@@ -59,9 +59,7 @@ struct AgentTranscriptCopyController {
         case let .agentReference(reference):
             return reference.displayNameAtSpawn
         case let .compaction(compaction):
-            let pre = compaction.preTokens.map(String.init) ?? "?"
-            let post = compaction.postTokens.map(String.init) ?? "?"
-            return "Compacted context (\(pre) → \(post) tokens)"
+            return CompactionRenderer.label(compaction)
         case let .table(table):
             // Copy yields the table the user saw. `source` is retained by the
             // payload precisely so a redesign of the table VIEW can never

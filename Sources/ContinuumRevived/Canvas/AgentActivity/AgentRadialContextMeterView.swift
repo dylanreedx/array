@@ -91,6 +91,9 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
         if let fraction = presentation.fraction {
             drawArc(in: rect, fraction: fraction, color: accentColor(for: presentation.state, theme: theme))
         }
+        if let threshold = presentation.providerThresholdFraction {
+            drawProviderThreshold(in: rect, fraction: threshold, theme: theme)
+        }
         drawStateOverlay(in: rect, theme: theme)
     }
 
@@ -118,6 +121,23 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
             clockwise: true)
         color.setStroke()
         path.stroke()
+    }
+
+    private func drawProviderThreshold(in rect: NSRect, fraction: Double, theme: TokenTheme) {
+        guard fraction >= 0, fraction <= 1 else { return }
+        let angle = CGFloat(90 - fraction * 360) * .pi / 180
+        let radius = rect.width / 2
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let inner = NSPoint(
+            x: center.x + cos(angle) * (radius - CGFloat(pageZoom.scaled(3))),
+            y: center.y + sin(angle) * (radius - CGFloat(pageZoom.scaled(3))))
+        let outer = NSPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+        let tick = NSBezierPath()
+        tick.move(to: inner)
+        tick.line(to: outer)
+        tick.lineWidth = max(1, CGFloat(pageZoom.scaled(1)))
+        TextToken.textPrimary.color.nsColor(for: theme).setStroke()
+        tick.stroke()
     }
 
     private func drawStateOverlay(in rect: NSRect, theme: TokenTheme) {

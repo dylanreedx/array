@@ -77,6 +77,19 @@ public enum ManagedAgentActivityBridge {
             // Identity details travel only in the encrypted transcript channel;
             // the legacy activity projection receives a generic safe milestone.
             return make(agentId, tileId, .info, "agent.spawned", status, "Subagent started", now)
+        case .compactionChanged(_, let event):
+            switch event.phase {
+            case .requested, .running:
+                return nil
+            case .succeeded:
+                return make(agentId, tileId, .info, "context.compacted", status, "Context compacted", now)
+            case .failed:
+                return make(agentId, tileId, .error, "context.compaction.failed", status, "Context compaction failed", now)
+            case .cancelled:
+                return make(agentId, tileId, .info, "context.compaction.cancelled", status, "Context compaction cancelled", now)
+            case .indeterminate:
+                return make(agentId, tileId, .info, "context.compaction.unknown", status, "Context compaction outcome unknown", now)
+            }
         case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved,
              .tokenUsageUpdated, .contextWindowUpdated:
             // Status changes ride on the other events' `status` field; content

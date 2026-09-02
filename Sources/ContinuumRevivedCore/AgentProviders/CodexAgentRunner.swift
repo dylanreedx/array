@@ -266,6 +266,17 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     public let config: Config
+    public var compactionCapabilities: AgentCompactionCapabilities {
+        let appServer = CodexCLIBackend.transportOverride() == .appServer
+        let hasThread = config.threadId?.isEmpty == false
+        return AgentCompactionCapabilities(
+            supportsManual: appServer && hasThread,
+            supportsFocus: false,
+            unavailableReason: !appServer
+                ? "Codex compaction requires the app-server transport"
+                : (hasThread ? nil : "Nothing to compact yet")
+        )
+    }
     private let queue = DispatchQueue(label: "continuum.codex-agent-runner")
     private var translator: CodexEventTranslator
     private var buffer = Data()
@@ -354,6 +365,111 @@ public final class CodexAgentRunner: @unchecked Sendable {
         if fresh.exitCode != 0 {
             try throwStoppedIfRequested(stderr: fresh.stderr)
             throw RunError.codexFailed(exitCode: fresh.exitCode, stderr: fresh.stderr)
+        }
+    }
+
+    /// A dedicated app-server operation: initialize → resume → compact → wait
+    /// for the provider boundary. It intentionally has no exec/prompt fallback.
+    public func compact(
+        _ request: AgentCompactionRequest,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        guard request.focus?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            throw RunError.appServerFailed("Codex compaction does not accept focus instructions")
+        }
+        guard compactionCapabilities.supportsManual, let threadId = config.threadId else {
+            throw RunError.appServerFailed(
+                compactionCapabilities.unavailableReason ?? "compaction unavailable")
+        }
+
+        let command = Self.liveResolvedCommand()
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs)
+        let spawned: ProcessGroupChild
+        do {
+            spawned = try ProcessGroupChild.spawn(
+                executable: command.executable,
+                arguments: arguments,
+                environment: PiAgentRunner.childEnvironment(),
+                currentDirectory: config.cwd,
+                standardInput: .pipe)
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        queue.sync {
+            child = spawned
+            appServerTranslator = CodexAppServerEventTranslator(
+                workingDirectory: config.cwd,
+                compactionOperationID: request.operationID,
+                compactionTrigger: .manual)
+            appServerTranslator.onRuntimeObservation = runtimeObservationHandler
+        }
+
+        let completion = DispatchSemaphore(value: 0)
+        var terminal: AgentCompactionLifecycleEvent?
+        let transport = CodexAppServerTransport(child: spawned) { [weak self] line in
+            guard let self else { return }
+            self.queue.sync {
+                for event in self.appServerTranslator.translate(line: line) {
+                    onEvent(event)
+                    if case .compactionChanged(let eventThreadID, let lifecycle) = event,
+                       eventThreadID == threadId,
+                       [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
+                        terminal = lifecycle
+                        completion.signal()
+                    }
+                }
+            }
+        }
+        queue.sync { appServerTransport = transport }
+        defer {
+            transport.shutdown()
+            spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+            queue.sync { child = nil; appServerTransport = nil }
+        }
+
+        _ = try transport.sendRequest(
+            method: "initialize",
+            params: [
+                "clientInfo": ["name": "array", "title": "Array", "version": "0.0.1"],
+                "capabilities": ["experimentalApi": true],
+            ],
+            timeout: 15)
+        try transport.sendNotification(method: "initialized", params: [:])
+
+        if let configResult = try? transport.sendRequest(
+            method: "config/read", params: [:], timeout: 5),
+           let policy = Self.automaticCompactionPolicy(fromConfigRead: configResult) {
+            onEvent(.contextWindowUpdated(
+                threadId: threadId,
+                snapshot: AgentContextWindowSnapshot(
+                    automaticCompactionPolicy: policy,
+                    observedAt: Date(),
+                    source: .unknown("codex-config-read"),
+                    freshness: .live)))
+        }
+        _ = try transport.sendRequest(
+            method: "thread/resume",
+            params: ["threadId": threadId, "model": config.model],
+            timeout: 30)
+        _ = try transport.sendRequest(
+            method: "thread/compact/start",
+            params: ["threadId": threadId],
+            timeout: 15)
+
+        let exitWatcher = Thread {
+            _ = spawned.wait()
+            completion.signal()
+        }
+        exitWatcher.start()
+        guard completion.wait(timeout: .now() + 120) == .success else {
+            throw RunError.appServerFailed("timed out waiting for contextCompaction completion")
+        }
+        try throwStoppedIfRequested(stderr: "")
+        guard let terminal else {
+            throw RunError.appServerFailed("contextCompaction completion not observed")
+        }
+        if terminal.phase == .failed {
+            throw RunError.appServerFailed(terminal.errorMessage ?? "compaction failed")
         }
     }
 
@@ -506,6 +622,17 @@ public final class CodexAgentRunner: @unchecked Sendable {
             ],
             timeout: 15)
         try transport.sendNotification(method: "initialized", params: [:])
+        if let configResult = try? transport.sendRequest(
+            method: "config/read", params: [:], timeout: 5),
+           let policy = Self.automaticCompactionPolicy(fromConfigRead: configResult) {
+            onEvent(.contextWindowUpdated(
+                threadId: config.threadId ?? "codex-pending",
+                snapshot: AgentContextWindowSnapshot(
+                    automaticCompactionPolicy: policy,
+                    observedAt: Date(),
+                    source: .unknown("codex-config-read"),
+                    freshness: .live)))
+        }
 
         let resolvedThreadId: String
         switch mode {
@@ -649,6 +776,21 @@ public final class CodexAgentRunner: @unchecked Sendable {
             runtimeObservationHandler = handler
             translator.onRuntimeObservation = handler
         }
+    }
+
+    private static func automaticCompactionPolicy(
+        fromConfigRead result: [String: Any]
+    ) -> AgentAutomaticCompactionPolicy? {
+        let config = result["config"] as? [String: Any] ?? result
+        let limit: Int? = {
+            if let value = config["model_auto_compact_token_limit"] as? Int { return value }
+            if let value = config["model_auto_compact_token_limit"] as? NSNumber { return value.intValue }
+            return nil
+        }()
+        let scope = config["model_auto_compact_token_limit_scope"] as? String
+        guard limit != nil || scope != nil else { return nil }
+        return AgentAutomaticCompactionPolicy(
+            enabled: limit.map { $0 > 0 }, thresholdTokens: limit, thresholdScope: scope)
     }
 
     // MARK: - one spawn

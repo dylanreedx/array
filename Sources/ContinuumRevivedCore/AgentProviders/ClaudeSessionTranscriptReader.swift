@@ -44,6 +44,16 @@ public enum ClaudeSessionTranscriptReader {
             if (object["isSidechain"] as? Bool) == true { continue }
 
             switch type {
+            case "system" where (object["subtype"] as? String) == "compact_boundary":
+                let metadata = object["compact_metadata"] as? [String: Any] ?? [:]
+                out.append(NormalizedTranscriptMessage(
+                    role: .compaction,
+                    countsAsMessage: false,
+                    compactionTokensBefore: intValue(metadata["pre_tokens"]),
+                    compactionTokensAfter: intValue(metadata["post_tokens"]),
+                    compactionBoundaryID: object["uuid"] as? String,
+                    compactionTrigger: AgentCompactionTrigger(providerValue: metadata["trigger"] as? String),
+                    compactionProvider: "claude"))
             case "user":
                 guard let message = object["message"] as? [String: Any] else { continue }
                 appendUserMessage(message["content"], into: &out)
@@ -56,6 +66,12 @@ public enum ClaudeSessionTranscriptReader {
             }
         }
         return out
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        return nil
     }
 
     /// A `user` line is either a real prompt (content is a String, or text

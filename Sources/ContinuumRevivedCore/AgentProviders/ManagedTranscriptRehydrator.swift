@@ -105,6 +105,11 @@ struct NormalizedTranscriptMessage: Equatable {
     /// session-file `compaction` entry carries (see `AgentCompactionPayload`'s
     /// doc comment for what it does not carry).
     var compactionTokensBefore: Int?
+    var compactionTokensAfter: Int?
+    var compactionAfterEstimated: Bool = false
+    var compactionBoundaryID: String?
+    var compactionTrigger: AgentCompactionTrigger = .unknown("")
+    var compactionProvider: String?
 }
 
 public enum ManagedTranscriptRehydrator {
@@ -222,9 +227,26 @@ public enum ManagedTranscriptRehydrator {
                 // Not wrapped in a turn: like claude's compact_boundary, this
                 // is a system-level boundary, not part of a turn's own work.
                 compactionCounter += 1
-                let itemID = "pi-compaction-\(compactionCounter)"
+                let itemID = message.compactionBoundaryID ?? "rehydrated-compaction-\(compactionCounter)"
+                steps.append(.event(.compactionChanged(
+                    threadId: threadId,
+                    event: AgentCompactionLifecycleEvent(
+                        boundaryID: itemID,
+                        phase: .succeeded,
+                        trigger: message.compactionTrigger,
+                        beforeTokens: message.compactionTokensBefore.map {
+                            AgentCompactionTokenReading($0, precision: .exact)
+                        },
+                        afterTokens: message.compactionTokensAfter.map {
+                            AgentCompactionTokenReading(
+                                $0, precision: message.compactionAfterEstimated ? .estimated : .exact)
+                        },
+                        provider: message.compactionProvider ?? "provider"
+                    ))))
                 let title = AgentCompactionPayload.encodeTitle(
-                    preTokens: message.compactionTokensBefore, postTokens: nil, automaticCompaction: nil)
+                    preTokens: message.compactionTokensBefore,
+                    postTokens: message.compactionTokensAfter,
+                    automaticCompaction: nil)
                 let compactionKind = ItemKind.compaction
                 steps.append(.event(.itemStarted(
                     threadId: threadId, itemId: itemID, kind: compactionKind, title: title)))

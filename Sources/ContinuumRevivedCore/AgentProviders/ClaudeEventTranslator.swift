@@ -110,6 +110,14 @@ public struct ClaudeEventTranslator {
             if subtype == "compact_boundary" {
                 return translateCompactBoundary(object)
             }
+            if subtype == "status", (object["status"] as? String) == "compacting" {
+                return [.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                    phase: .running,
+                    trigger: .providerAutomatic,
+                    provider: "claude",
+                    observedAt: now()
+                ))]
+            }
             guard subtype == "init" else { return [] }
             if let id = object["session_id"] as? String {
                 threadId = id
@@ -443,15 +451,36 @@ public struct ClaudeEventTranslator {
         else { return [] }
         let trigger = metadata["trigger"] as? String
         let preTokens = Self.intValue(metadata["pre_tokens"])
-        let automatic = trigger != "manual"
+        let lifecycleTrigger = AgentCompactionTrigger(providerValue: trigger)
+        let automatic: Bool? = {
+            switch lifecycleTrigger {
+            case .manual: return false
+            case .threshold, .overflowRecovery, .providerAutomatic: return true
+            case .unknown: return nil
+            }
+        }()
         // B6.2 — the compaction block kind. `itemStarted`/`itemCompleted` fire
         // back-to-back because the boundary is already resolved by the time
         // claude reports it; there is no in-progress interval to show.
         compactionCounter += 1
-        let itemID = "compaction#\(runToken)-\(compactionCounter)"
+        let itemID = (object["uuid"] as? String) ?? "compaction#\(runToken)-\(compactionCounter)"
         let title = AgentCompactionPayload.encodeTitle(
-            preTokens: preTokens, postTokens: postTokens, automaticCompaction: automatic)
+            preTokens: preTokens,
+            postTokens: postTokens,
+            automaticCompaction: automatic,
+            provider: "claude",
+            boundaryID: itemID,
+            trigger: trigger)
         return [
+            .compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                boundaryID: itemID,
+                phase: .succeeded,
+                trigger: lifecycleTrigger,
+                beforeTokens: preTokens.map { AgentCompactionTokenReading($0, precision: .exact) },
+                afterTokens: AgentCompactionTokenReading(postTokens, precision: .exact),
+                provider: "claude",
+                observedAt: now()
+            )),
             .itemStarted(threadId: threadId, itemId: itemID, kind: ItemKind.compaction, title: title),
             .itemCompleted(threadId: threadId, itemId: itemID, kind: ItemKind.compaction, status: .completed),
             .contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(

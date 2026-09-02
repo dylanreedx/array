@@ -1,5 +1,7 @@
 check --add-zone-check
 check --agent-awareness-check
+check --agent-compaction-check
+check --agent-compaction-ui-check
 check --agent-display-name-check
 check --agent-fanout-check
 check --agent-first-paint-check
@@ -195,6 +197,7 @@ leg run swift build
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-awareness-check
+leg run_app_check .build/debug/Array --agent-compaction-ui-check
 leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
@@ -381,6 +384,7 @@ leg run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
@@ -407,7 +411,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 112
+count ContinuumRevivedCoreChecks 113
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

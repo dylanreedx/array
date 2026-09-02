@@ -251,22 +251,46 @@ private func runClaudeCompactBoundaryChecks() {
     expect(initEvents.count == 3,
            "ClaudeEventTranslator: init must still emit its usual 3 events, got \(initEvents.count)")
 
-    // Line 2: an ORDINARY system frame (subtype "status", not init and not
-    // compact_boundary) must still emit nothing — the fix must not widen the
-    // gate beyond the one new subtype.
+    // Line 2: Claude announces the in-progress interval separately from the
+    // eventual boundary. It must become a running lifecycle event without
+    // creating a transcript item or completing the surrounding turn.
     let statusEvents = translator.translate(line: lines[1])
-    expect(statusEvents.isEmpty,
-           "ClaudeEventTranslator: an ordinary system/status frame must still emit nothing, got \(statusEvents)")
+    guard case .compactionChanged(let statusThreadID, let running)? = statusEvents.first else {
+        expect(false,
+               "ClaudeEventTranslator: system/status compacting must emit a running lifecycle event, got \(statusEvents)")
+        return
+    }
+    expect(statusEvents.count == 1 && statusThreadID == sid && running.phase == .running
+               && running.trigger == .providerAutomatic && running.provider == "claude",
+           "ClaudeEventTranslator: compacting status must only announce the running provider lifecycle, got \(statusEvents)")
 
     // Line 3: the real compact_boundary frame must produce the B6.2 compaction
     // item (begin/finish, real pre/post tokens from `compact_metadata`) plus
     // the one contextWindowUpdated built from `post_tokens`/`trigger`.
     let compactEvents = translator.translate(line: lines[2])
     let compactionKind = ItemKind.compaction
-    let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: 2140, automaticCompaction: false)
-    expect(compactEvents == [
-        .itemStarted(threadId: sid, itemId: "compaction#run1-1", kind: compactionKind, title: compactionTitle),
-        .itemCompleted(threadId: sid, itemId: "compaction#run1-1", kind: compactionKind, status: .completed),
+    let boundaryID = "00000000-0000-4000-8000-000000000202"
+    let compactionTitle = AgentCompactionPayload.encodeTitle(
+        preTokens: 26268,
+        postTokens: 2140,
+        automaticCompaction: false,
+        provider: "claude",
+        boundaryID: boundaryID,
+        trigger: "manual")
+    guard case .compactionChanged(let boundaryThreadID, let boundary)? = compactEvents.first else {
+        expect(false,
+               "ClaudeEventTranslator: compact_boundary must begin with a successful lifecycle event, got \(compactEvents)")
+        return
+    }
+    expect(boundaryThreadID == sid && boundary.phase == .succeeded
+               && boundary.boundaryID == boundaryID
+               && boundary.trigger == .manual
+               && boundary.beforeTokens == AgentCompactionTokenReading(26268, precision: .exact)
+               && boundary.afterTokens == AgentCompactionTokenReading(2140, precision: .exact),
+           "ClaudeEventTranslator: compact_boundary must preserve its stable identity, manual trigger, and exact counts, got \(boundary)")
+    expect(Array(compactEvents.dropFirst()) == [
+        .itemStarted(threadId: sid, itemId: boundaryID, kind: compactionKind, title: compactionTitle),
+        .itemCompleted(threadId: sid, itemId: boundaryID, kind: compactionKind, status: .completed),
         .contextWindowUpdated(threadId: sid, snapshot: AgentContextWindowSnapshot(
             usedTokens: 2140,
             maxTokens: nil,
@@ -276,7 +300,7 @@ private func runClaudeCompactBoundaryChecks() {
             freshness: .live)),
     ], "ClaudeEventTranslator: compact_boundary must emit the compaction item pair (real pre/post tokens) then contextWindowUpdated, got \(compactEvents)")
 
-    print("ClaudeEventTranslator compact_boundary checks passed: the real captured frame maps to a compaction item plus one contextWindowUpdated, an ordinary system frame still emits nothing")
+    print("ClaudeEventTranslator compact_boundary checks passed: compacting status maps to running and the captured boundary maps to success, a compaction item, and context telemetry")
 }
 
 // The context ring was empty for EVERY claude agent, always. Not a rendering

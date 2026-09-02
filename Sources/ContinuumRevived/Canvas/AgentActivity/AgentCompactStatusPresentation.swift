@@ -402,6 +402,25 @@ struct AgentRadialContextMeterPresentation: Equatable {
     let accessibilityLabel: String
     let detailText: String
     let warningMarker: String?
+    let providerThresholdFraction: Double?
+
+    init(
+        state: AgentRadialContextMeterState,
+        fraction: Double?,
+        label: String,
+        accessibilityLabel: String,
+        detailText: String,
+        warningMarker: String?,
+        providerThresholdFraction: Double? = nil
+    ) {
+        self.state = state
+        self.fraction = fraction
+        self.label = label
+        self.accessibilityLabel = accessibilityLabel
+        self.detailText = detailText
+        self.warningMarker = warningMarker
+        self.providerThresholdFraction = providerThresholdFraction
+    }
 }
 
 enum AgentRadialContextMeterPresenter {
@@ -499,7 +518,12 @@ enum AgentRadialContextMeterPresenter {
             label: visualLabel,
             accessibilityLabel: accessibilityLabel(state: state, percent: rawPercent, freshness: freshness),
             detailText: detailText(snapshot, source: source, freshness: freshness, arithmetic: arithmetic, policy: policy),
-            warningMarker: marker)
+            warningMarker: marker,
+            providerThresholdFraction: {
+                guard let threshold = snapshot.automaticCompactionPolicy?.thresholdTokens,
+                      let max = snapshot.maxTokens, max > 0 else { return nil }
+                return Double(threshold) / Double(max)
+            }())
     }
 
     private static func unknownPresentation(reason: String) -> AgentRadialContextMeterPresentation {
@@ -574,6 +598,17 @@ enum AgentRadialContextMeterPresenter {
         }
         if let automaticCompaction = snapshot.automaticCompaction {
             lines.append("Automatic compaction: \(automaticCompaction ? "enabled" : "disabled")")
+        }
+        if let providerPolicy = snapshot.automaticCompactionPolicy {
+            let state = providerPolicy.enabled.map { $0 ? "enabled" : "disabled" } ?? "provider-managed"
+            if let threshold = providerPolicy.thresholdTokens {
+                let scope = providerPolicy.thresholdScope.map { " (\($0))" } ?? ""
+                lines.append("Provider auto-compaction: \(state), threshold \(threshold) tokens\(scope)")
+            } else {
+                lines.append("Provider auto-compaction: \(state); threshold unknown")
+            }
+        } else {
+            lines.append("Provider auto-compaction: provider-managed; threshold unknown")
         }
         return lines.joined(separator: "\n")
     }

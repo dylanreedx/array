@@ -342,6 +342,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 # (it runs per zone per mouseDragged). Registered so the bound is gated, not
 # merely measurable: the leg existed with a failing exit path no gate ran.
 run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
+# Provider-native compaction lifecycle, opaque-payload discipline, and token
+# precision semantics. Standalone so unrelated long-running CoreChecks failures
+# cannot prevent this contract from running.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -445,6 +449,7 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+run_app_check .build/debug/Array --agent-compaction-ui-check
 run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
 # their identity/model/role intact, the tiled one re-resolved from its tileId and

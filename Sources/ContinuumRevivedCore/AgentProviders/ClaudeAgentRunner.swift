@@ -282,6 +282,13 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     }
 
     public let config: Config
+    public var compactionCapabilities: AgentCompactionCapabilities {
+        AgentCompactionCapabilities(
+            supportsManual: config.conversationMayExist && !config.forkSession,
+            supportsFocus: true,
+            unavailableReason: config.conversationMayExist ? nil : "Nothing to compact yet"
+        )
+    }
     private let queue = DispatchQueue(label: "continuum.claude-agent-runner")
     private var translator: ClaudeEventTranslator
     private var buffer = Data()
@@ -341,6 +348,35 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         if second.exitCode != 0 {
             try throwStoppedIfRequested(stderr: second.stderr)
             throw RunError.claudeFailed(exitCode: second.exitCode, stderr: second.stderr)
+        }
+    }
+
+    /// Invoke Claude's native slash command without publishing its synthetic
+    /// print-mode turn. Only the compaction lifecycle/boundary crosses this seam.
+    public func compact(
+        _ request: AgentCompactionRequest,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        guard compactionCapabilities.supportsManual else {
+            throw RunError.launchFailed(compactionCapabilities.unavailableReason ?? "compaction unavailable")
+        }
+        let focus = request.focus?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let command = focus.flatMap { $0.isEmpty ? nil : $0 }.map { "/compact \($0)" } ?? "/compact"
+        let result = try runOnce(mode: .resume, prompt: AgentPrompt(command)) { event in
+            switch event {
+            case .compactionChanged(let threadId, var lifecycle):
+                lifecycle.operationID = request.operationID
+                lifecycle.trigger = .manual
+                onEvent(.compactionChanged(threadId: threadId, event: lifecycle))
+            case .itemStarted(_, _, .compaction, _), .itemCompleted(_, _, .compaction, _), .contextWindowUpdated:
+                onEvent(event)
+            default:
+                break
+            }
+        }
+        if result.exitCode != 0 {
+            try throwStoppedIfRequested(stderr: result.stderr)
+            throw RunError.claudeFailed(exitCode: result.exitCode, stderr: result.stderr)
         }
     }
 

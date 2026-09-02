@@ -53,7 +53,7 @@ public extension InboxState {
     static func state(forSnapshot snapshot: AgentTileTurnSnapshot) -> InboxState {
         switch snapshot.state {
         case .ready: return .ready
-        case .working: return .working
+        case .working, .compacting: return .working
         case .queued: return .working
         case .needsAction(let request):
             switch request.kind {
@@ -172,7 +172,7 @@ public enum AgentInboxRowBuilder {
             // `.starting` means a runner is already bound — it is a live runner by
             // definition, so it must hold the row out of the settled tail exactly
             // as `.working` does.
-            case .starting, .working, .queued: observedFacts.hasLiveRunner = true
+            case .starting, .working, .compacting, .queued: observedFacts.hasLiveRunner = true
             case .needsAction: observedFacts.attentionIsYours = true
             case .ready, .failed, .restored: break
             }

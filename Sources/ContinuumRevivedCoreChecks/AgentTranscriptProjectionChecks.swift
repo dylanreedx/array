@@ -286,8 +286,10 @@ func runAgentTranscriptProjectionChecks() {
     expect(compactionEntry?.role == .system,
            "B6.2: a compaction block must be attributed to the harness (.system), got \(String(describing: compactionEntry?.role))")
     if case .compaction(let payload) = compactionEntry?.blocks.first?.payload {
-        expect(payload == AgentCompactionPayload(preTokens: 26268, postTokens: 2140, automaticCompaction: false),
-               "B6.2: the compaction payload must carry the real pre/post tokens and trigger, got \(payload)")
+        expect(payload.preTokens == 26268 && payload.postTokens == 2140
+                   && payload.automaticCompaction == false && payload.phase == "succeeded"
+                   && payload.provider == nil && payload.boundaryID == nil,
+               "B6.2: the legacy compaction payload must retain its real pre/post tokens and trigger while decoding as a successful boundary, got \(payload)")
     } else {
         expect(false, "B6.2: a compaction item must project to AgentBlockPayload.compaction, got \(String(describing: compactionEntry?.blocks.first?.payload))")
     }

@@ -1423,6 +1423,9 @@ final class ManagedAgentTileNSView: TileNSView {
                 compactStatusSession = .init(state: .running)
                 compactStatusTurn = .active(
                     startedAt: snapshot.turnStartedAt, stream: nil, streamStartedAt: nil)
+            case .compacting:
+                compactStatusSession = .init(state: .running)
+                liveToolVerb = (itemID: "context-compaction", text: "Compacting context…")
             case .starting:
                 // The compact row already had a word for this window; the tile just
                 // had no state that could reach it.
@@ -1534,6 +1537,21 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
             compactStatusSession = .init(state: .error, startedAt: nil)
             compactStatusInteraction = .clear
+        case .compactionChanged(_, let lifecycle):
+            switch lifecycle.phase {
+            case .requested, .running:
+                liveToolVerb = (itemID: "context-compaction", text: "Compacting context…")
+                compactStatusSession = .init(state: .running, startedAt: lifecycle.observedAt)
+            case .succeeded:
+                liveToolVerb = nil
+                compactStatusSession = .init(state: .ready, startedAt: nil)
+            case .failed:
+                liveToolVerb = nil
+                compactStatusSession = .init(state: .error, startedAt: nil)
+            case .cancelled, .indeterminate:
+                liveToolVerb = nil
+                compactStatusSession = .init(state: .stopped, startedAt: nil)
+            }
         case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned, .semanticSignal:
             break
         case let .contextWindowUpdated(_, snapshot):
@@ -1866,6 +1884,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // clear all route through `notifyTurnCapabilitiesChanged`), so the
             // chips stay in lockstep with the primary control's own repaint.
             if let supervisor = agentSource {
+                v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
                 v2Composer?.updateQueuedMessages(
                     supervisor.queuedMessages(for: agentID),
                     paused: supervisor.isQueuePaused(for: agentID)

@@ -730,9 +730,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             )
             let intent: AgentComposerIntent?
             if importedAttachments.isEmpty, importedFileReferences.isEmpty,
-               snapshot.executionState == .ready,
                let invocation = resolvedSelectedCommand(in: prompt) {
-                intent = snapshot.capabilities.canSend ? .providerCommand(invocation) : nil
+                if invocation.name == "compact" {
+                    let focus = invocation.arguments.joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    intent = .compact(AgentCompactionRequest(
+                        focus: focus.isEmpty ? nil : focus))
+                } else {
+                    intent = snapshot.executionState == .ready && snapshot.capabilities.canSend
+                        ? .providerCommand(invocation) : nil
+                }
             } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
                 let attachedPrompt = AgentPrompt(
                     text: prompt,
@@ -1096,6 +1103,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         case let .send(text): previewPrompt = AgentPrompt(text)
         case let .sendPrompt(prompt): previewPrompt = prompt
         case let .providerCommand(invocation): previewPrompt = AgentPrompt(invocation.nativeSlashText)
+        case .compact: previewPrompt = nil
         default: previewPrompt = nil
         }
         if let previewPrompt { onSubmissionStarted?(previewPrompt) }
@@ -1189,6 +1197,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 )
             }
             if case .providerCommand = intent { self.selectedDraftCommand = nil }
+            if case .compact = intent { self.selectedDraftCommand = nil }
         }
     }
 

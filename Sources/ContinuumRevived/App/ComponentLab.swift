@@ -2629,6 +2629,7 @@ enum LabCatalog {
         case .userInputResolved: return "userInputResolved"
         case .tokenUsageUpdated: return "tokenUsageUpdated"
         case .contextWindowUpdated: return "contextWindowUpdated"
+        case .compactionChanged(_, let event): return "compactionChanged(\(event.phase.rawValue))"
         case .childAgentSpawned: return "childAgentSpawned"
         case .semanticSignal(_, _, let kind): return "semanticSignal(\(kind.rawValue))"
         case .runtimeError: return "runtimeError"

@@ -307,6 +307,12 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// stale) instead of "unknown". Host-bound like everything else here; the
     /// sync boundary never sees an `AgentRecord`.
     public var lastContextWindow: AgentContextWindowSnapshot?
+    /// Monotonic provider-context generation. Compaction success advances it;
+    /// telemetry captured before that boundary can no longer repaint the meter.
+    public var contextEpoch: UInt64
+    /// Durable write-ahead marker for a manual compaction removed from the FIFO.
+    /// Focus text deliberately remains only in the local queue item.
+    public var inFlightCompaction: AgentCompactionJournal?
     /// The codex thread id captured from the first turn's `thread.started`,
     /// persisted so a later turn resumes the SAME thread (`codex exec resume
     /// <id>`). Codex mints this id itself and gives no flag to set it, so unlike
@@ -612,6 +618,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         lastVisitedAt: Date? = nil,
         tileId: UUID? = nil,
         lastContextWindow: AgentContextWindowSnapshot? = nil,
+        contextEpoch: UInt64 = 0,
+        inFlightCompaction: AgentCompactionJournal? = nil,
         codexThreadId: String? = nil,
         providerSessionId: String? = nil,
         resolvedModelId: String? = nil,
@@ -655,6 +663,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.lastVisitedAt = lastVisitedAt
         self.tileId = tileId
         self.lastContextWindow = lastContextWindow
+        self.contextEpoch = contextEpoch
+        self.inFlightCompaction = inFlightCompaction
         self.codexThreadId = codexThreadId
         self.providerSessionId = providerSessionId
         self.resolvedModelId = resolvedModelId
@@ -768,6 +778,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case lastVisitedAtReferenceInterval
         case tileId
         case lastContextWindow
+        case contextEpoch
+        case inFlightCompaction
         case codexThreadId
         case providerSessionId
         case resolvedModelId
@@ -861,6 +873,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // absent rather than dropping the whole record.
         lastContextWindow = (try? container.decodeIfPresent(
             AgentContextWindowSnapshot.self, forKey: .lastContextWindow)) ?? nil
+        contextEpoch = (try? container.decodeIfPresent(UInt64.self, forKey: .contextEpoch)) ?? 0
+        inFlightCompaction = try? container.decodeIfPresent(
+            AgentCompactionJournal.self, forKey: .inFlightCompaction)
         // Optional, tolerant, no schema bump — the snoozedAt/sourceItemId
         // precedent. A record from before this plan decodes it as absent.
         codexThreadId = try container.decodeIfPresent(String.self, forKey: .codexThreadId)
@@ -934,6 +949,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .lastVisitedAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
+        if contextEpoch != 0 { try container.encode(contextEpoch, forKey: .contextEpoch) }
+        try container.encodeIfPresent(inFlightCompaction, forKey: .inFlightCompaction)
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
         try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
         try container.encodeIfPresent(resolvedModelId, forKey: .resolvedModelId)

@@ -6,6 +6,18 @@ public enum ProviderTrustState: Equatable, Sendable {
     case unavailable(reason: String)
 }
 
+public struct AgentCompactionCommandAvailability: Equatable, Sendable {
+    public var isEnabled: Bool
+    public var detail: String
+    public var disabledReason: String?
+
+    public init(isEnabled: Bool, detail: String, disabledReason: String? = nil) {
+        self.isEnabled = isEnabled
+        self.detail = detail
+        self.disabledReason = disabledReason
+    }
+}
+
 /// Immutable, host-local scope captured when a composer binds to one managed
 /// agent. Providers must resolve files and capabilities from this context, never
 /// from Array's globally active project or the process working directory.
@@ -16,6 +28,7 @@ public struct AgentCompletionContext: Equatable, Sendable {
     public let gitRoot: URL?
     public let arrayProjectRoot: URL
     public let trustState: ProviderTrustState
+    public let compaction: AgentCompactionCommandAvailability?
 
     public init(
         agentID: AgentID,
@@ -23,7 +36,8 @@ public struct AgentCompletionContext: Equatable, Sendable {
         checkoutRoot: URL,
         gitRoot: URL? = nil,
         arrayProjectRoot: URL,
-        trustState: ProviderTrustState
+        trustState: ProviderTrustState,
+        compaction: AgentCompactionCommandAvailability? = nil
     ) {
         precondition(checkoutRoot.isFileURL, "AgentCompletionContext requires a local checkout root")
         precondition(gitRoot?.isFileURL != false, "AgentCompletionContext requires a local git root")
@@ -34,6 +48,7 @@ public struct AgentCompletionContext: Equatable, Sendable {
         self.gitRoot = gitRoot
         self.arrayProjectRoot = arrayProjectRoot
         self.trustState = trustState
+        self.compaction = compaction
     }
 }
 

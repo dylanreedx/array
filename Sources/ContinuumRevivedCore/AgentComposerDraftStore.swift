@@ -153,6 +153,60 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     }
 }
 
+public struct AgentComposerQueuedCompaction: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var operationID: UUID
+    public var focus: String?
+    public var queuedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        operationID: UUID = UUID(),
+        focus: String? = nil,
+        queuedAt: Date
+    ) {
+        self.id = id
+        self.operationID = operationID
+        self.focus = focus
+        self.queuedAt = queuedAt
+    }
+}
+
+public enum AgentComposerQueuedWorkItem: Codable, Equatable, Sendable, Identifiable {
+    case prompt(AgentComposerQueuedMessage)
+    case compaction(AgentComposerQueuedCompaction)
+
+    public var id: UUID {
+        switch self {
+        case .prompt(let value): value.id
+        case .compaction(let value): value.id
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, prompt, compaction }
+    private enum Kind: String, Codable { case prompt, compaction }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .type) {
+        case .prompt: self = .prompt(try container.decode(AgentComposerQueuedMessage.self, forKey: .prompt))
+        case .compaction: self = .compaction(try container.decode(AgentComposerQueuedCompaction.self, forKey: .compaction))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .prompt(let value):
+            try container.encode(Kind.prompt, forKey: .type)
+            try container.encode(value, forKey: .prompt)
+        case .compaction(let value):
+            try container.encode(Kind.compaction, forKey: .type)
+            try container.encode(value, forKey: .compaction)
+        }
+    }
+}
+
 public enum AgentComposerSubmissionState: String, Codable, Sendable {
     case pending
     case confirming
@@ -283,7 +337,7 @@ public actor AgentComposerDraftStore {
     /// B4: in-memory cache of each agent's durable follow-up queue, loaded
     /// lazily from `queuedMessagesFile`. Absent for an agent that has never
     /// queued anything.
-    private var queues: [AgentID: [AgentComposerQueuedMessage]] = [:]
+    private var queues: [AgentID: [AgentComposerQueuedWorkItem]] = [:]
 
     public init(
         applicationSupportDirectory: URL? = nil,
@@ -670,14 +724,71 @@ public actor AgentComposerDraftStore {
             queuedAt: queuedAt ?? clock.now()
         )
         var current = loadQueue(for: agentID)
-        current.append(message)
+        current.append(.prompt(message))
         persistQueue(current, for: agentID)
         return message
     }
 
     /// Read-only, in submission order. Never mutates the queue.
     public func queuedMessages(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
+        loadQueue(for: agentID).compactMap {
+            guard case .prompt(let message) = $0 else { return nil }
+            return message
+        }
+    }
+
+    public func queuedWorkItems(for agentID: AgentID) -> [AgentComposerQueuedWorkItem] {
         loadQueue(for: agentID)
+    }
+
+    public func nextWorkItem(for agentID: AgentID) -> AgentComposerQueuedWorkItem? {
+        loadQueue(for: agentID).first
+    }
+
+    @discardableResult
+    public func enqueueCompaction(
+        focus: String?,
+        operationID: UUID = UUID(),
+        for agentID: AgentID,
+        queuedAt: Date? = nil
+    ) -> AgentComposerQueuedCompaction {
+        let item = AgentComposerQueuedCompaction(
+            operationID: operationID,
+            focus: focus,
+            queuedAt: queuedAt ?? clock.now())
+        var current = loadQueue(for: agentID)
+        current.append(.compaction(item))
+        persistQueue(current, for: agentID)
+        return item
+    }
+
+    @discardableResult
+    public func dequeueNextWorkItem(for agentID: AgentID) -> AgentComposerQueuedWorkItem? {
+        var current = loadQueue(for: agentID)
+        guard !current.isEmpty else { return nil }
+        let next = current.removeFirst()
+        persistQueue(current, for: agentID)
+        return next
+    }
+
+    /// Removes only the item the caller previously journaled. If another queue
+    /// mutation won the actor hop, leave the queue untouched instead of
+    /// accidentally consuming work that has no matching recovery record.
+    public func dequeueNextWorkItem(
+        ifID expectedID: UUID,
+        for agentID: AgentID
+    ) -> AgentComposerQueuedWorkItem? {
+        var current = loadQueue(for: agentID)
+        guard current.first?.id == expectedID else { return nil }
+        let next = current.removeFirst()
+        persistQueue(current, for: agentID)
+        return next
+    }
+
+    public func requeueWorkItemAtFront(_ item: AgentComposerQueuedWorkItem, for agentID: AgentID) {
+        var current = loadQueue(for: agentID)
+        current.insert(item, at: 0)
+        persistQueue(current, for: agentID)
     }
 
     /// Pops the oldest queued message so the caller can hand it to a runner.
@@ -687,7 +798,8 @@ public actor AgentComposerDraftStore {
     public func dequeueNextQueuedMessage(for agentID: AgentID) -> AgentComposerQueuedMessage? {
         var current = loadQueue(for: agentID)
         guard !current.isEmpty else { return nil }
-        let next = current.removeFirst()
+        guard case .prompt(let next) = current.first else { return nil }
+        current.removeFirst()
         persistQueue(current, for: agentID)
         return next
     }
@@ -696,7 +808,7 @@ public actor AgentComposerDraftStore {
     /// became busy again in the same beat) so it is not silently dropped.
     public func requeueMessageAtFront(_ message: AgentComposerQueuedMessage, for agentID: AgentID) {
         var current = loadQueue(for: agentID)
-        current.insert(message, at: 0)
+        current.insert(.prompt(message), at: 0)
         persistQueue(current, for: agentID)
     }
 
@@ -718,7 +830,7 @@ public actor AgentComposerDraftStore {
         persistQueue([], for: agentID)
     }
 
-    private func loadQueue(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
+    private func loadQueue(for agentID: AgentID) -> [AgentComposerQueuedWorkItem] {
         if let cached = queues[agentID] { return cached }
         let file = layout.queuedMessagesFile(for: agentID)
         guard FileManager.default.fileExists(atPath: file.path) else {
@@ -726,7 +838,13 @@ public actor AgentComposerDraftStore {
             return []
         }
         do {
-            let loaded: [AgentComposerQueuedMessage] = try writer.read(at: file)
+            let loaded: [AgentComposerQueuedWorkItem]
+            do {
+                loaded = try writer.read(at: file)
+            } catch {
+                let legacy: [AgentComposerQueuedMessage] = try writer.read(at: file)
+                loaded = legacy.map(AgentComposerQueuedWorkItem.prompt)
+            }
             queues[agentID] = loaded
             return loaded
         } catch {
@@ -736,7 +854,7 @@ public actor AgentComposerDraftStore {
         }
     }
 
-    private func persistQueue(_ messages: [AgentComposerQueuedMessage], for agentID: AgentID) {
+    private func persistQueue(_ messages: [AgentComposerQueuedWorkItem], for agentID: AgentID) {
         queues[agentID] = messages
         let file = layout.queuedMessagesFile(for: agentID)
         do {

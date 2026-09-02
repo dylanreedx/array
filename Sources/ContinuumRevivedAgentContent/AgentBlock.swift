@@ -332,11 +332,45 @@ public struct AgentCompactionPayload: Codable, Equatable, Sendable {
     public var preTokens: Int?
     public var postTokens: Int?
     public var automaticCompaction: Bool?
+    public var provider: String?
+    public var operationID: UUID?
+    public var boundaryID: String?
+    public var phase: String?
+    public var trigger: String?
+    public var preTokensEstimated: Bool?
+    public var postTokensEstimated: Bool?
+    public var willRetryInterruptedTurn: Bool?
+    public var observedAt: Date?
+    public var errorMessage: String?
 
-    public init(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) {
+    public init(
+        preTokens: Int?,
+        postTokens: Int?,
+        automaticCompaction: Bool?,
+        provider: String? = nil,
+        operationID: UUID? = nil,
+        boundaryID: String? = nil,
+        phase: String? = nil,
+        trigger: String? = nil,
+        preTokensEstimated: Bool? = nil,
+        postTokensEstimated: Bool? = nil,
+        willRetryInterruptedTurn: Bool? = nil,
+        observedAt: Date? = nil,
+        errorMessage: String? = nil
+    ) {
         self.preTokens = preTokens
         self.postTokens = postTokens
         self.automaticCompaction = automaticCompaction
+        self.provider = provider
+        self.operationID = operationID
+        self.boundaryID = boundaryID
+        self.phase = phase
+        self.trigger = trigger
+        self.preTokensEstimated = preTokensEstimated
+        self.postTokensEstimated = postTokensEstimated
+        self.willRetryInterruptedTurn = willRetryInterruptedTurn
+        self.observedAt = observedAt
+        self.errorMessage = errorMessage
     }
 }
 
@@ -346,8 +380,17 @@ extension AgentCompactionPayload {
     /// (I5 forbids widening the event itself with dedicated fields). Never
     /// displayed raw; `AgentTranscriptProjection` decodes it back into this
     /// typed payload immediately.
-    public static func encodeTitle(preTokens: Int?, postTokens: Int?, automaticCompaction: Bool?) -> String {
-        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "")"
+    public static func encodeTitle(
+        preTokens: Int?,
+        postTokens: Int?,
+        automaticCompaction: Bool?,
+        provider: String? = nil,
+        boundaryID: String? = nil,
+        phase: String? = nil,
+        trigger: String? = nil,
+        postTokensEstimated: Bool? = nil
+    ) -> String {
+        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "");provider=\(provider ?? "");boundary=\(boundaryID ?? "");phase=\(phase ?? "");trigger=\(trigger ?? "");postEstimated=\(postTokensEstimated.map(String.init) ?? "")"
     }
 
     public init?(decodingTitle title: String?) {
@@ -355,6 +398,11 @@ extension AgentCompactionPayload {
         var pre: Int?
         var post: Int?
         var auto: Bool?
+        var provider: String?
+        var boundaryID: String?
+        var phase: String?
+        var trigger: String?
+        var postEstimated: Bool?
         for pair in title.dropFirst("compaction:".count).split(separator: ";") {
             let parts = pair.split(separator: "=", maxSplits: 1)
             guard parts.count == 2 else { continue }
@@ -362,10 +410,23 @@ extension AgentCompactionPayload {
             case "pre": pre = Int(parts[1])
             case "post": post = Int(parts[1])
             case "auto": auto = Bool(String(parts[1]))
+            case "provider": provider = parts[1].isEmpty ? nil : String(parts[1])
+            case "boundary": boundaryID = parts[1].isEmpty ? nil : String(parts[1])
+            case "phase": phase = parts[1].isEmpty ? nil : String(parts[1])
+            case "trigger": trigger = parts[1].isEmpty ? nil : String(parts[1])
+            case "postEstimated": postEstimated = Bool(String(parts[1]))
             default: break
             }
         }
-        self.init(preTokens: pre, postTokens: post, automaticCompaction: auto)
+        self.init(
+            preTokens: pre,
+            postTokens: post,
+            automaticCompaction: auto,
+            provider: provider,
+            boundaryID: boundaryID,
+            phase: phase ?? "succeeded",
+            trigger: trigger,
+            postTokensEstimated: postEstimated)
     }
 }
 

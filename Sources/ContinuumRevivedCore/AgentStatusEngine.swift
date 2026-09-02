@@ -455,6 +455,172 @@ public enum AgentContextWindowFreshness: Equatable, Sendable, Codable {
     }
 }
 
+public enum AgentCompactionPhase: String, Codable, Equatable, Sendable {
+    case requested
+    case running
+    case succeeded
+    case failed
+    case cancelled
+    case indeterminate
+}
+
+public enum AgentCompactionTrigger: Codable, Equatable, Sendable {
+    case manual
+    case threshold
+    case overflowRecovery
+    case providerAutomatic
+    case unknown(String)
+
+    public init(providerValue: String?) {
+        guard let raw = providerValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            self = .unknown("")
+            return
+        }
+        switch raw.lowercased() {
+        case "manual": self = .manual
+        case "threshold", "auto", "automatic": self = .threshold
+        case "overflow", "overflowrecovery", "overflow_recovery", "overflow-recovery": self = .overflowRecovery
+        case "providerautomatic", "provider_automatic", "provider-automatic": self = .providerAutomatic
+        default: self = .unknown(raw)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.init(providerValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    public var providerValue: String {
+        switch self {
+        case .manual: "manual"
+        case .threshold: "threshold"
+        case .overflowRecovery: "overflowRecovery"
+        case .providerAutomatic: "providerAutomatic"
+        case .unknown(let raw): raw
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(providerValue)
+    }
+}
+
+public enum AgentCompactionTokenPrecision: String, Codable, Equatable, Sendable {
+    case exact
+    case estimated
+}
+
+public struct AgentCompactionTokenReading: Codable, Equatable, Sendable {
+    public var value: Int
+    public var precision: AgentCompactionTokenPrecision
+
+    public init(_ value: Int, precision: AgentCompactionTokenPrecision) {
+        self.value = value
+        self.precision = precision
+    }
+}
+
+public struct AgentAutomaticCompactionPolicy: Codable, Equatable, Sendable {
+    public var enabled: Bool?
+    public var thresholdTokens: Int?
+    public var thresholdScope: String?
+
+    public init(enabled: Bool? = nil, thresholdTokens: Int? = nil, thresholdScope: String? = nil) {
+        self.enabled = enabled
+        self.thresholdTokens = thresholdTokens
+        self.thresholdScope = thresholdScope
+    }
+}
+
+public struct AgentCompactionLifecycleEvent: Codable, Equatable, Sendable {
+    public var operationID: UUID?
+    public var boundaryID: String?
+    public var phase: AgentCompactionPhase
+    public var trigger: AgentCompactionTrigger
+    public var beforeTokens: AgentCompactionTokenReading?
+    public var afterTokens: AgentCompactionTokenReading?
+    public var provider: String
+    public var errorMessage: String?
+    public var willRetryInterruptedTurn: Bool?
+    public var observedAt: Date
+
+    public init(
+        operationID: UUID? = nil,
+        boundaryID: String? = nil,
+        phase: AgentCompactionPhase,
+        trigger: AgentCompactionTrigger,
+        beforeTokens: AgentCompactionTokenReading? = nil,
+        afterTokens: AgentCompactionTokenReading? = nil,
+        provider: String,
+        errorMessage: String? = nil,
+        willRetryInterruptedTurn: Bool? = nil,
+        observedAt: Date = Date()
+    ) {
+        self.operationID = operationID
+        self.boundaryID = boundaryID
+        self.phase = phase
+        self.trigger = trigger
+        self.beforeTokens = beforeTokens
+        self.afterTokens = afterTokens
+        self.provider = provider
+        self.errorMessage = errorMessage
+        self.willRetryInterruptedTurn = willRetryInterruptedTurn
+        self.observedAt = observedAt
+    }
+}
+
+public struct AgentCompactionRequest: Equatable, Sendable {
+    public var operationID: UUID
+    public var focus: String?
+
+    public init(operationID: UUID = UUID(), focus: String? = nil) {
+        self.operationID = operationID
+        self.focus = focus
+    }
+}
+
+public struct AgentCompactionJournal: Codable, Equatable, Sendable {
+    public var operationID: UUID
+    public var boundaryID: String?
+    public var phase: AgentCompactionPhase
+    public var startedAt: Date
+    public var errorMessage: String?
+
+    public init(
+        operationID: UUID,
+        boundaryID: String? = nil,
+        phase: AgentCompactionPhase,
+        startedAt: Date,
+        errorMessage: String? = nil
+    ) {
+        self.operationID = operationID
+        self.boundaryID = boundaryID
+        self.phase = phase
+        self.startedAt = startedAt
+        self.errorMessage = errorMessage
+    }
+}
+
+public struct AgentCompactionCapabilities: Equatable, Sendable {
+    public var supportsManual: Bool
+    public var supportsFocus: Bool
+    public var unavailableReason: String?
+    public var automaticPolicy: AgentAutomaticCompactionPolicy?
+
+    public init(
+        supportsManual: Bool,
+        supportsFocus: Bool = false,
+        unavailableReason: String? = nil,
+        automaticPolicy: AgentAutomaticCompactionPolicy? = nil
+    ) {
+        self.supportsManual = supportsManual
+        self.supportsFocus = supportsFocus
+        self.unavailableReason = unavailableReason
+        self.automaticPolicy = automaticPolicy
+    }
+}
+
 public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public var usedTokens: Int?
     public var maxTokens: Int?
@@ -465,6 +631,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public var totalProcessedTokens: Int?
     public var totalCostUsd: Double?
     public var automaticCompaction: Bool?
+    public var contextEpoch: UInt64?
+    public var automaticCompactionPolicy: AgentAutomaticCompactionPolicy?
     public var observedAt: Date
     public var source: AgentContextWindowTelemetrySource
     public var freshness: AgentContextWindowFreshness
@@ -479,6 +647,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         totalProcessedTokens: Int? = nil,
         totalCostUsd: Double? = nil,
         automaticCompaction: Bool? = nil,
+        contextEpoch: UInt64? = nil,
+        automaticCompactionPolicy: AgentAutomaticCompactionPolicy? = nil,
         observedAt: Date,
         source: AgentContextWindowTelemetrySource,
         freshness: AgentContextWindowFreshness
@@ -492,6 +662,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         self.totalProcessedTokens = totalProcessedTokens
         self.totalCostUsd = totalCostUsd
         self.automaticCompaction = automaticCompaction
+        self.contextEpoch = contextEpoch
+        self.automaticCompactionPolicy = automaticCompactionPolicy
         self.observedAt = observedAt
         self.source = source
         self.freshness = freshness
@@ -586,6 +758,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
     case semanticSignal(threadId: String, itemId: String, kind: AgentSemanticSignalKind)
     case tokenUsageUpdated(threadId: String, snapshot: TokenUsageSnapshot)
     case contextWindowUpdated(threadId: String, snapshot: AgentContextWindowSnapshot)
+    case compactionChanged(threadId: String, event: AgentCompactionLifecycleEvent)
     /// Safe semantic identity for a child created by a local or provider spawn.
     /// Prompt/tool arguments are deliberately absent.
     case childAgentSpawned(threadId: String, childAgentID: UUID, parentAgentID: UUID, displayName: String, sourceItemID: String?, provider: String, spawnedAt: Date)
@@ -609,6 +782,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case questions
         case semanticKind
         case snapshot
+        case compactionEvent
         case message
         case childAgentID
         case parentAgentID
@@ -632,6 +806,7 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
         case semanticSignal
         case tokenUsageUpdated
         case contextWindowUpdated
+        case compactionChanged
         case childAgentSpawned
         case runtimeError
     }
@@ -712,6 +887,11 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             self = .contextWindowUpdated(
                 threadId: try container.decode(String.self, forKey: .threadId),
                 snapshot: try container.decode(AgentContextWindowSnapshot.self, forKey: .snapshot)
+            )
+        case .compactionChanged:
+            self = .compactionChanged(
+                threadId: try container.decode(String.self, forKey: .threadId),
+                event: try container.decode(AgentCompactionLifecycleEvent.self, forKey: .compactionEvent)
             )
         case .childAgentSpawned:
             self = .childAgentSpawned(
@@ -797,6 +977,10 @@ public enum AgentRuntimeEvent: Codable, Equatable, Sendable {
             try container.encode(Discriminator.contextWindowUpdated, forKey: .type)
             try container.encode(threadId, forKey: .threadId)
             try container.encode(snapshot, forKey: .snapshot)
+        case .compactionChanged(let threadId, let event):
+            try container.encode(Discriminator.compactionChanged, forKey: .type)
+            try container.encode(threadId, forKey: .threadId)
+            try container.encode(event, forKey: .compactionEvent)
         case let .childAgentSpawned(threadId, childAgentID, parentAgentID, displayName, sourceItemID, provider, spawnedAt):
             try container.encode(Discriminator.childAgentSpawned, forKey: .type)
             try container.encode(threadId, forKey: .threadId)

@@ -135,6 +135,18 @@ private func runPiSessionTranscriptParseChecks() {
     // manual/automatic flag pi's session file does not carry.
     let compactionKind = ItemKind.compaction
     let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: nil, automaticCompaction: nil)
+    let compactionBoundaryID = "pi:t-pi:unknown:26268"
+    guard transcript.steps.count > 9,
+          case .event(.compactionChanged(let lifecycleThreadID, let lifecycle)) = transcript.steps[9] else {
+        expect(false, "PiSessionTranscriptReader: persisted compaction must rehydrate a first-class lifecycle event")
+        return
+    }
+    expect(lifecycleThreadID == threadId && lifecycle.phase == .succeeded
+               && lifecycle.boundaryID == compactionBoundaryID
+               && lifecycle.trigger == .unknown("")
+               && lifecycle.beforeTokens == AgentCompactionTokenReading(26268, precision: .exact)
+               && lifecycle.afterTokens == nil && lifecycle.provider == "pi",
+           "PiSessionTranscriptReader: persisted boundary identity and known/unknown metadata drifted: \(lifecycle)")
     let expected: [RehydratedTranscriptStep] = [
         .userPrompt("PI_PROMPT_ONE"),
         .event(.turnStarted(threadId: threadId, turnId: "rehydrated-t1")),
@@ -145,8 +157,9 @@ private func runPiSessionTranscriptParseChecks() {
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "PI_ANSWER_TWO")),
         .event(.itemStarted(threadId: threadId, itemId: "call_2", kind: .fileChange, title: "write")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_2", kind: .fileChange, status: .failed)),
-        .event(.itemStarted(threadId: threadId, itemId: "pi-compaction-1", kind: compactionKind, title: compactionTitle)),
-        .event(.itemCompleted(threadId: threadId, itemId: "pi-compaction-1", kind: compactionKind, status: .completed)),
+        .event(.compactionChanged(threadId: threadId, event: lifecycle)),
+        .event(.itemStarted(threadId: threadId, itemId: compactionBoundaryID, kind: compactionKind, title: compactionTitle)),
+        .event(.itemCompleted(threadId: threadId, itemId: compactionBoundaryID, kind: compactionKind, status: .completed)),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
     ]
     expect(transcript.steps == expected,

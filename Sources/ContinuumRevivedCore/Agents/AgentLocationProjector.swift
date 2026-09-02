@@ -457,6 +457,18 @@ public struct AgentLocationProjector: Sendable {
         case .runtimeError:
             setLifecycle(.failed, at: now)
 
+        case .compactionChanged(_, let event):
+            switch event.phase {
+            case .requested, .running:
+                setLifecycle(.thinking, at: now)
+            case .failed:
+                setLifecycle(.failed, at: now)
+            case .cancelled, .indeterminate:
+                setLifecycle(.interrupted, at: now)
+            case .succeeded:
+                setLifecycle(.waiting, at: now)
+            }
+
         case .tokenUsageUpdated, .contextWindowUpdated, .childAgentSpawned, .semanticSignal:
             break
         }

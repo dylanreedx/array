@@ -32,7 +32,7 @@ struct AgentTileStatePresenter {
         let resolved = presentationState(for: snapshot)
         let isTimed: Bool
         switch snapshot.state {
-        case .starting, .working, .queued, .needsAction: isTimed = true
+        case .starting, .working, .compacting, .queued, .needsAction: isTimed = true
         case .ready, .failed, .restored: isTimed = false
         }
         // The snapshot is the supervisor-owned clock. A tile-local `startedAt`
@@ -110,6 +110,9 @@ struct AgentTileStatePresenter {
             let action = snapshot.capabilities.canStop ? "Stop current turn" : "No turn action available"
             let label = AgentStatusVocabulary.label(for: .working)
             return (.working, label, "Agent is working. \(action)", nil, action)
+        case .compacting:
+            let action = snapshot.capabilities.canStop ? "Stop context compaction" : "Context compaction in progress"
+            return (.working, "Compacting context…", "Agent is compacting context. \(action)", nil, action)
         case .queued:
             let label = AgentStatusVocabulary.label(for: .working)
             return (.working, label, "Prompt is queued. No immediate turn action available", nil, "No immediate turn action available")

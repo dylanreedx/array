@@ -69,6 +69,8 @@ final class AgentBlockRendererRegistry {
                     try registry.register(TableRenderer(), for: kind)
                 } else if kind == .thematicBreak {
                     try registry.register(ThematicBreakRenderer(), for: kind)
+                } else if kind == .compaction {
+                    try registry.register(CompactionRenderer(), for: kind)
                 } else if kind == .error || kind == .notice {
                     try registry.register(ErrorNoticeRenderer(kind: kind), for: kind)
                 } else {
