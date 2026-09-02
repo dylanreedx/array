@@ -13034,7 +13034,10 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
     // reading a half-written one (see `RunArtifactsReader.tailEventsJSONL`). A
     // line with no newline at all reads as "still being written" — correct for
     // production, but it means this fixture must not omit it.
-    try (#"{"ts":"1","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first line on disk before either half of the tool call is processed"}]}}"# + "\n")
+    try ([
+        #"{"ts":"0","type":"agent_start","agentId":"race-child"}"#,
+        #"{"ts":"1","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first line on disk before either half of the tool call is processed"}]}}"#
+    ].joined(separator: "\n") + "\n")
         .write(to: eventsURL, atomically: true, encoding: .utf8)
     let livePid = ProcessInfo.processInfo.processIdentifier
     try #"{"id":"\#(runId)","role":"code-scout","status":"running","pid":\#(livePid)}"#
@@ -13121,6 +13124,10 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
     }) else {
         throw fail("T6-D: the content already on disk before the race even began never reached the child, so the watcher this test depends on is not tailing at all")
     }
+    guard supervisor.turnSnapshot(for: child.id)?.state == .working,
+          supervisor.turnSnapshot(for: child.id)?.turnStartedAt != nil else {
+        throw fail("T6-D: the observed child's authoritative agent_start did not establish a live turn before restore reconciliation")
+    }
     try appendToEvents(#"{"ts":"2","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"appended after the child was finally adopted"}]}}"# + "\n")
     guard await waitUntil(timeout: 10, pollInterval: 0.05, {
         childInbox.events.map { "\($0)" }.joined().contains("appended after the child was finally adopted")
@@ -13128,7 +13135,37 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
         throw fail("T6-D: an append made AFTER the child was adopted never reached it — the watcher was torn down during the race and nothing was left running to notice the append")
     }
 
-    return "a run bound before its child was adopted (tool_execution_end arriving ahead of tool_execution_start) keeps its binding and its parent's watcher alive across that window, and an append made once the child exists still reaches it"
+    // End the first supervisor's ownership before making run.json terminal. This
+    // leaves the child's persisted working turn exactly as an app termination
+    // would, while ensuring the old watcher cannot win the reconciliation race.
+    supervisor.stop(parentId)
+    guard supervisor.observedRunBindingCount == 0 else {
+        throw fail("T6-D: stopping the original parent did not release its observed-run binding before the restore witness")
+    }
+    try #"{"id":"\#(runId)","role":"code-scout","status":"failed","pid":999999999}"#
+        .write(to: runJSONURL, atomically: true, encoding: .utf8)
+
+    let restored = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in ScriptedAgentRunner(script: [.sessionStateChanged(.ready)]) },
+        warn: { _ in })
+    _ = restored.restore()
+    guard restored.records[child.id]?.providerSessionId == runId,
+          (try? store.load(id: child.id))?.providerSessionId == runId else {
+        throw fail("T6-D: the restored child lost the bind-before-adopt run identity")
+    }
+    guard case .failed = restored.turnSnapshot(for: child.id)?.state,
+          restored.turnSnapshot(for: child.id)?.turnStartedAt == nil,
+          restored.records[child.id]?.latestTerminalEvent?.outcome == .failed else {
+        throw fail("T6-D: restoring the bind-before-adopt child did not reconcile terminal failed run.json into one non-working failed turn")
+    }
+    let terminalSequence = restored.records[child.id]?.latestTerminalEvent?.sequence
+    restored.reconcileObservedRunsAfterRestore()
+    guard restored.records[child.id]?.latestTerminalEvent?.sequence == terminalSequence else {
+        throw fail("T6-D: repeated restore reconciliation delivered the same observed-run terminal boundary more than once")
+    }
+
+    return "a run bound before its child was adopted keeps its watcher and persisted run identity across that window, an append after adoption reaches it, and a new supervisor uses the identity to reconcile failed run.json exactly once into a non-working child"
 }
 
 /// T6-B — a run whose directory goes quiet forever still reaches a terminal
