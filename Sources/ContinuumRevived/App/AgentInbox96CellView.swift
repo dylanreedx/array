@@ -642,6 +642,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             card.addSubview(indicator)
             throbber = indicator
         }
+        // Each running row rides its own point on the shared cycle. Without this
+        // every gyro in the column shows the same pose, which reads as one
+        // animation stuttering rather than several agents working — and the offset
+        // comes from the AGENT's id, not the cell's position, so scrolling a row
+        // out of view and back does not move it on the cycle.
+        if let id = shown?.row.id {
+            throbber?.setPhaseOffset(
+                DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: id))
+        }
         if prefersReducedMotion() {
             throbber?.setSnapshotPhase(0.32)
         } else {
@@ -1067,6 +1076,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The status is a PAINTED glyph here, not a text label, so it is reported by
     /// its symbol name — the honest answer for a row that draws rather than writes.
     var qaGlyph: String { decorations.isWorking ? "throbber" : (statusGlyph.symbol ?? "") }
+    /// Where this row's gyro sits on the shared cycle, or nil when the row is not
+    /// working. Witnesses the WIRING: `throbberPhaseOffset` being correct proves
+    /// nothing if `applyThrobber` forgets to hand it over, which is the regression
+    /// that puts every running row back in lockstep.
+    var qaThrobberPhaseOffset: CGFloat? { throbber?.qaPhaseOffset }
     /// Whether the escalated review mark is actually animating right now — the one
     /// fact about rule 2 that a still image cannot carry.
     var qaIsPulsingForQA: Bool { statusGlyph.isPulsing }

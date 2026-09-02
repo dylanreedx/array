@@ -1318,6 +1318,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// Codable transcript state.
     func bindToolDetailAgent(_ agentID: AgentID?) {
         toolDetailAgentID = agentID
+        // The tail gyro rides this agent's own point on the shared cycle, the same
+        // point its sidebar row uses. Two tiles side by side then read as two
+        // agents working rather than one animation shown twice.
+        if let agentID {
+            tailThinkingIndicator.setPhaseOffset(
+                DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: agentID.rawValue))
+        }
         activeRuntimeScope = nil
         runtimeIdentities.removeAll()
         pendingRuntimeObservations.removeAll()
@@ -1378,6 +1385,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     var qaTailIsSettled: Bool { tailIsSettled }
+    var qaTailThrobberPhaseOffset: CGFloat { tailThinkingIndicator.qaPhaseOffset }
 
     /// Re-drives the words beside the gyro without touching the snapshot: the
     /// elapsed tick calls this once a second, and rebuilding the collection item

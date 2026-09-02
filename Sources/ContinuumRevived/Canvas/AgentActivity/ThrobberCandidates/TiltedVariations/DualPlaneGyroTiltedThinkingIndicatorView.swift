@@ -156,6 +156,24 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
     private var animationRequested = false
     private var reducedMotionEnabled: Bool
     private var currentSnapshotPhase: CGFloat = 0
+    /// Where this instance sits on the shared master cycle, in turns.
+    ///
+    /// Live motion is anchored to the wall clock (see `timelinePhase`), so every
+    /// indicator in the app would otherwise ride the SAME phase — a column of
+    /// running agents beating in unison, which reads as one animation rather than
+    /// several agents. An owner gives each instance its own offset, derived from
+    /// something stable (the agent's id), so the offset survives view recycling.
+    private var phaseOffset: CGFloat = 0
+    /// The bounds the live keyframes were sampled against, or `.null` when no live
+    /// animation is installed. Keyframe VALUES are absolute positions, so they are
+    /// only valid for the geometry they were sampled from; this is what decides
+    /// whether a layout pass has to resample, and it is deliberately not "did
+    /// layout run", which is the question the reset bug answered.
+    private var animatedGeometryBounds: CGRect = .null
+    /// How many times the keyframe table has been sampled and installed. A cost
+    /// counter, and the only way a witness can tell "layout left the motion alone"
+    /// from "layout rebuilt it and the rebuild happened to be seamless".
+    private(set) var qaAnimationRebuilds = 0
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: Metrics.side, height: Metrics.side)
@@ -186,13 +204,22 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// Layout must not restart the motion.
+    ///
+    /// This used to drop every compositor animation on ANY layout pass and rebuild
+    /// it from phase 0. In the sidebar that is once a second (the row re-applies to
+    /// re-tick its duration word) and again on hover, so the gyro visibly snapped
+    /// back to its starting pose — the reported defect. Only a geometry change can
+    /// invalidate keyframes sampled in absolute coordinates, so only a geometry
+    /// change resamples; and because the rebuild anchors to the wall clock, even a
+    /// resample continues from the phase the old animation was showing.
     override func layout() {
         super.layout()
         updateContentsScale()
-        applyModelState(phase: modelPhaseForCurrentMode())
-        if animationRequested && !reducedMotionEnabled {
+        if animatedGeometryBounds != bounds {
             removeCompositorAnimations()
         }
+        applyModelState(phase: modelPhaseForCurrentMode())
         reconcileAnimationState()
     }
 
@@ -238,6 +265,40 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
         removeCompositorAnimations()
         applyModelState(phase: currentSnapshotPhase)
         configureAccessibility(animated: false, phase: currentSnapshotPhase)
+    }
+
+    /// Places this indicator at its own point on the shared master cycle.
+    ///
+    /// Pass something derived from the OWNER's stable identity, not a counter and
+    /// not a random number: a row that scrolls out of view and back, or a cell that
+    /// is recycled onto the same agent, has to land on the phase it left.
+    func setPhaseOffset(_ offset: CGFloat) {
+        let normalized = Self.normalizedPhase(offset)
+        guard normalized != phaseOffset else { return }
+        phaseOffset = normalized
+        // Re-anchor rather than reconcile: the installed animation carries the old
+        // offset in its `beginTime`, and `startCompositorAnimationsIfNeeded`
+        // deliberately leaves an already-installed animation alone.
+        removeCompositorAnimations()
+        reconcileAnimationState()
+    }
+
+    /// An agent's fixed place on the master cycle, in turns.
+    ///
+    /// One owner for the mapping, because two of them would let the sidebar row and
+    /// the agent's own tile disagree about where its gyro is. FNV-1a over the id:
+    /// deterministic, so the same agent lands on the same phase in every session
+    /// and after every view recycle, and well spread, so neighbours rarely collide.
+    /// Deliberately NOT a counter over whatever is visible — that renumbers on
+    /// every insert, which would jump the agents that did not change.
+    static func phaseOffset(for identity: UUID) -> CGFloat {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        withUnsafeBytes(of: identity.uuid) { bytes in
+            for byte in bytes {
+                hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+            }
+        }
+        return CGFloat(Double(hash % 1_000) / 1_000)
     }
 
     func setReducedMotion(_ enabled: Bool) {
@@ -370,9 +431,17 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
         }
 
         startCompositorAnimationsIfNeeded()
-        configureAccessibility(animated: true, phase: currentSnapshotPhase)
+        configureAccessibility(animated: true, phase: modelPhaseForCurrentMode())
     }
 
+    /// Installs the keyframes, sampled over one WHOLE master cycle from phase 0 and
+    /// positioned on that cycle by `beginTime` alone.
+    ///
+    /// The samples used to start at `currentSnapshotPhase`, which made "where the
+    /// animation starts" a property of the keyframe table. That is what let a
+    /// rebuild reset the motion, and it is also why two indicators could not
+    /// differ: the table was identical for every instance. Phase now lives
+    /// entirely in `beginTime`, so a rebuild is continuous and a stagger is free.
     private func startCompositorAnimationsIfNeeded() {
         let missingAnimation = nodeLayers.enumerated().contains { index, node in
             node.animation(forKey: animationKey(AnimationKey.position, index: index)) == nil
@@ -380,12 +449,18 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
                 || node.animation(forKey: animationKey(AnimationKey.opacity, index: index)) == nil
                 || node.animation(forKey: animationKey(AnimationKey.zPosition, index: index)) == nil
         }
-        guard missingAnimation else { return }
+        guard missingAnimation || animatedGeometryBounds != bounds else { return }
 
         removeCompositorAnimations()
-        applyModelState(phase: currentSnapshotPhase)
 
         let geometry = Self.geometry(in: bounds)
+        let phaseNow = timelinePhase()
+        applyModelState(phase: phaseNow)
+        // Local time zero has to land where phase zero is, `phaseNow * duration`
+        // ago. Expressed in the layer's own time space so an ancestor with
+        // non-default timing cannot shift it.
+        let beginTime = (layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime())
+            - Double(phaseNow) * Metrics.masterDuration
         let keyTimes = (0...Metrics.nodeSampleCount).map { step in
             NSNumber(value: Double(step) / Double(Metrics.nodeSampleCount))
         }
@@ -394,40 +469,44 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
             let samples = (0...Metrics.nodeSampleCount).map { step in
                 Self.nodeState(
                     index: index,
-                    phase: currentSnapshotPhase + CGFloat(step) / CGFloat(Metrics.nodeSampleCount),
+                    phase: CGFloat(step) / CGFloat(Metrics.nodeSampleCount),
                     geometry: geometry
                 )
             }
 
             let position = CAKeyframeAnimation(keyPath: "position")
             position.values = samples.map { NSValue(point: $0.position) }
-            configure(animation: position, keyTimes: keyTimes)
+            configure(animation: position, keyTimes: keyTimes, beginTime: beginTime)
             node.add(position, forKey: animationKey(AnimationKey.position, index: index))
 
             let scale = CAKeyframeAnimation(keyPath: "transform.scale")
             scale.values = samples.map { NSNumber(value: Double($0.scale)) }
-            configure(animation: scale, keyTimes: keyTimes)
+            configure(animation: scale, keyTimes: keyTimes, beginTime: beginTime)
             node.add(scale, forKey: animationKey(AnimationKey.scale, index: index))
 
             let opacity = CAKeyframeAnimation(keyPath: "opacity")
             opacity.values = samples.map { NSNumber(value: $0.opacity) }
-            configure(animation: opacity, keyTimes: keyTimes)
+            configure(animation: opacity, keyTimes: keyTimes, beginTime: beginTime)
             node.add(opacity, forKey: animationKey(AnimationKey.opacity, index: index))
 
             let zPosition = CAKeyframeAnimation(keyPath: "zPosition")
             zPosition.values = samples.map { NSNumber(value: Double($0.zPosition)) }
-            configure(animation: zPosition, keyTimes: keyTimes)
+            configure(animation: zPosition, keyTimes: keyTimes, beginTime: beginTime)
             node.add(zPosition, forKey: animationKey(AnimationKey.zPosition, index: index))
         }
+
+        animatedGeometryBounds = bounds
+        qaAnimationRebuilds += 1
     }
 
-    private func configure(animation: CAKeyframeAnimation, keyTimes: [NSNumber]) {
+    private func configure(animation: CAKeyframeAnimation, keyTimes: [NSNumber], beginTime: CFTimeInterval) {
         animation.keyTimes = keyTimes
         animation.duration = Metrics.masterDuration
         animation.repeatCount = .infinity
         animation.calculationMode = .linear
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.isRemovedOnCompletion = false
+        animation.beginTime = beginTime
     }
 
     private func removeCompositorAnimations() {
@@ -437,10 +516,19 @@ final class DualPlaneGyroTiltedThinkingIndicatorView: NSView, AgentThinkingIndic
             node.removeAnimation(forKey: animationKey(AnimationKey.opacity, index: index))
             node.removeAnimation(forKey: animationKey(AnimationKey.zPosition, index: index))
         }
+        animatedGeometryBounds = .null
+    }
+
+    /// The phase live motion should be showing right now: the shared wall clock,
+    /// plus this instance's offset. A pure function of time, which is exactly what
+    /// makes the motion survive a rebuild.
+    private func timelinePhase(at time: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+        Self.normalizedPhase(CGFloat(time / Metrics.masterDuration) + phaseOffset)
     }
 
     private func modelPhaseForCurrentMode() -> CGFloat {
-        reducedMotionEnabled && animationRequested ? Metrics.reducedMotionPhase : currentSnapshotPhase
+        guard animationRequested else { return currentSnapshotPhase }
+        return reducedMotionEnabled ? Metrics.reducedMotionPhase : timelinePhase()
     }
 
     private func animationKey(_ base: String, index: Int) -> String {
@@ -633,6 +721,18 @@ extension DualPlaneGyroTiltedThinkingIndicatorView {
     }
 
     var qaSnapshotPhase: CGFloat { currentSnapshotPhase }
+    var qaPhaseOffset: CGFloat { phaseOffset }
+    var qaMasterDuration: CFTimeInterval { Metrics.masterDuration }
+
+    /// The phase the INSTALLED animation will actually present at `time`, read back
+    /// off the `CAAnimation` the layer is holding rather than recomputed from the
+    /// model. A witness that recomputes cannot see a rebuild that restarts.
+    func qaPresentedPhase(at time: CFTimeInterval) -> CGFloat? {
+        guard let animation = nodeLayers.first?
+            .animation(forKey: animationKey(AnimationKey.position, index: 0)),
+            animation.duration > 0 else { return nil }
+        return Self.normalizedPhase(CGFloat((time - animation.beginTime) / animation.duration))
+    }
     var qaReducedMotionEnabled: Bool { reducedMotionEnabled }
     var qaReducedMotionPhase: CGFloat { Metrics.reducedMotionPhase }
     var qaAccessibilityLabel: String? { accessibilityLabel() }
