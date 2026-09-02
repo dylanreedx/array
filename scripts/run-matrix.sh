@@ -507,6 +507,15 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
+# walked every world-plane subview per camera commit — a cost invisible to a
+# chrome counter. The plane now keeps a spatial index; this counts the candidate
+# visits and cross-checks the index against a brute-force walk.
+run_app_check .build/debug/Array --canvas-visibility-index-check
+# WS3: the file-tree scanner emits a growing FULL snapshot every 512 nodes, each
+# of which used to get its own main-actor task and a full outline reload. This
+# bounds both the applies and the scheduled drains.
+run_app_check .build/debug/Array --file-tree-snapshot-coalescing-check
 # WS9: a zone below the live hydration tier must still create into its OWN
 # project. Controllers were acquired only at mount, so such a zone had none and
 # creation silently fell back to the active project's spawner.

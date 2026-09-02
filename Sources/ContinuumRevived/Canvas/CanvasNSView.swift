@@ -1375,13 +1375,54 @@ final class CanvasNSView: NSView, TokenThemed {
     /// far off-screen cost a step exactly what an on-screen one cost.
     /// `canvas.magnify-slope` measured 4 chrome refreshes per step at 16 installed
     /// and 38 at 128, with the visible count pinned at 12 throughout.
+    ///
+    /// WS3: the DISCOVERY was still O(installed) after that fix — the chrome
+    /// refresh became visible-only but this property still walked every
+    /// world-plane subview per commit. It now asks the plane's maintained
+    /// spatial index instead, so candidate visits are O(visible) too.
+    /// `--canvas-visibility-index-check` owns that invariant, with a
+    /// brute-force cross-check as its anti-teeth.
     var visibleTileViews: [TileNSView] {
-        let visibleWorld = worldPlane.bounds
-        return worldPlane.subviews.compactMap { subview in
-            guard let tile = subview as? TileNSView,
-                  tile.frame.intersects(visibleWorld) else { return nil }
-            return tile
-        }
+        worldPlane.tileViews(intersecting: worldPlane.bounds)
+    }
+
+    /// QA (WS3): the world plane's visibility-index counters, surfaced here so a
+    /// check does not have to reach through `worldPlane`.
+    struct VisibilityStats: Equatable {
+        var candidateVisits = 0
+        var queries = 0
+        var rebuilds = 0
+        var bruteForceQueries = 0
+    }
+    var qaVisibilityStats: VisibilityStats {
+        VisibilityStats(candidateVisits: worldPlane.qaVisibilityCandidateVisits,
+                        queries: worldPlane.qaVisibilityQueryCount,
+                        rebuilds: worldPlane.qaVisibilityIndexRebuilds,
+                        bruteForceQueries: worldPlane.qaVisibilityBruteForceQueryCount)
+    }
+    func qaResetVisibilityStats() { worldPlane.qaResetVisibilityStats() }
+
+    /// QA anti-teeth: the pre-index answer, computed by walking every subview.
+    /// The index must agree with this exactly.
+    var qaBruteForceVisibleTileViews: [TileNSView] {
+        worldPlane.qaBruteForceTileViews(intersecting: worldPlane.bounds)
+    }
+
+    /// QA anti-teeth over an ARBITRARY world rect. A viewport-sized rect cannot
+    /// exercise the per-candidate intersection test on its own: every tile that
+    /// shares a grid cell with the viewport also intersects it, so deleting the
+    /// test outright leaves the visible answer unchanged. A rect smaller than one
+    /// cell separates them.
+    func qaIndexedTileViews(intersecting rect: CGRect) -> [TileNSView] {
+        worldPlane.tileViews(intersecting: rect)
+    }
+    func qaBruteForceTileViews(intersecting rect: CGRect) -> [TileNSView] {
+        worldPlane.qaBruteForceTileViews(intersecting: rect)
+    }
+
+    /// QA: every tile view installed in the plane, in subview order.
+    var qaWorldPlaneTileViews: [TileNSView] {
+        worldPlane.subviews.compactMap { $0 as? TileNSView }
     }
 
     /// QA: how many installed tile views are NOT where the camera says they

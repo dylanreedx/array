@@ -396,7 +396,14 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         outlineView.layoutSubtreeIfNeeded()
     }
 
+    /// QA (WS3): full `NSOutlineView.reloadData` passes driven by an accepted
+    /// snapshot. Every one of these rebuilds the outline model and re-runs the
+    /// collapse/expansion/selection restore, so it is the main-thread cost the
+    /// scanner's growing snapshots used to multiply.
+    private(set) var qaOutlineReloadCount = 0
+
     private func apply(_ snapshot: FileTreeSnapshot) {
+        qaOutlineReloadCount += 1
         latestSnapshot = snapshot
         pathLabel.stringValue = "\(snapshot.root.lastPathComponent)  ·  \(snapshot.nodes.count)"
         outlineModel = FileTreeOutlineModel(snapshot: snapshot, query: fileTreeTile.searchQuery)

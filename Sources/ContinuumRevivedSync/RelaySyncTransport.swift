@@ -69,7 +69,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         startAtHead: Bool = false,
         pollWaitMs: UInt64 = 25_000,
         backoffNanoseconds: [UInt64] = [1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 15_000_000_000],
-        session: URLSession = .shared,
+        session: URLSession = RelaySyncTransport.makeDefaultSession(),
         onCursorChange: (@Sendable (UInt64) -> Void)? = nil,
         onDiagnostic: (@Sendable (String) -> Void)? = nil,
         apiVersion: APIVersion = .legacyV1
@@ -351,10 +351,46 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         throw RelayClientError.httpStatus(status, code: code)
     }
 
+    /// The relay's own URL session.
+    ///
+    /// This used to default to `URLSession.shared`, which carries the process
+    /// URL cache: a long-poll transport at a few requests a second per project
+    /// therefore fed every relay response into `CFURLCache`'s SQLite store, and
+    /// the baseline disk profile was dominated by `Cache.db` writes for bytes
+    /// nothing ever reads back. Relay replies are cursor-addressed and consumed
+    /// exactly once — there is no cache hit to be had, only the write.
+    ///
+    /// `urlCache = nil` removes the store; the request policy is belt and
+    /// braces for anything constructing a transport with its own session.
+    /// Cookies and credential reuse are not part of the protocol (every request
+    /// carries a bearer token), so nothing here is load-bearing beyond the cache.
+    /// WITNESS, and its limit. `ContinuumRevivedRelayChecks` asserts the
+    /// CONFIGURATION — no cache on the default session, and a poll request that
+    /// declines the cache — which catches a regression to `URLSession.shared` or
+    /// a dropped policy. It does NOT observe cache writes against a live server;
+    /// that would need a loopback probe of `URLCache.shared` with a positive
+    /// control proving the response was cacheable in the first place. An earlier
+    /// draft of this comment claimed a `--relay-cache-write-check` that was never
+    /// written.
+    public static func makeDefaultSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }
+
+    /// QA: the session this transport will actually use, and one of the exact
+    /// requests it will send. Both are needed to witness "an unchanged poll
+    /// writes nothing to a response cache" against a real server rather than
+    /// against a re-derivation of the transport's intent.
+    public var qaSession: URLSession { session }
+    public func qaPollRequest(path: String) -> URLRequest { makeRequest("GET", path: path, body: nil) }
+
     private func makeRequest(_ method: String, path: String, body: Data?) -> URLRequest {
         var request = URLRequest(url: URL(string: baseURL.absoluteString + path)!)
         request.httpMethod = method
         request.httpBody = body
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         // Must outlive the server's bounded long-poll wait (≤30s) or every
         // quiet poll dies as a client timeout and loops through backoff.
         request.timeoutInterval = 40

@@ -2520,6 +2520,30 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--file-tree-snapshot-coalescing-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try FileTreeSnapshotCoalescingChecks.run()
+                print("ContinuumRevivedFileTreeSnapshotCoalescingChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-visibility-index-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasVisibilityIndexChecks.run()
+                print("ContinuumRevivedCanvasVisibilityIndexChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--camera-chrome-redraw-check") {
             do {
                 _ = NSApplication.shared
