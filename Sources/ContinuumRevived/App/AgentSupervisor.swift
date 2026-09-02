@@ -2266,14 +2266,18 @@ final class AgentSupervisor {
         // the event stream. Hopped to the main actor like the events are, and for
         // the same reason — the handler mutates supervisor state.
         runner.observeSpawnRequests { [weak self] request in
-            DispatchQueue.main.async { self?.handleSpawnRequest(request, from: id) }
+            DispatchQueue.main.async {
+                guard let self, self.runners[id] === runner else { return }
+                self.handleSpawnRequest(request, from: id)
+            }
         }
         // The runner emits private observations before the matching normalized
         // item event on one serial queue. Main-queue FIFO preserves that order, so
         // the generic event cannot overwrite the path-bearing local What value.
         runner.observeRuntimeObservations { [weak self] observation in
             DispatchQueue.main.async {
-                self?.ingestRuntimeObservation(observation, for: id)
+                guard let self, self.runners[id] === runner else { return }
+                self.ingestRuntimeObservation(observation, for: id)
             }
         }
         // C7: a claude subagent's own work, routed to the CHILD rather than the
@@ -2288,7 +2292,8 @@ final class AgentSupervisor {
         if let observing = runner as? SubagentEventObserving {
             observing.observeSubagentEvents { [weak self] toolUseID, event in
                 DispatchQueue.main.async {
-                    self?.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
+                    guard let self, self.runners[id] === runner else { return }
+                    self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
                 }
             }
         }
@@ -2301,7 +2306,8 @@ final class AgentSupervisor {
             pendingProviderThreadEvents[id] = [:]
             observing.observeProviderSubagentActivity { [weak self] activity in
                 DispatchQueue.main.async {
-                    self?.handleProviderSubagentActivity(activity, rootAgentID: id)
+                    guard let self, self.runners[id] === runner else { return }
+                    self.handleProviderSubagentActivity(activity, rootAgentID: id)
                 }
             }
         }
@@ -2312,7 +2318,8 @@ final class AgentSupervisor {
         if let reporting = runner as? ObservedRunReporting {
             reporting.observeObservedRuns { [weak self] handle in
                 DispatchQueue.main.async {
-                    self?.bindObservedRun(handle, parent: id)
+                    guard let self, self.runners[id] === runner else { return }
+                    self.bindObservedRun(handle, parent: id)
                 }
             }
         }
@@ -2330,7 +2337,7 @@ final class AgentSupervisor {
                     let bound = event.withThreadId(threadId)
                     DispatchQueue.main.async {
                         if case .turnCompleted = bound { sawTurnCompleted.set() }
-                        self?.deliver(bound, to: id)
+                        self?.deliver(bound, from: runner, to: id)
                     }
                 }
                 // Dispatched from the same runner thread AFTER `run` returned, so
@@ -5434,6 +5441,22 @@ final class AgentSupervisor {
         submissionRecoveryTasks[id] = task
     }
 
+    /// Provider callbacks are accepted only from the concrete runner generation
+    /// that currently owns the agent. A terminal callback may finish a runner
+    /// Stop already removed, provided no replacement generation has taken over;
+    /// every nonterminal event requires exact identity.
+    private func deliver(
+        _ event: AgentRuntimeEvent,
+        from runner: AgentRunning,
+        to id: AgentID,
+        now: Date = Date()
+    ) {
+        if runners[id] !== runner {
+            guard runners[id] == nil, event.isRunnerTerminal else { return }
+        }
+        deliver(event, to: id, now: now)
+    }
+
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         // B1 — pi's persistence watermark, tracked because a stop before it costs
         // the user the whole conversation and Array is the only thing that can say
@@ -5900,6 +5923,21 @@ final class AgentSupervisor {
 }
 
 extension AgentSupervisor: AgentTileActionSink {}
+
+private extension AgentRuntimeEvent {
+    var isRunnerTerminal: Bool {
+        switch self {
+        case .turnCompleted, .runtimeError,
+             .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            return true
+        case .sessionStateChanged, .turnStarted, .itemStarted, .itemCompleted,
+             .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
+             .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
+             .childAgentSpawned, .semanticSignal:
+            return false
+        }
+    }
+}
 
 private extension AgentTileOperationalState {
     var acceptsNewTurn: Bool {
