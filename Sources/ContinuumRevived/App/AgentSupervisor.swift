@@ -894,6 +894,10 @@ private final class TerminalDeliveryLatch: @unchecked Sendable {
 
 @MainActor
 final class AgentSupervisor {
+    private struct RunnerGenerationToken: Equatable, Sendable {
+        let rawValue = UUID()
+    }
+
     /// How much of an agent's event history a late subscriber replays. Capped
     /// because `contentDelta` arrives per token, so an uncapped history is an
     /// uncapped buffer for the lifetime of the app. A re-attached tile therefore
@@ -944,6 +948,11 @@ final class AgentSupervisor {
     private(set) var records: [AgentID: AgentRecord] = [:]
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
+    /// The latest runner generation to own each agent. Unlike `runners`, this is
+    /// deliberately retained after the live slot clears: it is the tombstone that
+    /// prevents an older runner from becoming authoritative again merely because
+    /// the replacement has also finished.
+    private var runnerGenerationTokens: [AgentID: RunnerGenerationToken] = [:]
     /// Provider sessions which are alive but have no turn in flight. Keeping
     /// these separate preserves `runners` as the truthful busy/Stop capability
     /// while avoiding a fresh Pi/Node/resource-loader startup on every message.
@@ -2260,6 +2269,8 @@ final class AgentSupervisor {
         } else {
             runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
         }
+        let runnerGeneration = RunnerGenerationToken()
+        runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
@@ -2267,7 +2278,9 @@ final class AgentSupervisor {
         // the same reason — the handler mutates supervisor state.
         runner.observeSpawnRequests { [weak self] request in
             DispatchQueue.main.async {
-                guard let self, self.runners[id] === runner else { return }
+                guard let self,
+                      self.runnerGenerationTokens[id] == runnerGeneration,
+                      self.runners[id] === runner else { return }
                 self.handleSpawnRequest(request, from: id)
             }
         }
@@ -2276,7 +2289,9 @@ final class AgentSupervisor {
         // the generic event cannot overwrite the path-bearing local What value.
         runner.observeRuntimeObservations { [weak self] observation in
             DispatchQueue.main.async {
-                guard let self, self.runners[id] === runner else { return }
+                guard let self,
+                      self.runnerGenerationTokens[id] == runnerGeneration,
+                      self.runners[id] === runner else { return }
                 self.ingestRuntimeObservation(observation, for: id)
             }
         }
@@ -2292,7 +2307,9 @@ final class AgentSupervisor {
         if let observing = runner as? SubagentEventObserving {
             observing.observeSubagentEvents { [weak self] toolUseID, event in
                 DispatchQueue.main.async {
-                    guard let self, self.runners[id] === runner else { return }
+                    guard let self,
+                          self.runnerGenerationTokens[id] == runnerGeneration,
+                          self.runners[id] === runner else { return }
                     self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
                 }
             }
@@ -2306,7 +2323,9 @@ final class AgentSupervisor {
             pendingProviderThreadEvents[id] = [:]
             observing.observeProviderSubagentActivity { [weak self] activity in
                 DispatchQueue.main.async {
-                    guard let self, self.runners[id] === runner else { return }
+                    guard let self,
+                          self.runnerGenerationTokens[id] == runnerGeneration,
+                          self.runners[id] === runner else { return }
                     self.handleProviderSubagentActivity(activity, rootAgentID: id)
                 }
             }
@@ -2318,7 +2337,9 @@ final class AgentSupervisor {
         if let reporting = runner as? ObservedRunReporting {
             reporting.observeObservedRuns { [weak self] handle in
                 DispatchQueue.main.async {
-                    guard let self, self.runners[id] === runner else { return }
+                    guard let self,
+                          self.runnerGenerationTokens[id] == runnerGeneration,
+                          self.runners[id] === runner else { return }
                     self.bindObservedRun(handle, parent: id)
                 }
             }
@@ -2337,7 +2358,8 @@ final class AgentSupervisor {
                     let bound = event.withThreadId(threadId)
                     DispatchQueue.main.async {
                         if case .turnCompleted = bound { sawTurnCompleted.set() }
-                        self?.deliver(bound, from: runner, to: id)
+                        self?.deliver(
+                            bound, from: runner, generation: runnerGeneration, to: id)
                     }
                 }
                 // Dispatched from the same runner thread AFTER `run` returned, so
@@ -2359,6 +2381,7 @@ final class AgentSupervisor {
                             outcome: .interrupted,
                             errorMessage: message),
                         from: runner,
+                        generation: runnerGeneration,
                         to: id)
                 }
             } catch {
@@ -2392,6 +2415,7 @@ final class AgentSupervisor {
                                 outcome: .interrupted,
                                 errorMessage: nil),
                             from: runner,
+                            generation: runnerGeneration,
                             to: id)
                         return
                     }
@@ -2403,6 +2427,7 @@ final class AgentSupervisor {
                     self.deliver(
                         .runtimeError(threadId: threadId, message: message),
                         from: runner,
+                        generation: runnerGeneration,
                         to: id)
                     // `.runtimeError` shows the error row; a `.turnCompleted` is
                     // still owed so every consumer of turn liveness sees the turn
@@ -2415,11 +2440,14 @@ final class AgentSupervisor {
                                 outcome: .failed,
                                 errorMessage: message),
                             from: runner,
+                            generation: runnerGeneration,
                             to: id)
                     }
                 }
             }
-            DispatchQueue.main.async { self?.clearRunner(runner, for: id) }
+            DispatchQueue.main.async {
+                self?.clearRunner(runner, generation: runnerGeneration, for: id)
+            }
         }
         return true
     }
@@ -3739,6 +3767,7 @@ final class AgentSupervisor {
         }
 
         records.removeValue(forKey: id)
+        runnerGenerationTokens.removeValue(forKey: id)
         history.removeValue(forKey: id)
         rehydratedTranscripts.removeValue(forKey: id)
         locationProjectors.removeValue(forKey: id)
@@ -5461,9 +5490,14 @@ final class AgentSupervisor {
     private func deliver(
         _ event: AgentRuntimeEvent,
         from runner: AgentRunning,
+        generation: RunnerGenerationToken,
         to id: AgentID,
         now: Date = Date()
     ) {
+        // Keep the latest generation after its live slot clears. A nil `runners`
+        // entry is not evidence that any retired terminal event is valid: an old
+        // A may unwind after replacement B has completed and cleared too.
+        guard runnerGenerationTokens[id] == generation else { return }
         if runners[id] !== runner {
             guard runners[id] == nil, event.isRunnerTerminal else { return }
         }
@@ -5836,10 +5870,14 @@ final class AgentSupervisor {
         }
     }
 
-    private func clearRunner(_ runner: AgentRunning, for id: AgentID) {
+    private func clearRunner(
+        _ runner: AgentRunning,
+        generation: RunnerGenerationToken,
+        for id: AgentID
+    ) {
         // Identity-checked: a `send` that started while the previous prompt was
         // finishing must not have its runner cleared by the old one's completion.
-        if runners[id] === runner {
+        if runnerGenerationTokens[id] == generation, runners[id] === runner {
             // Claude owns mirrored children inside this process. If it exits or
             // crashes before their matching tool_result, no later transport can
             // close them. Codex is deliberately excluded: its provider children
@@ -8075,8 +8113,12 @@ private func checkRetiredRunnerCannotRestartTurn(
         holdUntilStopped: true,
         releaseOnStop: false)
     let replacementRunner = ScriptedAgentRunner(
-        script: [.turnStarted(threadId: "provider", turnId: "replacement")],
-        holdUntilStopped: true)
+        script: [
+            .turnStarted(threadId: "provider", turnId: "replacement"),
+            .turnCompleted(
+                threadId: "provider", turnId: "replacement",
+                outcome: .completed, errorMessage: nil)
+        ])
     let queue = ScriptedRunnerQueue([retiredRunner, replacementRunner])
     let supervisor = AgentSupervisor(
         store: AgentStore(applicationSupportDirectory: root),
@@ -8106,13 +8148,15 @@ private func checkRetiredRunnerCannotRestartTurn(
         throw fail("retired runner: replacement send was refused")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        supervisor.turnSnapshot(for: id)?.state == .working
-            && replacementRunner.runCount == 1
-    }), let replacementStart = supervisor.turnSnapshot(for: id)?.turnStartedAt else {
-        throw fail("retired runner: replacement generation never became Working")
+        replacementRunner.completedRuns == 1
+            && !supervisor.isRunning(id)
+            && supervisor.turnSnapshot(for: id)?.state != .working
+    }), let replacementStamp = supervisor.records[id]?.runCompletedAt,
+       replacementStamp != stoppedStamp else {
+        throw fail("retired runner: replacement generation did not complete and clear its slot")
     }
-    guard supervisor.records[id]?.runCompletedAt == stoppedStamp else {
-        throw fail("retired runner: the queued old turnStarted changed Stop's terminal stamp")
+    guard supervisor.turnSnapshot(for: id)?.turnStartedAt == nil else {
+        throw fail("retired runner: completed replacement retained an elapsed anchor")
     }
 
     retiredRunner.releaseRunAfterStop()
@@ -8120,16 +8164,12 @@ private func checkRetiredRunnerCannotRestartTurn(
         retiredRunner.completedRuns == 1
     }) else { throw fail("retired runner: old run call did not return after release") }
     try? await Task.sleep(nanoseconds: 300_000_000)
-    guard supervisor.isRunning(id),
-          supervisor.turnSnapshot(for: id)?.state == .working,
-          supervisor.turnSnapshot(for: id)?.turnStartedAt == replacementStart,
-          supervisor.records[id]?.runCompletedAt == stoppedStamp else {
-        throw fail("retired runner: an old callback or process-return fallback changed the replacement turn")
+    guard !supervisor.isRunning(id),
+          supervisor.turnSnapshot(for: id)?.state != .working,
+          supervisor.turnSnapshot(for: id)?.turnStartedAt == nil,
+          supervisor.records[id]?.runCompletedAt == replacementStamp else {
+        throw fail("retired runner: old fallback overwrote a completed replacement after its slot cleared")
     }
-    supervisor.stop(id)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        replacementRunner.completedRuns == 1 && !supervisor.isRunning(id)
-    }) else { throw fail("retired runner: replacement cleanup did not finish") }
 
     // Positive control: scoping the fallback must not suppress it for the runner
     // that still owns the slot when a provider exits silently.
@@ -8165,7 +8205,7 @@ private func checkRetiredRunnerCannotRestartTurn(
     guard fallbackCompletions == [.interrupted] else {
         throw fail("retired runner: current runner fallback outcomes were \(fallbackCompletions)")
     }
-    return "a queued old turnStarted and retired process-return fallback were rejected after replacement ownership, while the current runner's silent exit still terminalized once"
+    return "a queued old turnStarted and retired process-return fallback were rejected after a replacement completed and cleared its slot, while the current runner's silent exit still terminalized once"
 }
 
 /// A disposable tile must attach from the supervisor's complete semantic model,
