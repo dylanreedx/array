@@ -804,6 +804,20 @@ enum ManagedAgentPageZoomChecks {
                 isARepeat: false, keyCode: 0)!
         }
 
+        // WS5 gap, found by independent review: every geometry assertion in this
+        // file drives `setPageZoom` directly, and the two legs that drive the
+        // real chord asserted only `pageZoom.percent`. Replacing
+        // `performPageZoomCommand` with a bare `pageZoom = command.apply(...)` —
+        // the rung moves, `applyPageZoomToContent()` never runs, so the tile is
+        // visually frozen after a Cmd+/Cmd-/Cmd+0 — left this leg GREEN. The
+        // keyboard chord is the feature's primary trigger.
+        //
+        // A REFERENCE tile, driven to the same rung through the already-witnessed
+        // direct path, is what turns "the number changed" into "the tile
+        // reflowed": the chord's geometry must match it exactly.
+        let reference = try makeTile(named: "ws5-keys-reference", size: NSSize(width: 520, height: 480))
+        defer { reference.window.orderOut(nil) }
+
         struct Case { let name: String; let event: NSEvent; let consumed: Bool; let expected: Int }
         tile.setPageZoom(.default)
         let cases: [Case] = [
@@ -841,7 +855,40 @@ enum ManagedAgentPageZoomChecks {
                 tile.pageZoom.percent == testCase.expected,
                 "\(testCase.name): the rung is \(tile.pageZoom.percent)%, expected \(testCase.expected)%"
             )
+
+            reference.tile.setPageZoom(AgentPageZoom(percent: testCase.expected))
+            reference.tile.layoutSubtreeIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            try expect(
+                stableFontSizes(tile) == stableFontSizes(reference.tile),
+                "\(testCase.name): the rung reached \(testCase.expected)% but the CONTENT did not "
+                + "reflow — fonts are \(stableFontSizes(tile)), the same rung set directly gives "
+                + "\(stableFontSizes(reference.tile))"
+            )
+            try expect(
+                tile.qaPageZoomHeaderHeightConstant == reference.tile.qaPageZoomHeaderHeightConstant,
+                "\(testCase.name): the rung reached \(testCase.expected)% but the header height is "
+                + "\(tile.qaPageZoomHeaderHeightConstant), against "
+                + "\(reference.tile.qaPageZoomHeaderHeightConstant) for the same rung set directly"
+            )
         }
+
+        // POSITIVE CONTROL: the comparison above is only meaningful if these
+        // quantities actually MOVE with the rung. Two different rungs must give
+        // two different answers, or a tile that reflowed nothing would match a
+        // reference that reflowed nothing.
+        reference.tile.setPageZoom(AgentPageZoom(percent: 100))
+        reference.tile.layoutSubtreeIfNeeded()
+        let fontsAtRest = stableFontSizes(reference.tile)
+        let headerAtRest = reference.tile.qaPageZoomHeaderHeightConstant
+        reference.tile.setPageZoom(AgentPageZoom(percent: 150))
+        reference.tile.layoutSubtreeIfNeeded()
+        try expect(
+            stableFontSizes(reference.tile) != fontsAtRest
+                || reference.tile.qaPageZoomHeaderHeightConstant != headerAtRest,
+            "control: 100% and 150% resolve to identical geometry, so comparing against a reference "
+            + "tile proves nothing"
+        )
     }
 
     // MARK: - 8b. The app routes a chord to the FOCUSED tile only
