@@ -555,7 +555,9 @@ final class ChoicePopoverController {
                 min(CGFloat(zoom.scaled(Double(configuration.maximumWidth))), list.intrinsicContentSize.width)
             )
         )
-        let rowHeight = ChoiceListView.commandRowHeight(zoom: zoom)
+        let rowHeight = list.presentation == .slashCommands
+            ? ChoiceListView.slashCommandRowHeight(zoom: zoom)
+            : ChoiceListView.commandRowHeight(zoom: zoom)
         let maxHeight = CGFloat(configuration.maximumVisibleRows) * rowHeight
             + ChoiceListView.verticalPadding(zoom: zoom) * 2
         let height = min(maxHeight, max(1, list.intrinsicContentSize.height))

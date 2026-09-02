@@ -96,9 +96,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// An acceptance-aware seam for owners that can synchronously accept/reject
     /// send intent. Only `true` clears the per-agent draft.
     var onSubmitIntent: ((String) -> Bool)?
-    /// Semantic completion actions that belong to a provider adapter. Returning
-    /// true means the action was accepted; a rejected action leaves the query
-    /// text intact and never degrades into literal prompt text.
+    /// Non-command semantic completion actions that belong to a provider adapter.
+    /// Slash commands edit the draft and use the acceptance-aware action sink on
+    /// Enter; the synchronous callback remains for direct file/skill adapters.
     var onCompletionAction: ((AgentCompletionPayload) -> Bool)?
     var onDismissSuggestions: (() -> Void)?
     /// Synchronous visual acknowledgement seam. Fired before draft-journal or
@@ -128,6 +128,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var pendingSubmittedDraft: AgentComposerDraft?
     private var pendingSubmittedDraftAgentID: AgentID?
     private var pendingSubmittedLease: AgentComposerSubmissionLease?
+    /// A slash row edits the draft; Enter remains the one submission boundary.
+    /// Keeping the typed descriptor beside the draft avoids reparsing ambiguous
+    /// aliases while still letting the user add context before sending.
+    private var selectedDraftCommand: (invocation: AgentCommandInvocation, token: String)?
     /// Deterministic component-check seam immediately before the draft-store
     /// actor await. Production leaves this nil; checks use it to cancel/rebind
     /// while lease admission is suspended without relying on scheduler timing.
@@ -464,6 +468,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     ) {
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
+        selectedDraftCommand = nil
         actionSink = sink
         draftAgentID = agentID
         turnSnapshot = snapshot
@@ -486,6 +491,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     func unbindActionSink() {
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
+        selectedDraftCommand = nil
         actionSink = nil
         turnSnapshot = nil
         updateQueuedMessages([], paused: false)
@@ -530,6 +536,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             imageAttachments: importedAttachments,
             fileReferences: importedFileReferences
         )
+        if newDraft.text.isEmpty
+            || selectedDraftCommand.map({ !newDraft.text.contains($0.token) }) == true {
+            selectedDraftCommand = nil
+        }
         isApplyingDraft = false
         updatePlaceholder()
         updateReplyOptionRail()
@@ -542,6 +552,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func applyPageZoom(_ zoom: AgentPageZoom) {
+        let shouldRestoreSuggestions = completionController.isPresented && isEditorFocused
+        if shouldRestoreSuggestions { completionController.dismiss() }
         pageZoom = zoom
         layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
         let padding = Self.internalPadding(zoom: pageZoom)
@@ -563,6 +575,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         applyTokens()
         invalidateIntrinsicContentSize()
         needsLayout = true
+        // The completion panel is a separate window and cannot participate in
+        // the tile subtree's zoom walk. Recreate it after the composer reflows so
+        // its fonts, row metrics, anchor and screen bounds all use the new rung.
+        if shouldRestoreSuggestions {
+            DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
+        }
     }
 
     func applyTokens() {
@@ -711,7 +729,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 capabilities: snapshot.capabilities
             )
             let intent: AgentComposerIntent?
-            if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
+            if importedAttachments.isEmpty, importedFileReferences.isEmpty,
+               snapshot.executionState == .ready,
+               let invocation = resolvedSelectedCommand(in: prompt) {
+                intent = snapshot.capabilities.canSend ? .providerCommand(invocation) : nil
+            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
                 let attachedPrompt = AgentPrompt(
                     text: prompt,
                     imageAttachments: importedAttachments,
@@ -908,20 +930,63 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             completionNavigationPath = nextNavigationPath
             DispatchQueue.main.async { [weak self] in self?.refreshCompletionSuggestions() }
         case .skill, .promptTemplate, .runtimeCommand, .command:
-            guard onCompletionAction?(completion.payload) == true else { return }
-            // Fix 2a: a command picked from this popover used to skip the
-            // optimistic echo that `submitBoundIntent` paints for a typed send,
-            // so invoking the exact same command two ways produced two
-            // different appearances — silent here, an immediate bubble there.
-            // Echo the same text a typed acceptance would have shown.
             if case let .command(invocation) = completion.payload {
-                let echoText = invocation.arguments.isEmpty
-                    ? completion.insertionText
-                    : "\(completion.insertionText) \(invocation.arguments.joined(separator: " "))"
-                onSubmissionStarted?(AgentPrompt(echoText))
+                selectedDraftCommand = (invocation, completion.insertionText)
+                let source = textView.string as NSString
+                let nextLocation = NSMaxRange(replacementRange)
+                let hasWhitespaceAfter = nextLocation < source.length
+                    && UnicodeScalar(source.character(at: nextLocation)).map(
+                        CharacterSet.whitespacesAndNewlines.contains) == true
+                let insertion = completion.insertionText + (hasWhitespaceAfter ? "" : " ")
+                textView.insertCompletion(insertion, replacementRange: replacementRange)
+                return
             }
+            guard onCompletionAction?(completion.payload) == true else { return }
             textView.insertCompletion("", replacementRange: replacementRange)
         }
+    }
+
+    /// Converts a selected command anywhere in the draft into the native leading
+    /// form required by provider CLIs, preserving every other character as the
+    /// command's context. For example `check auth with /review please` becomes
+    /// `/review check auth with please` at the execution/transcript boundary.
+    private func resolvedSelectedCommand(in prompt: String) -> AgentCommandInvocation? {
+        guard let selectedDraftCommand else { return nil }
+        let source = prompt as NSString
+        let token = selectedDraftCommand.token as NSString
+        let isWhitespace: (unichar) -> Bool = { unit in
+            UnicodeScalar(unit).map(CharacterSet.whitespacesAndNewlines.contains) ?? false
+        }
+        var search = NSRange(location: 0, length: source.length)
+        while search.length > 0 {
+            let found = source.range(of: token as String, options: [], range: search)
+            guard found.location != NSNotFound else { return nil }
+            let beforeIsBoundary = found.location == 0
+                || isWhitespace(source.character(at: found.location - 1))
+            let after = NSMaxRange(found)
+            let afterIsBoundary = after == source.length
+                || isWhitespace(source.character(at: after))
+            if beforeIsBoundary && afterIsBoundary {
+                let mutable = NSMutableString(string: prompt)
+                mutable.replaceCharacters(in: found, with: "")
+                let context = (mutable as String)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .joined(separator: " ")
+                let base = selectedDraftCommand.invocation
+                return AgentCommandInvocation(
+                    descriptorID: base.descriptorID,
+                    name: base.name,
+                    arguments: base.arguments + (context.isEmpty ? [] : [context]),
+                    harness: base.harness,
+                    surface: base.surface
+                )
+            }
+            let next = NSMaxRange(found)
+            guard next < source.length else { return nil }
+            search = NSRange(location: next, length: source.length - next)
+        }
+        return nil
     }
 
     private func completionAnchor() -> NSRect {
@@ -1030,6 +1095,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         switch intent {
         case let .send(text): previewPrompt = AgentPrompt(text)
         case let .sendPrompt(prompt): previewPrompt = prompt
+        case let .providerCommand(invocation): previewPrompt = AgentPrompt(invocation.nativeSlashText)
         default: previewPrompt = nil
         }
         if let previewPrompt { onSubmissionStarted?(previewPrompt) }
@@ -1122,6 +1188,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     retainRecoveryUntilStart: isPromptSubmission
                 )
             }
+            if case .providerCommand = intent { self.selectedDraftCommand = nil }
         }
     }
 

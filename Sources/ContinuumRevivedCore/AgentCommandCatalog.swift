@@ -525,7 +525,9 @@ public struct AgentCommandCompletionProvider: AgentCompletionProvider {
                 || canonical(invocationName).contains(needle)
             guard matches else { return nil }
             let title = descriptor.name
-            let detail = [descriptor.detail, descriptor.harness?.rawValue, descriptor.disabledReason]
+            // The title already carries a harness prefix when disambiguation is
+            // needed. Repeating it here made the useful explanation truncate.
+            let detail = [descriptor.detail, descriptor.disabledReason]
                 .compactMap { $0 }.joined(separator: " · ")
             let arguments: String
             if descriptor.supportsArguments,

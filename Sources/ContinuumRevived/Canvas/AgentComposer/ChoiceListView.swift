@@ -56,6 +56,8 @@ struct ChoiceItem: Identifiable, Equatable {
 enum ChoiceListPresentation {
     case choices
     case commands
+    /// Prompt commands carry explanatory copy, unlike compact sidebar menus.
+    case slashCommands
     case completions
 }
 
@@ -91,6 +93,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     static let rowHeight: CGFloat = 36
     static let commandRowHeight: CGFloat = 30
+    static let slashCommandRowHeight: CGFloat = 40
     static let horizontalPadding = CGFloat(Space.l)
     static let verticalPadding = CGFloat(Space.m)
     static let minimumWidth: CGFloat = 220
@@ -104,6 +107,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     /// zoomed form on purpose — a hairline is a device property, not a metric.
     static func rowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(36)) }
     static func commandRowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
+    static func slashCommandRowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(40)) }
     static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
     static func verticalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
     static func minimumWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(220)) }
@@ -147,7 +151,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             } ?? 0
             return max(title, detail)
         }.max() ?? 0
-        let hasLeadingSlot = presentation != .commands || items.contains { $0.icon != nil }
+        let hasLeadingSlot = ![.commands, .slashCommands].contains(presentation)
+            || items.contains { $0.icon != nil }
         let leadingWidth: CGFloat = hasLeadingSlot ? CGFloat(pageZoom.scaled(26)) : 0
         let minimumWidth = presentation == .commands
             ? CGFloat(pageZoom.scaled(184)) : Self.minimumWidth(zoom: pageZoom)
@@ -183,8 +188,11 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     private var renderedRowHeight: CGFloat {
-        presentation == .commands
-            ? Self.commandRowHeight(zoom: pageZoom) : Self.rowHeight(zoom: pageZoom)
+        switch presentation {
+        case .commands: return Self.commandRowHeight(zoom: pageZoom)
+        case .slashCommands: return Self.slashCommandRowHeight(zoom: pageZoom)
+        case .choices, .completions: return Self.rowHeight(zoom: pageZoom)
+        }
     }
 
     private var renderedVerticalPadding: CGFloat {
@@ -200,7 +208,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     private var renderedHorizontalPadding: CGFloat { Self.horizontalPadding(zoom: pageZoom) }
 
     private var destructiveSeparatorIndex: Int? {
-        guard presentation == .commands,
+        guard [.commands, .slashCommands].contains(presentation),
               let index = items.firstIndex(where: \.destructive), index > 0 else { return nil }
         return index
     }
@@ -282,6 +290,9 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
     var qaHasDestructiveSeparator: Bool { !destructiveSeparator.isHidden }
     var qaRenderedRowHeight: CGFloat { renderedRowHeight }
+    var qaRowTextFrames: [(title: NSRect, detail: NSRect?)] {
+        rows.map { ($0.qaTitleFrame, $0.qaDetailFrame) }
+    }
     var qaFocusedRowIsVisible: Bool {
         guard let focusedID,
               let row = rows.first(where: { $0.item.id == focusedID }),
@@ -365,7 +376,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private func rebuildRows() {
         rows.forEach { $0.removeFromSuperview() }
-        let reservesLeadingSlot = presentation != .commands || items.contains { $0.icon != nil }
+        let reservesLeadingSlot = ![.commands, .slashCommands].contains(presentation)
+            || items.contains { $0.icon != nil }
         rows = items.map { item in
             let row = ChoiceRowView(
                 item: item, presentation: presentation,
@@ -415,6 +427,8 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     var qaFocused: Bool { focused }
     var qaCheckHidden: Bool { presentation != .choices || leadingImageView.isHidden }
     var qaLeadingImageHidden: Bool { leadingImageView.isHidden }
+    var qaTitleFrame: NSRect { titleLabel.frame }
+    var qaDetailFrame: NSRect? { detailLabel.isHidden ? nil : detailLabel.frame }
 
     init(
         item: ChoiceItem, presentation: ChoiceListPresentation,

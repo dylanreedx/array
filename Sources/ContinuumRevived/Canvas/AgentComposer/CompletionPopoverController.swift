@@ -139,7 +139,7 @@ final class CompletionPopoverController {
             let items = keyed.map {
                 ChoiceItem(
                     id: $0.key,
-                    title: $0.completion.title,
+                    title: Self.rowTitle(for: $0.completion),
                     detail: query.trigger == "@" ? Self.fileRowDetail(for: $0.completion) : $0.completion.detail,
                     icon: query.trigger == "@" ? Self.fileRowIcon(for: $0.completion) : Self.commandRowIcon(for: $0.completion),
                     enabled: $0.completion.isEnabled,
@@ -160,7 +160,7 @@ final class CompletionPopoverController {
                 listPresentation = .completions
             } else {
                 popoverLayout = .commands(CommandPopoverLayout())
-                listPresentation = .commands
+                listPresentation = .slashCommands
             }
             self.popover.pageZoom = self.pageZoom
             self.popover.present(
@@ -336,6 +336,11 @@ final class CompletionPopoverController {
         case .cli, .extensionCommand: return .system("terminal")
         case .providerSlash: return .system("command")
         }
+    }
+
+    private static func rowTitle(for completion: AgentCompletion) -> String {
+        if case .command = completion.payload { return completion.insertionText }
+        return completion.title
     }
 
     private static func isDestructive(_ completion: AgentCompletion) -> Bool {

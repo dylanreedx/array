@@ -71,7 +71,7 @@ enum AgentFirstPaintChecks {
         try checkStreamingResponseKeepsALivenessSignal()
         try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
         try checkADelegationTurnPresentsInteractiveSubagentChips()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command echoes exactly like a typed one, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud")
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, accepted local commands settle without a stuck glyph, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command waits for Enter and carries the complete surrounding draft, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -104,6 +104,10 @@ enum AgentFirstPaintChecks {
                 "optimistic window: the synchronize path stomped the optimistic indicator off "
                 + "before the provider ever reported working — the blank-after-send bug (C4)"
             )
+        }
+        tile.qaFinishOptimisticSubmissionForChecks(accepted: true)
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("optimistic window: an accepted local command with no runner left the indicator spinning forever")
         }
     }
 
@@ -333,22 +337,38 @@ enum AgentFirstPaintChecks {
         }
     }
 
-    /// `.plans/45` fix 2a: a command chosen from the completion popover
-    /// dispatched straight to `onCompletionAction` and never painted the same
-    /// optimistic echo a typed-and-sent command gets from `submitBoundIntent`.
-    /// Invoking the identical command two ways therefore looked different: an
-    /// immediate bubble for one, silence for the other.
+    /// A slash choice edits the draft; Enter submits the selected command and all
+    /// surrounding context through the same acceptance-aware path as a prompt.
+    /// The former click-time dispatch lost that context and started an optimistic
+    /// indicator without ever resolving it.
     @MainActor
     private static func checkPopoverCommandEchoesLikeATypedSend() throws {
         let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        let original = "check auth with /rev please"
+        composer.apply(.init(
+            text: original,
+            selection: NSRange(location: 20, length: 0),
+            revision: 1
+        ))
         var echoed: [AgentPrompt] = []
+        var resolutions: [Bool] = []
+        var legacyDispatchCount = 0
         composer.onSubmissionStarted = { echoed.append($0) }
-        composer.onCompletionAction = { _ in true }
+        composer.onSubmissionFinished = { resolutions.append($0) }
+        composer.onCompletionAction = { _ in
+            legacyDispatchCount += 1
+            return true
+        }
+        let sink = OrderRecordingSink(.accepted)
+        composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+            state: .ready,
+            capabilities: .sendStop(canSend: true, canStop: false),
+            turnStartedAt: nil
+        ))
 
         let invocation = AgentCommandInvocation(
             descriptorID: "array.compact",
             name: "compact",
-            arguments: ["now"],
             surface: .array
         )
         let completion = AgentCompletion(
@@ -357,13 +377,30 @@ enum AgentFirstPaintChecks {
             insertionText: "/compact",
             payload: .command(invocation)
         )
-        composer.qaAcceptCompletionForChecks(completion, replacementRange: NSRange(location: 0, length: 0))
+        composer.qaAcceptCompletionForChecks(
+            completion,
+            replacementRange: NSRange(location: 16, length: 4)
+        )
 
-        guard let echo = echoed.first else {
-            throw fail("popover command echo: selecting a command from the completion popover painted no optimistic echo at all — invoking the same command by typing it does")
+        guard legacyDispatchCount == 0, sink.receivedIntents.isEmpty, echoed.isEmpty else {
+            throw fail("popover command submission: selecting a row executed before Enter")
         }
-        guard echo.text == "/compact now" else {
-            throw fail("popover command echo: expected the same text a typed send would have shown ('/compact now'), got '\(echo.text)'")
+        guard composer.textView.string == "check auth with /compact please" else {
+            throw fail("popover command submission: selection lost surrounding draft text: \(composer.textView.string)")
+        }
+
+        composer.composerRequestedSend(composer.textView)
+        let deadline = Date().addingTimeInterval(2)
+        while (sink.receivedIntents.isEmpty || resolutions.isEmpty) && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        guard case let .providerCommand(sent)? = sink.receivedIntents.first,
+              sent.nativeSlashText == "/compact check auth with please" else {
+            throw fail("popover command submission: sink did not receive the whole contextual command: \(sink.receivedIntents)")
+        }
+        guard echoed.map(\.text) == ["/compact check auth with please"],
+              resolutions == [true], composer.textView.string.isEmpty else {
+            throw fail("popover command submission: acceptance did not resolve exactly once and clear the accepted draft; echo=\(echoed.map(\.text)) resolution=\(resolutions) draft='\(composer.textView.string)'")
         }
     }
 

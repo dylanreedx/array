@@ -1299,6 +1299,17 @@ final class ManagedAgentTileNSView: TileNSView {
             showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
             return
         }
+        // Array-owned slash commands are accepted without starting a provider
+        // turn. The old unconditional "Starting" paint left their gyro spinning
+        // forever because no runtime event exists to take it down. At acceptance
+        // time the supervisor has already installed a runner for every command
+        // that really does start one, so process ownership is the truthful split.
+        guard let agentID = attachedAgentID,
+              agentSource?.isRunning(agentID) == true else {
+            transcriptCollectionFixture?.setTurnInFlight(false)
+            transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
+            return
+        }
         // One word with the header and the sidebar, not a third vocabulary.
         transcriptCollectionFixture?.setThinkingStatusText(AgentStatusVocabulary.starting)
         transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
@@ -2783,6 +2794,10 @@ final class ManagedAgentTileNSView: TileNSView {
     // `.plans/45` S6 — deterministic seams for the optimistic-window witness.
     func qaBeginOptimisticSubmissionForChecks(_ text: String) {
         beginOptimisticSubmission(AgentPrompt(text))
+    }
+
+    func qaFinishOptimisticSubmissionForChecks(accepted: Bool) {
+        finishOptimisticSubmission(accepted: accepted)
     }
     func qaRefreshThinkingIndicatorForChecks() {
         refreshTranscriptThinkingIndicator()
