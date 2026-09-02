@@ -3005,7 +3005,13 @@ final class AgentSupervisor {
                 .appendingPathComponent(runId, isDirectory: true)
                 .appendingPathComponent("run.json", isDirectory: false)
             let run = RunArtifactsReader.readRunJSON(at: runJSON)
-            guard run.isFinished() else { continue }
+            // Restore has no surviving ownership generation for this provider-
+            // owned child and deliberately does not resume its event cursor or
+            // install a watcher. Therefore even `queued`/`running` is terminal
+            // here: its PID may belong to an orphan or have been reused, and mere
+            // process existence cannot prove that this restored record owns it.
+            // Live bindings still use `isFinished()` and the liveness sweep; this
+            // fail-closed rule is specific to crossing an app-session boundary.
             noteObservedRunEndedBeforeRestore(childID: childID, status: run.status)
         }
     }
@@ -13182,7 +13188,11 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
     guard supervisor.observedRunBindingCount == 0 else {
         throw fail("T6-D: stopping the original parent did not release its observed-run binding before the restore witness")
     }
-    try #"{"id":"\#(runId)","role":"code-scout","status":"failed","pid":999999999}"#
+    // Keep run.json nonterminal and point it at a definitely-live, same-user PID.
+    // A restore owns neither that process nor its generation: trusting this PID
+    // (which may also have been reused) would skip reconciliation forever because
+    // restore deliberately installs no watcher for prior-session runs.
+    try #"{"id":"\#(runId)","role":"code-scout","status":"running","pid":\#(ProcessInfo.processInfo.processIdentifier)}"#
         .write(to: runJSONURL, atomically: true, encoding: .utf8)
 
     let restored = AgentSupervisor(
@@ -13194,10 +13204,10 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
           (try? store.load(id: child.id))?.providerSessionId == runId else {
         throw fail("T6-D: the restored child lost the bind-before-adopt run identity")
     }
-    guard case .failed = restored.turnSnapshot(for: child.id)?.state,
+    guard restored.turnSnapshot(for: child.id)?.state != .working,
           restored.turnSnapshot(for: child.id)?.turnStartedAt == nil,
-          restored.records[child.id]?.latestTerminalEvent?.outcome == .failed else {
-        throw fail("T6-D: restoring the bind-before-adopt child did not reconcile terminal failed run.json into one non-working failed turn")
+          restored.records[child.id]?.latestTerminalEvent?.outcome == .interrupted else {
+        throw fail("T6-D: restoring a prior-session running child trusted an unowned live/reused PID instead of interrupting the stale turn")
     }
     let terminalSequence = restored.records[child.id]?.latestTerminalEvent?.sequence
     restored.reconcileObservedRunsAfterRestore()
@@ -13205,7 +13215,7 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
         throw fail("T6-D: repeated restore reconciliation delivered the same observed-run terminal boundary more than once")
     }
 
-    return "a run bound before its child was adopted keeps its watcher and persisted run identity across that window, an append after adoption reaches it, and a new supervisor uses the identity to reconcile failed run.json exactly once into a non-working child"
+    return "a run bound before its child was adopted keeps its watcher and persisted run identity across that window, an append after adoption reaches it, and a new supervisor interrupts prior-session running state exactly once without trusting an unowned live/reused PID"
 }
 
 /// T6-B — a run whose directory goes quiet forever still reaches a terminal
