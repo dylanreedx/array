@@ -139,5 +139,50 @@ func runClaudeSubagentSupplyChecks() {
     expect(parentItemIDs.isDisjoint(with: childItemIDs),
            "C7: the parent's timeline carried the child's items \(parentItemIDs.intersection(childItemIDs)) — a parent is an index, not a mirror")
 
-    print("Claude subagent supply checks passed: one observed-only child announced from the real capture, keyed by the id its own frames carry, rendered as a subagent rather than a command execution, with the role id published and the prompt withheld, and the child's own frames - prose included - routed to the child while the parent's timeline stayed an index")
+    // 6. A mirrored child owns one real turn lifecycle. Its Agent announcement
+    // starts that turn; the matching top-level tool_result closes it. Content in
+    // between is not enough: without the terminal boundary the durable child row
+    // can remain Working forever after Claude has already returned its result.
+    let starts = childEvents.enumerated().compactMap { index, pair -> Int? in
+        if case .turnStarted = pair.1 { return index }
+        return nil
+    }
+    let completions = childEvents.enumerated().compactMap { index, pair -> (Int, TurnOutcome)? in
+        if case let .turnCompleted(_, _, outcome, _) = pair.1 { return (index, outcome) }
+        return nil
+    }
+    expect(starts.count == 1,
+           "C7 lifecycle: expected exactly one child turnStarted, got \(starts.count)")
+    expect(completions.count == 1,
+           "C7 lifecycle: expected exactly one child turnCompleted, got \(completions.count)")
+    expect(completions.first?.1 == .completed,
+           "C7 lifecycle: the successful Agent tool_result must complete the child, got \(String(describing: completions.first?.1))")
+    if let start = starts.first, let completion = completions.first?.0 {
+        let contentIndices = childEvents.enumerated().compactMap { index, pair -> Int? in
+            if case .contentDelta = pair.1 { return index }
+            return nil
+        }
+        expect(contentIndices.allSatisfy { start < $0 && $0 < completion },
+               "C7 lifecycle: child content must be bracketed by its one start and completion")
+    }
+
+    // A failed top-level result closes the same mirrored child as failed, not as
+    // a successful child merely because Claude returned a tool_result envelope.
+    let failedToolID = "toolu_failed_child"
+    var failedTranslator = ClaudeEventTranslator(runToken: "failed-child")
+    final class FailedSink: @unchecked Sendable { var events: [AgentRuntimeEvent] = [] }
+    let failedSink = FailedSink()
+    failedTranslator.onSubagentEvent = { _, event in failedSink.events.append(event) }
+    _ = failedTranslator.translate(line: #"{"type":"system","subtype":"init","session_id":"failed-session"}"#)
+    _ = failedTranslator.translate(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_failed_child","name":"Agent","input":{"subagent_type":"general-purpose","prompt":"bounded fixture"}}]},"parent_tool_use_id":null}"#)
+    _ = failedTranslator.translate(line: #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_failed_child","is_error":true,"content":"bounded failure"}]},"parent_tool_use_id":null}"#)
+    let failedOutcomes = failedSink.events.compactMap { event -> TurnOutcome? in
+        if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
+        return nil
+    }
+    expect(failedOutcomes == [.failed],
+           "C7 lifecycle: failed Agent tool_result must produce exactly one failed child completion, got \(failedOutcomes)")
+    expect(failedToolID == "toolu_failed_child", "C7 lifecycle fixture drifted")
+
+    print("Claude subagent supply checks passed: one observed-only child announced from the real capture, keyed by the id its own frames carry, rendered as a subagent rather than a command execution, with the role id published and the prompt withheld, and the child's own frames - prose included - routed through one start/completion lifecycle while the parent's timeline stayed an index")
 }

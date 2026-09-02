@@ -7906,14 +7906,62 @@ func runAgentSupervisorChecks() async throws {
         + ".turnCompleted(.failed), and both left a redacted line in agent-diagnostics.log"
 
     let piDelegateReport = try await checkPiDelegatedRunTailing(fail: fail)
+    let piRewriteFirstReport = try await checkObservedRunRewriteBeforeInitialAppend(fail: fail)
     let codexSubagentReport = try await checkCodexProviderSubagentRouting(fail: fail)
     let refusalReport = try await checkRefusedSpawnIsActionableAndLeavesNothing(fail: fail)
     let observedCapReport = try await checkObservedChildrenPastFormerCapStayVisible(fail: fail)
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
+    let retiredRunnerReport = try await checkRetiredRunnerCannotRestartTurn(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+}
+
+/// A callback queued by a runner that Stop has already retired must not reopen
+/// execution. The callback is deliberately enqueued before `stop(_:)` while this
+/// check is still on the main actor; it cannot be delivered until the check yields,
+/// so Stop wins the ownership race deterministically.
+@MainActor
+private func checkRetiredRunnerCannotRestartTurn(
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-retired-runner-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let runner = ScriptedAgentRunner(
+        script: [.turnStarted(threadId: "provider", turnId: "initial")],
+        holdUntilStopped: true)
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in runner }, warn: { _ in })
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let id = supervisor.spawn(
+        role: nil, prompt: nil,
+        cwd: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+        harness: .pi, model: config.model, thinking: config.thinking)
+    guard supervisor.send("start", to: id) else {
+        throw fail("retired runner: initial send was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.turnSnapshot(for: id)?.state == .working
+    }) else { throw fail("retired runner: initial turn never became Working") }
+
+    guard runner.emit(.turnStarted(threadId: "provider", turnId: "late-after-stop")) else {
+        throw fail("retired runner: could not queue the late provider event")
+    }
+    supervisor.stop(id)
+    guard supervisor.turnSnapshot(for: id)?.state != .working,
+          supervisor.turnSnapshot(for: id)?.turnStartedAt == nil else {
+        throw fail("retired runner: Stop itself did not clear Working")
+    }
+    try? await Task.sleep(nanoseconds: 300_000_000)
+    guard !supervisor.isRunning(id),
+          supervisor.turnSnapshot(for: id)?.state != .working,
+          supervisor.turnSnapshot(for: id)?.turnStartedAt == nil else {
+        throw fail("retired runner: a queued old turnStarted restored Working after Stop")
+    }
+    return "a turnStarted queued by a runner before Stop was rejected after that concrete runner was retired"
 }
 
 /// A disposable tile must attach from the supervisor's complete semantic model,
@@ -12095,6 +12143,13 @@ private final class ProviderSubagentFixtureRunner:
         activity(.childAnnounced(
             parentProviderThreadID: child, childProviderThreadID: grandchild,
             sourceItemID: "codex-grandchild-call", displayLabel: "Verifier"))
+        // Positive control: Codex can close the parent before its provider-owned
+        // descendants drain. The runner itself remains bound while those late
+        // child frames arrive; a generic parent-completion closure would truncate
+        // both child transcripts.
+        onEvent(.turnCompleted(
+            threadId: parent, turnId: "codex-parent-turn",
+            outcome: .completed, errorMessage: nil))
         guard descendantGate.wait(timeout: .now() + 10) == .success else { return }
         activity(.threadEvent(providerThreadID: child, event: .turnStarted(
             threadId: child, turnId: "codex-child-turn")))
@@ -12112,9 +12167,6 @@ private final class ProviderSubagentFixtureRunner:
         activity(.threadEvent(providerThreadID: child, event: .turnCompleted(
             threadId: child, turnId: "codex-child-turn",
             outcome: .completed, errorMessage: nil)))
-        onEvent(.turnCompleted(
-            threadId: parent, turnId: "codex-parent-turn",
-            outcome: .completed, errorMessage: nil))
     }
 
     func stop() { descendantGate.signal() }
@@ -12183,6 +12235,11 @@ private func checkCodexProviderSubagentRouting(
             && supervisor.subscriberCount(for: grandchildID) == 1
     }) else { throw fail("Codex routing: descendant subscribers never registered") }
 
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        parentInbox.events.contains { if case .turnCompleted = $0 { return true }; return false }
+    }) else {
+        throw fail("Codex routing: the parent did not complete before descendant release, so the late-child positive control is vacuous")
+    }
     runner.releaseDescendantEvents()
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         childInbox.events.contains {
@@ -12550,6 +12607,82 @@ private func checkPiDelegatedRunTailing(
     return "one pi delegate_agent call became one read-only child keyed on its tool call id, its run was tailed into the child's own transcript without re-delivery, a completion rewrite closed it instead of replaying it, a relaunch added no child and no duplicate events, and a stale running status with a dead pid reads as over"
 }
 
+/// A completion compaction can be the watcher's first view of a Pi run. No
+/// append-only snapshot has then carried `agent_settled`, so the terminal
+/// `run.json` must close the mirrored child before the binding is discarded.
+@MainActor
+private func checkObservedRunRewriteBeforeInitialAppend(
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-pi-rewrite-first-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/pi-delegate-agent-turn.jsonl")
+    guard let fixture = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        throw fail("T6 rewrite-first: missing parent fixture")
+    }
+    let runId = "code-scout-20260825T141759Z-a23808"
+    let runDir = cwd.appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let eventsURL = runDir.appendingPathComponent("events.jsonl")
+    let runURL = runDir.appendingPathComponent("run.json")
+    try "".write(to: eventsURL, atomically: true, encoding: .utf8)
+    try #"{"id":"code-scout-20260825T141759Z-a23808","status":"running","pid":1}"#
+        .write(to: runURL, atomically: true, encoding: .utf8)
+
+    let runner = FixtureStreamRunner(lines: fixture.split(separator: "\n").map(String.init))
+    let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { launch -> AgentRunning in
+            if launch.record.parentAgentID == nil { return runner }
+            return ScriptedAgentRunner(script: [])
+        }, warn: { _ in })
+    let parent = supervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd, harness: .pi,
+        model: config.model, thinking: config.thinking)
+    guard supervisor.send("delegate", to: parent) else {
+        throw fail("T6 rewrite-first: parent send was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.01, {
+        supervisor.children(of: parent).count == 1 && supervisor.observedRunBindingCount == 1
+    }), let child = supervisor.children(of: parent).first else {
+        throw fail("T6 rewrite-first: child and binding were not established before compaction")
+    }
+    let inbox = EventInbox()
+    let task = Task { @MainActor in
+        for await event in supervisor.events(for: child) { inbox.append(event) }
+    }
+    defer { task.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.01, {
+        supervisor.subscriberCount(for: child) == 1
+    }) else { throw fail("T6 rewrite-first: child subscriber did not attach") }
+
+    // Atomic write changes inode before the watcher has consumed any append-only
+    // lifecycle. `run.json` is already terminal in that same snapshot.
+    try (#"{"ts":"done","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"compacted final"}]}}"# + "\n")
+        .write(to: eventsURL, atomically: true, encoding: .utf8)
+    try #"{"id":"code-scout-20260825T141759Z-a23808","status":"done","pid":1}"#
+        .write(to: runURL, atomically: true, encoding: .utf8)
+
+    guard await waitUntil(timeout: 10, pollInterval: 0.05, {
+        supervisor.observedRunBindingCount == 0
+    }) else { throw fail("T6 rewrite-first: terminal rewrite did not release the binding") }
+    let terminal = inbox.events.compactMap { event -> TurnOutcome? in
+        if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
+        return nil
+    }
+    guard terminal == [.completed],
+          supervisor.turnSnapshot(for: child)?.state != .working else {
+        throw fail("T6 rewrite-first: terminal rewrite owed exactly one completed child boundary, got \(terminal)")
+    }
+    return "a terminal Pi inode rewrite seen before any append snapshot delivered one completion before releasing its binding"
+}
+
 /// T6-C — provider-owned children remain visible past Array's former breadth cap.
 ///
 /// Claude `Agent` and Pi `delegate_agent` children already exist when Array sees
@@ -12760,6 +12893,10 @@ private func checkObservedRunBindingSurvivesAdoptionRace(
     }
     guard supervisor.observedRunBindingCount == 1 else {
         throw fail("T6-D: the binding did not survive adoption itself — \(supervisor.observedRunBindingCount) binding(s) remain instead of 1")
+    }
+    guard child.providerSessionId == runId,
+          (try? store.load(id: child.id))?.providerSessionId == runId else {
+        throw fail("T6-D: bind-before-adopt did not persist runId as the child's providerSessionId, so restore cannot reconcile it")
     }
 
     // The proof that matters: the watcher must still be ALIVE to tail an
