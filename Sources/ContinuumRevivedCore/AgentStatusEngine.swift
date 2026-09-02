@@ -343,9 +343,21 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
 
 public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     case piMessageUsage
-    /// The `usage` block of a claude stream-json `result` event (per-turn
-    /// aggregate; cache counters describe the turn, not occupancy).
+    /// The `usage` block of a claude stream-json `result` event.
+    ///
+    /// COST ACCOUNTING ONLY, never occupancy. It sums every API request the run
+    /// made — one agentic turn issues one request per tool round trip, and each
+    /// re-reads the whole conversation from cache, so the summed cache counters
+    /// are a multiple of what was ever in the model's context at once. Measured
+    /// on the committed subagent capture: 51,671 summed against a real last-request
+    /// prompt of 26,081, which is how the ring reached 348%.
     case claudeResultUsage
+    /// The `usage` on a claude stream-json `assistant` frame from the MAIN
+    /// conversation: one API response, so `input_tokens` + the two cache counters
+    /// are exactly the prompt that request carried — the occupancy reading. A
+    /// subagent's frame is a different conversation with its own context and is
+    /// never this.
+    case claudeAssistantUsage
     /// The `usage` block of a codex `turn.completed` event (per-turn aggregate;
     /// `input_tokens` is already the total, cache counters are a subset — not
     /// authoritative occupancy).
@@ -367,7 +379,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .providerSessionStats, .codexRolloutTokenCount, .claudeCompactBoundary:
             return true
-        case .piMessageUsage, .claudeResultUsage, .codexTurnUsage, .unknown:
+        case .piMessageUsage, .claudeResultUsage, .claudeAssistantUsage, .codexTurnUsage, .unknown:
             return false
         }
     }
@@ -376,6 +388,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch self {
         case .piMessageUsage: return "piMessageUsage"
         case .claudeResultUsage: return "claudeResultUsage"
+        case .claudeAssistantUsage: return "claudeAssistantUsage"
         case .codexTurnUsage: return "codexTurnUsage"
         case .codexRolloutTokenCount: return "codexRolloutTokenCount"
         case .providerSessionStats: return "providerSessionStats"
@@ -389,6 +402,7 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
         switch raw {
         case "piMessageUsage": self = .piMessageUsage
         case "claudeResultUsage": self = .claudeResultUsage
+        case "claudeAssistantUsage": self = .claudeAssistantUsage
         case "codexTurnUsage": self = .codexTurnUsage
         case "codexRolloutTokenCount": self = .codexRolloutTokenCount
         case "providerSessionStats": self = .providerSessionStats

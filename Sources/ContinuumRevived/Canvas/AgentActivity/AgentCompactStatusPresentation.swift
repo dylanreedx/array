@@ -373,9 +373,20 @@ struct AgentRadialContextMeterPolicy: Equatable {
     let warningThreshold: Double?
     let criticalThreshold: Double?
 
-    /// Production default until the owner/coordinator approves a warning policy:
-    /// show authoritative occupancy, but do not promote it to warning/critical.
-    static let productionDefault = AgentRadialContextMeterPolicy(warningThreshold: nil, criticalThreshold: nil)
+    /// The shipped policy. Approved by Dylan on 2026-09-02, after a meter
+    /// reading **348%** rendered as a calm green full ring with no marker: the
+    /// number was wrong (claude's `result.usage` is the run's sum — see
+    /// `AgentContextOccupancy`), and the ring had no way to say so because both
+    /// thresholds were nil and every reading resolved to `.known`.
+    ///
+    /// 75% / 90% are the numbers the geometry probe has always driven the
+    /// warning and critical branches with, so the states, markers and colours
+    /// below them are already witnessed at exactly these values. 75% also sits
+    /// under the point where claude's own auto-compaction starts looming, which
+    /// makes the amber a warning you can still act on rather than a narration of
+    /// something already happening.
+    static let productionDefault = AgentRadialContextMeterPolicy(
+        warningThreshold: 0.75, criticalThreshold: 0.90)
 
     static func thresholds(warning: Double, critical: Double) -> AgentRadialContextMeterPolicy {
         AgentRadialContextMeterPolicy(warningThreshold: warning, criticalThreshold: critical)
@@ -607,6 +618,7 @@ enum AgentRadialContextMeterPresenter {
         switch source {
         case .providerSessionStats: return "provider session stats"
         case .piMessageUsage: return "per-message usage"
+        case .claudeAssistantUsage: return "last request usage"
         case .claudeResultUsage: return "per-turn usage"
         case .codexTurnUsage: return "per-turn usage"
         case .codexRolloutTokenCount: return "Codex rollout token count"

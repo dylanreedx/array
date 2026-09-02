@@ -30,11 +30,26 @@ func runAgentContextOccupancyChecks() {
             freshness: .live)
     }
 
-    // claude: the prompt is input + cache read + cache write. Output is NOT in
-    // context occupancy for the turn that just ran.
-    let claude = snapshot(source: .claudeResultUsage, input: 1_200, output: 900, cacheRead: 40_000, cacheWrite: 800)
+    // claude: the prompt is input + cache read + cache write, read off ONE API
+    // response — an `assistant` frame. Output is NOT part of the occupancy of
+    // the request that just ran.
+    let claude = snapshot(source: .claudeAssistantUsage, input: 1_200, output: 900, cacheRead: 40_000, cacheWrite: 800)
     expect(AgentContextOccupancy.promptTokens(from: claude) == 42_000,
            "claude occupancy must sum input + cache read + cache write, got \(String(describing: AgentContextOccupancy.promptTokens(from: claude)))")
+
+    // THE 348% REGRESSION, and the reason this assertion used to name the wrong
+    // source. `result.usage` sums every API request the RUN made — an agentic
+    // turn issues one per tool round trip, each re-reading the whole
+    // conversation from cache — so it is cost accounting wearing occupancy's
+    // clothes, exactly like codex's `turn.completed.usage` below. This very
+    // check pinned it as the claude occupancy source for four releases.
+    let claudeRunSum = snapshot(source: .claudeResultUsage, input: 4, output: 330,
+                                cacheRead: 42_081, cacheWrite: 9_586)
+    expect(AgentContextOccupancy.promptTokens(from: claudeRunSum) == nil,
+           "a claude result block has no occupancy — it is every request of the run added up, got \(String(describing: AgentContextOccupancy.promptTokens(from: claudeRunSum)))")
+    let claudeNotEnriched = AgentContextOccupancy.withDerivedOccupancy(claudeRunSum, contextWindow: 200_000)
+    expect(claudeNotEnriched.usedTokens == nil && claudeNotEnriched.maxTokens == nil,
+           "…and it must not be enriched into one: that is the 348% reading, got \(String(describing: claudeNotEnriched.usedTokens))/\(String(describing: claudeNotEnriched.maxTokens))")
 
     // codex: ONLY a per-request reading counts. `token_count` sets `usedTokens`
     // from `last_token_usage`; that is the occupancy.

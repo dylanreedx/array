@@ -39,6 +39,13 @@ public struct ClaudeEventTranslator {
     /// B6.2 — a compaction boundary has no tool_use id of its own, so this
     /// mints a stable-enough one for the item's begin/finish pair.
     private var compactionCounter: Int = 0
+    /// The prompt counters of the most recent MAIN-conversation assistant frame
+    /// in this run — the occupancy reading, carried so the `result` event can
+    /// close a turn with a real number instead of the run's summed one. A
+    /// translator is built per run, so there is nothing to reset: an empty value
+    /// means this run has produced no assistant response yet, and in that state
+    /// the result publishes no occupancy at all.
+    private var lastMainThreadPromptUsage: (input: Int?, cacheRead: Int?, cacheWrite: Int?)?
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -242,6 +249,45 @@ public struct ClaudeEventTranslator {
               let content = message["content"] as? [[String: Any]]
         else { return [] }
         var events: [AgentRuntimeEvent] = []
+        // OCCUPANCY. One assistant frame is one API response, so its `usage`
+        // describes exactly one request: `input_tokens` plus the two cache
+        // counters IS the prompt that request carried, which is what the model
+        // held in context at that moment. `result.usage` cannot answer this —
+        // it sums every request of the run — and summing it is what put 348% on
+        // the ring.
+        //
+        // The `!isSubagent` guard is NOT what keeps a child's context off the
+        // parent's meter — the routing above already does that, by handing every
+        // subagent event to the child channel and returning nothing to the
+        // parent. What it decides is whether a CHILD gets an occupancy reading of
+        // its own, and it must not: an adopted child is `observedReadOnly` with
+        // no model settings of its own, so there is no window to divide by and
+        // the ring would show a bare token count where the parent shows a
+        // percentage. A witness that asserts this through the parent's event list
+        // is vacuous — it has to read the child channel (`onSubagentEvent`).
+        if !isSubagent, let usage = message["usage"] as? [String: Any] {
+            let input = Self.intValue(usage["input_tokens"])
+            let cacheRead = Self.intValue(usage["cache_read_input_tokens"])
+            let cacheWrite = Self.intValue(usage["cache_creation_input_tokens"])
+            let prompt = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
+            if prompt > 0 {
+                lastMainThreadPromptUsage = (input, cacheRead, cacheWrite)
+                events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+                    usedTokens: nil,
+                    maxTokens: nil,
+                    inputTokens: input,
+                    outputTokens: Self.intValue(usage["output_tokens"]),
+                    cacheReadTokens: cacheRead,
+                    cacheWriteTokens: cacheWrite,
+                    totalProcessedTokens: nil,
+                    totalCostUsd: nil,
+                    automaticCompaction: nil,
+                    observedAt: now(),
+                    source: .claudeAssistantUsage,
+                    freshness: .live
+                )))
+            }
+        }
         for block in content {
             guard (block["type"] as? String) == "tool_use",
                   let id = block["id"] as? String,
@@ -430,20 +476,29 @@ public struct ClaudeEventTranslator {
                         outputTokens: output ?? 0,
                         totalCostUsd: totalCost)
                 ))
-                events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
-                    usedTokens: nil,
-                    maxTokens: nil,
-                    inputTokens: input,
-                    outputTokens: output,
-                    cacheReadTokens: cacheRead,
-                    cacheWriteTokens: cacheWrite,
-                    totalProcessedTokens: total,
-                    totalCostUsd: totalCost,
-                    automaticCompaction: nil,
-                    observedAt: now(),
-                    source: .claudeResultUsage,
-                    freshness: .live
-                )))
+                // The result's own counters are the run's SUM — cost accounting,
+                // and the trap this whole path fell into. Publish them as the
+                // cost/processed figures they are, and carry the occupancy over
+                // from the last per-request assistant frame so closing a turn
+                // does not blank the ring. When no assistant frame reported
+                // usage in this run there is nothing to carry: emit no
+                // occupancy rather than the summed number.
+                if let prompt = lastMainThreadPromptUsage {
+                    events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+                        usedTokens: nil,
+                        maxTokens: nil,
+                        inputTokens: prompt.input,
+                        outputTokens: output,
+                        cacheReadTokens: prompt.cacheRead,
+                        cacheWriteTokens: prompt.cacheWrite,
+                        totalProcessedTokens: total,
+                        totalCostUsd: totalCost,
+                        automaticCompaction: nil,
+                        observedAt: now(),
+                        source: .claudeAssistantUsage,
+                        freshness: .live
+                    )))
+                }
             }
         }
 

@@ -8033,7 +8033,7 @@ func checkClearCommandTransaction(
         lastActivityAt: createdAt,
         lastContextWindow: AgentContextWindowSnapshot(
             usedTokens: 9_000, maxTokens: 10_000, observedAt: createdAt,
-            source: .claudeResultUsage, freshness: .live),
+            source: .claudeAssistantUsage, freshness: .live),
         providerSessionId: "claude-old-session-id"
     )
     let child = AgentRecord(
@@ -8066,7 +8066,7 @@ func checkClearCommandTransaction(
     // a real turn would.
     let liveSnapshot = AgentContextWindowSnapshot(
         usedTokens: 9_500, maxTokens: 10_000, observedAt: createdAt,
-        source: .claudeResultUsage, freshness: .live)
+        source: .claudeAssistantUsage, freshness: .live)
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot), to: parentID)
     guard supervisor.contextWindowSnapshot(for: parentID) == liveSnapshot else {
         throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache")
@@ -8126,7 +8126,7 @@ func checkClearCommandTransaction(
     // order would hand it back before the sentinel.
     let sentinelSnapshot = AgentContextWindowSnapshot(
         usedTokens: 1, maxTokens: 2, observedAt: createdAt,
-        source: .claudeResultUsage, freshness: .live)
+        source: .claudeAssistantUsage, freshness: .live)
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot), to: parentID)
     var firstReplayedAfterClear: AgentRuntimeEvent?
     for await event in supervisor.events(for: parentID) { firstReplayedAfterClear = event; break }

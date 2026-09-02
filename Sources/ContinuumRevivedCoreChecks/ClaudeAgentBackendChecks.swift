@@ -18,6 +18,7 @@ func runClaudeAgentBackendChecks() {
     runClaudeTranslatorGateChecks()
     runClaudeCompactBoundaryChecks()
     runClaudeResolvedModelContextWindowChecks()
+    runClaudeContextOccupancyChecks()
     runClaudeRunnerArgvChecks()
     runClaudeBackendPolicyChecks()
     runClaudeCatalogUnionChecks()
@@ -37,7 +38,11 @@ private func runClaudeTranslatorMappingChecks() {
         #"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" world"}},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
         #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello world"},{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"SECRET-COMMAND"}}]},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
         #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","is_error":false,"content":"SECRET-TOOL-OUTPUT"}]},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
-        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_02","name":"Edit","input":{"file_path":"/private/tmp/SECRET-PATH/notes.txt","old_string":"a","new_string":"b"}}]},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
+        // A real assistant frame carries the `usage` of the ONE API response it
+        // is — this is the occupancy reading, and the curated fixture used to
+        // omit it, which is part of why the summed `result.usage` looked like
+        // the only source available.
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_02","name":"Edit","input":{"file_path":"/private/tmp/SECRET-PATH/notes.txt","old_string":"a","new_string":"b"}}],"usage":{"input_tokens":4,"cache_creation_input_tokens":1200,"cache_read_input_tokens":17900,"output_tokens":12}},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
         // A sub-agent frame: everything about it must be skipped.
         #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"SECRET-SUBAGENT-COMMAND"}}]},"parent_tool_use_id":"toolu_02","session_id":"11111111-2222-3333-4444-555555555555"}"#,
         #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_02","is_error":true,"content":"SECRET-ERROR-BODY"}]},"parent_tool_use_id":null,"session_id":"11111111-2222-3333-4444-555555555555"}"#,
@@ -58,22 +63,40 @@ private func runClaudeTranslatorMappingChecks() {
         .contentDelta(threadId: claudeSID, turnId: "\(claudeSID)#run1-t1", streamKind: .assistant, delta: " world"),
         .itemStarted(threadId: claudeSID, itemId: "toolu_01", kind: .commandExecution, title: "Bash"),
         .itemCompleted(threadId: claudeSID, itemId: "toolu_01", kind: .commandExecution, status: .completed),
+        // Occupancy, from that one request: 4 + 1,200 + 17,900 = 19,104.
+        .contextWindowUpdated(threadId: claudeSID, snapshot: AgentContextWindowSnapshot(
+            usedTokens: nil,
+            maxTokens: nil,
+            inputTokens: 4,
+            outputTokens: 12,
+            cacheReadTokens: 17900,
+            cacheWriteTokens: 1200,
+            totalProcessedTokens: nil,
+            totalCostUsd: nil,
+            automaticCompaction: nil,
+            observedAt: observedAt,
+            source: .claudeAssistantUsage,
+            freshness: .live)),
         .itemStarted(threadId: claudeSID, itemId: "toolu_02", kind: .fileChange, title: "Edit"),
         .itemCompleted(threadId: claudeSID, itemId: "toolu_02", kind: .fileChange, status: .failed),
         .tokenUsageUpdated(threadId: claudeSID, snapshot: TokenUsageSnapshot(
             inputTokens: 24406, outputTokens: 40, totalCostUsd: 0.014992)),
+        // The result's OWN counters (10 / 17,900 / 6,496) are the run's sum and
+        // are cost accounting, published as `totalProcessedTokens`/cost. The
+        // occupancy carried here is still the last request's, so closing a turn
+        // does not blank the ring — and does not paint the sum.
         .contextWindowUpdated(threadId: claudeSID, snapshot: AgentContextWindowSnapshot(
             usedTokens: nil,
             maxTokens: nil,
-            inputTokens: 10,
+            inputTokens: 4,
             outputTokens: 40,
             cacheReadTokens: 17900,
-            cacheWriteTokens: 6496,
+            cacheWriteTokens: 1200,
             totalProcessedTokens: 24446,
             totalCostUsd: 0.014992,
             automaticCompaction: nil,
             observedAt: observedAt,
-            source: .claudeResultUsage,
+            source: .claudeAssistantUsage,
             freshness: .live)),
         .turnCompleted(threadId: claudeSID, turnId: "\(claudeSID)#run1-t1", outcome: .completed, errorMessage: nil),
         .sessionStateChanged(.ready),
@@ -313,14 +336,16 @@ private func runClaudeResolvedModelContextWindowChecks() {
     expect(windows["anthropic/claude-opus-5"] == 1_000_000 && windows["anthropic/claude-opus-4-5"] == 200_000,
            "resolved-model: the fixture must keep a 1M and a 200k model apart")
 
-    // End to end: a real claude `result` usage block over the resolved window
-    // produces a real percentage. Occupancy is the prompt — fresh input plus
-    // both cache counters — never the output.
+    // End to end: a real claude per-request `assistant` usage block over the
+    // resolved window produces a real percentage. Occupancy is the prompt —
+    // fresh input plus both cache counters — never the output, and never the
+    // `result` block, which sums every request of the run (see
+    // `runClaudeContextOccupancyChecks`).
     let turn = AgentContextWindowSnapshot(
         inputTokens: 1_000, outputTokens: 5_000,
         cacheReadTokens: 240_000, cacheWriteTokens: 9_000,
         observedAt: Date(timeIntervalSinceReferenceDate: 456),
-        source: .claudeResultUsage, freshness: .live)
+        source: .claudeAssistantUsage, freshness: .live)
     expect(AgentContextOccupancy.promptTokens(from: turn) == 250_000,
            "resolved-model: claude prompt tokens must sum input + cacheRead + cacheWrite")
     // `usedTokens`/`maxTokens` are the two fields the meter divides
@@ -521,4 +546,126 @@ private func runClaudeCatalogUnionChecks() {
            "ClaudeCLIBackend: garbage output must read as logged out")
 
     print("AgentModelCatalog claude-union checks passed: append/clear semantics, pi name precedence, QA reset, auth-status parse pinned")
+}
+
+/// Claude's context OCCUPANCY must come from a per-request `assistant` frame,
+/// never from `result.usage`.
+///
+/// The reported defect: the ring read **348%**. `result.usage` sums every API
+/// request the run made — an agentic turn issues one per tool round trip, and
+/// each re-reads the whole conversation from cache — so its summed cache
+/// counters are a multiple of anything the model ever held at once. This is the
+/// codex 237% trap in a second costume, and the source's own doc comment already
+/// said "per-turn aggregate … not occupancy" while this code summed it anyway.
+///
+/// Replayed against the committed capture, whose numbers make the difference
+/// arithmetic rather than rhetorical:
+///
+/// | frame | input | cache write | cache read | prompt |
+/// |---|---|---|---|---|
+/// | last MAIN assistant | 2 | 491 | 25,588 | **26,081** |
+/// | a SUBAGENT assistant | 2 | 898 | 12,765 | 13,665 |
+/// | `result` (the sum) | 4 | 9,586 | 42,081 | 51,671 |
+///
+/// A witness that only asserted "occupancy is not nil" passes on all three.
+func runClaudeContextOccupancyChecks() {
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/claude-subagent-turn.jsonl", isDirectory: false)
+    guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        expect(false, "claude occupancy: the committed subagent capture is missing")
+        return
+    }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    // The child channel has to be read too. Subagent events never appear in the
+    // parent's returned list — the translator routes them here instead — so an
+    // assertion about a child that only inspects the parent's list is vacuous.
+    // Mutating the `!isSubagent` guard away proved exactly that: the check
+    // stayed green.
+    final class ChildSink: @unchecked Sendable {
+        let lock = NSLock()
+        var events: [(String, AgentRuntimeEvent)] = []
+        func append(_ parent: String, _ event: AgentRuntimeEvent) {
+            lock.lock(); events.append((parent, event)); lock.unlock()
+        }
+    }
+    let childSink = ChildSink()
+    var translator = ClaudeEventTranslator(runToken: "run1", now: { Date(timeIntervalSinceReferenceDate: 99) })
+    translator.onSubagentEvent = { childSink.append($0, $1) }
+    let events = translator.translate(stream: lines)
+
+    var snapshots: [AgentContextWindowSnapshot] = []
+    for event in events {
+        if case let .contextWindowUpdated(_, snapshot) = event { snapshots.append(snapshot) }
+    }
+
+    // CONTROL. The capture must actually carry usage, or every assertion below
+    // is satisfied by a translator that emits nothing at all.
+    expect(!snapshots.isEmpty, "claude occupancy control: the capture produced no context snapshots")
+    expect(snapshots.allSatisfy { $0.source == .claudeAssistantUsage },
+           "claude occupancy: every published snapshot must come from a per-request assistant "
+           + "frame; got \(snapshots.map(\.source))")
+
+    // The reading the meter will use is the LAST one published.
+    guard let latest = snapshots.last else { return }
+    let occupancy = AgentContextOccupancy.promptTokens(from: latest)
+    expect(occupancy == 26_081,
+           "claude occupancy: the ring must read the last MAIN request's prompt (26,081), not "
+           + "the run's summed 51,671 and not a subagent's 13,665; got \(String(describing: occupancy))")
+
+    // A subagent's context is a different conversation, and an adopted child is
+    // `observedReadOnly` with no model of its own, so there is no window to
+    // divide its prompt by. Neither surface may carry one.
+    let published = snapshots.compactMap { AgentContextOccupancy.promptTokens(from: $0) }
+    expect(!published.contains(13_665),
+           "claude occupancy: a subagent's own prompt reached the parent's meter; got \(published)")
+    // CONTROL: the child channel must have carried real traffic, or the next
+    // assertion is satisfied by a capture with no subagent in it.
+    expect(!childSink.events.isEmpty,
+           "claude occupancy control: the capture produced no subagent events at all")
+    let childContext = childSink.events.compactMap { pair -> AgentContextWindowSnapshot? in
+        if case let .contextWindowUpdated(_, snapshot) = pair.1 { return snapshot }
+        return nil
+    }
+    expect(childContext.isEmpty,
+           "claude occupancy: an adopted child must get no occupancy reading of its own — there "
+           + "is no window on file to divide it by; got \(childContext.count) snapshot(s)")
+    expect(!published.contains(51_671),
+           "claude occupancy: the run's summed result usage reached the meter; got \(published)")
+
+    // The result frame still has to publish COST, which is what it is genuinely
+    // for. Losing it would trade one defect for another.
+    var usageSnapshots: [TokenUsageSnapshot] = []
+    for event in events {
+        if case let .tokenUsageUpdated(_, snapshot) = event { usageSnapshots.append(snapshot) }
+    }
+    expect(usageSnapshots.last?.inputTokens == 51_671,
+           "claude occupancy: cost accounting still wants the run's SUM; got "
+           + "\(String(describing: usageSnapshots.last?.inputTokens))")
+    expect(latest.totalProcessedTokens == 52_001,
+           "claude occupancy: the meter's detail text keeps the run's processed total; got "
+           + "\(String(describing: latest.totalProcessedTokens))")
+
+    // And the percentage the ring actually paints, through the production
+    // denominator. 26,081 of a 200k window is 13% — not 26%, which is what the
+    // summed number would have painted against the same window.
+    let derived = AgentContextOccupancy.withDerivedOccupancy(latest, contextWindow: 200_000)
+    expect(derived.usedTokens == 26_081 && derived.maxTokens == 200_000,
+           "claude occupancy: derived reading must be 26,081/200,000; got "
+           + "\(String(describing: derived.usedTokens))/\(String(describing: derived.maxTokens))")
+
+    // A legacy record persisted while the summed number was believed must not
+    // keep painting it: a result-sourced snapshot is sanitized, never trusted.
+    let legacy = AgentContextWindowSnapshot(
+        usedTokens: 696_000, maxTokens: 200_000,
+        observedAt: Date(timeIntervalSinceReferenceDate: 0),
+        source: .claudeResultUsage, freshness: .live)
+    let sanitized = AgentContextOccupancy.withDerivedOccupancy(legacy, contextWindow: 200_000)
+    expect(sanitized.usedTokens == nil && sanitized.maxTokens == nil,
+           "claude occupancy: a stored result-usage occupancy must be dropped, not re-published; "
+           + "got \(String(describing: sanitized.usedTokens))/\(String(describing: sanitized.maxTokens))")
+
+    print("Claude context occupancy checks passed: the real capture reads 26,081 from its last "
+          + "main-thread request (13% of 200k), never the run's summed 51,671 (the 348% reading) "
+          + "and never the subagent's 13,665; cost accounting keeps the sum")
 }

@@ -432,13 +432,35 @@ enum UIProbeGeometry {
             inputTokens: 600, outputTokens: 90, observedAt: now.addingTimeInterval(-800),
             source: .providerSessionStats, freshness: .stale)
 
-        let productionWarningDisabled = AgentRadialContextMeterPresenter.present(warning)
-        try require(productionWarningDisabled.state == .known,
-                    "compact status production default must not hard-code warning/critical thresholds")
-        try require(productionWarningDisabled.label == "80%",
-                    "compact status disabled threshold label/state disagreed: \(productionWarningDisabled.label)")
-        try require(productionWarningDisabled.detailText.contains("warning/critical disabled"),
-                    "compact status tooltip must state disabled threshold policy")
+        // THE SHIPPED POLICY. This block used to assert the opposite — that
+        // production hard-codes NO thresholds — which is why a 348% reading
+        // rendered as a calm green ring with no marker: every occupancy, however
+        // absurd, resolved to `.known`. Production now carries the same 75%/90%
+        // this probe has always driven the warning and critical branches with,
+        // so what is witnessed below IS what ships.
+        let production = AgentRadialContextMeterPresenter.present(warning)
+        try require(production.state == .warning,
+                    "compact status production default must promote 80% occupancy to warning, got \(production.state.rawValue)")
+        try require(production.label == "⚠︎ 80%",
+                    "compact status production label must carry the warning marker, got \(production.label)")
+        try require(production.detailText.contains("warning 75%, critical 90%"),
+                    "compact status tooltip must state the shipped threshold policy, got \(production.detailText)")
+        // …and the probe's own policy must be the production one, or every
+        // state assertion below witnesses a policy nobody ships.
+        try require(AgentRadialContextMeterPresenter.present(warning, policy: policy) == production,
+                    "the geometry probe's policy has drifted from the shipped default")
+        // A reading UNDER the warning line stays quiet. Without this, "the ring
+        // warns" is satisfied by a ring that warns about everything.
+        let quiet = AgentRadialContextMeterPresenter.present(known)
+        try require(quiet.state == .known && quiet.warningMarker == nil,
+                    "compact status must leave an ordinary occupancy unmarked, got \(quiet.state.rawValue)")
+        // And the reading that started this: over capacity is critical, and
+        // still prints its raw arithmetic rather than a comforting 100%.
+        let overCapacityProduction = AgentRadialContextMeterPresenter.present(overCapacity)
+        try require(overCapacityProduction.state == .critical
+                        && overCapacityProduction.label == "! 141%",
+                    "an over-capacity reading must be critical AND keep its raw percentage, got "
+                    + "\(overCapacityProduction.state.rawValue) \(overCapacityProduction.label)")
 
         let statePresentations: [(AgentRadialContextMeterState, AgentRadialContextMeterPresentation)] = [
             (.known, AgentRadialContextMeterPresenter.present(known, policy: policy)),
@@ -5833,7 +5855,7 @@ enum UIProbeGeometry {
                 cacheWriteTokens: 800,
                 totalProcessedTokens: 42_900,
                 observedAt: now,
-                source: .claudeResultUsage,
+                source: .claudeAssistantUsage,
                 freshness: .live),
             contextWindow: 200_000)
         tile.qaApplyCompactStatusFacts(
@@ -6014,6 +6036,28 @@ enum UIProbeGeometry {
               commands.qaRowStates.allSatisfy({ !$0.checkVisible }),
               commands.qaHasDestructiveSeparator else {
             throw fail("choice popover: command presentation lost compact density, dynamic icons, checkmark suppression, or destructive grouping")
+        }
+        let slashCommands = ChoiceListView(items: [
+            ChoiceItem(
+                id: "review", title: "/review",
+                detail: "Review the current working tree", icon: .system("command")
+            ),
+            ChoiceItem(
+                id: "compact", title: "/compact",
+                detail: "Compact the current conversation", icon: .system("command")
+            ),
+        ], selectedID: nil, presentation: .slashCommands)
+        slashCommands.frame = NSRect(origin: .zero, size: slashCommands.intrinsicContentSize)
+        slashCommands.layoutSubtreeIfNeeded()
+        guard slashCommands.qaRenderedRowHeight == ChoiceListView.slashCommandRowHeight,
+              slashCommands.qaRenderedRowHeight > ChoiceListView.commandRowHeight,
+              slashCommands.qaRowTextFrames.allSatisfy({ frames in
+                  guard let detail = frames.detail else { return false }
+                  return !frames.title.intersects(detail)
+                      && slashCommands.bounds.contains(frames.title)
+                      && slashCommands.bounds.contains(detail)
+              }) else {
+            throw fail("choice popover: slash-command copy overlaps or inherited compact sidebar-menu density")
         }
         guard let typeaheadEvent = NSEvent.keyEvent(
             with: .keyDown,

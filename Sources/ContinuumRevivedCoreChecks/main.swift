@@ -54,6 +54,14 @@ if CommandLine.arguments.contains("--exact-rebase-performance-check") {
 // CoreChecks run covers it too; this exists because the whole binary is a long,
 // filesystem- and process-heavy run, and a targeted arm is what makes a
 // mutation test of this feature cheap enough to actually perform.
+// Runnable on its own so the occupancy arithmetic can be mutation-tested without
+// the whole suite — the real-tmux and grouped-view legs above it are documented
+// as load-sensitive and abort the run before this one is reached.
+if CommandLine.arguments.contains("--claude-context-occupancy-check") {
+    runClaudeContextOccupancyChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--canvas-background-model-check") {
     runCanvasBackgroundChecks()
     print("CanvasBackgroundModelChecks passed")

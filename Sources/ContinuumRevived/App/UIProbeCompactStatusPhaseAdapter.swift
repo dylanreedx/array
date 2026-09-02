@@ -303,14 +303,17 @@ extension UIProbeGeometry {
         // that is what made it findable. The fix belongs in
         // `AgentContextOccupancy`, which no longer derives occupancy from
         // codex's cumulative session totals.
+        // 90 of 100 is exactly the shipped critical line, and production now
+        // promotes it. This assertion used to demand `.known` — it pinned the
+        // silence that let a 348% ring render calm and green.
         try require(AgentRadialContextMeterPresenter.present(
             AgentContextWindowSnapshot(
                 usedTokens: 90,
                 maxTokens: 100,
                 observedAt: t1,
                 source: .providerSessionStats,
-                freshness: .live)).state == .known,
-                    "production warning thresholds remain disabled by default")
+                freshness: .live)).state == .critical,
+                    "production must promote a 90% occupancy to critical")
 
         // A ready session with no active turn is IDLE, and idle outranks a tool
         // observation that has not yet expired. This is the stale-status defect:
