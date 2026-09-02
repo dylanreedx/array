@@ -184,5 +184,65 @@ func runClaudeSubagentSupplyChecks() {
            "C7 lifecycle: failed Agent tool_result must produce exactly one failed child completion, got \(failedOutcomes)")
     expect(failedToolID == "toolu_failed_child", "C7 lifecycle fixture drifted")
 
+    // Claude does not promise that the complete Agent/Task announcement is
+    // flushed before the child's first forwarded frame. Hold that early content
+    // behind the announcement so the child still observes one coherent turn.
+    // Replayed complete-message frames and tool results are also legal stream
+    // residue; neither may duplicate the synthetic lifecycle.
+    let taskToolID = "toolu_task_child"
+    var reorderedTranslator = ClaudeEventTranslator(runToken: "reordered-child")
+    final class ReorderedSink: @unchecked Sendable {
+        var requests: [SpawnRequest] = []
+        var events: [(String, AgentRuntimeEvent)] = []
+    }
+    let reorderedSink = ReorderedSink()
+    reorderedTranslator.onSpawnRequest = { reorderedSink.requests.append($0) }
+    reorderedTranslator.onSubagentEvent = { toolUseID, event in
+        reorderedSink.events.append((toolUseID, event))
+    }
+    _ = reorderedTranslator.translate(line: #"{"type":"system","subtype":"init","session_id":"reordered-session"}"#)
+    _ = reorderedTranslator.translate(line: #"{"type":"assistant","message":{"content":[{"type":"text","text":"early child prose"}]},"parent_tool_use_id":"toolu_task_child"}"#)
+    let taskAnnouncement = #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_task_child","name":"Task","input":{"subagent_type":"general-purpose","prompt":"bounded fixture"}}]},"parent_tool_use_id":null}"#
+    _ = reorderedTranslator.translate(line: taskAnnouncement)
+    _ = reorderedTranslator.translate(line: taskAnnouncement)
+    let taskResult = #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_task_child","is_error":false,"content":"ok"}]},"parent_tool_use_id":null}"#
+    _ = reorderedTranslator.translate(line: taskResult)
+    _ = reorderedTranslator.translate(line: taskResult)
+
+    expect(reorderedSink.requests.count == 1,
+           "C7 lifecycle: repeated Task announcement produced \(reorderedSink.requests.count) child requests")
+    expect(Set(reorderedSink.events.map(\.0)) == [taskToolID],
+           "C7 lifecycle: reordered child events escaped their Task tool id")
+    let reorderedStarts = reorderedSink.events.enumerated().compactMap { index, pair -> (Int, String)? in
+        if case let .turnStarted(_, turnID) = pair.1 { return (index, turnID) }
+        return nil
+    }
+    let reorderedContent = reorderedSink.events.enumerated().compactMap { index, pair -> Int? in
+        if case .contentDelta = pair.1 { return index }
+        return nil
+    }
+    let reorderedCompletions = reorderedSink.events.enumerated().compactMap { index, pair -> (Int, String, TurnOutcome)? in
+        if case let .turnCompleted(_, turnID, outcome, _) = pair.1 {
+            return (index, turnID, outcome)
+        }
+        return nil
+    }
+    expect(reorderedStarts.count == 1,
+           "C7 lifecycle: repeated Task announcement produced \(reorderedStarts.count) child starts")
+    expect(reorderedContent.count == 1,
+           "C7 lifecycle: early child content was lost or duplicated: \(reorderedContent.count) deltas")
+    expect(reorderedCompletions.count == 1,
+           "C7 lifecycle: repeated matching result produced \(reorderedCompletions.count) child completions")
+    if let start = reorderedStarts.first,
+       let content = reorderedContent.first,
+       let completion = reorderedCompletions.first {
+        expect(start.0 < content && content < completion.0,
+               "C7 lifecycle: early child content was not bracketed by start/completion")
+        expect(start.1 == completion.1,
+               "C7 lifecycle: synthetic child turn id changed between start and completion: \(start.1) vs \(completion.1)")
+        expect(completion.2 == .completed,
+               "C7 lifecycle: successful Task result produced \(completion.2)")
+    }
+
     print("Claude subagent supply checks passed: one observed-only child announced from the real capture, keyed by the id its own frames carry, rendered as a subagent rather than a command execution, with the role id published and the prompt withheld, and the child's own frames - prose included - routed through one start/completion lifecycle while the parent's timeline stayed an index")
 }
