@@ -1262,6 +1262,10 @@ final class CanvasNSView: NSView, TokenThemed {
         return window.occlusionState.contains(.visible)
     }
 
+    /// QA: the LIVE window answer, so a witness can tell a stale cached flag from
+    /// a genuinely occluded window. Nothing in production reads this.
+    var qaResolvedWindowVisibilityForChecks: Bool? { resolvedWindowVisibility() }
+
     /// WS4: the same live occlusion answer residency uses, for the awareness
     /// facts. Reusing `resolvedWindowVisibility` means a fixture that already has
     /// to inject `occlusionVisibilityProvider` (every off-display check window
@@ -4356,6 +4360,17 @@ final class CanvasNSView: NSView, TokenThemed {
         guard visible != windowOcclusionVisible else { return }
         windowOcclusionVisible = visible
         applyOverlayAnimationSuspension()
+        fanOutWindowOcclusion(visible: visible)
+    }
+
+    /// The half of an occlusion change that touches the scene: every tile, the
+    /// residency heartbeat, and the plane's redraw.
+    ///
+    /// Split from the flag so the arrival resync in `viewDidMoveToWindow` can
+    /// correct the FLAG synchronously — that is the value a newly installed tile
+    /// reads, and reading a stale one is the freeze — while deferring this part
+    /// out of AppKit's window-association pass.
+    private func fanOutWindowOcclusion(visible: Bool) {
         for tileView in tileViewsInVisualOrder {
             tileView.windowOcclusionChanged(visible: visible)
         }
@@ -4395,6 +4410,49 @@ final class CanvasNSView: NSView, TokenThemed {
                 name: NSWindow.didChangeOcclusionStateNotification,
                 object: window
             )
+            // RESYNC, because the observer above is the only thing that moves
+            // `windowOcclusionVisible` and it was not listening until this line.
+            // A canvas that left its window while covered kept the `false`, and
+            // any occlusion change that happened in between produced no
+            // notification for it to catch — so it rejoins a perfectly visible
+            // window still believing it is hidden. That used to cost nothing;
+            // since tiles ask for the current occlusion on arrival, it means
+            // every tile spawned afterwards is told to pause, and a terminal
+            // applies that the moment its surface exists and never renders.
+            // Occlusion is state: read it from the window, do not remember it
+            // across an absence.
+            //
+            // UPWARD ONLY, deliberately, and it is not timidity. `.visible` is
+            // absent for reasons that are not "the user cannot see this" — an
+            // off-display window reports not-visible, which is exactly what every
+            // borderless check fixture is, and latching that here took the
+            // residency witnesses to "0 of 6 surfaced" on the first attempt.
+            // Arriving may therefore CLEAR a stale pause; it may never impose a
+            // new one. A canvas that genuinely rejoins a covered window renders a
+            // few frames nobody sees until the next real notification pauses it,
+            // and that is the failure direction this whole seam is chosen for:
+            // wasted compositing is cheap, a frozen tile is not.
+            //
+            // The FLAG moves now, because that is what a tile installed later
+            // reads on arrival and reading a stale one is the freeze. The
+            // SCENE fan-out waits a runloop turn: it walks every tile, starts the
+            // residency heartbeat and invalidates the plane, and doing that
+            // inside `viewDidMoveToWindow` runs it while AppKit is still
+            // associating the view tree with the window. A matrix run carrying
+            // the inline version produced a SIGSEGV in `objc_release` under
+            // `NSApplication.run`'s autorelease pool drain — twice, and in the
+            // only two runs that ever carried it. Never reproduced since and
+            // never attributed, so this is not a claimed fix; the reentrancy is
+            // real on its own terms and the deferral costs nothing, because a
+            // canvas re-attach and a tile spawn are never the same turn.
+            if resolvedWindowVisibility() == true, !windowOcclusionVisible {
+                windowOcclusionVisible = true
+                applyOverlayAnimationSuspension()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.window != nil, self.windowOcclusionVisible else { return }
+                    self.fanOutWindowOcclusion(visible: true)
+                }
+            }
             installFrameTailObserver()
             startResidencyEvaluation()
         }

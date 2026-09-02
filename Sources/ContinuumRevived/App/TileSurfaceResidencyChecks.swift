@@ -327,6 +327,7 @@ enum TileSurfaceResidencyChecks {
         try checkNoBakeWhileTheWindowIsNotShown()
         try checkOcclusionPausesAndResumesResidency()
         try checkATileRejoiningTheSceneIsToldTheCurrentOcclusion()
+        try checkAFreshTileIsNotBornOccludedByAStaleLatch()
         try checkTheSurfaceLandsExactlyWhereTheBodyDrew()
         try checkAScrollIsNeverShownStale()
         try checkAZoomGestureCrossesResidencyAlmostNever()
@@ -2065,6 +2066,100 @@ enum TileSurfaceResidencyChecks {
         try expect(recorder.feeds.last == false,
                    "a tile rejoining an occluded window must be told it is occluded, not resumed. "
                    + "Feeds: \(recorder.feeds)")
+    }
+
+    /// **A tile created into a VISIBLE window must not be born paused.**
+    ///
+    /// Reported 2026-09-02: a freshly spawned terminal "freezes mid-open" — the
+    /// tile appears, the shell is alive, and nothing ever renders. It is a
+    /// regression from 0.7.6's own occlusion fix, and it needed BOTH halves of
+    /// that fix to exist:
+    ///
+    ///  - `GhosttyTerminalView` now REMEMBERS an occlusion request that arrives
+    ///    before its surface exists and applies it at creation. Before, the
+    ///    `guard let surface else { return }` dropped it, which accidentally
+    ///    protected every new terminal.
+    ///  - `TileNSView.viewDidMoveToWindow` now asks the canvas for the current
+    ///    occlusion on arrival — and the canvas answers from a CACHED flag.
+    ///
+    /// So a stale cache became fatal. `windowOcclusionVisible` only moves inside
+    /// `noteWindowOcclusionChanged`, whose observer is per-window and is REMOVED
+    /// when the canvas leaves a window — without resetting the flag. A canvas
+    /// that was covered when it left, and whose window became visible while
+    /// nothing was listening, rejoins believing it is still occluded. Every tile
+    /// spawned after that is told to pause the moment its surface exists, and
+    /// nothing ever corrects it because the dispatch fires only on a CHANGE.
+    ///
+    /// The fix is to resync the flag from the real window on arrival: occlusion
+    /// is state, and a cache that survives an absence is not state, it is a
+    /// memory of one.
+    private static func checkAFreshTileIsNotBornOccludedByAStaleLatch() throws {
+        final class OcclusionRecordingTileView: TileNSView {
+            var feeds: [Bool] = []
+            override func windowOcclusionChanged(visible: Bool) { feeds.append(visible) }
+        }
+
+        let world = World(tileCount: 2)
+        defer { world.teardown() }
+        world.canvas.viewDidMoveToWindow()
+
+        // The window is covered while the canvas is watching, so the flag latches.
+        world.canvas.occlusionVisibilityProvider = { false }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        try expect(world.canvas.windowOcclusionVisible == false,
+                   "precondition: the canvas must believe the window is occluded")
+
+        // The canvas leaves the window (a workspace scene teardown), the window
+        // becomes visible while nothing is observing, and the canvas comes back.
+        // No notification exists to catch: this is the whole trap.
+        world.canvas.occlusionVisibilityProvider = { true }
+        world.canvas.viewDidMoveToWindow()
+        // The resync is deferred a runloop turn on purpose (see the comment at
+        // its call site: running the fan-out inside the window association was
+        // The flag moves synchronously on arrival; only the scene fan-out is
+        // deferred. A tile installed right after must already read the truth.
+
+        // POSITIVE CONTROL on the trap. The window really is visible, and the
+        // canvas really is still holding the old answer — without both, the
+        // assertion below witnesses nothing.
+        try expect(world.canvas.qaResolvedWindowVisibilityForChecks == true,
+                   "control: the real window must be visible for this to be a STALE flag")
+
+        // THE assertion. A brand-new tile arriving into a visible window must be
+        // told it is visible.
+        let fresh = OcclusionRecordingTileView(tile: Tile(
+            id: UUID(), kind: .note, title: "fresh-tile",
+            frame: TileFrame(x: 2_400, y: 60, width: 200, height: 120),
+            zPosition: .fromLegacyRank(98), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()
+        ))
+        world.canvas.install(tileView: fresh, for: fresh.tile)
+        try expect(fresh.feeds.last != false,
+                   "a tile created into a VISIBLE window must not be told it is occluded — a "
+                   + "terminal told this at birth applies it the moment its surface exists and "
+                   + "never renders. Feeds: \(fresh.feeds)")
+
+        // The resync is deliberately ONE-WAY: arriving may clear a stale pause,
+        // never impose a new one. `.visible` is absent for reasons that are not
+        // "covered" — every borderless check fixture reports not-visible — so
+        // latching it here would freeze the honest cases to protect the
+        // dishonest one. Arriving at a window the provider calls occluded must
+        // therefore leave the flag alone.
+        world.canvas.occlusionVisibilityProvider = { false }
+        world.canvas.viewDidMoveToWindow()
+        try expect(world.canvas.windowOcclusionVisible == true,
+                   "arrival must not impose a pause; only a real occlusion notification may")
+
+        // …and the real notification still does, so nothing here traded a frozen
+        // tile for a render loop nobody can pause.
+        let second = OcclusionRecordingTileView(tile: Tile(
+            id: UUID(), kind: .note, title: "fresh-tile-occluded",
+            frame: TileFrame(x: 2_600, y: 60, width: 200, height: 120),
+            zPosition: .fromLegacyRank(97), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()
+        ))
+        world.canvas.install(tileView: second, for: second.tile)
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        try expect(second.feeds.last == false,
+                   "a real occlusion notification must still pause the tiles. Feeds: \(second.feeds)")
     }
 
     private static func checkOcclusionPausesAndResumesResidency() throws {
