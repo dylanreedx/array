@@ -372,9 +372,22 @@ final class GhosttyTerminalView: NSView {
         ghostty_surface_set_focus(surface, focused)
     }
 
+    /// Remembered so a request that arrives before the surface exists is not
+    /// silently dropped — `guard let surface else { return }` lost it, and the
+    /// surface then started with whatever ghostty defaults to rather than what
+    /// the canvas asked for.
+    private var requestedOcclusion = false
+
     func setSnapshotOccluded(_ occluded: Bool) {
+        requestedOcclusion = occluded
         guard let surface else { return }
         ghostty_surface_set_occlusion(surface, occluded)
+    }
+
+    /// Apply the last requested occlusion to a surface that has just been built.
+    private func applyRequestedOcclusion() {
+        guard let surface else { return }
+        ghostty_surface_set_occlusion(surface, requestedOcclusion)
     }
 
     func isProcessExited() -> Bool {
@@ -510,6 +523,7 @@ final class GhosttyTerminalView: NSView {
         }
 
         statusChanged(.running)
+        applyRequestedOcclusion()
         updateSurfaceSize()
         startProcessExitPoller()
     }

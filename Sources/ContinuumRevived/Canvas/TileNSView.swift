@@ -217,6 +217,26 @@ class TileNSView: NSView, TokenThemed {
     /// them — a fully occluded window should cost nothing to composite.
     func windowOcclusionChanged(visible: Bool) {}
 
+    /// Re-assert the window's CURRENT occlusion the moment this tile joins a
+    /// window.
+    ///
+    /// The canvas dispatches occlusion changes over `worldPlane.subviews`, so a
+    /// tile that is not in the plane when the window becomes visible never hears
+    /// the resume — and nothing tells it later, because the canvas only fires on
+    /// a CHANGE. A terminal removed by a workspace switch or a zone teardown
+    /// while the window was occluded therefore came back with its renderer still
+    /// paused: a frozen tile whose shell was perfectly alive, recoverable only by
+    /// closing it. Occlusion is state, not an event, so it is asked for on
+    /// arrival rather than remembered across an absence.
+    ///
+    /// A missing canvas defaults to VISIBLE. The failure direction matters: the
+    /// wrong answer here costs a few frames of compositing, never a frozen tile.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        windowOcclusionChanged(visible: canvas?.windowOcclusionVisible ?? true)
+    }
+
     /// Scroll positions the baked picture depends on, in a stable order.
     ///
     /// Families name their own scroll owners rather than the base class walking the

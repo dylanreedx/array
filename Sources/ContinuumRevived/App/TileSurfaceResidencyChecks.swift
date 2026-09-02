@@ -326,6 +326,7 @@ enum TileSurfaceResidencyChecks {
         try checkSurfacesAreNeverBlankAfterAParkRoundTrip()
         try checkNoBakeWhileTheWindowIsNotShown()
         try checkOcclusionPausesAndResumesResidency()
+        try checkATileRejoiningTheSceneIsToldTheCurrentOcclusion()
         try checkTheSurfaceLandsExactlyWhereTheBodyDrew()
         try checkAScrollIsNeverShownStale()
         try checkAZoomGestureCrossesResidencyAlmostNever()
@@ -2000,6 +2001,70 @@ enum TileSurfaceResidencyChecks {
         try expect(world.canvas.qaSurfacedTileViews.count == world.tiles.count,
                    "once the window is shown again every quiet tile must surface: "
                    + "\(world.canvas.qaSurfacedTileViews.count) of \(world.tiles.count)")
+    }
+
+    /// A tile that was not in the plane when the window came back must still be
+    /// told the window is visible.
+    ///
+    /// THE REPORTED FREEZE. The canvas dispatches occlusion over
+    /// `worldPlane.subviews` and only fires on a CHANGE, so a tile removed while
+    /// the window was occluded — a workspace switch, a zone teardown — misses the
+    /// resume, and nothing ever tells it afterwards. Its runtime stayed paused:
+    /// terminals came back frozen, with a live shell behind them, recoverable only
+    /// by closing the tile.
+    private static func checkATileRejoiningTheSceneIsToldTheCurrentOcclusion() throws {
+        final class OcclusionRecordingTileView: TileNSView {
+            var feeds: [Bool] = []
+            override func windowOcclusionChanged(visible: Bool) { feeds.append(visible) }
+        }
+
+        let world = World(tileCount: 2)
+        defer { world.teardown() }
+        world.canvas.viewDidMoveToWindow()
+
+        let recorder = OcclusionRecordingTileView(tile: Tile(
+            id: UUID(), kind: .note, title: "occlusion-rejoin",
+            frame: TileFrame(x: 2_000, y: 60, width: 200, height: 120),
+            zPosition: .fromLegacyRank(99), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()
+        ))
+        world.canvas.install(tileView: recorder, for: recorder.tile)
+
+        // The window is covered. Every tile in the plane is told to pause.
+        world.canvas.occlusionVisibilityProvider = { false }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        try expect(recorder.feeds.last == false,
+                   "precondition: the tile must be told the window is occluded, got \(recorder.feeds)")
+
+        // It leaves the scene WHILE occluded — what a workspace switch or a zone
+        // teardown does.
+        recorder.removeFromSuperview()
+        let feedsWhenItLeft = recorder.feeds.count
+
+        // The window comes back while the tile is away.
+        world.canvas.occlusionVisibilityProvider = { true }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+
+        // POSITIVE CONTROL on the trap itself: the absent tile really did miss
+        // the resume. Without this the assertion below could pass simply because
+        // the tile never left, and the check would witness nothing.
+        try expect(recorder.feeds.count == feedsWhenItLeft && recorder.feeds.last == false,
+                   "control: a tile outside the plane must miss the resume, or this witnesses nothing; got \(recorder.feeds)")
+
+        // It rejoins. THE assertion: occlusion is state, so arriving is enough.
+        world.canvas.install(tileView: recorder, for: recorder.tile)
+        try expect(recorder.feeds.last == true,
+                   "a tile rejoining a VISIBLE window must be told so on arrival — otherwise its render "
+                   + "loop stays paused forever and the tile is frozen. Feeds: \(recorder.feeds)")
+
+        // And the reverse direction is not broken: rejoining an OCCLUDED window
+        // must not resume a render loop that should stay paused.
+        world.canvas.occlusionVisibilityProvider = { false }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: world.window)
+        recorder.removeFromSuperview()
+        world.canvas.install(tileView: recorder, for: recorder.tile)
+        try expect(recorder.feeds.last == false,
+                   "a tile rejoining an occluded window must be told it is occluded, not resumed. "
+                   + "Feeds: \(recorder.feeds)")
     }
 
     private static func checkOcclusionPausesAndResumesResidency() throws {
