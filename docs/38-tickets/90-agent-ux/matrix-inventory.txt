@@ -1,79 +1,3 @@
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 22
-count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 108
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
-count ContinuumRevivedSyncIntegrationChecks 1
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 22
-count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 109
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
-count ContinuumRevivedSyncIntegrationChecks 1
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 22
-count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 108
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
-count ContinuumRevivedSyncIntegrationChecks 1
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 22
-count ContinuumRevivedAgentUIChecks 19
-count ContinuumRevivedCoreChecks 110
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 0
-count ContinuumRevivedRelayCoreChecks 0
-count ContinuumRevivedRelayIntegrationChecks 0
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 11
-count ContinuumRevivedSyncIntegrationChecks 1
 check --add-zone-check
 check --agent-awareness-check
 check --agent-display-name-check
@@ -91,6 +15,7 @@ check --agent-status-check
 check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-click-focus-check
+check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --bring-to-front-focus-check
 check --browser-auth-challenge-check
@@ -117,6 +42,7 @@ check --canvas-background-settings-check
 check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
 check --canvas-persistence-model-check
+check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
 check --companion-sync-health-check
@@ -135,6 +61,7 @@ check --file-markdown-preview-check
 check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
+check --file-tree-snapshot-coalescing-check
 check --focus-border-check
 check --focus-broker-activation-check
 check --focus-mode-check
@@ -282,6 +209,7 @@ leg run_app_check .build/debug/Array --agent-status-check
 leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-click-focus-check
+leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --bring-to-front-focus-check
 leg run_app_check .build/debug/Array --browser-auth-challenge-check
@@ -307,6 +235,7 @@ leg run_app_check .build/debug/Array --canvas-background-settings-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
+leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
@@ -323,6 +252,7 @@ leg run_app_check .build/debug/Array --file-markdown-preview-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
+leg run_app_check .build/debug/Array --file-tree-snapshot-coalescing-check
 leg run_app_check .build/debug/Array --focus-border-check
 leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check
@@ -466,3 +396,22 @@ leg run_leg swift run ContinuumRevivedRelayCoreChecks
 leg run_leg swift run ContinuumRevivedRelayIntegrationChecks
 leg run_leg swift run ContinuumRevivedRelayProtocolChecks
 leg run_leg swift run ContinuumRevivedSyncChecks
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --tool-path-bootstrap-check
+count ContinuumRevivedAgentContentChecks 22
+count ContinuumRevivedAgentUIChecks 20
+count ContinuumRevivedCoreChecks 111
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedRelayCoreChecks 0
+count ContinuumRevivedRelayIntegrationChecks 0
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 11
+count ContinuumRevivedSyncIntegrationChecks 1
