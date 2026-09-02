@@ -2358,6 +2358,7 @@ final class AgentSupervisor {
                             turnId: "no-result:\(threadId)",
                             outcome: .interrupted,
                             errorMessage: message),
+                        from: runner,
                         to: id)
                 }
             } catch {
@@ -2390,6 +2391,7 @@ final class AgentSupervisor {
                                 turnId: "stopped:\(threadId)",
                                 outcome: .interrupted,
                                 errorMessage: nil),
+                            from: runner,
                             to: id)
                         return
                     }
@@ -2398,7 +2400,10 @@ final class AgentSupervisor {
                     // this line is the trail that survives the process.
                     self.appendAgentDiagnostics(
                         "harness=\(harnessName) exit=threw \(message)", agentID: id)
-                    self.deliver(.runtimeError(threadId: threadId, message: message), to: id)
+                    self.deliver(
+                        .runtimeError(threadId: threadId, message: message),
+                        from: runner,
+                        to: id)
                     // `.runtimeError` shows the error row; a `.turnCompleted` is
                     // still owed so every consumer of turn liveness sees the turn
                     // END — unless the runner already closed it before throwing.
@@ -2409,6 +2414,7 @@ final class AgentSupervisor {
                                 turnId: "failed:\(threadId)",
                                 outcome: .failed,
                                 errorMessage: message),
+                            from: runner,
                             to: id)
                     }
                 }
@@ -5988,6 +5994,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private let script: [AgentRuntimeEvent]
     private let runtimeObservations: [AgentRuntimeObservation]
     private let holdUntilStopped: Bool
+    private let releaseOnStop: Bool
     private let runError: Error?
     /// Thrown AFTER `released.wait()` returns — i.e. as a consequence of `stop()`.
     /// M1.9 (`.plans/46`).
@@ -6017,6 +6024,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         script: [AgentRuntimeEvent],
         runtimeObservations: [AgentRuntimeObservation] = [],
         holdUntilStopped: Bool = false,
+        releaseOnStop: Bool = true,
         runError: Error? = nil,
         stopError: Error? = nil,
         persistentBetweenTurns: Bool = false
@@ -6024,6 +6032,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         self.script = script
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
+        self.releaseOnStop = releaseOnStop
         self.runError = runError
         self.stopError = stopError
         self.persistentBetweenTurns = persistentBetweenTurns
@@ -6084,8 +6093,13 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
 
     func stop() {
         lock.withLock { stopCountStorage += 1 }
-        released.signal()
+        if releaseOnStop { released.signal() }
     }
+
+    /// Lets a check retire a runner, install its replacement, and only then allow
+    /// the old blocking `run` call to return. Production runners can unwind after
+    /// Stop on the same schedule, so this makes supersession deterministic.
+    func releaseRunAfterStop() { released.signal() }
 
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
         lock.withLock { spawnHandler = handler }
@@ -7167,6 +7181,10 @@ func runAgentSupervisorChecks() async throws {
     let store = AgentStore(applicationSupportDirectory: root)
     let config = AgentModelConfig.resolvedFromDefaults()
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    // Liveness ownership is foundational and fast; run it before the broader
+    // supervisor corpus so an unrelated later fixture cannot mask this witness.
+    let retiredRunnerReport = try await checkRetiredRunnerCannotRestartTurn(fail: fail)
+    print("AgentSupervisor runner generation: \(retiredRunnerReport)")
     let composerKeyAssertions = try runComposerKeyContractChecks()
     let completionAssertions = try await runCompletionComposerChecks()
     // Run the one-shot's production sync-boundary witness first so a regression
@@ -8036,16 +8054,15 @@ func runAgentSupervisorChecks() async throws {
     let observedCapReport = try await checkObservedChildrenPastFormerCapStayVisible(fail: fail)
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
-    let retiredRunnerReport = try await checkRetiredRunnerCannotRestartTurn(fail: fail)
-
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
     print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
 }
 
 /// A callback queued by a runner that Stop has already retired must not reopen
-/// execution. The callback is deliberately enqueued before `stop(_:)` while this
-/// check is still on the main actor; it cannot be delivered until the check yields,
-/// so Stop wins the ownership race deterministically.
+/// execution or affect its replacement generation. The callback is deliberately
+/// enqueued before `stop(_:)` while this check is still on the main actor; it
+/// cannot be delivered until after the replacement is installed. The old run call
+/// is then released separately, proving its process-return fallback is scoped too.
 @MainActor
 private func checkRetiredRunnerCannotRestartTurn(
     fail: (String) -> Error
@@ -8053,12 +8070,17 @@ private func checkRetiredRunnerCannotRestartTurn(
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("continuum-retired-runner-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
-    let runner = ScriptedAgentRunner(
+    let retiredRunner = ScriptedAgentRunner(
         script: [.turnStarted(threadId: "provider", turnId: "initial")],
+        holdUntilStopped: true,
+        releaseOnStop: false)
+    let replacementRunner = ScriptedAgentRunner(
+        script: [.turnStarted(threadId: "provider", turnId: "replacement")],
         holdUntilStopped: true)
+    let queue = ScriptedRunnerQueue([retiredRunner, replacementRunner])
     let supervisor = AgentSupervisor(
         store: AgentStore(applicationSupportDirectory: root),
-        makeRunner: { _ in runner }, warn: { _ in })
+        makeRunner: { queue.next($0.record) }, warn: { _ in })
     let config = AgentModelConfig.resolvedFromDefaults(harness: .pi)
     let id = supervisor.spawn(
         role: nil, prompt: nil,
@@ -8071,7 +8093,7 @@ private func checkRetiredRunnerCannotRestartTurn(
         supervisor.turnSnapshot(for: id)?.state == .working
     }) else { throw fail("retired runner: initial turn never became Working") }
 
-    guard runner.emit(.turnStarted(threadId: "provider", turnId: "late-after-stop")) else {
+    guard retiredRunner.emit(.turnStarted(threadId: "provider", turnId: "late-after-stop")) else {
         throw fail("retired runner: could not queue the late provider event")
     }
     supervisor.stop(id)
@@ -8079,13 +8101,71 @@ private func checkRetiredRunnerCannotRestartTurn(
           supervisor.turnSnapshot(for: id)?.turnStartedAt == nil else {
         throw fail("retired runner: Stop itself did not clear Working")
     }
-    try? await Task.sleep(nanoseconds: 300_000_000)
-    guard !supervisor.isRunning(id),
-          supervisor.turnSnapshot(for: id)?.state != .working,
-          supervisor.turnSnapshot(for: id)?.turnStartedAt == nil else {
-        throw fail("retired runner: a queued old turnStarted restored Working after Stop")
+    let stoppedStamp = supervisor.records[id]?.runCompletedAt
+    guard supervisor.send("replacement", to: id) else {
+        throw fail("retired runner: replacement send was refused")
     }
-    return "a turnStarted queued by a runner before Stop was rejected after that concrete runner was retired"
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.turnSnapshot(for: id)?.state == .working
+            && replacementRunner.runCount == 1
+    }), let replacementStart = supervisor.turnSnapshot(for: id)?.turnStartedAt else {
+        throw fail("retired runner: replacement generation never became Working")
+    }
+    guard supervisor.records[id]?.runCompletedAt == stoppedStamp else {
+        throw fail("retired runner: the queued old turnStarted changed Stop's terminal stamp")
+    }
+
+    retiredRunner.releaseRunAfterStop()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        retiredRunner.completedRuns == 1
+    }) else { throw fail("retired runner: old run call did not return after release") }
+    try? await Task.sleep(nanoseconds: 300_000_000)
+    guard supervisor.isRunning(id),
+          supervisor.turnSnapshot(for: id)?.state == .working,
+          supervisor.turnSnapshot(for: id)?.turnStartedAt == replacementStart,
+          supervisor.records[id]?.runCompletedAt == stoppedStamp else {
+        throw fail("retired runner: an old callback or process-return fallback changed the replacement turn")
+    }
+    supervisor.stop(id)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        replacementRunner.completedRuns == 1 && !supervisor.isRunning(id)
+    }) else { throw fail("retired runner: replacement cleanup did not finish") }
+
+    // Positive control: scoping the fallback must not suppress it for the runner
+    // that still owns the slot when a provider exits silently.
+    let fallbackRunner = ScriptedAgentRunner(script: [
+        .turnStarted(threadId: "provider-fallback", turnId: "fallback")
+    ])
+    let fallbackSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("fallback", isDirectory: true)),
+        makeRunner: { _ in fallbackRunner }, warn: { _ in })
+    let fallbackID = fallbackSupervisor.spawn(
+        role: nil, prompt: nil,
+        cwd: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+        harness: .pi, model: config.model, thinking: config.thinking)
+    let fallbackInbox = EventInbox()
+    let fallbackStream = fallbackSupervisor.events(for: fallbackID)
+    let fallbackTask = Task { @MainActor in
+        for await event in fallbackStream { fallbackInbox.append(event) }
+    }
+    defer { fallbackTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fallbackSupervisor.subscriberCount(for: fallbackID) == 1
+    }), fallbackSupervisor.send("silent exit", to: fallbackID) else {
+        throw fail("retired runner: fallback positive control did not start")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        !fallbackSupervisor.isRunning(fallbackID)
+            && fallbackSupervisor.turnSnapshot(for: fallbackID)?.state != .working
+    }) else { throw fail("retired runner: current runner's silent exit stayed Working") }
+    let fallbackCompletions = fallbackInbox.events.compactMap { event -> TurnOutcome? in
+        guard case let .turnCompleted(_, _, outcome, _) = event else { return nil }
+        return outcome
+    }
+    guard fallbackCompletions == [.interrupted] else {
+        throw fail("retired runner: current runner fallback outcomes were \(fallbackCompletions)")
+    }
+    return "a queued old turnStarted and retired process-return fallback were rejected after replacement ownership, while the current runner's silent exit still terminalized once"
 }
 
 /// A disposable tile must attach from the supervisor's complete semantic model,
