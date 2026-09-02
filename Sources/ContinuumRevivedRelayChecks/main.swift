@@ -832,4 +832,27 @@ do {
     expect(lan.status == 0 && lan.stdout.contains("<string>0.0.0.0</string>"), "assertion 86: LAN mode is an explicit all-interface bind")
 }
 
+// 87. WS3: the relay's own session must not feed the process URL cache.
+// A long-poll transport at a few requests a second fed every cursor-addressed
+// reply into CFURLCache's SQLite store for bytes nothing reads back. This is a
+// CONFIGURATION assertion, not a behavioural one: it catches a regression to
+// `URLSession.shared` or a dropped request policy, and does not observe an
+// actual cache write. Stated rather than implied, because the comment this
+// replaces claimed a behavioural check that was never written.
+do {
+    let session = RelaySyncTransport.makeDefaultSession()
+    expect(session.configuration.urlCache == nil,
+           "assertion 87: the relay's default session carries a URL cache")
+    expect(session.configuration.requestCachePolicy == .reloadIgnoringLocalCacheData,
+           "assertion 87: the relay's default session does not decline the cache")
+    let transport = RelaySyncTransport(
+        baseURL: URL(string: "http://127.0.0.1:1")!, bearerToken: "checks-cache-policy",
+        deviceLabel: "checks-cache-policy")
+    expect(transport.qaSession.configuration.urlCache == nil,
+           "assertion 87: a transport built with default arguments carries a URL cache")
+    let poll = transport.qaPollRequest(path: "/v1/poll?after=0&waitMs=1")
+    expect(poll.cachePolicy == .reloadIgnoringLocalCacheData,
+           "assertion 87: a poll request does not decline the cache, so a caller-supplied session would store it")
+}
+
 print("ContinuumRevivedRelayChecks passed: managed local relay (real subprocess readiness+health, no token in argv/logs, side-effect-free LaunchAgent and loopback/LAN mode contract)")

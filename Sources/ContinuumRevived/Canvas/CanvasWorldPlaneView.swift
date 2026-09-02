@@ -119,4 +119,156 @@ final class CanvasWorldPlaneView: NSView {
         abs(lhs - rhs) < 0.001
     }
 
+    // MARK: - Visibility index
+
+    /// A uniform grid over the plane's TILE children, so answering "which tiles
+    /// does the camera see?" costs O(visible) instead of O(installed).
+    ///
+    /// This is WS3's measured fix, not a speculative one.
+    /// `CanvasNSView.visibleTileViews` used to `compactMap` every world-plane
+    /// subview and rectangle-test it on EVERY camera commit. The chrome refresh
+    /// it feeds was already visible-only (`canvas.magnify-slope` pins that at a
+    /// zero slope), so the discovery pass was the last thing on the camera's hot
+    /// path whose cost grew with tiles the user cannot see:
+    /// `--canvas-visibility-index-check` counted 128 candidate visits per commit
+    /// at 128 installed with 12 visible, and 16 at 16 installed — a slope of
+    /// exactly 1 per extra parked tile.
+    ///
+    /// The index is rebuilt lazily and only when the world changed shape:
+    /// a tile was installed, removed, moved or resized. A CAMERA step changes
+    /// nothing here — the plane's bounds carry the camera and every tile frame is
+    /// a world frame — so a whole gesture answers from one build at most.
+    ///
+    /// Cell size is a world constant rather than adaptive: tiles are hundreds of
+    /// world units across, so a 1024-unit cell holds a handful, and a 1600x1000
+    /// viewport at zoom 1 spans 4 cells. Zoomed far enough OUT the query rect
+    /// covers more cells than a full scan would cost, so the query falls back to
+    /// the brute-force walk above `maxCellsPerQuery` — at that zoom essentially
+    /// every tile IS a candidate, so the fallback is the honest answer and not a
+    /// hole in the invariant.
+    static let visibilityCellSize: CGFloat = 1_024
+    static let visibilityMaxCellsPerQuery = 4_096
+
+    private struct VisibilityCell: Hashable {
+        let column: Int
+        let row: Int
+    }
+
+    private var visibilityCells: [VisibilityCell: [Int]] = [:]
+    /// Index-ordered tiles, so a query can restore subview order without a
+    /// second walk of `subviews`.
+    private var visibilityTiles: [TileNSView] = []
+    private var visibilityIndexIsDirty = true
+
+    /// QA: how many tile views a visibility query actually examined. This is the
+    /// number that must NOT grow when off-screen tiles are added.
+    private(set) var qaVisibilityCandidateVisits = 0
+    /// QA: how many times the grid was rebuilt (each rebuild is O(installed), so
+    /// a per-camera-step rebuild would defeat the whole point).
+    private(set) var qaVisibilityIndexRebuilds = 0
+    /// QA: total queries, and how many of those took the zoomed-way-out fallback.
+    private(set) var qaVisibilityQueryCount = 0
+    private(set) var qaVisibilityBruteForceQueryCount = 0
+
+    func qaResetVisibilityStats() {
+        qaVisibilityCandidateVisits = 0
+        qaVisibilityIndexRebuilds = 0
+        qaVisibilityQueryCount = 0
+        qaVisibilityBruteForceQueryCount = 0
+    }
+
+    /// The world changed shape. Called from `didAddSubview`/`willRemoveSubview`
+    /// and from `TileNSView`'s frame primitives, which are the only ways a tile
+    /// enters, leaves or moves within the plane.
+    func invalidateVisibilityIndex() {
+        visibilityIndexIsDirty = true
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        invalidateVisibilityIndex()
+    }
+
+    override func willRemoveSubview(_ subview: NSView) {
+        super.willRemoveSubview(subview)
+        invalidateVisibilityIndex()
+    }
+
+    override func sortSubviews(
+        _ compare: @convention(c) (NSView, NSView, UnsafeMutableRawPointer?) -> ComparisonResult,
+        context: UnsafeMutableRawPointer?
+    ) {
+        super.sortSubviews(compare, context: context)
+        invalidateVisibilityIndex()
+    }
+
+    private func rebuildVisibilityIndexIfNeeded() {
+        guard visibilityIndexIsDirty else { return }
+        visibilityIndexIsDirty = false
+        qaVisibilityIndexRebuilds += 1
+        visibilityCells.removeAll(keepingCapacity: true)
+        visibilityTiles.removeAll(keepingCapacity: true)
+        let cell = Self.visibilityCellSize
+        for subview in subviews {
+            guard let tile = subview as? TileNSView else { continue }
+            let ordinal = visibilityTiles.count
+            visibilityTiles.append(tile)
+            let frame = tile.frame
+            let minColumn = Int((frame.minX / cell).rounded(.down))
+            let maxColumn = Int((frame.maxX / cell).rounded(.down))
+            let minRow = Int((frame.minY / cell).rounded(.down))
+            let maxRow = Int((frame.maxY / cell).rounded(.down))
+            for column in minColumn...max(minColumn, maxColumn) {
+                for row in minRow...max(minRow, maxRow) {
+                    visibilityCells[VisibilityCell(column: column, row: row), default: []].append(ordinal)
+                }
+            }
+        }
+    }
+
+    /// Tile children intersecting `rect` (a WORLD rect), in subview order.
+    func tileViews(intersecting rect: CGRect) -> [TileNSView] {
+        qaVisibilityQueryCount += 1
+        rebuildVisibilityIndexIfNeeded()
+        let cell = Self.visibilityCellSize
+        let minColumn = Int((rect.minX / cell).rounded(.down))
+        let maxColumn = Int((rect.maxX / cell).rounded(.down))
+        let minRow = Int((rect.minY / cell).rounded(.down))
+        let maxRow = Int((rect.maxY / cell).rounded(.down))
+        let columns = maxColumn - minColumn + 1
+        let rows = maxRow - minRow + 1
+        guard columns > 0, rows > 0,
+              columns.multipliedReportingOverflow(by: rows).overflow == false,
+              columns * rows <= Self.visibilityMaxCellsPerQuery else {
+            qaVisibilityBruteForceQueryCount += 1
+            var result: [TileNSView] = []
+            for tile in visibilityTiles {
+                qaVisibilityCandidateVisits += 1
+                if tile.frame.intersects(rect) { result.append(tile) }
+            }
+            return result
+        }
+
+        var seen = Set<Int>()
+        var ordinals: [Int] = []
+        for column in minColumn...maxColumn {
+            for row in minRow...maxRow {
+                guard let bucket = visibilityCells[VisibilityCell(column: column, row: row)] else { continue }
+                for ordinal in bucket where seen.insert(ordinal).inserted {
+                    qaVisibilityCandidateVisits += 1
+                    if visibilityTiles[ordinal].frame.intersects(rect) { ordinals.append(ordinal) }
+                }
+            }
+        }
+        return ordinals.sorted().map { visibilityTiles[$0] }
+    }
+
+    /// QA anti-teeth: the index must answer EXACTLY what a full subview walk
+    /// answers. Deliberately O(installed) and never called on the camera path.
+    func qaBruteForceTileViews(intersecting rect: CGRect) -> [TileNSView] {
+        subviews.compactMap { subview in
+            guard let tile = subview as? TileNSView, tile.frame.intersects(rect) else { return nil }
+            return tile
+        }
+    }
 }

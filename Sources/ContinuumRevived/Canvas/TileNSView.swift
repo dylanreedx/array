@@ -22,6 +22,32 @@ class TileNSView: NSView, TokenThemed {
     /// closures. Only two production callers of `detach()` existed: the self-detach
     /// inside `attach` and the deliberate tile close.
     func prepareForRemovalFromScene() {}
+
+    // MARK: - Visibility index maintenance
+    //
+    // A tile's frame is a WORLD frame, and the world plane keeps a spatial index
+    // over those frames so a camera step's visibility query is O(visible) rather
+    // than O(installed) (see `CanvasWorldPlaneView.tileViews(intersecting:)`).
+    // These two are AppKit's geometry primitives for a view, and `frame`'s own
+    // setter routes through them, so they are the complete set of places a tile
+    // can move or resize inside the plane. That routing is not taken on trust:
+    // `--canvas-visibility-index-check` drags a parked tile across the viewport
+    // boundary in both directions with a plain `frame =` write and cross-checks
+    // the index against a brute-force subview walk each time.
+
+    private func invalidateWorldPlaneVisibilityIndex() {
+        (superview as? CanvasWorldPlaneView)?.invalidateVisibilityIndex()
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        invalidateWorldPlaneVisibilityIndex()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        invalidateWorldPlaneVisibilityIndex()
+    }
     struct ChromeSnapshot: Equatable {
         var title: String
         var providerModel: String?
