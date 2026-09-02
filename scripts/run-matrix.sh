@@ -384,6 +384,7 @@ run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 run_app_check .build/debug/Array --agent-awareness-check
 run_app_check .build/debug/Array --completion-awareness-check
+run_app_check .build/debug/Array --throbber-timeline-check
 run_app_check .build/debug/Array --onboarding-panel-check
 run_app_check .build/debug/Array --provider-model-picker-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").

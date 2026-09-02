@@ -132,6 +132,7 @@ check --terminal-tmux-no-mirror-check
 check --terminal-tmux-observer-check
 check --terminal-tmux-observer-wiring-check
 check --terminal-tmux-persistence-check
+check --throbber-timeline-check
 check --ticket-queue-tile-check
 check --tile-action-check
 check --tile-chrome-scale-check
@@ -324,6 +325,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-no-mirror-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-check
 leg run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
+leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
@@ -405,7 +407,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 111
+count ContinuumRevivedCoreChecks 112
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
