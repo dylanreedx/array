@@ -142,6 +142,21 @@ func runAgentAdapterTests() {
     )
     expect(failedSignals.isError, "failed turn must set isError")
 
+    for outcome in [TurnOutcome.interrupted, .cancelled] {
+        let terminalSignals = deriveStatusSignals(
+            from: [
+                .sessionStateChanged(.running),
+                .turnCompleted(threadId: threadId, turnId: "turn-1", outcome: outcome, errorMessage: nil)
+            ],
+            threadId: threadId,
+            engineStatus: .working
+        )
+        expect(!terminalSignals.isRunning,
+               "a \(outcome.rawValue) latest turn must defeat stale session-running residue")
+        expect(deriveAgentStatus(signals: terminalSignals) != .working,
+               "a \(outcome.rawValue) latest turn must not derive Working")
+    }
+
     let errorSignals = deriveStatusSignals(
         from: [.sessionStateChanged(.error)],
         threadId: threadId,

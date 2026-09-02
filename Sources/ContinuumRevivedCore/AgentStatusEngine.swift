@@ -84,7 +84,17 @@ public struct AgentStatusEngine: Equatable, Sendable {
     private mutating func recompute(at now: Date) {
         let next: AgentStatus
         if let explicitStatus {
-            next = explicitStatus
+            // Terminal/attention statuses are durable facts. Working is a
+            // liveness claim and survives only while its explicit observer
+            // evidence is fresh; unrelated inferred traffic cannot renew it.
+            let explicitIsFresh = explicitUpdatedAt.map {
+                now.timeIntervalSince($0) < configuration.staleTimeout
+            } ?? false
+            if explicitStatus == .working && !explicitIsFresh {
+                next = .stale
+            } else {
+                next = explicitStatus
+            }
         } else if now.timeIntervalSince(lastSignalAt) >= configuration.staleTimeout {
             next = .stale
         } else if let inferredStatus {
@@ -831,6 +841,8 @@ public func deriveStatusSignals(
         switch event {
         case .sessionStateChanged(let state):
             sessionState = state
+        case .turnStarted(let tid, _) where tid == threadId:
+            latestTurnOutcome = nil
         case .turnCompleted(let tid, _, let outcome, _) where tid == threadId:
             latestTurnOutcome = outcome
         case .requestOpened(let tid, let requestId, _) where tid == threadId:
@@ -846,6 +858,8 @@ public func deriveStatusSignals(
         }
     }
 
+    let latestTurnIsTerminal = latestTurnOutcome != nil
+
     return StatusSignals(
         agentKind: .managed,
         hasPendingApproval: !pendingApprovalIds.isEmpty,
@@ -854,7 +868,8 @@ public func deriveStatusSignals(
         hookBreadcrumbAge: nil,
         isError: sessionState == .error || latestTurnOutcome == .failed,
         isStarting: sessionState == .starting,
-        isRunning: sessionState == .running || sessionState == .waiting,
+        isRunning: !latestTurnIsTerminal
+            && (sessionState == .running || sessionState == .waiting),
         isCompleted: latestTurnOutcome == .completed,
         engineStatus: engineStatus
     )

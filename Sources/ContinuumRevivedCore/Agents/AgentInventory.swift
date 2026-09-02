@@ -228,6 +228,13 @@ public final class CrossProjectManagedSessionWalk {
         self.ttl = ttl
     }
 
+    /// Discard the directory snapshot after a deliberate managed-session
+    /// mutation. The next read still uses the TTL; it simply cannot resurrect a
+    /// record the app has just deleted or hide one it has just created.
+    public func invalidate() {
+        cached = nil
+    }
+
     /// Every legacy managed-session record on disk, from every project root.
     ///
     /// A root that no longer exists is SKIPPED, not an error: `registry.projects`
@@ -354,6 +361,10 @@ public final class ReconciledManagedSessionSource {
     public func hasReconciled(_ root: Root) -> Bool { swept.contains(root) }
 
     public var sweptRootCount: Int { swept.count }
+
+    public func invalidateCache() {
+        walk.invalidate()
+    }
 
     /// The registry's projects as roots. One definition, so the boot sweep and the
     /// listing read cannot disagree about which roots exist — a root swept under one

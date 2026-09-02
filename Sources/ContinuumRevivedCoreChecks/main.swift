@@ -1502,7 +1502,13 @@ do {
     expect(engine.ingest(.terminalTitle("Claude needs attention"), at: t0.addingTimeInterval(9)) == .needsAttention, "title inference should surface needs-attention")
     expect(engine.ingest(.explicit(.working), at: t0.addingTimeInterval(10)) == .working, "explicit signal should take precedence over title inference")
     expect(engine.ingest(.terminalTitle("Claude done"), at: t0.addingTimeInterval(11)) == .working, "title inference should not override explicit status")
-    expect(engine.tick(at: t0.addingTimeInterval(100)) == .working, "explicit status should not stale without an explicit stale signal")
+    expect(engine.tick(at: t0.addingTimeInterval(100)) == .stale, "explicit Working without fresh observer evidence must age to stale")
+
+    var terminalEngine = AgentStatusEngine(initialStatus: .idle, now: t0, configuration: .init(workingHysteresis: 5, staleTimeout: 30))
+    expect(terminalEngine.ingest(.explicit(.done), at: t0.addingTimeInterval(10)) == .done,
+           "explicit terminal status should be accepted")
+    expect(terminalEngine.tick(at: t0.addingTimeInterval(100)) == .done,
+           "only liveness-claiming Working expires; explicit terminal statuses remain durable")
 }
 
 do {

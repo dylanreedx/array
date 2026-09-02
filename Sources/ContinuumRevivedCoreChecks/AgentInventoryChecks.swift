@@ -754,6 +754,14 @@ private func runCrossProjectWalkCacheCheck(roots: [CrossProjectManagedSessionWal
     expect(served(walkNow.addingTimeInterval(-3600), roots).count == 4,
            "a backwards clock jump re-reads instead of serving a cache entry stamped in the future — got \(served(walkNow.addingTimeInterval(-3600), roots).count)")
 
+    // A deliberate mutation must be visible immediately even inside the TTL.
+    // The app uses this before rebuilding after a tile deletion; otherwise the
+    // cached record briefly resurrects the row it just removed.
+    try? ManagedAgentSessionStore(projectRoot: rootB).delete(tileId: walkTileLate)
+    walk.invalidate()
+    expect(served(walkNow.addingTimeInterval(-3599), roots).count == 3,
+           "explicit invalidation re-reads immediately after deletion instead of resurrecting the cached record")
+
     // A changed root set must not be served from a cache keyed on the old one.
     let narrowed = Array(roots.prefix(1))
     expect(served(walkNow.addingTimeInterval(-3600), narrowed).count == 1,

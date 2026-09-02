@@ -6010,6 +6010,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // `tileDidClose` is idempotent, so calling it again in the
             // live-runtime case above is harmless.
             workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: id)
+            try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
+            reconciledManagedSessionSource.invalidateCache()
         case .browser:
             if let runtime = browserRuntimes.first(where: { $0.tileId == id }) {
                 browserRuntimes.removeAll { $0.id == runtime.id }
@@ -6079,6 +6081,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // stayed there forever. `close` refuses a busy agent, so a tile closed
             // mid-turn still leaves its row where you can see the work finish.
             try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
+            reconciledManagedSessionSource.invalidateCache()
             if let agentId = agentSupervisor.agent(forTile: id) {
                 agentSupervisor.close(agentID: agentId)
                 agentSupervisor.detachView(agentID: agentId)
@@ -15094,24 +15097,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureActiveControllerRuntimeCallbacks() {
-        workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
+        guard let controller = workspaceRuntime?.activeController else { return }
+        controller.onBrowserRuntimeHydrated = { [weak self] runtime in
             self?.wireContentProcessTerminationHandler(runtime)
             self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
         }
-        workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
+        controller.onAgentStatusWritten = { [weak self] _, _ in
             guard let self else { return }
             self.refreshAgentSurfaces()
             self.scheduleCompanionSyncPublish(
                 reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
         }
-        workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
+        controller.onCanvasStatePersisted = { [weak self] in
             self?.scheduleCompanionSyncPublish(
                 reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
         }
-        workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
+        controller.onObservedAgentStatusesChanged = { [weak self, weak controller] statuses in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, let controller,
+                      self.workspaceRuntime?.activeController === controller else { return }
                 self.applyObserverStatuses(statuses)
             }
         }
