@@ -1028,6 +1028,8 @@ final class AgentSupervisor {
             operationID: request.operationID, phase: .requested, startedAt: now)
         records[id] = record
         persist(record)
+        let runnerGeneration = RunnerGenerationToken()
+        runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         activeCompactionOperations.insert(id)
         notifyTurnCapabilitiesChanged(id)
@@ -1040,11 +1042,13 @@ final class AgentSupervisor {
             trigger: .manual,
             provider: providerName,
             observedAt: now
-        )), from: runner, to: id, now: now)
+        )), from: runner, generation: runnerGeneration, to: id, now: now)
 
         runner.observeRuntimeObservations { [weak self] observation in
             DispatchQueue.main.async {
-                guard let self, self.runners[id] === runner else { return }
+                guard let self,
+                      self.runnerGenerationTokens[id] == runnerGeneration,
+                      self.runners[id] === runner else { return }
                 self.ingestRuntimeObservation(observation, for: id)
             }
         }
@@ -1058,7 +1062,8 @@ final class AgentSupervisor {
                            [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
                             terminal.set(lifecycle)
                         }
-                        self?.deliver(bound, from: runner, to: id)
+                        self?.deliver(
+                            bound, from: runner, generation: runnerGeneration, to: id)
                     }
                 }
             } catch {
@@ -1074,7 +1079,9 @@ final class AgentSupervisor {
                         errorMessage: stopped ? nil : message,
                         observedAt: Date())
                     terminal.set(lifecycle)
-                    self.deliver(.compactionChanged(threadId: threadId, event: lifecycle), from: runner, to: id)
+                    self.deliver(
+                        .compactionChanged(threadId: threadId, event: lifecycle),
+                        from: runner, generation: runnerGeneration, to: id)
                 }
             }
             DispatchQueue.main.async { [weak self] in
@@ -1090,9 +1097,10 @@ final class AgentSupervisor {
                     terminal.set(lifecycle)
                     self.deliver(
                         .compactionChanged(threadId: threadId, event: lifecycle),
-                        from: runner, to: id)
+                        from: runner, generation: runnerGeneration, to: id)
                 }
-                self.finishCompaction(terminal.event, runner: runner, for: id)
+                self.finishCompaction(
+                    terminal.event, runner: runner, generation: runnerGeneration, for: id)
             }
         }
         return true
@@ -1101,9 +1109,10 @@ final class AgentSupervisor {
     private func finishCompaction(
         _ terminal: AgentCompactionLifecycleEvent?,
         runner: AgentRunning,
+        generation: RunnerGenerationToken,
         for id: AgentID
     ) {
-        guard runners[id] === runner else { return }
+        guard runnerGenerationTokens[id] == generation, runners[id] === runner else { return }
         runners[id] = nil
         activeCompactionOperations.remove(id)
         compactingAgents.remove(id)
@@ -2805,7 +2814,9 @@ final class AgentSupervisor {
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
-        if activeCompactionOperations.contains(id), let runner = runners[id] {
+        if activeCompactionOperations.contains(id),
+           let runner = runners[id],
+           let runnerGeneration = runnerGenerationTokens[id] {
             runner.stop()
             let lifecycle = AgentCompactionLifecycleEvent(
                 operationID: records[id]?.inFlightCompaction?.operationID,
@@ -2813,8 +2824,10 @@ final class AgentSupervisor {
                 trigger: .manual,
                 provider: records[id]?.harness?.rawValue ?? "agent")
             deliver(.compactionChanged(
-                threadId: Self.threadId(for: id), event: lifecycle), from: runner, to: id)
-            finishCompaction(lifecycle, runner: runner, for: id)
+                threadId: Self.threadId(for: id), event: lifecycle),
+                from: runner, generation: runnerGeneration, to: id)
+            finishCompaction(
+                lifecycle, runner: runner, generation: runnerGeneration, for: id)
             return
         }
         runners[id]?.stop()
