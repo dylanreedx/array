@@ -334,6 +334,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// could need the same adoption. Host-bound like everything here; the
     /// sync boundary never sees an `AgentRecord`.
     public var providerSessionId: String?
+    /// The concrete model the provider resolved this agent's alias to, as the
+    /// harness itself reported it (claude's `system/init` `model`). Persisted so
+    /// the context meter has a denominator immediately after a relaunch or a
+    /// workspace switch, before the next turn re-observes it.
+    public var resolvedModelId: String?
 
     /// B7.2 — set by `/clear` for a claude-backed agent: the session id to
     /// resume-and-fork FROM on the agent's next launch (`claude --resume
@@ -609,6 +614,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         lastContextWindow: AgentContextWindowSnapshot? = nil,
         codexThreadId: String? = nil,
         providerSessionId: String? = nil,
+        resolvedModelId: String? = nil,
         pendingSessionForkFrom: String? = nil,
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
@@ -651,6 +657,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.lastContextWindow = lastContextWindow
         self.codexThreadId = codexThreadId
         self.providerSessionId = providerSessionId
+        self.resolvedModelId = resolvedModelId
         self.pendingSessionForkFrom = pendingSessionForkFrom
         self.settledOverride = settledOverride
         self.settledAt = settledAt
@@ -763,6 +770,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case lastContextWindow
         case codexThreadId
         case providerSessionId
+        case resolvedModelId
         case pendingSessionForkFrom
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
@@ -860,6 +868,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // from before this ticket decodes it as absent (still on the derived
         // seed).
         providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
+        resolvedModelId = try container.decodeIfPresent(String.self, forKey: .resolvedModelId)
         pendingSessionForkFrom = try container.decodeIfPresent(String.self, forKey: .pendingSessionForkFrom)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
@@ -927,6 +936,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(lastContextWindow, forKey: .lastContextWindow)
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
         try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
+        try container.encodeIfPresent(resolvedModelId, forKey: .resolvedModelId)
         try container.encodeIfPresent(pendingSessionForkFrom, forKey: .pendingSessionForkFrom)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and

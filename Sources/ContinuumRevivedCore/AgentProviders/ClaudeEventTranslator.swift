@@ -111,6 +111,19 @@ public struct ClaudeEventTranslator {
                 // `--fork-session` (B7.2) mints an id Array could not predict.
                 onRuntimeObservation?(.providerSessionId(id))
             }
+            // The alias the user picked (`anthropic/opus`) is not a key in the
+            // context-window catalogue; the id claude reports here is. Without
+            // it there is no denominator and the ring stays empty.
+            if let model = (object["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !model.isEmpty {
+                // Qualified HERE, where the provider is known, so the consumer
+                // does a plain catalogue lookup and holds no provider knowledge.
+                // claude reports a bare id (`claude-opus-5`); the catalogue is
+                // keyed `provider/id`. Guarded so an already-qualified id — if
+                // claude ever reports one — is not double-prefixed.
+                onRuntimeObservation?(.resolvedModel(
+                    model.contains("/") ? model : "anthropic/\(model)"))
+            }
             if let cwd = object["cwd"] as? String,
                let directory = Self.absoluteDirectory(cwd) {
                 workingDirectory = directory

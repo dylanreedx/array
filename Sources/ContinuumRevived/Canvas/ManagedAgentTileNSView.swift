@@ -1805,7 +1805,24 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func contextWindowForCurrentModel() -> Int? {
-        AgentModelCatalog.shared.contextWindow(for: providerSettings.model)
+        // The RESOLVED id first. The Claude harness offers three aliases —
+        // `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and the
+        // catalogue is keyed by concrete ids (`anthropic/claude-opus-5`), so the
+        // alias never matched and every claude agent's ring was empty. The
+        // resolved id is what claude itself reported on `system/init`, and it
+        // rides the record so a relaunch or a workspace switch has a denominator
+        // before the next turn.
+        //
+        // Resolving an alias by GUESSING the newest concrete model would be
+        // worse than an empty ring: `anthropic/claude-opus-4-5` is a 200k window
+        // and `anthropic/claude-opus-5` is 1M, so picking wrong misreports
+        // occupancy by 5x. Only a harness-reported id is used.
+        if let id = projectedAgentID,
+           let resolved = agentSource?.resolvedModelId(for: id),
+           let window = AgentModelCatalog.shared.contextWindow(for: resolved) {
+            return window
+        }
+        return AgentModelCatalog.shared.contextWindow(for: providerSettings.model)
     }
 
     /// Whether the live elapsed tick is currently scheduled. A live phase must

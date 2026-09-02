@@ -30,6 +30,18 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// (`AgentRecord.providerSessionId`). Not a location fact: the projector
     /// ignores it.
     case providerSessionId(String)
+    /// The CONCRETE model claude resolved an alias to, echoed on `system/init`
+    /// (`"model":"claude-opus-5"`). The Claude harness offers three aliases —
+    /// `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and the context
+    /// window catalogue is keyed by concrete ids, so the alias never matched and
+    /// claude agents had no denominator: the context ring was empty for every
+    /// claude agent, always. It rides this host-local side channel for the same
+    /// reason as `providerSessionId` — the supervisor rebinds every event's
+    /// threadId, so it could not survive on an `AgentRuntimeEvent`. Persisted to
+    /// `AgentRecord.resolvedModelId` so a relaunch or a workspace switch can seed
+    /// the meter before the next turn. Not a location fact: the projector
+    /// ignores it.
+    case resolvedModel(String)
     /// Bounded tool detail for `AgentToolDetailStore`, riding the same
     /// host-local side channel as `threadId` and for the same reason: it must
     /// never enter `AgentRuntimeEvent` (the I5 sync boundary), and the store —
@@ -356,6 +368,12 @@ public struct AgentLocationProjector: Sendable {
         case .providerSessionId:
             // Same reasoning as `.threadId`: host-local persistence state, not
             // a Home / Where / What fact.
+            break
+
+        case .resolvedModel:
+            // Same reasoning again: the model behind an alias is host-local
+            // persistence state feeding the context meter's denominator, not a
+            // Home / Where / What fact.
             break
 
         case .toolDetail:

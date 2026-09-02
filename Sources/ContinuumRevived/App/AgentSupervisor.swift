@@ -1385,6 +1385,17 @@ final class AgentSupervisor {
             persist(updated)
             return
         }
+        // The concrete model behind the alias. Persisted for the same reason as
+        // the session id: it is the context meter's denominator key, and without
+        // it on the record the ring is empty until the agent takes another turn.
+        if case let .resolvedModel(value) = observation {
+            guard record.resolvedModelId != value else { return }
+            var updated = record
+            updated.resolvedModelId = value
+            records[id] = updated
+            persist(updated)
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -1392,6 +1403,12 @@ final class AgentSupervisor {
         // immutable agent ID; no raw runtime payload or path enters the event log.
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
+
+    /// The concrete `provider/model` the harness resolved this agent's alias to,
+    /// as the harness reported it. The context meter's denominator key: the
+    /// Claude harness offers aliases (`anthropic/opus`) that are not catalogue
+    /// keys, so without this a claude agent has no window and an empty ring.
+    func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;

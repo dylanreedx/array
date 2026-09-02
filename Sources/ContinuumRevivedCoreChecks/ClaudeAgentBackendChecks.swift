@@ -17,6 +17,7 @@ func runClaudeAgentBackendChecks() {
     runClaudeTranslatorMappingChecks()
     runClaudeTranslatorGateChecks()
     runClaudeCompactBoundaryChecks()
+    runClaudeResolvedModelContextWindowChecks()
     runClaudeRunnerArgvChecks()
     runClaudeBackendPolicyChecks()
     runClaudeCatalogUnionChecks()
@@ -253,6 +254,99 @@ private func runClaudeCompactBoundaryChecks() {
     ], "ClaudeEventTranslator: compact_boundary must emit the compaction item pair (real pre/post tokens) then contextWindowUpdated, got \(compactEvents)")
 
     print("ClaudeEventTranslator compact_boundary checks passed: the real captured frame maps to a compaction item plus one contextWindowUpdated, an ordinary system frame still emits nothing")
+}
+
+// The context ring was empty for EVERY claude agent, always. Not a rendering
+// bug: there was no denominator. `AgentModelCatalog`'s window map is keyed by
+// concrete model ids (`anthropic/claude-opus-5`), but the Claude harness offers
+// three ALIASES — `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and
+// the tile looked the window up by the alias, which is not a key. Miss, nil
+// maxTokens, `occupancyFraction` nil, empty ring.
+//
+// Guessing which concrete model an alias means would be worse than an empty
+// ring: `anthropic/claude-opus-4-5` is a 200k window and `anthropic/claude-opus-5`
+// is 1M, so a wrong guess misreports occupancy by 5x. claude states the resolved
+// id itself on `system/init`; the translator dropped it. It now rides the
+// runtime-observation side channel, qualified with its provider.
+private func runClaudeResolvedModelContextWindowChecks() {
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/claude-compact-boundary.jsonl", isDirectory: false)
+    guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8),
+          let initLine = text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) else {
+        expect(false, "resolved-model: the committed claude capture is missing")
+        return
+    }
+
+    final class ObservationSink: @unchecked Sendable {
+        let lock = NSLock()
+        var values: [AgentRuntimeObservation] = []
+        func append(_ value: AgentRuntimeObservation) { lock.lock(); values.append(value); lock.unlock() }
+    }
+    let sink = ObservationSink()
+    var translator = ClaudeEventTranslator(runToken: "run1", now: { Date(timeIntervalSinceReferenceDate: 456) })
+    translator.onRuntimeObservation = { sink.append($0) }
+    _ = translator.translate(line: initLine)
+    let observations = sink.values
+
+    // The fixture's init frame carries `"model":"claude-fable-5"`.
+    expect(observations.contains(.resolvedModel("anthropic/claude-fable-5")),
+           "resolved-model: init must report the concrete model, provider-qualified for the catalogue; got \(observations)")
+
+    // The real shape of pi's models-store, through the PRODUCTION parser, with
+    // the two windows that make the alias guess dangerous.
+    let store = Data("""
+    {"anthropic":{"models":[
+      {"id":"claude-fable-5","contextWindow":1000000},
+      {"id":"claude-opus-5","contextWindow":1000000},
+      {"id":"claude-opus-4-5","contextWindow":200000}
+    ]}}
+    """.utf8)
+    let windows = AgentModelCatalog.parse(modelsStoreContextWindows: store)
+
+    // THE BUG, stated as a contrast: the alias the user picks is not a key.
+    expect(windows["anthropic/opus"] == nil,
+           "resolved-model: the fixture must keep the alias unkeyed, or this witnesses nothing")
+    expect(windows["anthropic/claude-fable-5"] == 1_000_000,
+           "resolved-model: the production parser must key the concrete id; got \(String(describing: windows["anthropic/claude-fable-5"]))")
+    // Two concrete opus ids, 5x apart. This is why an alias is never guessed.
+    expect(windows["anthropic/claude-opus-5"] == 1_000_000 && windows["anthropic/claude-opus-4-5"] == 200_000,
+           "resolved-model: the fixture must keep a 1M and a 200k model apart")
+
+    // End to end: a real claude `result` usage block over the resolved window
+    // produces a real percentage. Occupancy is the prompt — fresh input plus
+    // both cache counters — never the output.
+    let turn = AgentContextWindowSnapshot(
+        inputTokens: 1_000, outputTokens: 5_000,
+        cacheReadTokens: 240_000, cacheWriteTokens: 9_000,
+        observedAt: Date(timeIntervalSinceReferenceDate: 456),
+        source: .claudeResultUsage, freshness: .live)
+    expect(AgentContextOccupancy.promptTokens(from: turn) == 250_000,
+           "resolved-model: claude prompt tokens must sum input + cacheRead + cacheWrite")
+    // `usedTokens`/`maxTokens` are the two fields the meter divides
+    // (`AgentRadialContextMeterPresenter.occupancyArithmetic`); the stricter
+    // `occupancyFraction` accessor additionally demands an authoritative source
+    // and is NOT what the ring reads.
+    let derived = AgentContextOccupancy.withDerivedOccupancy(
+        turn, contextWindow: windows["anthropic/claude-fable-5"])
+    expect(derived.usedTokens == 250_000 && derived.maxTokens == 1_000_000,
+           "resolved-model: the resolved window must fill both meter fields; got used=\(String(describing: derived.usedTokens)) max=\(String(describing: derived.maxTokens))")
+
+    // WITHOUT a window — the shipped behaviour for every claude agent — the
+    // meter has nothing to divide and the ring is empty. This is the bug.
+    let unresolved = AgentContextOccupancy.withDerivedOccupancy(
+        turn, contextWindow: windows["anthropic/opus"])
+    expect(unresolved.maxTokens == nil,
+           "resolved-model: an unresolved alias must leave the ring empty, never invent a denominator")
+
+    // The same turn against the WRONG concrete model reads 125% instead of 25%.
+    // This is why an alias is resolved from what claude reported and never guessed.
+    let wrong = AgentContextOccupancy.withDerivedOccupancy(
+        turn, contextWindow: windows["anthropic/claude-opus-4-5"])
+    expect(wrong.usedTokens == 250_000 && wrong.maxTokens == 200_000,
+           "resolved-model: the contrast case must show the 5x error a guessed window causes")
+
+    print("Claude resolved-model context window checks passed: init reports the concrete id, the alias is not a catalogue key, and a real result usage block fills the meter at 250k/1M from the resolved id, stays empty on the alias, and would read 250k/200k against a guessed one")
 }
 
 private func runClaudeRunnerArgvChecks() {
