@@ -5360,6 +5360,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `AgentAwarenessTransition` two owners of one rule, and the second one
     /// silently wins.
     private var pendingWatchedArrivalsByTile: [UUID: AgentAwarenessDecision] = [:]
+    /// A hover is a visit only after a bounded dwell. Immediate mouse crossings
+    /// remain inert so sweeping across the canvas cannot clear several agents.
+    static let completionHoverDwellDuration: TimeInterval = 0.65
+    private var hoveredCompletionTileID: UUID?
+    private var completionHoverDwellWorkItem: DispatchWorkItem?
     /// Acknowledgments actually played. Positive control for the visual half.
     private(set) var qaCompletionAcknowledgmentCount = 0
     /// Stamps consumed by the live half. Positive control for the hand-off.
@@ -5448,8 +5453,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // arming below still run — only the READ-STATE half is withheld.
             let deliberate = reason.isDeliberateVisit
             if !deliberate { self.qaNonDeliberateFocusCount += 1 }
-            self.synchronizeAgentFocus(to: tileId, deliberate: deliberate)
-            if deliberate { self.agentSignalCenter.markViewed(tileID: tileId) }
+            if deliberate {
+                self.visitAgentTile(tileId, establishesFocus: true)
+            } else {
+                self.synchronizeAgentFocus(to: tileId, deliberate: false)
+            }
             self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
@@ -5516,6 +5524,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } ?? false
         guard previousAgent != agentSupervisor.focusedAgentID || attentionChanged else { return }
         reloadWorkspaceSidebar(rebuildAgentActivity: false)
+    }
+
+    /// One deliberate-visit transaction for the two independently-owned truths:
+    /// the record watermark and the live completion signal. Keyboard navigation
+    /// establishes focus; hover and Focus Mode clicks only record that this tile
+    /// was actually viewed and must not retarget app focus behind the overlay.
+    private func visitAgentTile(_ tileId: UUID, establishesFocus: Bool) {
+        if establishesFocus {
+            synchronizeAgentFocus(to: tileId)
+        } else if let agentID = agentSupervisor.agent(forTile: tileId) {
+            let previousAttention = agentSupervisor.attention(for: agentID)
+            agentSupervisor.markVisited(agentID: agentID)
+            if previousAttention != agentSupervisor.attention(for: agentID) {
+                reloadWorkspaceSidebar(rebuildAgentActivity: false)
+            }
+        }
+        agentSignalCenter.markViewed(tileID: tileId)
+    }
+
+    private func completionHoverChanged(tileId: UUID, hovered: Bool) {
+        if hovered {
+            hoveredCompletionTileID = tileId
+            scheduleCompletionHoverDwellIfNeeded(for: tileId)
+        } else if hoveredCompletionTileID == tileId {
+            hoveredCompletionTileID = nil
+            completionHoverDwellWorkItem?.cancel()
+            completionHoverDwellWorkItem = nil
+        }
+    }
+
+    private func scheduleCompletionHoverDwellIfNeeded(for tileId: UUID) {
+        completionHoverDwellWorkItem?.cancel()
+        completionHoverDwellWorkItem = nil
+        guard hoveredCompletionTileID == tileId,
+              agentSignalCenter.currentByTile[tileId]?.kind == .completed else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.hoveredCompletionTileID == tileId,
+                  self.agentSignalCenter.currentByTile[tileId]?.kind == .completed,
+                  let agentID = self.agentSupervisor.agent(forTile: tileId) else { return }
+            let facts = self.activeViewFacts(forAgent: agentID)
+            // Hover supplies the two facts focus normally supplies. Every ambient
+            // visibility fact remains strict at expiry, not merely at mouse-enter.
+            guard facts.appActive, facts.windowNotUpstaged, facts.windowVisible,
+                  facts.windowOcclusionVisible, facts.tileMounted,
+                  !facts.modalPresented else { return }
+            self.visitAgentTile(tileId, establishesFocus: false)
+            self.completionHoverDwellWorkItem = nil
+        }
+        completionHoverDwellWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.completionHoverDwellDuration, execute: work)
     }
 
     private func recordAcceptedTileFocusInHistory(_ tileId: UUID, reason: FocusRequest) {
@@ -7042,8 +7101,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installTileFocusMonitor() {
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
-            guard self.focusModeSession == nil else { return event }
             guard let window = canvas.window, event.window === window else { return event }
+            if let session = self.focusModeSession {
+                _ = self.visitFocusModeTile(
+                    at: event.locationInWindow, candidateTileIDs: session.protectedTileIds)
+                return event
+            }
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             let clickedTileId = canvas.tileId(at: pointInCanvas)
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
@@ -7088,6 +7151,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
         focusBroker.enterScope(surface, reason: .userClick)
+    }
+
+    /// Focus Mode deliberately keeps the broker in modal scope and reparents its
+    /// tile views out of the ordinary canvas plane. Resolve the click against the
+    /// protected panes' actual window-space bounds, then clear completion without
+    /// retargeting the modal broker scope. Bounds beat `contentView.hitTest` here:
+    /// TileNSView's custom hit-test normalizes world-plane coordinates and is not a
+    /// stable ownership oracle after Focus Mode reparents it under a plain pane.
+    @discardableResult
+    private func visitFocusModeTile(
+        at windowPoint: NSPoint, candidateTileIDs: Set<UUID>
+    ) -> Bool {
+        guard let canvasView else { return false }
+        let tileId = candidateTileIDs
+            .sorted(by: { $0.uuidString < $1.uuidString })
+            .first { id in
+                guard let view = canvasView.tileView(for: id), view.window != nil else { return false }
+                return view.convert(view.bounds, to: nil).contains(windowPoint)
+            }
+        guard let tileId else { return false }
+        visitAgentTile(tileId, establishesFocus: false)
+        return true
     }
 
     private func installCanvasGestureMonitors() {
@@ -7547,7 +7632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             nextId = agentTileIds[0]
         }
         canvasView.markActive(tileId: nextId)
-        synchronizeAgentFocus(to: nextId)
+        visitAgentTile(nextId, establishesFocus: true)
         focusHistory.recordTileFocus(nextId, zoneId: zoneContainingTile(nextId), reason: .directTileActivation)
     }
 
@@ -7687,6 +7772,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         for id in tileIDs {
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?
                 .applyAwarenessSignal(agentSignalCenter.currentByTile[id])
+            if hoveredCompletionTileID == id {
+                scheduleCompletionHoverDwellIfNeeded(for: id)
+            }
         }
         applyAgentStatusesToCanvas()
     }
@@ -7753,7 +7841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tiles: worldTiles
               ) else { return }
         canvasView.markActive(tileId: nextTileId)
-        synchronizeAgentFocus(to: nextTileId)
+        visitAgentTile(nextTileId, establishesFocus: true)
         focusHistory.recordTileFocus(nextTileId, zoneId: zoneContainingTile(nextTileId), reason: .directTileActivation)
     }
 
@@ -14879,6 +14967,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaAcceptTileFocus(_ tileId: UUID, reason: FocusRequest) {
         focusBroker.appAcceptedTileFocusWithReason?(tileId, reason)
     }
+    /// QA (WS4): drive the direct keyboard-navigation visit used by agent cycling
+    /// and spatial navigation. This deliberately follows that production path
+    /// rather than entering through FocusBroker's mouse-click hook.
+    func qaDirectAgentNavigationVisit(_ tileId: UUID) {
+        visitAgentTile(tileId, establishesFocus: true)
+    }
+    /// QA (WS4): drive the same hover callback the canvas owns without requiring
+    /// the check process to move the user's pointer.
+    func qaAgentCompletionHoverChanged(_ tileId: UUID, hovered: Bool) {
+        completionHoverChanged(tileId: tileId, hovered: hovered)
+    }
+    /// QA (WS4): resolve a click through the same Focus Mode overlay hit-test as
+    /// the local mouse-up monitor, without installing a process-global monitor.
+    @discardableResult
+    func qaVisitFocusModeTile(at windowPoint: NSPoint, tileId: UUID) -> Bool {
+        visitFocusModeTile(at: windowPoint, candidateTileIDs: [tileId])
+    }
     /// QA (M1.11): `openProfilePalette` needs a host window. Borderless and never
     /// ordered front, so a check cannot take the screen.
     func qaAttachWindowForOfflineCheck(_ window: NSWindow) { self.window = window }
@@ -14980,6 +15085,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // seven tickets passed against code the app never executed.
         canvasView.onZoneActivated = { [weak self] zoneId in
             self?.workspaceRuntime?.setActiveZone(zoneId, reason: .click)
+        }
+        canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
+            self?.completionHoverChanged(tileId: tileId, hovered: hovered)
         }
         // WS2 F2: wired HERE for the same reason `onZoneActivated` is. This is the
         // ONLY production route from a committed canvas gesture to durable

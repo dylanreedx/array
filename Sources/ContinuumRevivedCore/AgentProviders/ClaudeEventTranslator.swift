@@ -37,9 +37,17 @@ public struct ClaudeEventTranslator {
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var seenItemIds = Set<String>()
     /// Provider-owned Claude children currently inside their one mirrored turn,
-    /// keyed by the announcing Agent/Task tool-use id. The top-level matching
-    /// tool_result is their authoritative terminal boundary.
-    private var activeSubagentToolUseIDs = Set<String>()
+    /// keyed by the announcing Agent/Task tool-use id. Store the synthetic turn
+    /// id at announcement time so the matching result cannot accidentally derive
+    /// a different id from later translator state.
+    private var activeSubagentTurnIDs: [String: String] = [:]
+    /// Claude may forward a child's first frame before flushing the complete
+    /// Agent/Task tool-use block. Hold those events until the announcement can
+    /// put `.turnStarted` in front of them.
+    private var pendingSubagentEvents: [String: [AgentRuntimeEvent]] = [:]
+    /// A repeated/late provider frame cannot reopen a child after its matching
+    /// top-level result already supplied the terminal boundary.
+    private var completedSubagentToolUseIDs = Set<String>()
     /// B6.2 — a compaction boundary has no tool_use id of its own, so this
     /// mints a stable-enough one for the item's begin/finish pair.
     private var compactionCounter: Int = 0
@@ -166,14 +174,14 @@ public struct ClaudeEventTranslator {
         // it keeps its one chip and stays an index, never a mirror.
         case "stream_event":
             if let parentToolUseID = Self.subagentParentToolUseID(object) {
-                emitSubagentEvents(translateStreamEvent(object), for: parentToolUseID)
+                routeSubagentEvents(translateStreamEvent(object), for: parentToolUseID)
                 return []
             }
             return translateStreamEvent(object)
 
         case "assistant":
             if let parentToolUseID = Self.subagentParentToolUseID(object) {
-                emitSubagentEvents(
+                routeSubagentEvents(
                     translateAssistantMessage(object, isSubagent: true), for: parentToolUseID)
                 return []
             }
@@ -181,7 +189,7 @@ public struct ClaudeEventTranslator {
 
         case "user":
             if let parentToolUseID = Self.subagentParentToolUseID(object) {
-                emitSubagentEvents(
+                routeSubagentEvents(
                     translateUserMessage(object, isSubagent: true), for: parentToolUseID)
                 return []
             }
@@ -221,6 +229,21 @@ public struct ClaudeEventTranslator {
     private func emitSubagentEvents(_ events: [AgentRuntimeEvent], for parentToolUseID: String) {
         guard let onSubagentEvent, !events.isEmpty else { return }
         for event in events { onSubagentEvent(parentToolUseID, event) }
+    }
+
+    /// Route immediately once the Agent/Task announcement has opened the child
+    /// turn; otherwise retain the provider's early frame. The announcement
+    /// drains this buffer immediately after its one synthetic start.
+    private mutating func routeSubagentEvents(
+        _ events: [AgentRuntimeEvent], for parentToolUseID: String
+    ) {
+        guard !events.isEmpty,
+              !completedSubagentToolUseIDs.contains(parentToolUseID) else { return }
+        guard activeSubagentTurnIDs[parentToolUseID] != nil else {
+            pendingSubagentEvents[parentToolUseID, default: []].append(contentsOf: events)
+            return
+        }
+        emitSubagentEvents(events, for: parentToolUseID)
     }
 
     // MARK: - stream_event (partial-message deltas)
@@ -341,11 +364,16 @@ public struct ClaudeEventTranslator {
                 toolUseID: id
             ) {
                 onSpawnRequest?(request)
-                if activeSubagentToolUseIDs.insert(id).inserted {
+                if activeSubagentTurnIDs[id] == nil,
+                   !completedSubagentToolUseIDs.contains(id) {
+                    let turnID = subagentTurnID(for: id)
+                    activeSubagentTurnIDs[id] = turnID
                     emitSubagentEvents([.turnStarted(
                         threadId: threadId,
-                        turnId: subagentTurnID(for: id)
+                        turnId: turnID
                     )], for: id)
+                    let pending = pendingSubagentEvents.removeValue(forKey: id) ?? []
+                    emitSubagentEvents(pending, for: id)
                 }
             }
             let kind = Self.itemKind(forTool: name)
@@ -409,10 +437,13 @@ public struct ClaudeEventTranslator {
                 kind: kind,
                 status: isError ? .failed : .completed
             ))
-            if !isSubagent, activeSubagentToolUseIDs.remove(toolUseId) != nil {
+            if !isSubagent,
+               let turnID = activeSubagentTurnIDs.removeValue(forKey: toolUseId) {
+                completedSubagentToolUseIDs.insert(toolUseId)
+                pendingSubagentEvents.removeValue(forKey: toolUseId)
                 emitSubagentEvents([.turnCompleted(
                     threadId: threadId,
-                    turnId: subagentTurnID(for: toolUseId),
+                    turnId: turnID,
                     outcome: isError ? .failed : .completed,
                     errorMessage: nil
                 )], for: toolUseId)
