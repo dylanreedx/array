@@ -42,6 +42,7 @@ final class GhosttyTerminalView: NSView {
     private(set) var qaSurfaceResizeAppliedCount = 0
     private(set) var qaSurfaceResizeSkippedUnchangedCount = 0
     private(set) var qaConfiguredFontSize: Float?
+    private(set) var qaLastAppliedGhosttyVisibility: Bool?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
@@ -381,13 +382,17 @@ final class GhosttyTerminalView: NSView {
     func setSnapshotOccluded(_ occluded: Bool) {
         requestedOcclusion = occluded
         guard let surface else { return }
-        ghostty_surface_set_occlusion(surface, occluded)
+        let visible = !occluded
+        qaLastAppliedGhosttyVisibility = visible
+        ghostty_surface_set_occlusion(surface, visible)
     }
 
     /// Apply the last requested occlusion to a surface that has just been built.
     private func applyRequestedOcclusion() {
         guard let surface else { return }
-        ghostty_surface_set_occlusion(surface, requestedOcclusion)
+        let visible = !requestedOcclusion
+        qaLastAppliedGhosttyVisibility = visible
+        ghostty_surface_set_occlusion(surface, visible)
     }
 
     func isProcessExited() -> Bool {

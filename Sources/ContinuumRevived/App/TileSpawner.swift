@@ -4336,6 +4336,8 @@ final class TileSpawner {
         let surfaceSize = ghostty_surface_size(surface)
         let configuredFontSize = term.qaConfiguredFontSize.map(Double.init)
         try expect(abs((configuredFontSize ?? -1) - TerminalDisplayConfig.defaultFontSize) < 0.01, "terminal surface should use readable font default \(TerminalDisplayConfig.defaultFontSize), got \(String(describing: configuredFontSize))")
+        try expect(term.qaLastAppliedGhosttyVisibility == true,
+                   "visible terminal must tell Ghostty it is visible; got \(String(describing: term.qaLastAppliedGhosttyVisibility))")
         try expect(surfaceSize.columns >= 80, "default terminal should provide at least 80 columns, got \(surfaceSize.columns)")
         try expect(surfaceSize.rows >= 20, "default terminal should provide at least 20 rows, got \(surfaceSize.rows)")
 
@@ -4515,9 +4517,11 @@ final class TileSpawner {
             throw CheckError.failed("spawned terminal tile missing from real canvas path")
         }
         try pump(context, seconds: 0.8)
-        guard runtime.qaTerminalView?.surface != nil else {
+        guard let terminalView = runtime.qaTerminalView, terminalView.surface != nil else {
             throw CheckError.failed("spawned terminal surface missing")
         }
+        try expect(terminalView.qaLastAppliedGhosttyVisibility == true,
+                   "visible terminal must tell Ghostty it is visible; got \(String(describing: terminalView.qaLastAppliedGhosttyVisibility))")
 
         let theme = context.themeSnapshot
         guard let expectedBackground = theme.backgroundHex else {
