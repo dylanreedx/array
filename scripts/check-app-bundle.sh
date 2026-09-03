@@ -143,6 +143,29 @@ done
   || { echo "FAIL: missing bundled agent sound manifest" >&2; exit 1; }
 "$ROOT_DIR/scripts/generate-agent-sounds.py" --check "$RESOURCES/AgentSounds"
 
+# Ghostty is linked statically, but its runtime is not resource-free. On macOS
+# it discovers the app resource root by this exact terminfo sentinel, then uses
+# the sibling ghostty/shell-integration tree to initialize the user's shell.
+# A bundle without these files still links, signs, launches, and even falls back
+# to xterm-256color, which is why the old dependency-only audit let 0.7.8 ship
+# with shell integration disabled.
+GHOSTTY_TERMINFO_SENTINEL="$RESOURCES/terminfo/78/xterm-ghostty"
+GHOSTTY_SHELL_INTEGRATION="$RESOURCES/ghostty/shell-integration"
+[[ -s "$GHOSTTY_TERMINFO_SENTINEL" ]] \
+  || { echo "FAIL: missing Ghostty terminfo sentinel $GHOSTTY_TERMINFO_SENTINEL" >&2; exit 1; }
+for ghostty_shell_resource in \
+  bash/bash-preexec.sh \
+  bash/ghostty.bash \
+  elvish/lib/ghostty-integration.elv \
+  fish/vendor_conf.d/ghostty-shell-integration.fish \
+  zsh/.zshenv \
+  zsh/ghostty-integration
+do
+  [[ -s "$GHOSTTY_SHELL_INTEGRATION/$ghostty_shell_resource" ]] \
+    || { echo "FAIL: missing Ghostty shell integration resource $ghostty_shell_resource" >&2; exit 1; }
+done
+ghostty_resources_embedded=true
+
 # C8: continuum-spawn-agent.ts (Pi's spawn_agent extension) ships as a SwiftPM
 # resource on ContinuumRevivedCore, copied into Contents/Resources (not the
 # .app's top level — see make-app-bundle.sh's comment on why). Asserts it
@@ -183,7 +206,7 @@ fi
 
 /usr/bin/file "$EXE" | tee "$FILE_LOG"
 /usr/bin/otool -L "$EXE" | tee "$OTOOL_LOG"
-find "$BUNDLE_PATH" \( -path '*GhosttyKit*' -o -name 'libghostty*' \) -print | sort | tee "$GHOSTTY_LOG"
+find "$BUNDLE_PATH" \( -path '*GhosttyKit*' -o -name 'libghostty*' -o -path '*/Resources/terminfo/*' -o -path '*/Resources/ghostty/*' \) -print | sort | tee "$GHOSTTY_LOG"
 
 if find "$BUNDLE_PATH" \( -path '*ios-arm64*' -o -path '*ios-arm64-simulator*' \) -print -quit | grep -q .; then
   echo "FAIL: forbidden iOS GhosttyKit slice found in bundle" >&2
@@ -225,8 +248,9 @@ before_old_defaults=$(plist_snapshot "$OLD_DEFAULTS_PLIST")
 project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-project.XXXXXX")
 app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-appsupport.XXXXXX")
 isolated_home=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-home.XXXXXX")
+isolated_tmux=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-tmux.XXXXXX")
 : > "$SELF_CHECK_LOG"
-self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check)
+self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check --terminal-theme-fidelity-check)
 if [[ -n "${CONTINUUM_BUNDLE_CHECK_FORCE_FAIL:-}" ]]; then
   self_checks+=("$CONTINUUM_BUNDLE_CHECK_FORCE_FAIL")
 fi
@@ -235,8 +259,10 @@ self_check_codes=()
 for check in "${self_checks[@]}"; do
   printf '==> %s\n' "$check" | tee -a "$SELF_CHECK_LOG"
   set +e
-  HOME="$isolated_home" \
+  env -u TMUX -u TMUX_PANE \
+    HOME="$isolated_home" \
     CFFIXED_USER_HOME="$isolated_home" \
+    TMUX_TMPDIR="$isolated_tmux" \
     CONTINUUM_PROJECT_ROOT="$project_root" \
     CONTINUUM_APP_SUPPORT="$app_support" \
     "$EXE" "$check" 2>&1 | tee -a "$SELF_CHECK_LOG"
@@ -294,7 +320,7 @@ launch_status=$open_status
 if [[ "$sentinel_status" != "0" ]]; then
   launch_status=$sentinel_status
 fi
-rm -rf "$project_root" "$app_support" "$isolated_home" "$launch_project_root" "$launch_app_support" "$launch_home"
+rm -rf "$project_root" "$app_support" "$isolated_home" "$isolated_tmux" "$launch_project_root" "$launch_app_support" "$launch_home"
 after_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' -o -name 'Array Dev' \) -print 2>/dev/null | sort || true)
 cleanup_empty_created_plist "$before_new_defaults" "$NEW_DEFAULTS_PLIST"
 cleanup_empty_created_plist "$before_dev_defaults" "$DEV_DEFAULTS_PLIST"
@@ -330,6 +356,7 @@ CODESIGN_LOG="$CODESIGN_LOG" LAUNCH_LOG="$LAUNCH_LOG" LAUNCH_SENTINEL="$LAUNCH_S
 bundle_id="$bundle_id" bundle_executable="$bundle_executable" bundle_name="$bundle_name" channel="$CHANNEL" \
 bundle_package="$bundle_package" icon_file="$icon_file" minimum_system="$minimum_system" \
 forbidden_slices_absent="$forbidden_slices_absent" ghostty_runtime_dependency="$ghostty_runtime_dependency" \
+ghostty_resources_embedded="$ghostty_resources_embedded" \
 su_feed_url="$su_feed_url" su_public_ed_key="$su_public_ed_key" \
 persistent_pollution="$persistent_pollution" real_defaults_pollution="$real_defaults_pollution" \
 defaults_key="continuum.deleteConfirmPolicy" old_defaults_domain="continuum-revived" \
@@ -356,6 +383,7 @@ manifest = {
     "minimumSystemVersion": os.environ["minimum_system"],
     "iconFile": os.environ["icon_file"],
     "ghosttyRuntimeDependency": os.environ["ghostty_runtime_dependency"] == "true",
+    "ghosttyResourcesEmbedded": os.environ["ghostty_resources_embedded"] == "true",
     "ghosttyForbiddenSlicesAbsent": os.environ["forbidden_slices_absent"] == "true",
     "sparkle": {"frameworkEmbedded": True, "feedURL": os.environ["su_feed_url"], "publicEDKeyPresent": bool(os.environ["su_public_ed_key"])},
     "persistentAppSupportPollution": os.environ["persistent_pollution"] == "true",

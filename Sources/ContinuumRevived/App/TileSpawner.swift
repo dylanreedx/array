@@ -4539,7 +4539,7 @@ final class TileSpawner {
         let probePath = probeFile.path.replacingOccurrences(of: "'", with: "'\\''")
         let probe = """
         {
-          printf '\(sentinel)-env TERM=%s COLORTERM=%s TMUX=%s\\n' "$TERM" "${COLORTERM:-}" "${TMUX:+yes}"
+          printf '\(sentinel)-env TERM=%s COLORTERM=%s TMUX=%s GHOSTTY_RESOURCES_DIR=%s TERMINFO=%s GHOSTTY_SHELL_FEATURES=%s\\n' "$TERM" "${COLORTERM:-}" "${TMUX:+yes}" "${GHOSTTY_RESOURCES_DIR:-}" "${TERMINFO:-}" "${GHOSTTY_SHELL_FEATURES:-}"
           if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
             printf '\(sentinel)-tmux-status-style=%s\\n' "$(tmux show -gqv status-style)"
             printf '\(sentinel)-tmux-default-terminal=%s\\n' "$(tmux show -gqv default-terminal)"
@@ -4563,6 +4563,19 @@ final class TileSpawner {
         let envLine = probeLines.first { $0.contains("-env ") } ?? ""
         try expect(envLine.contains("TERM=tmux-256color"), "theme fidelity shell should report TERM=tmux-256color, got: \(envLine)")
         try expect(envLine.contains("COLORTERM=truecolor"), "theme fidelity shell should report COLORTERM=truecolor, got: \(envLine)")
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            guard let resourceURL = Bundle.main.resourceURL else {
+                throw CheckError.failed("bundled terminal check could not resolve Bundle.main.resourceURL")
+            }
+            let ghosttyResources = resourceURL.appendingPathComponent("ghostty", isDirectory: true).path
+            let terminfo = resourceURL.appendingPathComponent("terminfo", isDirectory: true).path
+            try expect(envLine.contains("GHOSTTY_RESOURCES_DIR=\(ghosttyResources)"),
+                       "bundled shell did not receive Ghostty's resolved resource directory: \(envLine)")
+            try expect(envLine.contains("TERMINFO=\(terminfo)"),
+                       "bundled shell did not receive Ghostty's terminfo directory: \(envLine)")
+            try expect(!envLine.hasSuffix("GHOSTTY_SHELL_FEATURES="),
+                       "bundled shell did not receive Ghostty shell features: \(envLine)")
+        }
         if tmuxWrapped {
             try expect(envLine.contains("TMUX=yes"), "tmux-wrapped shell should report TMUX=yes in the real terminal path, got: \(envLine)")
             let defaultTerminalLine = probeLines.first { $0.contains("-tmux-default-terminal=") } ?? ""

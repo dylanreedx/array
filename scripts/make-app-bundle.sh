@@ -72,6 +72,16 @@ AGENT_SOUND_SOURCE="$ROOT_DIR/Resources/AgentSounds"
 # Sparkle ships as an SPM binary artifact; layout pinned 2026-08-09 (Sparkle
 # 2.9.5): bin/ tools + the xcframework live under .build/artifacts/sparkle.
 SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+# GhosttyKit is linked statically, but the library discovers terminfo and shell
+# integration at runtime from the host app's Contents/Resources directory. The
+# checked-in xcframework is a symlink into the matching Ghostty build, so derive
+# the resource archive from that same build unless a packager supplies an
+# explicit override.
+GHOSTTY_XCFRAMEWORK_REAL=$(cd -P "$ROOT_DIR/ThirdParty/GhosttyKit.xcframework" && pwd)
+GHOSTTY_SOURCE_ROOT=$(dirname "$(dirname "$GHOSTTY_XCFRAMEWORK_REAL")")
+GHOSTTY_SHARE_SOURCE="${ARRAY_GHOSTTY_SHARE_SOURCE:-$GHOSTTY_SOURCE_ROOT/zig-out/share}"
+GHOSTTY_RESOURCE_SOURCE="$GHOSTTY_SHARE_SOURCE/ghostty"
+GHOSTTY_TERMINFO_SOURCE="$GHOSTTY_SHARE_SOURCE/terminfo"
 
 # ContinuumRevivedCore declares SwiftPM resources (C8: continuum-spawn-agent.ts,
 # Pi's spawn_agent extension). SwiftPM's generated Bundle.module accessor
@@ -93,6 +103,8 @@ CORE_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$CORE_RESOURCE_BUNDLE"
 [[ -f "$AGENT_SOUND_SOURCE/manifest.json" ]] || { echo "agent sound manifest not found" >&2; exit 1; }
 [[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
 [[ -d "$CORE_RESOURCE_BUNDLE_SOURCE" ]] || { echo "Core resource bundle not found: $CORE_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
+[[ -s "$GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" ]] || { echo "Ghostty terminfo not found: $GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" >&2; exit 1; }
+[[ -s "$GHOSTTY_RESOURCE_SOURCE/shell-integration/zsh/ghostty-integration" ]] || { echo "Ghostty shell integration not found: $GHOSTTY_RESOURCE_SOURCE/shell-integration" >&2; exit 1; }
 
 rm -rf "$OUTPUT"
 mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources" "$OUTPUT/Contents/Frameworks"
@@ -107,6 +119,10 @@ for mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
   cp "$BRAND_MARK_SOURCE/$mark" "$OUTPUT/Contents/Resources/BrandMarks/$mark"
 done
 ditto "$AGENT_SOUND_SOURCE" "$OUTPUT/Contents/Resources/AgentSounds"
+mkdir -p "$OUTPUT/Contents/Resources/ghostty"
+ditto "$GHOSTTY_RESOURCE_SOURCE/shell-integration" "$OUTPUT/Contents/Resources/ghostty/shell-integration"
+ditto "$GHOSTTY_TERMINFO_SOURCE" "$OUTPUT/Contents/Resources/terminfo"
+chmod -R a+rX "$OUTPUT/Contents/Resources/ghostty" "$OUTPUT/Contents/Resources/terminfo"
 
 # Channel stamping: Packaging/Info.plist carries the PROD identity; the dev
 # channel re-stamps so macOS keys everything (prefs, LaunchServices, the
@@ -127,8 +143,8 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$OUTPUT/Contents/
 # Developer ID over this).
 codesign --force --sign - "$OUTPUT/Contents/MacOS/Array"
 
-# GhosttyKit is currently linked statically by SwiftPM. Do not copy the full
-# xcframework unless a future otool -L check shows a runtime Ghostty dependency.
+# GhosttyKit itself is linked statically by SwiftPM, so the xcframework is not
+# copied. Its data resources above are nevertheless required at runtime.
 plutil -lint "$OUTPUT/Contents/Info.plist" >/dev/null
 
 printf 'Assembled %s (channel: %s)\n' "$OUTPUT" "$CHANNEL"

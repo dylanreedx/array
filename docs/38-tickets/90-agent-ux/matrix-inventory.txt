@@ -408,6 +408,7 @@ bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
+bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
