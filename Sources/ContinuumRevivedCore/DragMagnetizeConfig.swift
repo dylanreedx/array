@@ -13,6 +13,7 @@ public enum DragMagnetizeConfig {
     /// `/ viewport.zoom` so the catch distance feels constant at any zoom. Wide
     /// enough that the phantom catches from a comfortable distance.
     public static let snapThresholdScreenPoints: Double = 44
+    public static let snapReleaseScreenPoints: Double = 64
 
     public static func enabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledKey) != nil

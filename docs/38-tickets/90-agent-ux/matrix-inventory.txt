@@ -72,6 +72,7 @@ check --inbox-reveal-project-check
 check --input-gate-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
+check --layout-pressure-check
 check --leader-activation-check
 check --leader-jump-check
 check --leader-snap-check
@@ -388,6 +389,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg scripts/check-color-hygiene.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh
@@ -412,7 +414,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 113
+count ContinuumRevivedCoreChecks 116
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

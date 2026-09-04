@@ -346,6 +346,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # precision semantics. Standalone so unrelated long-running CoreChecks failures
 # cannot prevent this contract from running.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from

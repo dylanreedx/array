@@ -471,7 +471,9 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func applyAutoLayout(_ mutation: CanvasAutoLayoutEngine.Mutation, baseline: CanvasAutoLayoutEngine.Scene? = nil) {
-        guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
+        if case .tidy = mutation {} else {
+            guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
+        }
         let scene = baseline ?? autoLayoutScene()
         let transaction = CanvasAutoLayoutEngine.solve(
             scene: scene,
@@ -490,24 +492,10 @@ final class CanvasNSView: NSView, TokenThemed {
         case let .zone(id, _): activeTileId = nil; activeZoneId = id
         case .tidy, .settle: activeTileId = nil; activeZoneId = nil
         }
-        let isDirectResize: Bool
-        switch mutation {
-        case let .tile(id, frame):
-            isDirectResize = scene.tiles.first(where: { $0.id == id }).map {
-                $0.frame.width != frame.width || $0.frame.height != frame.height
-            } ?? false
-        case let .zone(id, placement):
-            isDirectResize = scene.zones.first(where: { $0.zoneId == id }).map {
-                $0.size != placement.size
-            } ?? false
-        case .tidy, .settle:
-            isDirectResize = false
-        }
-        if isDirectResize {
-            applyLayoutTransaction(
-                transaction,
-                activeTileId: activeTileId,
-                activeZoneId: activeZoneId,
+        if case .zone = mutation, let activeZoneId,
+           let placement = transaction.zonePlacements[activeZoneId],
+           scene.zones.first(where: { $0.zoneId == activeZoneId })?.size != placement.size {
+            applyLayoutTransaction(transaction, activeZoneId: activeZoneId,
                 preservingLayerMemberWorldFramesIn: Set(transaction.zonePlacements.keys))
             return
         }
@@ -523,7 +511,8 @@ final class CanvasNSView: NSView, TokenThemed {
         for zone in scene.zones where absolute.zonePlacements[zone.zoneId] == nil {
             absolute.zonePlacements[zone.zoneId] = zone
         }
-        applyLayoutTransaction(absolute, activeTileId: activeTileId, activeZoneId: activeZoneId)
+        applyLayoutTransaction(absolute, activeTileId: activeTileId, activeZoneId: activeZoneId,
+            preservingLayerMemberWorldFramesIn: Set(absolute.zonePlacements.keys))
     }
 
     private func applyLayoutTransaction(
@@ -533,7 +522,7 @@ final class CanvasNSView: NSView, TokenThemed {
         preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = []
     ) {
         let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
-            tileView(for: id).map { (id, $0.frame.origin) }
+            tileView(for: id).map { (id, $0.layer?.presentation()?.frame.origin ?? $0.frame.origin) }
         })
         let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
             zoneChromeViews[id].map { (id, $0.frame.origin) }
@@ -744,7 +733,8 @@ final class CanvasNSView: NSView, TokenThemed {
             Set(autoLayoutScene().tiles.lazy.filter { $0.zoneId == zoneId }.map(\.id))
         } ?? []
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.14
+            context.duration = 0.11
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
             for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeZoneMembers.contains(id) {
                 guard let view = tileView(for: id), view.frame.origin != oldOrigin else { continue }
@@ -782,7 +772,7 @@ final class CanvasNSView: NSView, TokenThemed {
         return transaction
     }
 
-    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true) {
+    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(
             .tidy,
@@ -790,7 +780,13 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneIds: Set(baseline.zones.map(\.zoneId))
         )
         autoLayoutGestureBaseline = baseline
-        applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
+        if compact {
+            applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
+        } else {
+            for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
+                applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
+            }
+        }
         if commit {
             _ = finishAutoLayoutGesture()
             if let transaction = commitGeometryEdit(), offerUndo {
@@ -831,7 +827,9 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         autoLayoutGestureBaseline = baseline
         if let zoneId { expandZoneToContainMembers(zoneId) }
-        applyAutoLayout(.tidy(zoneId: zoneId), baseline: autoLayoutScene())
+        for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
+            applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
+        }
         _ = finishAutoLayoutGesture()
         _ = commitGeometryEdit()
     }
@@ -882,7 +880,7 @@ final class CanvasNSView: NSView, TokenThemed {
         onZoneMoved?(placement)
         if mode.resolves(globalEnabled: CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults)),
            CanvasAutoLayoutConfig.activation(defaults: autoLayoutDefaults) == .immediately {
-            tidyAutoLayout(zoneId: zoneId)
+            tidyAutoLayout(zoneId: zoneId, compact: false)
         }
     }
 
@@ -988,7 +986,7 @@ final class CanvasNSView: NSView, TokenThemed {
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
         onZoneCreated?(placement)
-        if isAutoLayoutEnabled { tidyAutoLayout(zoneId: zoneId, offerUndo: false) }
+        if isAutoLayoutEnabled { tidyAutoLayout(zoneId: zoneId, offerUndo: false, compact: false) }
         delegate?.canvasDidChange(self)
     }
 
@@ -1993,7 +1991,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// moved tile joining last (the composition wins over its raw drop point).
     /// Membership is resolved through the scene so ZoneLayer-owned members
     /// settle too, not just flat-canvas tiles.
-    func settleAutoLayoutAfterMove(tileId: UUID) {
+    func settleAutoLayoutAfterMove(tileId: UUID, honorSnap: Bool = false) {
         guard isAutoLayoutEnabled else { return }
         var scene = autoLayoutScene()
         guard let member = scene.tiles.first(where: { $0.id == tileId }),
@@ -2004,8 +2002,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // aside, never the mover into a different lane. (The latch and gesture
         // baseline are still alive here — the gesture finishes in
         // commitGeometryGesture.)
-        var pinned = false
-        if let latch = autoLayoutSwapLatch,
+        var pinned = honorSnap
+        if !honorSnap, let latch = autoLayoutSwapLatch,
            scene.tiles.first(where: { $0.id == latch })?.zoneId == zoneId,
            let slot = autoLayoutGestureBaseline?.tiles.first(where: { $0.id == latch })?.frame {
             applyLayoutTransaction(CanvasLayoutTransaction(
@@ -2790,6 +2788,27 @@ final class CanvasNSView: NSView, TokenThemed {
     /// deterministically without touching standard defaults.
     var dragMagnetizeDefaults: UserDefaults = .standard
 
+    func animateSnapLanding(tileId: UUID, from origin: CGPoint) {
+        guard !autoLayoutReduceMotionProvider(), let view = tileView(for: tileId), view.frame.origin != origin else { return }
+        let destination = view.frame.origin
+        view.setFrameOrigin(origin)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.11
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            view.animator().setFrameOrigin(destination)
+        }
+    }
+
+    func magneticPlacement(freeWorldFrame: TileFrame, tileId: UUID, previous: MagneticPlacement.Target?) -> MagneticPlacement.Result {
+        guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else {
+            return MagneticPlacement.Result(frame: freeWorldFrame, target: nil)
+        }
+        let neighbors = (autoLayoutGestureBaseline ?? autoLayoutScene()).tiles
+            .filter { $0.id != tileId }.map { MagneticPlacement.Neighbor(id: $0.id, frame: $0.frame) }
+        return MagneticPlacement.resolve(free: freeWorldFrame, neighbors: neighbors,
+            previous: previous, gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults), zoom: viewport.zoom)
+    }
+
     /// The snapped world frame a tile being dragged to `freeFrame` would commit to,
     /// or nil when drag snapping is off or nothing is within the pull radius. The
     /// drag itself keeps the tile under the cursor (free); this only drives the
@@ -2822,29 +2841,36 @@ final class CanvasNSView: NSView, TokenThemed {
         let zoom = viewport.zoom
         guard zoom.isFinite, zoom > 0 else { return nil }
         let resizedWorldFrame = worldFrame(forTileFrame: resizedFrame, tileId: id)
-        let others = navigationTileSnapshots()
-            .filter { $0.tileId != id }
-            .map(\.worldFrame)
+        let scene = autoLayoutGestureBaseline ?? autoLayoutScene()
+        let others = scene.tiles.filter { $0.id != id }.map(\.frame)
         guard !others.isEmpty else { return nil }
-        let gap = TileGapResolver.resolvedGap()
+        let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
         let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
         let minimum = CanvasEngine.minimumFrame(for: kind)
         let result = TileArrangement.resizeEdgeSnap(resizedWorldFrame, edge: edge, others: others, gap: gap, threshold: threshold, minimum: minimum)
-        return result.guides.isEmpty ? nil : tileFrame(fromWorldFrame: result.frame, tileId: id)
+        guard !result.guides.isEmpty else { return nil }
+        var frame = result.frame
+        if let initial = scene.tiles.first(where: { $0.id == id }),
+           let zone = scene.zones.first(where: { $0.zoneId == initial.zoneId }),
+           isAutoLayoutEnabled && zone.autoLayoutMode.resolves(globalEnabled: true) {
+            frame = MagneticPlacement.resizeContact(free: resizedWorldFrame, snapped: frame,
+                initial: initial.frame, edge: edge, zoom: zoom)
+        }
+        return tileFrame(fromWorldFrame: frame, tileId: id)
     }
 
     /// Snapping math is workspace-wide and therefore runs in world space. A
     /// ZoneLayer owns zone-local frames, while the compatibility canvas owns
     /// world frames directly; these two conversions keep the gesture's stored
     /// frame in its owner's coordinate system without hiding layered neighbors.
-    private func worldFrame(forTileFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+    func worldFrame(forTileFrame frame: TileFrame, tileId: UUID) -> TileFrame {
         guard let placement = zoneLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
         return CanvasEngine.zoneLocalToWorld(frame, zoneOrigin: placement.origin)
     }
 
-    private func tileFrame(fromWorldFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+    func tileFrame(fromWorldFrame frame: TileFrame, tileId: UUID) -> TileFrame {
         guard let placement = zoneLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
@@ -3384,7 +3410,7 @@ final class CanvasNSView: NSView, TokenThemed {
         guard enabled && !lastAutoLayoutEnabled else { return }
         switch CanvasAutoLayoutConfig.activation(defaults: autoLayoutDefaults) {
         case .immediately:
-            tidyAutoLayout()
+            tidyAutoLayout(compact: false)
         case .onFirstEdit:
             autoLayoutDeferredUntilEdit = true
         }
@@ -3392,7 +3418,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     @objc private func tileGapSettingDidChange() {
         guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
-        tidyAutoLayout()
+        tidyAutoLayout(compact: false)
     }
 
     @objc private func zoneChromeSettingDidChange() {
@@ -8089,9 +8115,8 @@ final class CanvasNSView: NSView, TokenThemed {
                    "a rejected cross-store transaction must restore the last durable geometry")
 
         // The production multi-zone representation stores member frames locally
-        // in ZoneLayer. A direct resize is pointer-owned: the active tile changes,
-        // while every passive member remains byte-for-byte exact. Overlap is less
-        // destructive than silently moving or shrinking somebody else's surface.
+        // in ZoneLayer. A direct resize is pointer-owned: pressure moves neighbors
+        // without resizing them, and the owning zone grows around the result.
         let layerZoneId = UUID(uuidString: "A1300000-0000-4000-8000-000000000021")!
         let layerFirstId = UUID(uuidString: "A1300000-0000-4000-8000-000000000022")!
         let layerSecondId = UUID(uuidString: "A1300000-0000-4000-8000-000000000023")!
@@ -8161,20 +8186,12 @@ final class CanvasNSView: NSView, TokenThemed {
                 frame: resizedLayerSecond, zPosition: .fromLegacyRank(2),
                 runtimeRef: nil, metadata: TileMetadata()),
             in: resizedLayerZone)
-        try expect(resizedLayerSecondWorld == passiveLayerWorldBaseline,
-                   "direct resize must preserve the passive member's exact world frame; before=\(passiveLayerWorldBaseline), after=\(resizedLayerSecondWorld)")
-        if resizedLayerZone.origin == layerPlacementBeforeDirectResize.origin {
-            try expect(resizedLayerSecond == passiveLayerBaseline,
-                       "direct resize with an unchanged zone origin must preserve the passive local frame exactly; before=\(passiveLayerBaseline), after=\(resizedLayerSecond)")
-        } else {
-            let expectedRebasedFrame = CanvasEngine.worldToZoneLocal(
-                passiveLayerWorldBaseline,
-                zoneOrigin: resizedLayerZone.origin)
-            try expect(resizedLayerSecond == expectedRebasedFrame,
-                       "direct resize with a changed zone origin must precisely rebase the passive local frame; expected=\(expectedRebasedFrame), after=\(resizedLayerSecond)")
-        }
-        try expect(resizedLayerZone.size.width == layerPlacement.size.width,
-                   "the zone must stay fixed when the resized tile still fits")
+        var expectedPushed = passiveLayerWorldBaseline
+        expectedPushed.x += 120
+        try expect(resizedLayerSecondWorld == expectedPushed,
+                   "direct resize must push the layered neighbor exactly 120 world points without resizing it")
+        try expect(resizedLayerZone.size.width == layerPlacement.size.width + 120,
+                   "the zone must grow to contain the pushed neighbor")
         try expect(layerCommits.count == 1,
                    "one ZoneLayer tile resize must produce one final geometry transaction")
         try expect(layerCanvas.qaLiveZonePlacement(layerZoneId) == resizedLayerZone
@@ -8210,10 +8227,71 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
 
+        // Enabled pressure must relax from the same baseline on every event,
+        // including an exact return to the starting width and zone bounds.
+        layerCanvas.activateUndoWorkspace(UUID())
+        let pressureBaseline = try layerWorldFrames()
+        let pressureZoneBaseline = layer.placement
+        let pressureCommits = layerCommits.count
+        let pressureStart = layerFirstView.convert(
+            NSPoint(x: layerFirstView.bounds.maxX - 1, y: layerFirstView.bounds.midY), to: nil)
+        defaults.set(true, forKey: DragMagnetizeConfig.enabledKey)
+        layerFirstView.mouseDown(with: try event(.leftMouseDown, pressureStart, window: layerWindow))
+        for distance in [4.0, 8.0] {
+            layerFirstView.mouseDragged(with: try event(.leftMouseDragged,
+                NSPoint(x: pressureStart.x + distance, y: pressureStart.y), window: layerWindow))
+            let contact = try layerWorldFrames()
+            let growth = contact[layerFirstId]!.width - pressureBaseline[layerFirstId]!.width
+            try expect(growth >= distance * 0.65 && growth <= distance,
+                       "enabled resize snapping must transmit small pointer movements instead of freezing at contact")
+            try expect(abs(contact[layerSecondId]!.x - pressureBaseline[layerSecondId]!.x - growth) < 0.001,
+                       "soft resize contact must move the neighbor by the actual growth")
+        }
+        layerFirstView.mouseDragged(with: try event(.leftMouseDragged,
+            NSPoint(x: pressureStart.x + 64, y: pressureStart.y), window: layerWindow))
+        let pressureLiveFrames = try layerWorldFrames()
+        try expect(pressureLiveFrames[layerSecondId]?.x == pressureBaseline[layerSecondId]!.x + 64,
+                   "live pressure must push the layered neighbor before mouse-up")
+        layerFirstView.mouseDragged(with: try event(.leftMouseDragged, pressureStart, window: layerWindow))
+        let pressureReversedFrames = try layerWorldFrames()
+        try expect(pressureReversedFrames == pressureBaseline && layer.placement == pressureZoneBaseline,
+                   "reversing within a resize must restore all baseline frames and zone bounds")
+        layerFirstView.mouseUp(with: try event(.leftMouseUp, pressureStart, window: layerWindow))
+        try expect(layerCommits.count == pressureCommits, "a reversed resize is a no-op transaction")
+        defaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
+
+        // An explicit Tidy bypasses both switches and remains one reversible edit.
+        defaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        layer.placement.autoLayoutMode = .disabled
+        layerCanvas.upsertZoneLayer(layer)
+        let beforeTidy = try layerWorldFrames()
+        let zoneBeforeTidy = layer.placement
+        layerCanvas.tidyAutoLayout(zoneId: layerZoneId)
+        let afterTidy = try layerWorldFrames()
+        let zoneAfterTidy = layer.placement
+        try expect(zoneAfterTidy != zoneBeforeTidy, "explicit Tidy must fit a disabled layered zone")
+        try expect(layer.placement.autoLayoutMode == .disabled && !layerCanvas.isAutoLayoutEnabled,
+                   "Tidy must not enable either automatic-layout switch")
+        layerCanvas.activeCanvasUndoManager?.undo()
+        let tidyUndoneFrames = try layerWorldFrames()
+        try expect(tidyUndoneFrames == beforeTidy && layer.placement == zoneBeforeTidy,
+                   "Tidy undo must restore world geometry and zone together")
+        layerCanvas.activeCanvasUndoManager?.redo()
+        let tidyRedoneFrames = try layerWorldFrames()
+        try expect(tidyRedoneFrames == afterTidy && layer.placement == zoneAfterTidy,
+                   "Tidy redo must restore the compacted result")
+        layerCanvas.activeCanvasUndoManager?.undo()
+        layerCanvas.clearActiveCanvasHistory()
+        defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
+        layer.placement.autoLayoutMode = .inherit
+        layerCanvas.upsertZoneLayer(layer)
+
         // Permanent seeded production-gesture corpus. Repeated NSEvent resizes
         // cover every supported zoom and edge family while exact full passive
         // frames, concrete occurrence order, installed views, and HUD teardown
         // remain under the surrounding fixture's projection/lifecycle checks.
+        layer.placement.autoLayoutMode = .disabled
+        layerCanvas.upsertZoneLayer(layer)
         let passiveRebaseBaselineTiles = layer.tiles
         let passiveRebaseBaselinePlacement = layer.placement
         let passiveRebaseBaselineCommits = layerCommits

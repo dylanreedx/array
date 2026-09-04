@@ -23972,15 +23972,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: neighborFrame.y, width: startFrame.width, height: startFrame.height)
         let freeXAfterDrag = startFrame.x + Double(worldDx)
 
-        // Scenario 1 — snapping ON, dwell delay 0 (arm synchronously). Drag toward B.
-        viewA.dragGhostDelay = 0
+        // Scenario 1 — snapping ON: immediate magnetic suggestion toward B.
         let p0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
         viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
-        // Mid-drag: the TILE tracks the cursor (free), and a GHOST previews the snap.
+        // Mid-drag: the tile is attracted and a ghost previews the exact destination.
         let duringDrag = frameOfA()
-        try expect(duringDrag.x == freeXAfterDrag, "mid-drag the tile must track the cursor (free x=\(freeXAfterDrag)); got \(duringDrag.x)")
-        try expect(duringDrag.y == startFrame.y, "mid-drag the tile must stay free on Y (the snap is preview-only); got \(duringDrag.y)")
+        try expect(abs(duringDrag.x - snapTargetFrame.x) < abs(freeXAfterDrag - snapTargetFrame.x), "mid-drag the tile must be attracted toward the destination (free x=\(freeXAfterDrag)); got \(duringDrag.x)")
+        try expect(abs(duringDrag.y - snapTargetFrame.y) <= abs(startFrame.y - snapTargetFrame.y), "mid-drag Y attraction must approach the preview; got \(duringDrag.y)")
         let expectedGhost = CanvasEngine.tileScreenFrame(snapTargetFrame, viewport: canvas.canvasState.viewport)
         try expect(canvas.qaDragGhostFrame == expectedGhost, "ghost must preview the gap-adjacent destination \(expectedGhost); got \(String(describing: canvas.qaDragGhostFrame))")
         // Release commits to the previewed snap and clears the ghost.
@@ -23991,19 +23990,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(committed.y == neighborFrame.y, "committed tile top must be flush with B (the 90° corner); got A.y=\(committed.y), B.y=\(neighborFrame.y)")
         try expect(canvas.qaDragGhostFrame == nil, "ghost must hide on release; got \(String(describing: canvas.qaDragGhostFrame))")
 
-        // Scenario 1b — DWELL gates a quick drag-past. With a real (>0) delay, a
-        // single in-range drag event must NOT arm yet (timer pending, no run loop
-        // spun here), so no ghost shows and a quick release does NOT snap.
-        viewA.dragGhostDelay = 0.15
+        // Scenario 1b: suggestions are immediate, but pulling beyond the release
+        // band clears them and commits the raw pointer position without drift.
         var rearm = canvas.canvasState.tiles.first(where: { $0.id == aId })!
         rearm.frame = startFrame
         canvas.updateTile(rearm)
         let d0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: d0))
         viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: d0.x + worldDx, y: d0.y)))
-        try expect(canvas.qaDragGhostFrame == nil, "dwell: a single in-range drag must not show the phantom before the delay; got \(String(describing: canvas.qaDragGhostFrame))")
-        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: d0.x + worldDx, y: d0.y)))
-        try expect(frameOfA().x == freeXAfterDrag, "dwell: a quick drag-past must place freely (x=\(freeXAfterDrag)); got \(frameOfA().x)")
+        try expect(canvas.qaDragGhostFrame != nil, "suggestion must appear on the first in-range event")
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: d0))
+        try expect(canvas.qaDragGhostFrame == nil, "returning home must break the magnetic latch")
+        viewA.mouseUp(with: try mouse(.leftMouseUp, at: d0))
+        try expect(frameOfA() == startFrame, "raw pointer tracking must return home without accumulated attraction")
 
         // Scenario 2 — snapping DISABLED → no ghost, release keeps the free position.
         let offSuite = "DragMagnetizeOffChecks-\(UUID().uuidString)"

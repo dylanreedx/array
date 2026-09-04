@@ -16,6 +16,12 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--layout-pressure-check") {
+    runLayoutPressureChecks()
+    runCanvasAutoLayoutChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--exact-rebase-performance-check") {
     let oldOrigin = -0.000_976_562_5
     let proposed = -0.334_309_895_833_333_3
@@ -11919,8 +11925,8 @@ func runCanvasAutoLayoutChecks() {
         mutation: .tile(id: pressureActiveId, frame: gapPressureFrame),
         gap: 8, zonePadding: 8, headerHeight: 32)
     let gapPressureNeighbor = gapPressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
-    expect(gapPressureNeighbor.width == 360,
-           "jelly resize pressure compresses the gap before changing a neighbor's size")
+    expect(gapPressureNeighbor.width == 360 && gapPressureNeighbor.x == 360,
+           "jelly resize pressure preserves the gap and neighbor size from first contact")
 
     var sizePressureFrame = pressureTiles[0].frame
     sizePressureFrame.width += 120
@@ -11929,10 +11935,10 @@ func runCanvasAutoLayoutChecks() {
         mutation: .tile(id: pressureActiveId, frame: sizePressureFrame),
         gap: 8, zonePadding: 8, headerHeight: 32)
     let sizePressureNeighbor = sizePressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
-    expect(sizePressureNeighbor == pressureTiles[1].frame,
-           "jelly direct resize preserves a passive neighbor exactly")
-    expect(sizePressure.zonePlacements[pressureZoneId] == nil,
-           "jelly keeps the zone fixed while neighbor shrink capacity remains")
+    expect(sizePressureNeighbor.width == 360 && sizePressureNeighbor.x == 476,
+           "jelly direct resize pushes a neighbor without shrinking it")
+    expect(sizePressure.zonePlacements[pressureZoneId]?.size.width == 744,
+           "jelly expands the zone to contain the pressure chain")
 
     var exhaustedPressureFrame = pressureTiles[0].frame
     exhaustedPressureFrame.width += 150
@@ -11942,16 +11948,16 @@ func runCanvasAutoLayoutChecks() {
         gap: 8, zonePadding: 8, headerHeight: 32)
     let exhaustedNeighbor = exhaustedPressure.tileFrames[pressureNeighborId] ?? pressureTiles[1].frame
     let exhaustedActive = exhaustedPressure.tileFrames[pressureActiveId] ?? exhaustedPressureFrame
-    expect(exhaustedNeighbor == pressureTiles[1].frame,
-           "jelly never shrinks or moves a passive neighbor under resize pressure")
+    expect(exhaustedNeighbor.width == 360 && exhaustedNeighbor.x == 506,
+           "jelly preserves neighbor size through continued resize pressure")
     expect(exhaustedActive == exhaustedPressureFrame,
            "jelly preserves the pointer-owned requested active frame")
     expect((exhaustedPressure.zonePlacements[pressureZoneId]?.size.width ?? pressureZone.size.width) >= exhaustedActive.x + exhaustedActive.width + 8 - pressureZone.origin.x,
            "jelly minimally expands the zone when the active tile crosses its padded edge")
 
     // Fixed-seed permutation corpus: direct horizontal/vertical/corner pressure
-    // across 128 unequal scenes preserves every passive frame and every peer
-    // placement exactly, for global/on/off/inherit resolution states.
+    // across 128 unequal scenes preserves neighbor dimensions and peer geometry,
+    // and preserves full passive frames when auto layout is disabled.
     var seed: UInt64 = 0x0801_CAFE_F00D_BAAD
     func nextUnit() -> Double {
         seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
@@ -11975,20 +11981,29 @@ func runCanvasAutoLayoutChecks() {
         var requested = active.frame
         if iteration % 3 != 1 { requested.width += 220 + nextUnit() * 160 }
         if iteration % 3 != 0 { requested.height += 180 + nextUnit() * 120 }
-        let members = [requested, passive.frame, secondRow.frame]
-        let expectedRight = max(seededZone.origin.x + seededZone.size.width, members.map { $0.x + $0.width }.max()! + 8)
-        let expectedBottom = max(seededZone.origin.y + seededZone.size.height, members.map { $0.y + $0.height }.max()! + 8)
+        let enabled = seededZone.autoLayoutMode.resolves(globalEnabled: iteration % 4 != 0)
         let seeded = CanvasAutoLayoutEngine.solve(
             scene: .init(tiles: [active, passive, secondRow, outside], zones: [seededZone, neighbor], globalEnabled: iteration % 4 != 0),
             mutation: .tile(id: activeID, frame: requested), gap: 8, zonePadding: 8, headerHeight: 32)
         expect(seeded.tileFrames[activeID] == requested, "seeded resize \(iteration): active frame")
-        expect(seeded.tileFrames[passiveID] == nil && seeded.tileFrames[secondRowID] == nil && seeded.tileFrames[outsideID] == nil,
-               "seeded resize \(iteration): passive frames exact")
-        expect(seeded.zonePlacements[neighborZoneId] == nil,
-               "seeded resize \(iteration): peer zone exact")
-        let expectedZone = ZoneSize(width: expectedRight - seededZone.origin.x, height: expectedBottom - seededZone.origin.y)
-        expect((seeded.zonePlacements[pressureZoneId] ?? seededZone).size == expectedZone,
-               "seeded resize \(iteration): minimal union plus padding")
+        for tile in [passive, secondRow] {
+            let after = seeded.tileFrames[tile.id] ?? tile.frame
+            expect(after.width == tile.frame.width && after.height == tile.frame.height,
+                   "seeded resize \(iteration): neighbor dimensions remain exact")
+            if !enabled { expect(after == tile.frame, "disabled resize preserves passive frames") }
+            else {
+                expect(after.x >= requested.x + requested.width + 8 - 0.001 || after.y >= requested.y + requested.height + 8 - 0.001,
+                       "enabled resize separates each reached neighbor")
+            }
+        }
+        expect(seeded.tileFrames[outsideID] == nil && seeded.zonePlacements[neighborZoneId] == nil,
+               "seeded resize \(iteration): outside tile and peer zone exact")
+        let members = [requested, seeded.tileFrames[passiveID] ?? passive.frame, seeded.tileFrames[secondRowID] ?? secondRow.frame]
+        let expectedRight = max(seededZone.origin.x + seededZone.size.width, members.map { $0.x + $0.width }.max()! + 8)
+        let expectedBottom = max(seededZone.origin.y + seededZone.size.height, members.map { $0.y + $0.height }.max()! + 8)
+        expect((seeded.zonePlacements[pressureZoneId] ?? seededZone).size == ZoneSize(
+            width: expectedRight - seededZone.origin.x, height: expectedBottom - seededZone.origin.y),
+            "seeded resize \(iteration): zone fits the final pressure chain")
 
         var requestedZone = seededZone
         requestedZone.origin.x += 120
@@ -12143,8 +12158,8 @@ func runCanvasAutoLayoutChecks() {
     let disabledResult = CanvasAutoLayoutEngine.solve(
         scene: .init(tiles: tiles, zones: [disabled]), mutation: .tidy(zoneId: zoneId),
         gap: 8, zonePadding: 8, headerHeight: 20)
-    expect(disabledResult.tileFrames.isEmpty && disabledResult.zonePlacements.isEmpty,
-           "jelly: disabled zone preserves today's freeform geometry")
+    expect(disabledResult.tileFrames.isEmpty && disabledResult.zonePlacements[zoneId]?.size == ZoneSize(width: 224, height: 108),
+           "jelly: explicit tidy fits a disabled zone without changing member dimensions")
 
     var compressedZone = zone
     compressedZone.size = ZoneSize(width: 204, height: 92)
@@ -12246,6 +12261,7 @@ func runCanvasAutoLayoutChecks() {
 }
 
 runCanvasAutoLayoutChecks()
+runLayoutPressureChecks()
 runTypographyReadabilityChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md — the agent as an

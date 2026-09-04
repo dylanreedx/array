@@ -125,11 +125,16 @@ public enum CanvasAutoLayoutEngine {
         case let .tile(id, _): targetZoneIds = tiles[id]?.zoneId.map { [$0] } ?? []
         }
 
-        // Direct resize is deliberately non-destructive. It is not a packing
-        // request: the pointer-owned rectangle changes, passive rectangles stay
-        // exact, and only the owning container may grow to contain the result.
+        // Resize pressure preserves dimensions and propagates only along the
+        // expanding edges. Every solve starts from the gesture baseline.
         if let activeTile, activeTileResizeIsHorizontal != nil,
            let zoneId = tiles[activeTile]?.zoneId, var zone = zones[zoneId] {
+            if zone.autoLayoutMode.resolves(globalEnabled: scene.globalEnabled), !zone.collapsed,
+               let original = activeTileOriginalFrame, let requested = tiles[activeTile]?.frame {
+                let members = scene.tiles.filter { $0.zoneId == zoneId }
+                let pushed = resizeMembers(members, active: activeTile, original: original, requested: requested, gap: gap)
+                for (id, frame) in pushed { tiles[id]?.frame = frame }
+            }
             let members = tiles.values.filter { $0.zoneId == zoneId }.map(\.frame)
             if let first = members.first {
                 let minX = members.dropFirst().reduce(first.x) { min($0, $1.x) }
@@ -145,9 +150,8 @@ public enum CanvasAutoLayoutEngine {
                 zones[zoneId] = zone
             }
             var result = CanvasLayoutTransaction()
-            if let original = scene.tiles.first(where: { $0.id == activeTile }),
-               let changed = tiles[activeTile]?.frame, changed != original.frame {
-                result.tileFrames[activeTile] = changed
+            for original in scene.tiles where tiles[original.id]?.frame != original.frame {
+                result.tileFrames[original.id] = tiles[original.id]?.frame
             }
             if let original = scene.zones.first(where: { $0.zoneId == zoneId }), zone != original {
                 result.zonePlacements[zoneId] = zone
@@ -180,8 +184,10 @@ public enum CanvasAutoLayoutEngine {
         var blocked: Set<UUID> = []
         var newSwapTarget: UUID?
         for zoneId in targetZoneIds {
+            let explicitTidy: Bool
+            if case .tidy = mutation { explicitTidy = true } else { explicitTidy = false }
             guard var zone = zones[zoneId], !zone.collapsed,
-                  zone.autoLayoutMode.resolves(globalEnabled: scene.globalEnabled) else { continue }
+                  explicitTidy || zone.autoLayoutMode.resolves(globalEnabled: scene.globalEnabled) else { continue }
             // A zone is a rigid body while it is moved. Its members already received
             // the exact origin delta above; repacking here would make a simple move
             // unexpectedly alter the composition inside the zone.
@@ -193,7 +199,18 @@ public enum CanvasAutoLayoutEngine {
             // gap-contact with the cluster instead of running the packer.
             var settleMover: (mover: UUID?, pin: Bool)?
             if case let .settle(_, anchor, pin) = mutation { settleMover = (anchor, pin) }
-            if case .tidy = mutation { settleMover = (nil, false) }
+            if explicitTidy {
+                let compacted = compactMembers(memberIds: memberIds, tiles: tiles, gap: gap)
+                for (id, frame) in compacted { tiles[id]?.frame = frame }
+                if let minX = compacted.values.map(\.x).min(), let minY = compacted.values.map(\.y).min(),
+                   let maxX = compacted.values.map({ $0.x + $0.width }).max(),
+                   let maxY = compacted.values.map({ $0.y + $0.height }).max() {
+                    zone.origin = ZonePoint(x: minX - padding, y: minY - header - padding)
+                    zone.size = ZoneSize(width: maxX - minX + 2 * padding, height: maxY - minY + header + 2 * padding)
+                    zones[zoneId] = zone
+                }
+                continue
+            }
             if let (mover, pin) = settleMover {
                 let settled = settleMembers(
                     memberIds: memberIds, tiles: tiles, zone: zone,
@@ -315,6 +332,112 @@ public enum CanvasAutoLayoutEngine {
             result.zonePlacements[original.zoneId] = zones[original.zoneId]
         }
         return result
+    }
+
+    /// Push outward in baseline order; the zone is deliberately not a wall.
+    /// Only the active rectangle and already displaced rectangles transmit force.
+    private static func resizeMembers(
+        _ members: [LayoutTile], active: UUID, original: TileFrame, requested: TileFrame, gap: Double
+    ) -> [UUID: TileFrame] {
+        let baseline = autoLayoutFirstWinsDictionary(members.map { ($0.id, $0.frame) })
+        var frames = baseline
+        frames[active] = requested
+        let directions: [(horizontal: Bool, positive: Bool, enabled: Bool)] = [
+            (true, true, requested.x + requested.width > original.x + original.width),
+            (true, false, requested.x < original.x),
+            (false, true, requested.y + requested.height > original.y + original.height),
+            (false, false, requested.y < original.y)
+        ]
+        // Corner pressure can make a new contact on the perpendicular axis.
+        // Each directional sweep is topological; repeat until no contact moves.
+        for _ in 0..<max(1, members.count) {
+            var changed = false
+            for (horizontal, positive, enabled) in directions where enabled {
+                func start(_ f: TileFrame) -> Double { horizontal ? f.x : f.y }
+                func length(_ f: TileFrame) -> Double { horizontal ? f.width : f.height }
+                let ordered = baseline.keys.sorted {
+                    let a = start(baseline[$0]!), b = start(baseline[$1]!)
+                    return a == b ? uuidLess($0, $1) : (positive ? a < b : a > b)
+                }
+                for source in ordered {
+                    guard let a = frames[source], let oldA = baseline[source],
+                          source == active || a != oldA else { continue }
+                    for target in ordered where target != active && target != source {
+                        guard var b = frames[target], let oldB = baseline[target] else { continue }
+                        // Do not move tiles in another lane or reverse their baseline order.
+                        let beyond = positive
+                            ? start(oldB) >= start(oldA) + length(oldA) - 0.001
+                            : start(oldB) + length(oldB) <= start(oldA) + 0.001
+                        let overlap = horizontal
+                            ? min(a.y + a.height, b.y + b.height) > max(a.y, b.y)
+                            : min(a.x + a.width, b.x + b.width) > max(a.x, b.x)
+                        guard beyond && overlap else { continue }
+                        let destination = positive ? start(a) + length(a) + gap : start(a) - gap - length(b)
+                        guard positive ? start(b) < destination : start(b) > destination else { continue }
+                        if horizontal { b.x = destination } else { b.y = destination }
+                        frames[target] = b
+                        changed = true
+                    }
+                }
+            }
+            if !changed { break }
+        }
+        return frames
+    }
+
+    /// Compact a partial order, never a bin pack. Existing separation on either
+    /// axis is retained. Overlapping legacy rectangles get one deterministic
+    /// horizontal relation so an explicit tidy can repair them as well.
+    private static func compactMembers(memberIds: [UUID], tiles: [UUID: LayoutTile], gap: Double) -> [UUID: TileFrame] {
+        var working = tiles
+        var frames = autoLayoutFirstWinsDictionary(memberIds.compactMap { id in tiles[id].map { (id, $0.frame) } })
+        // Compaction can expose another separating relation in an irregular
+        // layout. Close those relations in this operation, not on the next click.
+        // Existing relations never disappear; at most n*(n-1) can be added.
+        for _ in 0...memberIds.count * memberIds.count {
+            let next = compactMembersOnce(memberIds: memberIds, tiles: working, gap: gap)
+            if next == frames { return frames }
+            frames = next
+            for (id, frame) in frames { working[id]?.frame = frame }
+        }
+        return frames
+    }
+
+    private static func compactMembersOnce(memberIds: [UUID], tiles: [UUID: LayoutTile], gap: Double) -> [UUID: TileFrame] {
+        var frames = autoLayoutFirstWinsDictionary(memberIds.compactMap { id in tiles[id].map { (id, $0.frame) } })
+        guard let minX = frames.values.map(\.x).min(), let minY = frames.values.map(\.y).min() else { return frames }
+        let baseline = frames
+        var horizontal: [(UUID, UUID)] = [], vertical: [(UUID, UUID)] = []
+        for (index, aID) in memberIds.enumerated() {
+            for bID in memberIds.dropFirst(index + 1) {
+                guard let a = baseline[aID], let b = baseline[bID] else { continue }
+                var separated = false
+                if a.x + a.width <= b.x { horizontal.append((aID, bID)); separated = true }
+                else if b.x + b.width <= a.x { horizontal.append((bID, aID)); separated = true }
+                if a.y + a.height <= b.y { vertical.append((aID, bID)); separated = true }
+                else if b.y + b.height <= a.y { vertical.append((bID, aID)); separated = true }
+                if !separated {
+                    horizontal.append(a.x < b.x || (a.x == b.x && uuidLess(aID, bID)) ? (aID, bID) : (bID, aID))
+                }
+            }
+        }
+        for axis in [true, false] {
+            let ordered = memberIds.sorted {
+                let a = baseline[$0]!, b = baseline[$1]!
+                let av = axis ? a.x : a.y, bv = axis ? b.x : b.y
+                return av == bv ? uuidLess($0, $1) : av < bv
+            }
+            let edges = axis ? horizontal : vertical
+            for id in ordered {
+                var coordinate = axis ? minX : minY
+                for (before, after) in edges where after == id {
+                    let f = frames[before]!
+                    coordinate = max(coordinate, (axis ? f.x + f.width : f.y + f.height) + gap)
+                }
+                if axis { frames[id]?.x = coordinate } else { frames[id]?.y = coordinate }
+            }
+        }
+        return frames
     }
 
     /// True when the two frames sit edge-to-edge at approximately `gap` on one
