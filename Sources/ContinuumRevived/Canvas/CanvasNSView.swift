@@ -512,14 +512,16 @@ final class CanvasNSView: NSView, TokenThemed {
             absolute.zonePlacements[zone.zoneId] = zone
         }
         applyLayoutTransaction(absolute, activeTileId: activeTileId, activeZoneId: activeZoneId,
-            preservingLayerMemberWorldFramesIn: Set(absolute.zonePlacements.keys))
+            preservingLayerMemberWorldFramesIn: Set(absolute.zonePlacements.keys),
+            preservingZoneSizes: activeZoneId != nil)
     }
 
     private func applyLayoutTransaction(
         _ transaction: CanvasLayoutTransaction,
         activeTileId: UUID? = nil,
         activeZoneId: UUID? = nil,
-        preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = []
+        preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = [],
+        preservingZoneSizes: Bool = false
     ) {
         let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
             tileView(for: id).map { (id, $0.layer?.presentation()?.frame.origin ?? $0.frame.origin) }
@@ -617,9 +619,14 @@ final class CanvasNSView: NSView, TokenThemed {
                 rejectTransaction(); return
             }
             corrected.origin = exactOrigin
-            corrected.size = ZoneSize(
-                width: proposed.origin.x + proposed.size.width - corrected.origin.x,
-                height: proposed.origin.y + proposed.size.height - corrected.origin.y)
+            // A rigid zone move preserves dimensions exactly. Reconstructing
+            // them from opposite edges introduces rounding drift, causing the
+            // next baseline-relative move to be mistaken for a manual resize.
+            if !preservingZoneSizes {
+                corrected.size = ZoneSize(
+                    width: proposed.origin.x + proposed.size.width - corrected.origin.x,
+                    height: proposed.origin.y + proposed.size.height - corrected.origin.y)
+            }
             resolvedZonePlacements[zoneId] = corrected
         }
         // Stage every rebase before mutating anything. Only zones the
@@ -7542,6 +7549,86 @@ final class CanvasNSView: NSView, TokenThemed {
         // 6. onZoneMoved fired exactly once with the new origin.
         try expect(moved.count == 1, "onZoneMoved should fire exactly once; got \(moved.count)")
         try expect(moved.first?.origin == ZonePoint(x: 200, y: 110), "onZoneMoved should carry the new origin")
+
+        // Fractional mounted zones must stay rigid across consecutive pointer
+        // updates: rounded size drift must never reclassify a move as a resize.
+        let suite = "zone-move-fractional-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: CanvasAutoLayoutConfig.enabledKey)
+        for zoom in [1.0, 0.73] {
+            var placement = zone
+            placement.origin = ZonePoint(x: 50.1, y: 50.2)
+            placement.size = ZoneSize(width: 400.3, height: 300.4)
+            var member = tileA
+            member.frame = TileFrame(x: 20.3, y: 50.7, width: 100.2, height: 80.1)
+            let mounted = CanvasNSView(canvasState: CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: zoom), tiles: [], groups: [], lastActiveTileId: nil),
+                showsZoneChrome: true)
+            mounted.autoLayoutDefaults = defaults
+            mounted.autoLayoutReduceMotionProvider = { true }
+            mounted.frame = canvas.frame
+            let mountedWindow = NSWindow(contentRect: mounted.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            mountedWindow.contentView = mounted
+            mountedWindow.orderFrontRegardless()
+            defer { mountedWindow.orderOut(nil) }
+            var second = tileB
+            second.frame = TileFrame(x: 200.2, y: 50.7, width: 100.1, height: 90.2)
+            let layer = ZoneLayer(placement: placement,
+                renderModel: ZoneRenderModel(placement: placement, displayName: "Fractional"), tiles: [member, second])
+            let view = DescriptorTileNSView(tile: member)
+            layer.tileViews[member.id] = view
+            let secondView = DescriptorTileNSView(tile: second)
+            layer.tileViews[second.id] = secondView
+            mounted.upsertZoneLayer(layer)
+            var distant = bare
+            distant.frame.x = 5000
+            distant.frame.y = 4000
+            mounted.install(tileView: DescriptorTileNSView(tile: distant), for: distant)
+            mounted.activateUndoWorkspace(UUID())
+            var durable: [CanvasLayoutTransaction] = []
+            mounted.onLayoutCommitted = { durable.append($0); return true }
+            mounted.layoutSubtreeIfNeeded()
+            let initialWorld = CanvasEngine.worldFrame(tile: member, in: placement)
+            let secondWorld = CanvasEngine.worldFrame(tile: second, in: placement)
+            let initial = mounted.captureGeometry(tileIds: [member.id, second.id, bare.id], zoneIds: [zoneId])
+            let start = mounted.worldPlane.convert(CGPoint(x: placement.origin.x + 100, y: placement.origin.y + 16), to: nil)
+            mounted.mouseDown(with: try mouse(.leftMouseDown, at: start, window: mountedWindow))
+            var end = start
+            for step in Array(1...60) + Array((0..<60).reversed()) + [20] {
+                end = CGPoint(x: start.x + Double(step) * 7.31, y: start.y - Double(step) * 3.17)
+                mounted.mouseDragged(with: try mouse(.leftMouseDragged, at: end, window: mountedWindow))
+                let current = layer.placement
+                try expect(current.size == placement.size,
+                    "zone move must preserve fractional size at zoom \(zoom), step \(step): \(current.size) vs \(placement.size)")
+                let dx = (end.x - start.x) / zoom, dy = -(end.y - start.y) / zoom
+                try expect(abs(current.origin.x - placement.origin.x - dx) < 0.000001
+                    && abs(current.origin.y - placement.origin.y - dy) < 0.000001,
+                    "zone must follow every pointer update")
+                try expect(abs(view.frame.minX - initialWorld.x - dx) < 0.000001
+                    && abs(view.frame.minY - initialWorld.y - dy) < 0.000001,
+                    "mounted member must follow every zone pointer update")
+                try expect(abs(secondView.frame.minX - secondWorld.x - dx) < 0.000001
+                    && abs(secondView.frame.minY - secondWorld.y - dy) < 0.000001,
+                    "mixed-size neighbor must follow the same zone delta")
+                try expect(mounted.tileView(for: distant.id)?.frame == Self.worldRect(distant.frame),
+                    "unrelated bare tile must remain fixed")
+            }
+            mounted.mouseUp(with: try mouse(.leftMouseUp, at: end, window: mountedWindow))
+            try expect(layer.placement.size == placement.size, "release must not grow a moved zone")
+            try expect(durable.count == 1 && durable[0].tileFrames[member.id] == CanvasEngine.worldFrame(tile: layer.tiles[0], in: layer.placement),
+                "one drag must persist one transaction with the member's moved world frame")
+            let committed = mounted.captureGeometry(tileIds: [member.id, second.id, bare.id], zoneIds: [zoneId])
+            mounted.undo(nil)
+            try expect(mounted.geometryMatches(initial), "zone move undo must restore captured geometry")
+            mounted.redo(nil)
+            try expect(mounted.geometryMatches(committed), "zone move redo must restore committed geometry")
+            let cancelStart = mounted.worldPlane.convert(CGPoint(x: layer.placement.origin.x + 100, y: layer.placement.origin.y + 16), to: nil)
+            mounted.mouseDown(with: try mouse(.leftMouseDown, at: cancelStart, window: mountedWindow))
+            mounted.mouseDragged(with: try mouse(.leftMouseDragged, at: CGPoint(x: cancelStart.x - 60, y: cancelStart.y + 20), window: mountedWindow))
+            mounted.cancelOperation(nil)
+            try expect(mounted.geometryMatches(committed), "zone move cancellation must restore captured geometry")
+        }
 
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
