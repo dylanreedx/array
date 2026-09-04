@@ -80,6 +80,7 @@ final class TileSpawner {
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
     var browserProfileDeleteHandler: ((UUID, UUID) -> Void)?
     var documentLocationProvider: ((URL) -> DocumentLocation)?
+    var fileEditorConfigurator: ((FileTileNSView) -> Void)?
     var noteConvertedHandler: ((UUID, UUID) -> Void)?
 
     /// Called right after a new terminal session descriptor is persisted, so
@@ -2089,8 +2090,13 @@ final class TileSpawner {
         var converted = originalTile
         converted.kind = .file
         converted.title = URL(fileURLWithPath: canonical).lastPathComponent
-        converted.metadata = TileMetadata(filePath: canonical, documentLocation: location)
+        converted.metadata = TileMetadata(
+            filePath: canonical,
+            documentLocation: location,
+            fileEditorViewState: location.checkoutRootPath == nil ? nil : FileEditorViewState(sidebarExpanded: false)
+        )
         let fileView = FileTileNSView(tile: converted)
+        fileEditorConfigurator?(fileView)
         let target = canvasView.installProjectTile(tileView: fileView, for: converted, targetZoneId: sourceZoneId)
         do {
             try persistProjectCanvas(after: target, in: canvasView)
@@ -2300,10 +2306,12 @@ final class TileSpawner {
             runtimeRef: nil,
             metadata: TileMetadata(
                 filePath: canonicalPath,
-                documentLocation: DocumentLocation(path: canonicalPath, scope: location.scope)
+                documentLocation: DocumentLocation(path: canonicalPath, scope: location.scope),
+                fileEditorViewState: location.checkoutRootPath == nil ? nil : FileEditorViewState(sidebarExpanded: false)
             )
         )
         let view = FileTileNSView(tile: tile)
+        fileEditorConfigurator?(view)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
@@ -2370,6 +2378,7 @@ final class TileSpawner {
     /// Installs a file tile view for an existing `Tile` during canvas restore.
     func installFileTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = FileTileNSView(tile: tile)
+        fileEditorConfigurator?(view)
         canvasView.install(tileView: view, for: tile)
     }
 

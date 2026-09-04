@@ -13,19 +13,22 @@ import Foundation
 public enum AppChannel {
     public static let prodBundleIdentifier = "dev.arrayapp.macos"
     public static let devBundleIdentifier = "dev.arrayapp.macos.dev"
+    public static let editorTestBundleIdentifier = "dev.arrayapp.macos.editor-test"
 
     /// "Array" for the prod bundle alone; "Array Dev" for the dev bundle and
     /// for bare binaries (nil bundle id) — dev work lands in the dev store by
     /// default instead of the user's real state.
     public static func applicationSupportDirectoryName(bundleIdentifier: String?) -> String {
-        bundleIdentifier == prodBundleIdentifier ? "Array" : "Array Dev"
+        if bundleIdentifier == editorTestBundleIdentifier { return "Array Editor Test" }
+        return bundleIdentifier == prodBundleIdentifier ? "Array" : "Array Dev"
     }
 
     /// The defaults domain non-standard contexts read as "the bundled app's
     /// settings". Channel-scoped so a dev build falls back to the DEV
     /// bundle's domain and never reads (or leaks into) prod preferences.
     public static func bundledDefaultsDomain(bundleIdentifier: String?) -> String {
-        bundleIdentifier == prodBundleIdentifier ? prodBundleIdentifier : devBundleIdentifier
+        if bundleIdentifier == editorTestBundleIdentifier { return editorTestBundleIdentifier }
+        return bundleIdentifier == prodBundleIdentifier ? prodBundleIdentifier : devBundleIdentifier
     }
 
     public static var liveApplicationSupportDirectoryName: String {
@@ -54,7 +57,8 @@ public enum AppChannel {
     /// reaching this code would do the same. The prod name is unchanged, so a
     /// shipped install keeps its existing credential and does not re-pair.
     public static func keychainService(_ base: String, bundleIdentifier: String?) -> String {
-        bundleIdentifier == prodBundleIdentifier ? base : base + ".dev"
+        if bundleIdentifier == editorTestBundleIdentifier { return base + ".editor-test" }
+        return bundleIdentifier == prodBundleIdentifier ? base : base + ".dev"
     }
 
     public static func liveKeychainService(_ base: String) -> String {

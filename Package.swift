@@ -177,6 +177,9 @@ let package = Package(
                 // file(s) which are unhandled" build warning.
                 "ContinuumRevived.entitlements"
             ],
+            resources: [
+                .copy("Resources/CodeEditor")
+            ],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedLibrary("stdc++")

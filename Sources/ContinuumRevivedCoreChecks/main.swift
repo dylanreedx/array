@@ -103,6 +103,19 @@ if CommandLine.arguments.contains("--document-location-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--language-service-check") {
+    try runAsyncCheck { try await runLanguageServiceChecks() }
+    print("LanguageServiceChecks passed")
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--file-document-session-check") {
+    runFileDocumentSessionChecks()
+    runEditorPreferencesChecks()
+    print("FileDocumentSessionChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--onboarding-foundation-check") {
     try runDirectoryScopeChecks()
     try runProductRegistryChecks()
@@ -7650,9 +7663,9 @@ do {
     expect(
         sections.map(\.title) == [
             "General", "Appearance", "Canvas Background", "Canvas & Zones", "Navigation", "Keybindings",
-            "Agents", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
+            "Agents", "Editor", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
         ],
-        "settings exposes the twelve product sections in stable order"
+        "settings exposes the thirteen product sections in stable order"
     )
 
     // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
@@ -12368,6 +12381,9 @@ try runAsyncCheck {
 // file tile presents from.
 runAgentLocalFileLinkChecks()
 runDocumentLocationChecks()
+try runAsyncCheck {
+    try await runLanguageServiceChecks()
+}
 
 // Plan: .plans/46 M1.0 — what a project's canvas.json is allowed to receive.
 // An un-installed zone's tiles must survive a save; only a zone that IS installed
@@ -12417,5 +12433,8 @@ runPiRpcTransportChecks()
 // contract and the v9 document round trip. The RENDERER is witnessed in pixels
 // by the app leg `--canvas-background-render-check`.
 runCanvasBackgroundChecks()
+
+runFileDocumentSessionChecks()
+runEditorPreferencesChecks()
 
 print("ContinuumRevivedCoreChecks passed")

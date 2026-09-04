@@ -17,6 +17,7 @@ releases/
 # P2C.1: per-agent git worktrees live at <repo>/.worktrees/<slug>.
 .worktrees/
 .env
+Tools/CodeEditor/node_modules/
 
 # Local Pi generated artifacts
 .pi/tmux-shell-persistence-artifacts.md

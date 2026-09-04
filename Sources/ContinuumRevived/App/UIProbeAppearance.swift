@@ -287,6 +287,9 @@ enum UIProbeAppearance {
         // App-layer half of the ticket is covered by the same sweep.
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
+            ("appearance.editorNavigator", NSSize(width: 260, height: 400), {
+                FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
+            }),
             // P3.8: 520 plus the scope control. The popup took that much off the top of
             // the list, which cost this surface one rendered `AgentInboxCardView` and
             // took the sweep under its own floor. The room is given back rather than
@@ -799,6 +802,7 @@ enum UIProbeAppearance {
 
     /// The views P1.10 and P1.11 put on tokens.
     private static let tokenAdoptedOwners: Set<String> = [
+        "FileTreeBrowserView",
         "ManagedAgentTileNSView.contentBackdrop",
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
@@ -959,6 +963,11 @@ enum UIProbeAppearance {
         var values = legalValues(for: kind, theme: theme)
         guard kind == .background || kind == .fill else { return values }
         switch owner {
+        case "FileTreeBrowserView":
+            // The navigator follows the explicit editor palette. Admit only
+            // its named sidebar fill, resolved for this sweep's appearance.
+            let editorTheme: EditorThemeTokens = theme == .dark ? .dark : .light
+            values.insert(hex(StatusChipNSView.nsColor(editorTheme.resolvedColor(\.sidebarBackground)).cgColor))
         case "ChoiceButton", "ProviderModelButton":
             // The picker trigger is a ChoiceButton subclass painting the same
             // composer/hover family through the inherited applyTokens.
@@ -1295,6 +1304,20 @@ enum UIProbeAppearance {
                     var legal = slot.isSurface
                         ? legalValues(for: .background, theme: theme)
                         : legalForegroundValues(theme: theme)
+                    let navigator = firstDescendant(FileTreeBrowserView.self, in: probe.view)
+                    let editorBody = firstDescendant(FileTileNSView.self, in: probe.view)?.contentView
+                    let inNavigator = navigator.map { slot.view === $0 || slot.view.isDescendant(of: $0) } ?? false
+                    let inEditorBody = editorBody.map { slot.view === $0 || slot.view.isDescendant(of: $0) } ?? false
+                    if inNavigator || inEditorBody {
+                        let editorTheme: EditorThemeTokens = theme == .dark ? .dark : .light
+                        let keys: [KeyPath<EditorThemeTokens, String>]
+                        if slot.isSurface {
+                            keys = inNavigator ? [\.sidebarBackground] : [\.background, \.chromeBackground, \.gutterBackground]
+                        } else { keys = [\.foreground, \.mutedForeground, \.accent] }
+                        for key in keys {
+                            legal.insert(hex(StatusChipNSView.nsColor(editorTheme.resolvedColor(key)).cgColor))
+                        }
+                    }
                     // Choice-row checkmarks deliberately use the same focus-ring
                     // line token as the selected row. Image-view tint was outside
                     // this census before the bitmap freeze; admit that one owned
@@ -1407,6 +1430,9 @@ enum UIProbeAppearance {
             searchQuery: "", ignoredNames: [], gitBadges: .off
         )
         return [
+            AdoptedSurface(id: "editorNavigator", size: NSSize(width: 260, height: 400), make: {
+                FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
+            }),
             AdoptedSurface(
                 id: "managedAgentTile", size: NSSize(width: 640, height: 560), make: makeTile,
                 prepare: { root in

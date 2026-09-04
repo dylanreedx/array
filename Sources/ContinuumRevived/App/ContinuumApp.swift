@@ -1201,6 +1201,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--project-file-operation-check") {
+            do {
+                try ProjectFileOperationChecks.run()
+                print("ContinuumRevivedProjectFileOperationChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // `--perf-budget-zoom-check`, `--perf-budget-camera-slope-check` and
         // `--perf-budget-transcript-delta-check` are single scenarios under their
         // OWN leg names. The matrix matches KNOWN-RED by leg name, and a scenario
@@ -1280,6 +1291,16 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--editor-navigation-check") {
+            do { try EditorNavigationChecks.run(); print("PASS: editor-navigation-check") }
+            catch { fputs("FAIL: editor-navigation-check: \(error)\n", stderr); exit(1) }
+            return
+        }
+        if CommandLine.arguments.contains("--editor-web-bridge-check") {
+            do { try EditorWebBridgeChecks.run(); print("PASS: editor-web-bridge-check") }
+            catch { fputs("FAIL: editor-web-bridge-check: \(error)\n", stderr); exit(1) }
+            return
+        }
         if CommandLine.arguments.contains("--file-markdown-preview-check") {
             do {
                 _ = NSApplication.shared
@@ -1627,7 +1648,8 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--canvas-zoom-invalidation-probe-check") {
+        if CommandLine.arguments.contains("--canvas-zoom-invalidation-probe-check")
+            || CommandLine.arguments.contains("--file-tile-zoom-check") {
             do {
                 _ = NSApplication.shared
                 try CanvasZoomInvalidationProbeChecks.run()
@@ -3954,6 +3976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var workspaceRuntime: WorkspaceRuntime?
+    private let editorLanguageServices = EditorLanguageServiceManager()
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     /// Internal, not private: the WS9 zone/project witness and the WS7 asset-sweep
@@ -6006,6 +6029,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func deleteTile(id: UUID) {
+        if let file = canvasView?.tileView(for: id) as? FileTileNSView {
+            file.flushEditorBarrier { [weak self, weak file] success in
+                guard success else { return }
+                self?.deleteTileAfterEditorBarrier(id: id)
+                file?.resumeEditorAfterBarrier()
+            }
+        } else { deleteTileAfterEditorBarrier(id: id) }
+    }
+
+    private func deleteTileAfterEditorBarrier(id: UUID) {
         guard let canvasView else { return }
         // `projectTiles()`, not the flat collection: once the active project's tiles
         // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
@@ -6025,7 +6058,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
            fileView.isDirty {
             let alert = NSAlert()
             alert.messageText = "Save changes before closing?"
-            alert.informativeText = "This Markdown file has an unsaved draft."
+            alert.informativeText = "This file has an unsaved editor draft."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Save")
             alert.addButton(withTitle: "Discard")
@@ -7229,6 +7262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func handleHotkey(_ event: NSEvent) -> Bool {
+
         if focusBroker.activeSurface == .modal(.focusMode) {
             if event.keyCode == 53 {
                 closeFocusMode()
@@ -7262,6 +7296,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         if profilePalette?.handleKeyEvent(event) == true {
             return true
+        }
+
+        if window?.isKeyWindow == true, event.window === window,
+           let tileId = TileNSView.enclosingTileId(of: window?.firstResponder),
+           let editor = canvasView?.tileView(for: tileId) as? FileTileNSView,
+           editor.isCodeEditorFocused {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            if flags.contains(.command), ["s", "f", "z"].contains(key) {
+                return editor.performKeyEquivalent(with: event)
+            }
+            if !flags.contains(.command) || ["a", "c", "v", "x"].contains(key) { return false }
         }
 
         let shortcut = focusBroker.reservedShortcut(for: event)
@@ -14723,9 +14769,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.documentLocationProvider = { [weak self] url in
             self?.resolveDocumentLocation(url) ?? DocumentLocation(path: url.standardizedFileURL.resolvingSymlinksInPath().path, scope: .standalone)
         }
+        spawner.fileEditorConfigurator = { [weak self] view in
+            self?.configureFileEditor(view)
+        }
         spawner.noteConvertedHandler = { [weak self] noteId, _ in
             self?.noteViews.removeValue(forKey: noteId)
         }
+    }
+
+    private func configureFileEditor(_ view: FileTileNSView) {
+        view.onNavigateDocument = { [weak self, weak view] url, sourceTileId, disposition in
+            guard let self, let view, let runtime = self.workspaceRuntime else { return }
+            let source = self.canvasView?.allWorkspaceTiles().first(where: { $0.id == sourceTileId })
+            let explicitRoot = source?.metadata.documentLocation?.checkoutRootPath.map {
+                DocumentLocationRoot(rootURL: URL(fileURLWithPath: $0, isDirectory: true),
+                                     projectId: source?.metadata.documentLocation?.projectId)
+            }
+            let location = DocumentLocationResolver.resolve(fileURL: url, explicitRoot: explicitRoot)
+            if let existing = self.canvasView?.allWorkspaceTiles().first(where: {
+                $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == location.path
+            }) {
+                view.restoreCurrentFileSelection()
+                self.focusSpawnedTile(existing.id)
+                return
+            }
+            if disposition == .replaceCurrent {
+                let workspaceId = runtime.workspaceId
+                view.switchDocument(to: location, beforeCommit: { [weak self, weak runtime] in
+                    guard let runtime, runtime.workspaceId == workspaceId,
+                          self?.canvasView?.tileView(for: sourceTileId) === view else {
+                        throw NSError(domain: "ArrayEditor", code: 1, userInfo: [NSLocalizedDescriptionKey: "The workspace changed before the file could be opened."])
+                    }
+                    if self?.canvasView?.allWorkspaceTiles().contains(where: {
+                        $0.id != sourceTileId && $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == location.path
+                    }) == true {
+                        throw NSError(domain: "ArrayEditor", code: 2, userInfo: [NSLocalizedDescriptionKey: "This file was opened in another tile. Select it again to reveal that tile."])
+                    }
+                    try runtime.removeDocumentLinks(tileId: sourceTileId)
+                })
+                return
+            }
+            let outcome = runtime.openDocument(.init(location: location,
+                placement: .beside(tileId: sourceTileId), sourceTileId: sourceTileId))
+            switch outcome {
+            case let .opened(tileId), let .revealed(tileId): self.focusSpawnedTile(tileId)
+            case let .failure(message): self.presentFileOpenFailure(message)
+            }
+        }
+        view.onOpenEditorSettings = { [weak self] in
+            guard let self else { return }
+            let panel = self.settingsPanel ?? self.makeSettingsPanel()
+            if !panel.isVisible { self.focusBroker.openModal(.settings) }
+            self.settingsPanel = panel
+            panel.show(near: self.window, sectionID: "editor")
+        }
+        view.onOpenExternally = { [weak self] url in
+            self?.tileSpawner?.openFileInPreferredEditor(path: url.path)
+        }
+        view.connectLanguageServices(editorLanguageServices)
     }
 
     /// All filesystem-backed creation reads this one resolver at invocation.
@@ -15348,7 +15449,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return view
 
         case .file:
-            return FileTileNSView(tile: tile)
+            let view = FileTileNSView(tile: tile)
+            configureFileEditor(view)
+            return view
 
         case .runArtifacts:
             return RunArtifactsTileNSView(tile: tile)
@@ -15617,6 +15720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// started, or the run leaks past the session.
     func applicationWillTerminate(_ notification: Notification) {
         agentSupervisor.stopAll()
+        editorLanguageServices.shutdown()
         // P3.1: the identical sweep the launch runs, with the reason a clean quit
         // deserves. Best-effort — a quit can be a kill we never see, which is why
         // the launch sweep is the load-bearing one.
@@ -23972,16 +24076,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: neighborFrame.y, width: startFrame.width, height: startFrame.height)
         let freeXAfterDrag = startFrame.x + Double(worldDx)
 
+        // Unrelated tiles must not repaint because one tile is dragged.
+        var distantViews: [TileNSView] = []
+        for index in 0..<128 {
+            let distant = Tile(id: UUID(), kind: .note, title: "DISTANT_\(index)",
+                frame: TileFrame(x: 2000 + Double(index % 16) * 240,
+                                 y: 1000 + Double(index / 16) * 200, width: 200, height: 150),
+                zPosition: .fromLegacyRank(index + 3), runtimeRef: nil, metadata: TileMetadata())
+            let view = TileNSView(tile: distant)
+            canvas.install(tileView: view, for: distant)
+            distantViews.append(view)
+        }
+        let distantInvalidations = distantViews.map(\.qaCanvasLayoutInvalidationCount)
+
         // Scenario 1 — snapping ON: immediate magnetic suggestion toward B.
         let p0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
         viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
+        try expect(distantViews.map(\.qaCanvasLayoutInvalidationCount) == distantInvalidations,
+                   "dragging one tile must not invalidate 128 unrelated tile surfaces")
         // Mid-drag: the tile is attracted and a ghost previews the exact destination.
         let duringDrag = frameOfA()
         try expect(abs(duringDrag.x - snapTargetFrame.x) < abs(freeXAfterDrag - snapTargetFrame.x), "mid-drag the tile must be attracted toward the destination (free x=\(freeXAfterDrag)); got \(duringDrag.x)")
         try expect(abs(duringDrag.y - snapTargetFrame.y) <= abs(startFrame.y - snapTargetFrame.y), "mid-drag Y attraction must approach the preview; got \(duringDrag.y)")
         let expectedGhost = CanvasEngine.tileScreenFrame(snapTargetFrame, viewport: canvas.canvasState.viewport)
         try expect(canvas.qaDragGhostFrame == expectedGhost, "ghost must preview the gap-adjacent destination \(expectedGhost); got \(String(describing: canvas.qaDragGhostFrame))")
+        // Push the raw pointer 40 points into the neighboring tile's dock.
+        // Both the visible tile and its ghost must stay on the unoccupied side.
+        let penetratingDX = CGFloat(snapTargetFrame.x - startFrame.x + 40)
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged,
+            at: NSPoint(x: p0.x + penetratingDX, y: p0.y)))
+        try expect(canvas.qaDragGhostAttachmentCount == 1,
+                   "continuous preview updates must retain one attached ghost layer; count=\(canvas.qaDragGhostAttachmentCount)")
+        let penetratingPreview = frameOfA()
+        try expect(penetratingPreview.x + penetratingPreview.width + gap <= neighborFrame.x + 0.000001,
+                   "held magnetic preview must not clip into its neighbor when the raw pointer penetrates")
+        try expect(canvas.qaDragGhostFrame == expectedGhost,
+                   "penetrating pointer must keep the same clear destination preview")
         // Release commits to the previewed snap and clears the ghost.
         viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
         let committed = frameOfA()

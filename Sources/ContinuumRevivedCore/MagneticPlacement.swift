@@ -68,6 +68,18 @@ public enum MagneticPlacement {
         guard zoom.isFinite, zoom > 0 else { return Result(frame: free, target: nil) }
         let acquire = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
         let release = DragMagnetizeConfig.snapReleaseScreenPoints / zoom
+        // A suggestion promises available space, not merely alignment to one
+        // neighbor. Validate both acquired and held targets against the scene.
+        func isClear(_ frame: TileFrame) -> Bool {
+            neighbors.allSatisfy { neighbor in
+                let n = neighbor.frame
+                let epsilon = 0.000001
+                return frame.x + frame.width + gap <= n.x + epsilon
+                    || n.x + n.width + gap <= frame.x + epsilon
+                    || frame.y + frame.height + gap <= n.y + epsilon
+                    || n.y + n.height + gap <= frame.y + epsilon
+            }
+        }
         var target: Target?
         if var held = previous, let neighbor = neighbors.first(where: { $0.id == held.neighborId }),
            remainsNearDock(free, neighbor.frame, guide: held.guides.first, tolerance: release) {
@@ -102,20 +114,69 @@ public enum MagneticPlacement {
                 }
                 held.frame = frame
                 held.guides = guides
-                target = held
+                if isClear(frame) { target = held }
             }
         }
         if target == nil {
             var bestDistance = Double.infinity
-            for neighbor in neighbors.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            for neighbor in neighbors {
                 let candidate = TileArrangement.cornerSnap(free, others: [neighbor.frame], gap: gap, threshold: acquire)
                 guard !candidate.guides.isEmpty else { continue }
                 let distance = max(abs(candidate.frame.x - free.x), abs(candidate.frame.y - free.y))
-                if distance < bestDistance {
+                // Preserve the stable UUID tie-break without sorting and formatting
+                // every neighbor on every pointer event. Only validate contenders.
+                let wins = distance < bestDistance || (distance == bestDistance &&
+                    target.map { neighbor.id.uuidString < $0.neighborId.uuidString } == true)
+                if wins && isClear(candidate.frame) {
                     bestDistance = distance
                     target = Target(neighborId: neighbor.id, guides: candidate.guides, frame: candidate.frame)
                 }
             }
+        }
+        if target == nil, !isClear(free) {
+            // A large tile can overlap a neighbor while every legal edge is
+            // farther away than the normal acquisition radius. During that
+            // crossing, always offer the nearest unoccupied escape slot so the
+            // location preview does not disappear in the middle of the cluster.
+            var best: (distance: Double, target: Target)?
+            for neighbor in neighbors {
+                let n = neighbor.frame
+                let separated = free.x + free.width + gap <= n.x
+                    || n.x + n.width + gap <= free.x
+                    || free.y + free.height + gap <= n.y
+                    || n.y + n.height + gap <= free.y
+                guard !separated else { continue }
+                let alignTop = abs(free.y - n.y) <= abs((free.y + free.height) - (n.y + n.height))
+                let alignLeading = abs(free.x - n.x) <= abs((free.x + free.width) - (n.x + n.width))
+                var left = free
+                left.x = n.x - gap - free.width
+                left.y = alignTop ? n.y : n.y + n.height - free.height
+                var right = free
+                right.x = n.x + n.width + gap
+                right.y = left.y
+                var top = free
+                top.y = n.y - gap - free.height
+                top.x = alignLeading ? n.x : n.x + n.width - free.width
+                var bottom = free
+                bottom.y = n.y + n.height + gap
+                bottom.x = top.x
+                let candidates: [(TileFrame, [TileArrangement.SnapGuide])] = [
+                    (left, [.trailingToLeadingGap, alignTop ? .topAligned : .bottomAligned]),
+                    (right, [.leadingToTrailingGap, alignTop ? .topAligned : .bottomAligned]),
+                    (top, [.bottomToTopGap, alignLeading ? .leadingAligned : .trailingAligned]),
+                    (bottom, [.topToBottomGap, alignLeading ? .leadingAligned : .trailingAligned]),
+                ]
+                for (frame, guides) in candidates {
+                    let dx = frame.x - free.x, dy = frame.y - free.y
+                    let distance = dx * dx + dy * dy
+                    let wins = best == nil || distance < best!.distance ||
+                        (distance == best!.distance && neighbor.id.uuidString < best!.target.neighborId.uuidString)
+                    if wins && isClear(frame) {
+                        best = (distance, Target(neighborId: neighbor.id, guides: guides, frame: frame))
+                    }
+                }
+            }
+            target = best?.target
         }
         guard let target else { return Result(frame: free, target: nil) }
         var attracted = free
@@ -125,6 +186,19 @@ public enum MagneticPlacement {
         }
         attracted.x += pull(target.frame.x - free.x)
         attracted.y += pull(target.frame.y - free.y)
+        // Keep the raw pointer free to leave the release radius, but do not
+        // blend through the occupied side of a held dock. On the open side the
+        // existing smooth attraction is unchanged.
+        switch target.guides.first {
+        case .trailingToLeadingGap: attracted.x = min(attracted.x, target.frame.x)
+        case .leadingToTrailingGap: attracted.x = max(attracted.x, target.frame.x)
+        case .bottomToTopGap: attracted.y = min(attracted.y, target.frame.y)
+        case .topToBottomGap: attracted.y = max(attracted.y, target.frame.y)
+        default: break
+        }
+        // Perpendicular attraction can cross another neighbor even when the
+        // destination is clear. In that case use the safe displayed destination.
+        if !isClear(attracted) { attracted = target.frame }
         return Result(frame: attracted, target: target)
     }
 }

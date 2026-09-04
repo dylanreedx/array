@@ -182,7 +182,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         case .browser: return "Browser"
         case .browserInspector: return "Inspector"
         case .note: return "Note"
-        case .file: return "File"
+        case .file: return "Editor"
         case .fileTree: return "File Tree"
         case .ticketQueue: return "Tickets"
         case .conductorQueue: return "Queue"
@@ -232,6 +232,43 @@ public enum MarkdownDocumentMode: String, Codable, Equatable, Sendable {
     case edit
 }
 
+/// Small, component-independent editor presentation state. The editor's text,
+/// undo stack and recovery draft are document state and deliberately do not
+/// belong in canvas metadata.
+public struct FileEditorViewState: Codable, Equatable, Sendable {
+    public var sidebarExpanded: Bool
+    public var sidebarWidth: Double
+    public var expandedPaths: [String]
+    public var selectedPath: String?
+    public var searchQuery: String
+    public var cursorLine: Int
+    public var cursorColumn: Int
+    public var verticalScrollOffset: Double
+    public var horizontalScrollOffset: Double
+
+    public init(
+        sidebarExpanded: Bool = false,
+        sidebarWidth: Double = 220,
+        expandedPaths: [String] = [],
+        selectedPath: String? = nil,
+        searchQuery: String = "",
+        cursorLine: Int = 1,
+        cursorColumn: Int = 1,
+        verticalScrollOffset: Double = 0,
+        horizontalScrollOffset: Double = 0
+    ) {
+        self.sidebarExpanded = sidebarExpanded
+        self.sidebarWidth = sidebarWidth
+        self.expandedPaths = expandedPaths
+        self.selectedPath = selectedPath
+        self.searchQuery = searchQuery
+        self.cursorLine = cursorLine
+        self.cursorColumn = cursorColumn
+        self.verticalScrollOffset = verticalScrollOffset
+        self.horizontalScrollOffset = horizontalScrollOffset
+    }
+}
+
 public struct TileMetadata: Codable, Equatable, Sendable {
     public var launchProfileId: String?
     public var projectRelativeCwd: String?
@@ -257,6 +294,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var agentSoundOverrides: AgentSoundOverrides?
     /// Optional for backwards-compatible decoding of existing canvases.
     public var markdownDocumentMode: MarkdownDocumentMode?
+    /// Optional so canvases written before the rich editor remain decodable.
+    public var fileEditorViewState: FileEditorViewState?
 
     public init(
         launchProfileId: String? = nil,
@@ -279,7 +318,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         filesystemWherePath: String? = nil,
         worktreeId: String? = nil,
         agentSoundOverrides: AgentSoundOverrides? = nil,
-        markdownDocumentMode: MarkdownDocumentMode? = nil
+        markdownDocumentMode: MarkdownDocumentMode? = nil,
+        fileEditorViewState: FileEditorViewState? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -302,6 +342,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.worktreeId = worktreeId
         self.agentSoundOverrides = agentSoundOverrides
         self.markdownDocumentMode = markdownDocumentMode
+        self.fileEditorViewState = fileEditorViewState
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -326,6 +367,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case worktreeId
         case agentSoundOverrides
         case markdownDocumentMode
+        case fileEditorViewState
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -351,6 +393,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(worktreeId, forKey: .worktreeId)
         try container.encodeIfPresent(agentSoundOverrides, forKey: .agentSoundOverrides)
         try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
+        try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
     }
 }
 

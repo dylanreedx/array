@@ -7,7 +7,7 @@ import Foundation
 /// projections, while Markdown documents share Preview/Split/Edit behavior
 /// with notes and retain explicit repository-file save semantics.
 @MainActor
-final class FileTileNSView: TileNSView, NSTextViewDelegate {
+final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate {
     typealias Mode = MarkdownDocumentMode
 
     private struct RecoveryDraft: Codable, Equatable {
@@ -25,8 +25,35 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
-    private let filePath: String?
-    private let sourceLanguage: FilePreview.SourceLanguage
+    private var filePath: String?
+    private var sourceLanguage: FilePreview.SourceLanguage
+    private var documentSession: FileDocumentSession?
+    private var codeEditor: CodeEditorHostView?
+    private var documentGeneration = UUID()
+    private var bridgeDocumentID: String { (filePath ?? "") + "#" + documentGeneration.uuidString }
+    private var documentTransitionPending = false
+    var isCodeEditorFocused: Bool {
+        guard let codeEditor, let responder = window?.firstResponder as? NSView else { return false }
+        return responder === codeEditor.webView || responder.isDescendant(of: codeEditor.webView)
+    }
+    private var editorAppearanceButton: NSButton?
+    private let vimModeLabel = NSTextField(labelWithString: "")
+    var qaSetSwitchDecision: (() -> NSApplication.ModalResponse)?
+    var qaCodeEditor: CodeEditorHostView? { codeEditor }
+    var qaDocumentID: String { bridgeDocumentID }
+    var qaDraftText: String? { documentSession?.draftText }
+    var qaSidebarRoot: String? { fileBrowser == nil ? nil : tile.metadata.documentLocation?.checkoutRootPath }
+    var onOpenEditorSettings: (() -> Void)?
+    var onNavigateDocument: ((URL, UUID, EditorDocumentOpenDisposition) -> Void)?
+
+    private weak var languageServiceManager: EditorLanguageServiceManager?
+    private let markdownEditorSplit = NSSplitView()
+    private let editorSplitView = NSSplitView()
+    private let documentContainer = NSView()
+    private var fileBrowser: FileTreeBrowserView?
+    private var sidebarButton: NSButton?
+    private var rebuildingEditorShell = false
+    private var editorState: FileEditorViewState
     private var lineNumberRuler: CodeLineNumberRulerView?
     private var languageLabel: NSTextField?
     private(set) var mode: Mode = .preview
@@ -36,29 +63,43 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private(set) var loadedText: String?
     private var markdownSurface: MarkdownDocumentSurface?
     private var modeControl: NSSegmentedControl?
+    private var markdownFormatControl: NSPopUpButton?
     private let dirtyLabel = NSTextField(labelWithString: "")
     private let referenceLabel = NSTextField(labelWithString: "")
     private var titleAccessoryStack: NSStackView?
     var onRevealReferencedAgentTile: ((UUID) -> Void)?
+    var onOpenDocument: ((URL, UUID) -> Void)?
+    var onOpenExternally: ((URL) -> Void)?
+    var onEditorStateChange: ((Tile) -> Void)?
+    var onLanguageDocumentChange: ((URL, String, UInt64) -> Void)?
+    var onLanguageDocumentSave: ((URL) -> Void)?
+    var onLanguageDocumentClose: ((URL) -> Void)?
     private(set) var isDirty = false
     private(set) var hasExternalConflict = false
     private var savedText: String?
     private var loadedFileSignature: FileSignature?
     private var externalChangeTimer: Timer?
     private var recoverySaveTimer: Timer?
+    private var editorStateSaveTimer: Timer?
     var onSaveFailure: ((String) -> Void)?
     private var pendingReveal: (line: Int, column: Int?)?
+    private var lastEditorRevealLine: Int?
     /// The "file unavailable" placeholder, built lazily by `showMessage`. Held so
     /// `applyTokens()` can re-paint it — it is a content view like any other, and
     /// a placeholder that stays dark under Aqua is the same bug as a tile that does.
     private var messageLabel: NSTextField?
     private var messageContainer: NSView?
+    private var trashedOriginalURL: URL?
+    private var trashedItemURL: URL?
 
     override init(tile: Tile) {
-        self.filePath = tile.metadata.documentLocation?.path ?? tile.metadata.filePath
+        let resolvedPath = tile.metadata.documentLocation?.path ?? tile.metadata.filePath
+        self.filePath = resolvedPath
         self.sourceLanguage = FilePreview.sourceLanguage(
-            forPath: tile.metadata.documentLocation?.path ?? tile.metadata.filePath ?? ""
+            forPath: resolvedPath ?? ""
         )
+        self.documentSession = resolvedPath.map(FileDocumentSession.init(path:))
+        self.editorState = tile.metadata.fileEditorViewState ?? FileEditorViewState(sidebarExpanded: false)
 
         let tv = NSTextView()
         tv.isEditable = false
@@ -102,13 +143,20 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
         super.init(tile: tile)
 
-        setContentView(sv)
-        activeBody = sv
+        NotificationCenter.default.addObserver(self, selector: #selector(projectFileMoved(_:)), name: .arrayProjectFileMoved, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(projectFileTrashed(_:)), name: .arrayProjectFileTrashed, object: nil)
+        for key in EditorPreferences.allKeys {
+            NotificationCenter.default.addObserver(self, selector: #selector(editorPreferencesChanged(_:)),
+                name: SettingChangeEvent.name(for: SettingID(rawValue: key)), object: nil)
+        }
+        configureEditorShell()
         tv.delegate = self
         loadFile()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -124,6 +172,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         externalChangeTimer?.invalidate()
         externalChangeTimer = nil
         flushRecoveryDraft()
+        editorStateSaveTimer?.invalidate()
+        persistEditorState()
+        fileBrowser?.stop()
+        if let filePath { onLanguageDocumentClose?(URL(fileURLWithPath: filePath)) }
+        codeEditor?.tearDown()
     }
 
     override func applyTokens() {
@@ -133,6 +186,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         messageContainer?.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         messageLabel?.textColor = TextToken.textSecondary.color.nsColor(in: self)
         markdownSurface?.applyTheme()
+        fileBrowser?.applyTokens()
+        applyEditorPreferences()
         bumpSurfaceEpoch()
     }
 
@@ -141,7 +196,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         // Before targeting a view inside the body: while surfaced, that view is
         // PARKED, and AppKit will happily focus it there.
         promoteForIncomingFocus()
-        window?.makeFirstResponder(mode == .preview ? (markdownSurface?.previewView ?? textView) : textView)
+        if (presentation == .sourceText || mode != .preview), let codeEditor {
+            codeEditor.focusEditor(documentID: bridgeDocumentID)
+        } else {
+            window?.makeFirstResponder(mode == .preview ? (markdownSurface?.previewView ?? textView) : textView)
+        }
         return true
     }
 
@@ -159,7 +218,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private var activeBody: NSView?
     private var surfaceEpoch: UInt64 = 1
 
-    override var surfaceableBody: NSView? { activeBody }
+    override var surfacesTitleAccessory: Bool { true }
+
+    override var surfaceableBody: NSView? {
+        // WKWebView snapshots are intentionally excluded until a dedicated
+        // visual/performance witness proves they survive canvas residency.
+        if presentation == .sourceText || (presentation == .markdown && mode != .preview) { return nil }
+        return activeBody
+    }
     override var surfaceContentRevision: UInt64? { surfaceEpoch }
 
     /// `activeBody` is a scroll view for some file kinds and a container holding
@@ -175,6 +241,622 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     /// revision vector; the epoch covers content and mode.
     private func bumpSurfaceEpoch() { surfaceEpoch &+= 1 }
 
+    private var editorTheme: EditorThemeTokens {
+        EditorPreferences().resolve(systemIsDark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+    }
+    private var editorTokenTheme: TokenTheme { editorTheme.isDark ? .dark : .light }
+
+    @objc private func editorPreferencesChanged(_ notification: Notification) { applyEditorPreferences() }
+
+    private func applyEditorPreferences() {
+        let preferences = EditorPreferences()
+        let theme = editorTheme
+        let appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        documentContainer.appearance = appearance
+        editorSplitView.appearance = appearance
+        markdownEditorSplit.appearance = appearance
+        fileBrowser?.applyEditorAppearance(isDark: theme.isDark)
+        codeEditor?.setPreferences(preferences, isDark: theme.isDark)
+        markdownSurface?.applyTheme()
+        vimModeLabel.isHidden = !preferences.vimEnabled
+        if preferences.vimEnabled && vimModeLabel.stringValue.isEmpty { vimModeLabel.stringValue = "NORMAL" }
+        func color(_ key: KeyPath<EditorThemeTokens, String>) -> NSColor {
+            StatusChipNSView.nsColor(theme.resolvedColor(key))
+        }
+        documentContainer.wantsLayer = true
+        documentContainer.layer?.backgroundColor = color(\.background).cgColor
+        textView.backgroundColor = color(\.background)
+        if presentation == .markdown { textView.textColor = color(\.foreground) }
+        textView.insertionPointColor = color(\.accent)
+        messageContainer?.layer?.backgroundColor = color(\.background).cgColor
+        messageLabel?.textColor = color(\.mutedForeground)
+        vimModeLabel.textColor = color(\.accent)
+        bumpSurfaceEpoch()
+    }
+
+    @objc private func showEditorMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let preferences = EditorPreferences()
+        for appearance in EditorAppearance.allCases {
+            let item = NSMenuItem(title: appearance.rawValue + " Appearance", action: #selector(selectEditorAppearance(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = appearance.rawValue
+            item.state = preferences.appearance == appearance ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let vim = NSMenuItem(title: "Vim Mode — All Editors", action: #selector(toggleEditorVim(_:)), keyEquivalent: "")
+        vim.target = self
+        vim.state = preferences.vimEnabled ? .on : .off
+        menu.addItem(vim)
+        let settings = NSMenuItem(title: "Editor Settings…", action: #selector(openEditorSettings(_:)), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+    }
+
+    @objc private func selectEditorAppearance(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(value, forKey: EditorPreferences.appearanceKey)
+        SettingChangeEvent.post(SettingID(rawValue: EditorPreferences.appearanceKey))
+    }
+    @objc private func toggleEditorVim(_ sender: Any?) { EditorPreferences.setVimEnabled(!EditorPreferences().vimEnabled) }
+    @objc private func openEditorSettings(_ sender: Any?) { onOpenEditorSettings?() }
+
+    private func navigateDocument(_ url: URL, disposition: EditorDocumentOpenDisposition) {
+        if let onNavigateDocument { onNavigateDocument(url, tile.id, disposition) }
+        else { onOpenDocument?(url, tile.id) }
+    }
+
+    /// Freeze web input while the snapshot crosses the bridge. Native draft and
+    /// revision become authoritative before presenting any Save/Discard choice.
+    func flushEditorBarrier(_ completion: @escaping (Bool) -> Void) {
+        guard !documentTransitionPending else { completion(false); return }
+        guard let codeEditor else { completion(true); return }
+        documentTransitionPending = true
+        let identity = bridgeDocumentID
+        var finished = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard !finished else { return }
+            finished = true
+            self?.resumeEditorAfterBarrier()
+            self?.showSaveFailure("The editor did not respond. Your current draft is retained; try again.")
+            completion(false)
+        }
+        codeEditor.requestSnapshot(documentID: identity, freeze: true) { [weak self] result in
+            guard !finished else { return }
+            finished = true
+            guard let self, identity == self.bridgeDocumentID else { completion(false); return }
+            switch result {
+            case let .success(snapshot):
+                self.replaceDraftFromEditor(snapshot)
+                completion(true)
+            case .failure:
+                self.resumeEditorAfterBarrier()
+                completion(false)
+            }
+        }
+    }
+
+    func restoreCurrentFileSelection() {
+        fileBrowser?.selectFile(filePath.map { URL(fileURLWithPath: $0) })
+    }
+
+    func resumeEditorAfterBarrier() {
+        documentTransitionPending = false
+        restoreCurrentFileSelection()
+        codeEditor?.runCommand(documentID: bridgeDocumentID, command: "resumeEditing")
+    }
+
+    private func saveFromEditor() {
+        flushEditorBarrier { [weak self] success in
+            guard let self else { return }
+            if success { _ = self.saveInteractively() }
+            self.resumeEditorAfterBarrier()
+        }
+    }
+
+    /// One tile owns one document. Navigation commits only after draft handling
+    /// and relationship persistence succeed; geometry and sidebar state survive.
+    func switchDocument(to location: DocumentLocation, beforeCommit: @escaping () throws -> Void,
+                        completion: @escaping (Bool) -> Void = { _ in }) {
+        guard location.path != filePath else { completion(true); return }
+        flushEditorBarrier { [weak self] success in
+            guard let self else { completion(false); return }
+            guard success else { completion(false); return }
+            if self.isDirty {
+                let alert = NSAlert()
+                alert.messageText = "Save changes before switching files?"
+                alert.informativeText = URL(fileURLWithPath: self.filePath ?? "").lastPathComponent
+                alert.addButton(withTitle: "Save")
+                alert.addButton(withTitle: "Discard")
+                alert.addButton(withTitle: "Cancel")
+                switch self.qaSetSwitchDecision?() ?? alert.runModal() {
+                case .alertFirstButtonReturn:
+                    guard self.saveInteractively() else {
+                        self.resumeEditorAfterBarrier(); completion(false); return
+                    }
+                case .alertSecondButtonReturn: break
+                default: self.resumeEditorAfterBarrier(); completion(false); return
+                }
+            }
+            do { try beforeCommit() }
+            catch {
+                self.showSaveFailure(error.localizedDescription)
+                self.resumeEditorAfterBarrier(); completion(false); return
+            }
+            self.recoverySaveTimer?.invalidate()
+            self.editorStateSaveTimer?.invalidate()
+            self.externalChangeTimer?.invalidate()
+            self.discardRecoveryDraft()
+            if let path = self.filePath { self.onLanguageDocumentClose?(URL(fileURLWithPath: path)) }
+            self.onLanguageDocumentChange = nil
+            self.onLanguageDocumentSave = nil
+            self.onLanguageDocumentClose = nil
+            // Keep WebKit mounted; loading a new document resets its editing state.
+            self.documentGeneration = UUID()
+            self.documentTransitionPending = false
+            let oldRoot = self.tile.metadata.documentLocation?.checkoutRootPath
+            self.filePath = location.path
+            self.documentSession = FileDocumentSession(path: location.path)
+            self.sourceLanguage = FilePreview.sourceLanguage(forPath: location.path)
+            self.loadedText = nil
+            self.savedText = nil
+            self.markdownSurface = nil
+            self.modeControl = nil
+            self.markdownFormatControl = nil
+            self.languageLabel = nil
+            self.mode = .preview
+            self.pendingReveal = nil
+            self.trashedOriginalURL = nil
+            self.trashedItemURL = nil
+            self.hasExternalConflict = false
+            self.setDirty(false)
+            self.setReferencedAgentTiles([])
+            self.editorState.cursorLine = 1
+            self.editorState.cursorColumn = 1
+            self.editorState.verticalScrollOffset = 0
+            self.editorState.horizontalScrollOffset = 0
+            self.tile.metadata.filePath = location.path
+            self.tile.metadata.documentLocation = location
+            self.tile.metadata.markdownDocumentMode = nil
+            self.tile.title = URL(fileURLWithPath: location.path).lastPathComponent
+            if oldRoot != location.checkoutRootPath {
+                self.fileBrowser?.stop()
+                self.fileBrowser?.removeFromSuperview()
+                self.fileBrowser = nil
+                self.sidebarButton = nil
+                self.editorState.expandedPaths = []
+                self.editorState.searchQuery = ""
+                self.editorState.selectedPath = nil
+                self.configureEditorShell()
+            }
+            self.editorState.selectedPath = location.relativePath
+            self.fileBrowser?.selectFile(URL(fileURLWithPath: location.path))
+            self.persistEditorState()
+            self.loadFile()
+            self.applyEditorPreferences()
+            completion(true)
+        }
+    }
+
+    // MARK: - Editor shell
+
+    private func configureEditorShell() {
+        editorSplitView.delegate = self
+        editorSplitView.isVertical = true
+        editorSplitView.dividerStyle = .thin
+        editorSplitView.autosaveName = nil
+        documentContainer.wantsLayer = true
+
+        if let rootPath = tile.metadata.documentLocation?.checkoutRootPath {
+            let persisted = tile.metadata.fileEditorViewState
+            let browserState = FileTreeBrowserView.State(
+                expandedPaths: persisted?.expandedPaths ?? [],
+                selectedPath: persisted?.selectedPath,
+                searchQuery: persisted?.searchQuery ?? ""
+            )
+            let browser = FileTreeBrowserView(
+                rootURL: URL(fileURLWithPath: rootPath, isDirectory: true),
+                state: browserState
+            )
+            browser.onActivateFile = { [weak self] url in
+                guard let self else { return }
+                self.navigateDocument(url, disposition: .replaceCurrent)
+            }
+            browser.onOpenInNewTile = { [weak self] url in self?.navigateDocument(url, disposition: .newTile) }
+            browser.onOpenExternally = { [weak self] url in self?.onOpenExternally?(url) }
+            browser.onCreateFile = { [weak self] parent in self?.promptToCreate(in: parent, directory: false) }
+            browser.onCreateFolder = { [weak self] parent in self?.promptToCreate(in: parent, directory: true) }
+            browser.onRename = { [weak self] url in self?.promptToRename(url) }
+            browser.onMoveToTrash = { [weak self] url in self?.confirmMoveToTrash(url) }
+            browser.onStateChange = { [weak self] state in self?.persistBrowserState(state) }
+            fileBrowser = browser
+        }
+
+        installSidebarButton()
+        rebuildEditorShell(documentBody: scrollView)
+    }
+
+    private func installSidebarButton() {
+        guard fileBrowser != nil else { return }
+        let button = NSButton(
+            image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle files")!,
+            target: self,
+            action: #selector(toggleSidebar(_:))
+        )
+        button.title = "Files"
+        button.imagePosition = .imageLeading
+        button.isBordered = false
+        button.controlSize = .small
+        button.toolTip = "Show or hide project files"
+        sidebarButton = button
+        rebuildTitleAccessory()
+    }
+
+    private func rebuildTitleAccessory() {
+        dirtyLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        dirtyLabel.textColor = .systemOrange
+        referenceLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        referenceLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        referenceLabel.isHidden = referenceLabel.stringValue.isEmpty
+        if editorAppearanceButton == nil {
+            let button = NSButton(image: NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Editor appearance and Vim")!, target: self, action: #selector(showEditorMenu(_:)))
+            button.isBordered = false
+            button.toolTip = "Editor appearance and Vim"
+            editorAppearanceButton = button
+        }
+        vimModeLabel.font = .monospacedSystemFont(ofSize: 9, weight: .medium)
+        vimModeLabel.isHidden = !EditorPreferences().vimEnabled
+        var views: [NSView] = [referenceLabel, dirtyLabel, vimModeLabel]
+        if let editorAppearanceButton { views.append(editorAppearanceButton) }
+        if let sidebarButton { views.append(sidebarButton) }
+        if let languageLabel { views.append(languageLabel) }
+        if let markdownFormatControl { views.append(markdownFormatControl) }
+        if let modeControl { views.append(modeControl) }
+        let stack = NSStackView(views: views)
+        stack.orientation = .horizontal
+        stack.spacing = 4
+        titleAccessoryStack = stack
+        setTitleBarAccessory(stack)
+    }
+
+    private func rebuildEditorShell(documentBody: NSView) {
+        let expectedSubviews: [NSView] = editorState.sidebarExpanded
+            ? [fileBrowser, documentContainer].compactMap { $0 }
+            : [documentContainer]
+        if documentBody.superview === documentContainer,
+           editorSplitView.subviews == expectedSubviews { return }
+        rebuildingEditorShell = true
+        defer { rebuildingEditorShell = false }
+        promoteForIncomingFocus()
+        editorSplitView.subviews.forEach { $0.removeFromSuperview() }
+        documentContainer.subviews.forEach { $0.removeFromSuperview() }
+        documentBody.translatesAutoresizingMaskIntoConstraints = false
+        documentContainer.addSubview(documentBody)
+        NSLayoutConstraint.activate([
+            documentBody.leadingAnchor.constraint(equalTo: documentContainer.leadingAnchor),
+            documentBody.trailingAnchor.constraint(equalTo: documentContainer.trailingAnchor),
+            documentBody.topAnchor.constraint(equalTo: documentContainer.topAnchor),
+            documentBody.bottomAnchor.constraint(equalTo: documentContainer.bottomAnchor)
+        ])
+        if editorState.sidebarExpanded, let browser = fileBrowser {
+            editorSplitView.addSubview(browser)
+            editorSplitView.addSubview(documentContainer)
+            let total = max(bounds.width, 500)
+            let width = min(max(CGFloat(editorState.sidebarWidth), 150), total * 0.55)
+            editorSplitView.setPosition(width, ofDividerAt: 0)
+            browser.start()
+        } else {
+            fileBrowser?.stop()
+            editorSplitView.addSubview(documentContainer)
+        }
+        setContentView(editorSplitView)
+        activeBody = editorSplitView
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        guard splitView === editorSplitView else { splitView.adjustSubviews(); return }
+        let size = splitView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        if editorState.sidebarExpanded, let browser = fileBrowser, splitView.subviews.count == 2 {
+            let width = min(max(CGFloat(editorState.sidebarWidth), 160), min(320, size.width * 0.45))
+            browser.frame = NSRect(x: 0, y: 0, width: width, height: size.height)
+            let start = width + splitView.dividerThickness
+            documentContainer.frame = NSRect(x: start, y: 0, width: max(0, size.width - start), height: size.height)
+        } else { documentContainer.frame = splitView.bounds }
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !rebuildingEditorShell, notification.object as? NSSplitView === editorSplitView,
+              editorState.sidebarExpanded, let browser = fileBrowser, browser.frame.width > 0 else { return }
+        editorState.sidebarWidth = Double(browser.frame.width)
+        editorStateSaveTimer?.invalidate()
+        editorStateSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.persistEditorState() }
+        }
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        splitView === editorSplitView ? 160 : proposedMinimumPosition
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        splitView === editorSplitView ? min(360, splitView.bounds.width * 0.55) : proposedMaximumPosition
+    }
+
+    @objc private func toggleSidebar(_ sender: Any?) {
+        editorState.sidebarExpanded.toggle()
+        persistEditorState()
+        rebuildEditorShell(documentBody: currentDocumentBody())
+    }
+
+    private func currentDocumentBody() -> NSView {
+        if presentation == .sourceText, let codeEditor { return codeEditor }
+        if presentation == .markdown, let markdownSurface {
+            switch mode {
+            case .preview: return markdownSurface.previewBody()
+            case .edit: return codeEditor ?? scrollView
+            case .split: return markdownEditorSplit
+            }
+        }
+        return scrollView
+    }
+
+    private func persistBrowserState(_ state: FileTreeBrowserView.State) {
+        editorState.expandedPaths = state.expandedPaths
+        editorState.selectedPath = state.selectedPath
+        editorState.searchQuery = state.searchQuery
+        persistEditorState()
+    }
+
+    private func persistEditorState() {
+        tile.metadata.fileEditorViewState = editorState
+        canvas?.updateTile(tile, recalculateZoneBounds: false)
+        onEditorStateChange?(tile)
+    }
+
+    private func promptName(title: String, value: String = "") -> String? {
+        let field = NSTextField(string: value)
+        field.placeholderString = "Name"
+        field.frame.size.width = 300
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        window?.makeFirstResponder(field)
+        return alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil
+    }
+
+    private func promptToCreate(in parent: URL, directory: Bool) {
+        guard let root = tile.metadata.documentLocation?.checkoutRootPath, let fileBrowser else { return }
+        fileBrowser.beginNameEntry(initialValue: "", placeholder: directory ? "New folder name" : "New file name") { [weak self] name in
+            guard let self, let name, self.tile.metadata.documentLocation?.checkoutRootPath == root else { return }
+            do {
+                let coordinator = ProjectFileOperationCoordinator(rootURL: URL(fileURLWithPath: root))
+                let url = directory ? try coordinator.createDirectory(parent: parent, name: name)
+                    : try coordinator.createFile(parent: parent, name: name)
+                self.fileBrowser?.refresh()
+                if !directory { self.navigateDocument(url, disposition: .replaceCurrent) }
+            } catch { self.presentFileOperationError(error) }
+        }
+    }
+
+    private func promptToRename(_ url: URL) {
+        guard let root = tile.metadata.documentLocation?.checkoutRootPath, let fileBrowser else { return }
+        fileBrowser.beginNameEntry(initialValue: url.lastPathComponent, placeholder: "Rename file or folder") { [weak self] name in
+            guard let self, let name, name != url.lastPathComponent,
+                  self.tile.metadata.documentLocation?.checkoutRootPath == root else { return }
+            do {
+                let result = try ProjectFileOperationCoordinator(rootURL: URL(fileURLWithPath: root)).rename(entry: url, newName: name)
+                NotificationCenter.default.post(name: .arrayProjectFileMoved, object: nil,
+                    userInfo: ["source": result.source.path, "destination": result.destination.path, "directory": result.isDirectory])
+                self.fileBrowser?.refresh()
+            } catch { self.presentFileOperationError(error) }
+        }
+    }
+
+    private func confirmMoveToTrash(_ url: URL) {
+        guard let root = tile.metadata.documentLocation?.checkoutRootPath else { return }
+        let alert = NSAlert()
+        alert.messageText = "Move “\(url.lastPathComponent)” to Trash?"
+        let affectsThisDraft = filePath.map {
+            Self.replacingPathPrefix($0, source: url.path, destination: url.path) != nil
+        } ?? false
+        alert.informativeText = affectsThisDraft && isDirty
+            ? "This editor has unsaved changes. Save them first, discard them, or cancel."
+            : "Open editor drafts will be kept available."
+        alert.alertStyle = .warning
+        if affectsThisDraft && isDirty {
+            alert.addButton(withTitle: "Save & Move to Trash")
+            alert.addButton(withTitle: "Discard & Move to Trash")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: guard saveInteractively() else { return }
+            case .alertSecondButtonReturn: discardUnsavedChanges()
+            default: return
+            }
+        } else {
+            alert.addButton(withTitle: "Move to Trash")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        do {
+            let result = try ProjectFileOperationCoordinator(rootURL: URL(fileURLWithPath: root)).moveToTrash(entry: url)
+            NotificationCenter.default.post(
+                name: .arrayProjectFileTrashed,
+                object: nil,
+                userInfo: [
+                    "source": result.original.path,
+                    "trash": result.trashed?.path as Any,
+                    "directory": result.isDirectory
+                ]
+            )
+            fileBrowser?.refresh()
+        } catch { presentFileOperationError(error) }
+    }
+
+    private func presentFileOperationError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        alert.messageText = "File operation failed"
+        alert.runModal()
+    }
+
+    @objc private func projectFileMoved(_ notification: Notification) {
+        guard let current = filePath,
+              let source = notification.userInfo?["source"] as? String,
+              let destination = notification.userInfo?["destination"] as? String,
+              let mapped = Self.replacingPathPrefix(current, source: source, destination: destination) else { return }
+        onLanguageDocumentClose?(URL(fileURLWithPath: current))
+        let draft = documentSession?.draftText ?? loadedText
+        filePath = mapped
+        sourceLanguage = FilePreview.sourceLanguage(forPath: mapped)
+        let replacement = FileDocumentSession(path: mapped)
+        if let draft, replacement.draftText != draft { _ = replacement.updateDraft(draft) }
+        documentSession = replacement
+        loadedText = draft ?? replacement.draftText
+        savedText = replacement.baselineText
+        tile.metadata.filePath = mapped
+        if var location = tile.metadata.documentLocation {
+            location.path = mapped
+            if case let .checkout(projectId, rootPath, _) = location.scope {
+                let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+                let relative = URL(fileURLWithPath: mapped).pathComponents
+                    .dropFirst(root.pathComponents.count).joined(separator: "/")
+                location.scope = .checkout(projectId: projectId, rootPath: rootPath, relativePath: relative)
+            }
+            tile.metadata.documentLocation = location
+        }
+        if current == source { tile.title = URL(fileURLWithPath: mapped).lastPathComponent }
+        canvas?.updateTile(tile, recalculateZoneBounds: false)
+        configureCodeEditorIfNeeded()
+        setDirty(replacement.isDirty)
+        if let languageServiceManager { connectLanguageServices(languageServiceManager) }
+    }
+
+    @objc private func projectFileTrashed(_ notification: Notification) {
+        guard let current = filePath,
+              let source = notification.userInfo?["source"] as? String,
+              Self.replacingPathPrefix(current, source: source, destination: source) != nil else { return }
+        flushRecoveryDraft()
+        trashedOriginalURL = URL(fileURLWithPath: current)
+        if let trashRoot = notification.userInfo?["trash"] as? String {
+            trashedItemURL = URL(fileURLWithPath: Self.replacingPathPrefix(
+                current, source: source, destination: trashRoot
+            ) ?? trashRoot)
+        }
+        showMissingFileActions("File moved to Trash. Your editor draft is preserved.")
+    }
+
+    private func showMissingFileActions(_ message: String) {
+        let label = NSTextField(labelWithString: message)
+        label.alignment = .center
+        label.maximumNumberOfLines = 0
+        let restore = NSButton(title: "Restore", target: self, action: #selector(restoreTrashedFile(_:)))
+        restore.isEnabled = trashedItemURL != nil
+        let saveAs = NSButton(title: "Save As…", target: self, action: #selector(saveMissingDraftAs(_:)))
+        let buttons = NSStackView(views: [restore, saveAs])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        let stack = NSStackView(views: [label, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        let container = NSView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16)
+        ])
+        messageLabel = label
+        messageContainer = container
+        setContentView(container)
+        activeBody = container
+        applyTokens()
+    }
+
+    @objc private func restoreTrashedFile(_ sender: Any?) {
+        guard let source = trashedItemURL, let destination = trashedOriginalURL else { return }
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            presentFileOperationError(ProjectFileOperationCoordinator.OperationError.collision(destination.lastPathComponent))
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: source, to: destination)
+            trashedItemURL = nil
+            trashedOriginalURL = nil
+            refreshFromDisk(force: true)
+            showBody()
+        } catch { presentFileOperationError(error) }
+    }
+
+    @objc private func saveMissingDraftAs(_ sender: Any?) {
+        guard let draft = documentSession?.draftText ?? loadedText else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = trashedOriginalURL?.lastPathComponent ?? filePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Untitled"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            guard !FileManager.default.fileExists(atPath: url.path) else {
+                throw ProjectFileOperationCoordinator.OperationError.collision(url.lastPathComponent)
+            }
+            try Data(draft.utf8).write(to: url, options: [.atomic, .withoutOverwriting])
+            relocateDocument(to: url.standardizedFileURL.resolvingSymlinksInPath().path, preservingDraft: draft)
+            trashedItemURL = nil
+            trashedOriginalURL = nil
+            showBody()
+        } catch { presentFileOperationError(error) }
+    }
+
+    private func relocateDocument(to mapped: String, preservingDraft draft: String?) {
+        if let filePath { onLanguageDocumentClose?(URL(fileURLWithPath: filePath)) }
+        codeEditor?.tearDown()
+        codeEditor?.removeFromSuperview()
+        codeEditor = nil
+        documentGeneration = UUID()
+        filePath = mapped
+        sourceLanguage = FilePreview.sourceLanguage(forPath: mapped)
+        let replacement = FileDocumentSession(path: mapped)
+        if let draft, replacement.draftText != draft { _ = replacement.updateDraft(draft) }
+        documentSession = replacement
+        loadedText = draft ?? replacement.draftText
+        savedText = replacement.baselineText
+        tile.metadata.filePath = mapped
+        if var location = tile.metadata.documentLocation {
+            location.path = mapped
+            if case let .checkout(projectId, rootPath, _) = location.scope,
+               DocumentLocationResolver.contains(URL(fileURLWithPath: mapped), in: URL(fileURLWithPath: rootPath)) {
+                let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+                location.scope = .checkout(
+                    projectId: projectId, rootPath: rootPath,
+                    relativePath: URL(fileURLWithPath: mapped).pathComponents.dropFirst(root.pathComponents.count).joined(separator: "/")
+                )
+            } else {
+                location.scope = .standalone
+                fileBrowser?.stop()
+                fileBrowser = nil
+                sidebarButton = nil
+            }
+            tile.metadata.documentLocation = location
+        }
+        tile.title = URL(fileURLWithPath: mapped).lastPathComponent
+        canvas?.updateTile(tile, recalculateZoneBounds: false)
+        configureCodeEditorIfNeeded()
+        setDirty(replacement.isDirty)
+        if let manager = languageServiceManager { connectLanguageServices(manager) }
+    }
+
+    private static func replacingPathPrefix(_ path: String, source: String, destination: String) -> String? {
+        if path == source { return destination }
+        let prefix = source.hasSuffix("/") ? source : source + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        return destination + "/" + path.dropFirst(prefix.count)
+    }
+
     // MARK: - Markdown mode
 
     /// Switches the body in place. The tile keeps its identity, its persisted
@@ -184,9 +866,10 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         promoteForIncomingFocus()
         mode = newMode
         modeControl?.selectedSegment = newMode.segmentIndex
-        markdownSurface?.setMode(newMode)
+        markdownSurface?.setMode(newMode, sourceDraft: documentSession?.draftText ?? loadedText)
         showBody()
-        window?.makeFirstResponder(newMode == .preview ? (markdownSurface?.previewView ?? textView) : textView)
+        if newMode != .preview, let codeEditor { codeEditor.focusEditor(documentID: bridgeDocumentID) }
+        else { window?.makeFirstResponder(markdownSurface?.previewView ?? textView) }
         tile.metadata.markdownDocumentMode = newMode
         canvas?.updateTile(tile)
     }
@@ -194,65 +877,98 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard presentation == .markdown else { return }
         loadedText = textView.string
+        _ = documentSession?.updateDraft(textView.string)
         markdownSurface?.draftDidChange(textView.string)
-        setDirty(savedText != loadedText)
+        setDirty(documentSession?.isDirty ?? (savedText != loadedText))
         scheduleRecoveryDraftSave()
         bumpSurfaceEpoch()
     }
 
     @discardableResult
     func save(overwriteExternalChanges: Bool = false) -> Bool {
-        guard presentation == .markdown, let filePath, let savedText else { return false }
-        let currentDisk = FilePreview.load(path: filePath)
-        if case let .text(diskText) = currentDisk, diskText != savedText, !overwriteExternalChanges {
+        guard let filePath, let session = documentSession else { return false }
+        if codeEditor == nil, presentation == .markdown, session.draftText != textView.string {
+            _ = session.updateDraft(textView.string)
+        }
+        let editorRevisionBeforeSave = session.revision
+        switch session.save(overwriteExternalChanges: overwriteExternalChanges) {
+        case .saved, .unchanged:
+            savedText = session.baselineText
+            loadedText = session.draftText
+            if let loadedText { markdownSurface?.replaceDraft(loadedText) }
+            loadedFileSignature = Self.fileSignature(for: filePath)
+            hasExternalConflict = false
+            setDirty(session.isDirty)
+            if !session.isDirty { discardRecoveryDraft() }
+            onLanguageDocumentSave?(URL(fileURLWithPath: filePath))
+            if session.revision != editorRevisionBeforeSave {
+                codeEditor?.applyEdits(
+                    documentID: bridgeDocumentID,
+                    expectedRevision: editorRevisionBeforeSave,
+                    revision: session.revision,
+                    changes: []
+                )
+            }
+            return true
+        case .conflict:
             hasExternalConflict = true
             dirtyLabel.stringValue = "!"
             dirtyLabel.toolTip = "The file changed on disk"
             return false
-        }
-        do {
-            try textView.string.write(to: URL(fileURLWithPath: filePath), atomically: true, encoding: .utf8)
-            self.savedText = textView.string
-            loadedText = textView.string
-            markdownSurface?.replaceDraft(textView.string)
-            loadedFileSignature = Self.fileSignature(for: filePath)
-            hasExternalConflict = false
-            setDirty(false)
-            discardRecoveryDraft()
-            return true
-        } catch {
-            showSaveFailure(error.localizedDescription)
-            onSaveFailure?(error.localizedDescription)
-            return false
+        case let .unavailable(reason):
+            let message = Self.unavailableMessage(reason)
+            showSaveFailure(message); onSaveFailure?(message); return false
+        case let .draftTooLarge(maxBytes):
+            let message = "Draft is larger than \(maxBytes / 1_024) KB"
+            showSaveFailure(message); onSaveFailure?(message); return false
+        case let .writeFailed(message):
+            showSaveFailure(message); onSaveFailure?(message); return false
+        case .stale:
+            let message = "The editor changed while saving. Try again."
+            showSaveFailure(message); return false
         }
     }
 
     /// Reloads external edits only while the tile has no local draft. A dirty
     /// draft is never overwritten; it is marked conflicted for the next save.
     func refreshFromDisk(force: Bool = false) {
-        guard let filePath else { return }
+        guard !documentTransitionPending || force else { return }
+        guard let filePath, let session = documentSession else { return }
         let signature = Self.fileSignature(for: filePath)
         guard force || signature != loadedFileSignature else { return }
-        guard case let .text(diskText) = FilePreview.load(path: filePath) else { return }
-        guard diskText != savedText else {
+        let result = session.refreshFromDisk()
+        switch result {
+        case .unchanged:
             loadedFileSignature = signature
-            return
-        }
-        if presentation == .markdown, isDirty {
+        case .conflict:
             hasExternalConflict = true
             dirtyLabel.stringValue = "!"
             dirtyLabel.toolTip = "The file changed on disk"
-        } else {
-            savedText = diskText
-            loadedText = diskText
+        case .reloaded:
+            savedText = session.baselineText
+            loadedText = session.draftText
             loadedFileSignature = signature
-            textView.string = diskText
-            markdownSurface?.replaceDraft(diskText)
+            if let text = session.draftText {
+                textView.string = text
+                if presentation == .sourceText { applyCodePresentation() }
+                markdownSurface?.replaceDraft(text)
+                codeEditor?.loadDocument(
+                    documentID: bridgeDocumentID, text: text,
+                    language: Self.codeMirrorLanguage(sourceLanguage), revision: session.revision
+                )
+            }
             showBody()
+        case let .unavailable(reason):
+            let message = Self.unavailableMessage(reason)
+            showSaveFailure(message)
+            trashedOriginalURL = URL(fileURLWithPath: filePath)
+            trashedItemURL = nil
+            showMissingFileActions(message)
         }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isCodeEditorFocused || TileNSView.enclosingTileId(of: window?.firstResponder) == tile.id else { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if presentation == .markdown, modifiers == [.command, .option],
            let key = event.charactersIgnoringModifiers,
@@ -260,14 +976,21 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             setMode(selectedMode)
             return true
         }
-        if presentation == .markdown, mode != .preview,
+        if codeEditor == nil, presentation == .markdown, mode != .preview,
            MarkdownEditingCommands.handleKeyEquivalent(event, in: textView) {
+            return true
+        }
+        if isCodeEditorFocused, modifiers.contains(.command),
+           let key = event.charactersIgnoringModifiers?.lowercased(),
+           ["z", "f"].contains(key) {
+            let command = key == "f" ? "find" : (modifiers.contains(.shift) ? "redo" : "undo")
+            codeEditor?.runCommand(documentID: bridgeDocumentID, command: command)
             return true
         }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers?.lowercased() == "s",
-           presentation == .markdown {
-            _ = saveInteractively()
+           loadedText != nil {
+            saveFromEditor()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -291,11 +1014,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
+            documentSession?.discardDraft()
             setDirty(false)
             hasExternalConflict = false
             refreshFromDisk(force: true)
             discardRecoveryDraft()
-            return true
+            return !isDirty
         case .alertSecondButtonReturn:
             return save(overwriteExternalChanges: true)
         default:
@@ -306,7 +1030,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private func setDirty(_ dirty: Bool) {
         isDirty = dirty
         dirtyLabel.stringValue = dirty ? "•" : ""
-        dirtyLabel.toolTip = dirty ? "Unsaved Markdown changes" : nil
+        dirtyLabel.toolTip = dirty ? "Unsaved editor changes" : nil
         dirtyLabel.setAccessibilityLabel(dirty ? "Unsaved changes" : "Saved")
     }
 
@@ -317,11 +1041,43 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         recoverySaveTimer?.invalidate()
         recoverySaveTimer = nil
         discardRecoveryDraft()
+        documentSession?.discardDraft()
+        if let filePath, let session = documentSession, let text = session.draftText {
+            loadedText = text
+            textView.string = text
+            markdownSurface?.replaceDraft(text)
+            codeEditor?.loadDocument(
+                documentID: bridgeDocumentID, text: text,
+                language: presentation == .markdown ? "markdown" : Self.codeMirrorLanguage(sourceLanguage),
+                revision: session.revision
+            )
+        }
         setDirty(false)
         hasExternalConflict = false
     }
 
     func flushUnsavedRecovery() { flushRecoveryDraft() }
+
+    /// Existing workspace lifecycle APIs are synchronous. Pump only the main
+    /// run loop until the asynchronous web barrier acknowledges, and fail the
+    /// owner's transition closed on timeout instead of tearing down stale text.
+    func captureForSceneTransition() throws {
+        var captured: Bool?
+        flushEditorBarrier { captured = $0 }
+        let deadline = Date().addingTimeInterval(5.5)
+        while captured == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
+        guard captured == true else {
+            resumeEditorAfterBarrier()
+            throw CodeEditorHostError.bridgeUnavailable
+        }
+        guard flushRecoveryDraft() else {
+            resumeEditorAfterBarrier()
+            throw CodeEditorHostError.javaScript("The recovery draft could not be saved.")
+        }
+        resumeEditorAfterBarrier()
+    }
 
     @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
         setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
@@ -340,22 +1096,20 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             target: self,
             action: #selector(applyMarkdownCommand(_:))
         )
+        markdownFormatControl = formatControl
         dirtyLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
         dirtyLabel.textColor = NSColor.systemOrange
         dirtyLabel.alignment = .center
         referenceLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         referenceLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         referenceLabel.isHidden = true
-        let stack = NSStackView(views: [referenceLabel, dirtyLabel, formatControl, control])
-        stack.orientation = .horizontal
-        stack.spacing = 4
-        titleAccessoryStack = stack
-        setTitleBarAccessory(stack)
+        rebuildTitleAccessory()
     }
 
     func setReferencedAgentTiles(_ agentTileIds: [UUID]) {
+        invalidateTitleBarAccessory()
         let count = agentTileIds.count
-        referenceLabel.stringValue = count == 1 ? "1 reference" : "\(count) references"
+        referenceLabel.stringValue = count == 0 ? "" : (count == 1 ? "1 reference" : "\(count) references")
         referenceLabel.toolTip = count == 0 ? nil : "Referenced by \(count) agent\(count == 1 ? "" : "s")"
         referenceLabel.isHidden = count == 0
         guard count > 0 else {
@@ -387,16 +1141,32 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         promoteForIncomingFocus()
         if presentation == .markdown, let markdownSurface {
             markdownSurface.replaceDraft(loadedText)
-            let body = markdownSurface.activeBody
-            setContentView(body)
-            activeBody = body
+            let body: NSView
+            switch mode {
+            case .preview:
+                body = markdownSurface.previewBody()
+            case .edit:
+                configureCodeEditorIfNeeded()
+                body = codeEditor ?? scrollView
+            case .split:
+                configureCodeEditorIfNeeded()
+                markdownEditorSplit.isVertical = true
+                markdownEditorSplit.dividerStyle = .thin
+                markdownEditorSplit.subviews.forEach { $0.removeFromSuperview() }
+                let source = codeEditor ?? scrollView
+                let preview = markdownSurface.previewBody()
+                source.removeFromSuperview()
+                preview.removeFromSuperview()
+                markdownEditorSplit.addSubview(source)
+                markdownEditorSplit.addSubview(preview)
+                body = markdownEditorSplit
+            }
+            rebuildEditorShell(documentBody: body)
             markdownSurface.restorePresentationState()
             if mode != .preview { applyPendingReveal() }
         } else {
-            if textView.string != loadedText { textView.string = loadedText }
-            applyCodePresentation()
-            setContentView(scrollView)
-            activeBody = scrollView
+            configureCodeEditorIfNeeded()
+            rebuildEditorShell(documentBody: codeEditor ?? scrollView)
             applyPendingReveal()
         }
         bumpSurfaceEpoch()
@@ -419,6 +1189,10 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     private func applyPendingReveal() {
         guard let pendingReveal, !textView.string.isEmpty else { return }
         self.pendingReveal = nil
+        lastEditorRevealLine = pendingReveal.line
+        if let codeEditor, let filePath {
+            codeEditor.reveal(documentID: bridgeDocumentID, line: pendingReveal.line, column: pendingReveal.column)
+        }
         let text = textView.string as NSString
         var lineStart = 0
         var currentLine = 1
@@ -453,6 +1227,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     /// QA: the one-based line currently at the top of the visible source rect.
     func qaFirstVisibleSourceLine() -> Int? {
+        if let lastEditorRevealLine { return lastEditorRevealLine }
         guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return nil }
         layoutManager.ensureLayout(for: container)
         let visible = textView.visibleRect
@@ -478,6 +1253,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     var qaModeControl: NSSegmentedControl? { modeControl }
     var qaSourceLanguage: FilePreview.SourceLanguage { sourceLanguage }
     var qaHasLineNumbers: Bool { scrollView.rulersVisible && scrollView.verticalRulerView === lineNumberRuler }
+    var qaCodeEditorVisible: Bool {
+        guard let codeEditor, codeEditor.superview != nil else { return false }
+        layoutSubtreeIfNeeded()
+        return !codeEditor.isHidden && codeEditor.frame.width > 0 && codeEditor.frame.height > 0
+    }
     var qaExternalChangeMonitoringActive: Bool { externalChangeTimer?.isValid == true }
     var qaRecoveryURL: URL? { recoveryURL }
     func qaFlushRecoveryDraft() { flushRecoveryDraft() }
@@ -634,9 +1414,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
         if Self.shouldLoadAsynchronously(path: filePath) {
             textView.string = "Loading file..."
+            let generation = documentGeneration
             Task.detached { [filePath] in
                 let result = FilePreview.load(path: filePath)
-                await MainActor.run { [weak self] in self?.apply(result) }
+                await MainActor.run { [weak self] in
+                    guard let self, self.documentGeneration == generation else { return }
+                    self.apply(result)
+                }
             }
         } else {
             apply(FilePreview.load(path: filePath))
@@ -647,9 +1431,18 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         switch result {
         case let .text(content):
             let recovery = loadRecoveryDraft(forDiskText: content)
-            let initialText = recovery?.draftText ?? content
+            if let recovery {
+                _ = documentSession?.restoreRecovery(FileDocumentRecoverySnapshot(
+                    filePath: recovery.filePath,
+                    baselineText: recovery.baseText,
+                    draftText: recovery.draftText,
+                    updatedAt: recovery.updatedAt
+                ))
+            }
+            let initialText = documentSession?.draftText ?? recovery?.draftText ?? content
             loadedText = initialText
-            savedText = content
+            textView.string = initialText
+            savedText = documentSession?.baselineText ?? content
             loadedFileSignature = filePath.flatMap { Self.fileSignature(for: $0) }
             presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
             if presentation == .markdown {
@@ -660,7 +1453,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
                     sourceScrollView: scrollView,
                     initialDraft: initialText,
                     mode: mode,
-                    theme: { [weak self] in self?.effectiveTokenTheme ?? .dark }
+                    theme: { [weak self] in self?.editorTokenTheme ?? .dark }
                 )
                 installModeControl()
                 if recovery != nil {
@@ -674,12 +1467,45 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
                 }
             } else {
                 configureCodePresentation()
+                applyCodePresentation()
             }
+            configureCodeEditorIfNeeded()
             showBody()
             startExternalChangeMonitoring()
+            if let manager = languageServiceManager { connectLanguageServices(manager) }
         case let .unavailable(message):
-            loadedText = nil
-            showMessage(message)
+            if let recovery = readRecoveryDraft(), let session = documentSession,
+               session.restoreRecovery(FileDocumentRecoverySnapshot(
+                   filePath: recovery.filePath,
+                   baselineText: recovery.baseText,
+                   draftText: recovery.draftText,
+                   updatedAt: recovery.updatedAt
+               )) {
+                loadedText = recovery.draftText
+                savedText = recovery.baseText
+                textView.string = recovery.draftText
+                presentation = filePath.map { FilePreview.presentation(forPath: $0) } ?? .sourceText
+                if presentation == .markdown {
+                    configureMarkdownEditor()
+                    mode = tile.metadata.markdownDocumentMode ?? .preview
+                    markdownSurface = MarkdownDocumentSurface(
+                        textView: textView, sourceScrollView: scrollView,
+                        initialDraft: recovery.draftText, mode: mode,
+                        theme: { [weak self] in self?.editorTokenTheme ?? .dark }
+                    )
+                    installModeControl()
+                } else {
+                    configureCodePresentation()
+                    applyCodePresentation()
+                }
+                configureCodeEditorIfNeeded()
+                setDirty(true)
+                hasExternalConflict = true
+                showBody()
+            } else {
+                loadedText = nil
+                showMessage(message)
+            }
         }
     }
 
@@ -699,10 +1525,15 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
 
     @objc private func applyMarkdownCommand(_ sender: NSMenuItem) {
         guard let command = MarkdownEditingCommands.Command(rawValue: sender.tag) else { return }
-        MarkdownEditingCommands.apply(command, in: textView)
+        if let codeEditor {
+            if mode == .preview { setMode(.edit) }
+            codeEditor.runCommand(documentID: bridgeDocumentID, command: "markdown" + String(command.rawValue))
+        } else { MarkdownEditingCommands.apply(command, in: textView) }
     }
 
     private func configureCodePresentation() {
+        // Keep the lightweight native projection as a deterministic fallback
+        // and test witness while CodeMirror owns the visible editor surface.
         let ruler = CodeLineNumberRulerView(scrollView: scrollView, textView: textView)
         lineNumberRuler = ruler
         scrollView.verticalRulerView = ruler
@@ -714,7 +1545,269 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         label.textColor = TextToken.textSecondary.color.nsColor(in: self)
         label.setAccessibilityLabel("Language: \(sourceLanguage.rawValue)")
         languageLabel = label
-        setTitleBarAccessory(label)
+        rebuildTitleAccessory()
+    }
+
+    private func configureCodeEditorIfNeeded() {
+        guard let filePath,
+              let session = documentSession, let text = loadedText ?? session.draftText else { return }
+        let language = presentation == .markdown ? "markdown" : Self.codeMirrorLanguage(sourceLanguage)
+        if codeEditor?.activeDocumentID == bridgeDocumentID { return }
+        let editor = codeEditor ?? CodeEditorHostView(frame: .zero)
+        editor.onProcessTerminated = { [weak self, weak editor] in
+            guard let self, let editor, let filePath = self.filePath,
+                  let session = self.documentSession, let text = session.draftText else { return }
+            self.documentTransitionPending = false
+            self.documentGeneration = UUID()
+            editor.setPreferences(EditorPreferences(), isDark: self.editorTheme.isDark)
+            editor.loadDocument(
+                documentID: self.bridgeDocumentID, text: text,
+                language: self.presentation == .markdown ? "markdown" : Self.codeMirrorLanguage(self.sourceLanguage),
+                revision: session.revision
+            )
+        }
+        editor.onSaveRequest = { [weak self] in self?.saveFromEditor() }
+        editor.onVimModeChange = { [weak self] mode in
+            self?.vimModeLabel.stringValue = mode == "off" ? "" : mode.uppercased()
+            self?.vimModeLabel.setAccessibilityLabel("Vim " + mode)
+        }
+        editor.onDocumentChange = { [weak self] change in self?.applyEditorChange(change) }
+        editor.onViewStateChange = { [weak self] state in
+            guard let self else { return }
+            self.editorState.cursorLine = state.line
+            self.editorState.cursorColumn = state.column
+            self.editorState.verticalScrollOffset = state.scrollTop
+            self.editorState.horizontalScrollOffset = state.scrollLeft
+            self.editorStateSaveTimer?.invalidate()
+            self.editorStateSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.persistEditorState() }
+            }
+        }
+        editor.onBridgeError = { [weak self] error in self?.showSaveFailure(error.localizedDescription) }
+        codeEditor = editor
+        applyEditorPreferences()
+        editor.loadDocument(
+            documentID: self.bridgeDocumentID, text: text,
+            language: language, revision: session.revision
+        ) { [weak self, weak editor] result in
+            guard case .success = result, let self, let editor else { return }
+            editor.restoreViewState(
+                documentID: self.bridgeDocumentID,
+                state: CodeEditorViewState(
+                    line: self.editorState.cursorLine, column: self.editorState.cursorColumn,
+                    scrollTop: self.editorState.verticalScrollOffset,
+                    scrollLeft: self.editorState.horizontalScrollOffset
+                )
+            )
+        }
+    }
+
+    private func applyEditorChange(_ change: CodeEditorDocumentChange) {
+        guard change.documentID == bridgeDocumentID, let session = documentSession,
+              let current = session.draftText else { return }
+        let mutable = NSMutableString(string: Self.normalizedEditorText(current))
+        // CodeMirror changes are measured against the same pre-transaction
+        // document; apply from the end so earlier UTF-16 offsets stay valid.
+        for edit in change.changes.sorted(by: { $0.fromUTF16 > $1.fromUTF16 }) {
+            guard edit.fromUTF16 >= 0, edit.toUTF16 >= edit.fromUTF16,
+                  edit.toUTF16 <= mutable.length else {
+                codeEditor?.requestSnapshot(documentID: change.documentID) { [weak self] result in
+                    if case let .success(snapshot) = result { self?.replaceDraftFromEditor(snapshot) }
+                }
+                return
+            }
+            mutable.replaceCharacters(
+                in: NSRange(location: edit.fromUTF16, length: edit.toUTF16 - edit.fromUTF16),
+                with: edit.insertedText
+            )
+        }
+        switch session.updateDraft(nativeLineEndings(mutable as String), expectedRevision: change.baseRevision) {
+        case .updated:
+            loadedText = session.draftText
+            if let draft = session.draftText {
+                textView.string = draft
+                markdownSurface?.draftDidChange(draft)
+            }
+            setDirty(session.isDirty)
+            scheduleRecoveryDraftSave()
+            if let filePath, let draft = session.draftText {
+                onLanguageDocumentChange?(URL(fileURLWithPath: filePath), draft, session.revision)
+            }
+        case .stale:
+            codeEditor?.requestSnapshot(documentID: change.documentID) { [weak self] result in
+                if case let .success(snapshot) = result { self?.replaceDraftFromEditor(snapshot) }
+            }
+        }
+    }
+
+    private func replaceDraftFromEditor(_ snapshot: CodeEditorSnapshot) {
+        guard snapshot.documentID == bridgeDocumentID, let session = documentSession else { return }
+        _ = session.synchronizeDraft(nativeLineEndings(snapshot.text), revision: snapshot.revision)
+        loadedText = session.draftText
+        textView.string = session.draftText ?? snapshot.text
+        markdownSurface?.draftDidChange(session.draftText ?? snapshot.text)
+        if let filePath, let text = session.draftText {
+            onLanguageDocumentChange?(URL(fileURLWithPath: filePath), text, session.revision)
+        }
+        setDirty(session.isDirty)
+        scheduleRecoveryDraftSave()
+    }
+
+    private static func normalizedEditorText(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private func nativeLineEndings(_ text: String) -> String {
+        let normalized = Self.normalizedEditorText(text)
+        let baseline = documentSession?.baselineText ?? ""
+        if baseline.contains("\r\n") { return normalized.replacingOccurrences(of: "\n", with: "\r\n") }
+        if baseline.contains("\r") && !baseline.contains("\n") { return normalized.replacingOccurrences(of: "\n", with: "\r") }
+        return normalized
+    }
+
+    private static func codeMirrorLanguage(_ language: FilePreview.SourceLanguage) -> String {
+        switch language {
+        case .javascript: return "javascript"
+        case .typescript: return "typescript"
+        case .html: return "html"
+        case .css: return "css"
+        case .go: return "go"
+        case .rust: return "rust"
+        case .c: return "cpp"
+        case .csharp: return "csharp"
+        case .python: return "python"
+        case .swift: return "swift"
+        case .json: return "json"
+        case .shell: return "shell"
+        case .plainText: return "plaintext"
+        }
+    }
+
+    func connectLanguageServices(_ manager: EditorLanguageServiceManager) {
+        languageServiceManager = manager
+        guard let filePath,
+              let rootPath = tile.metadata.documentLocation?.checkoutRootPath,
+              let text = documentSession?.draftText else { return }
+        languageServiceManager = manager
+        let fileURL = URL(fileURLWithPath: filePath)
+        let identity = bridgeDocumentID
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        onLanguageDocumentChange = { [weak manager] url, text, revision in
+            manager?.change(fileURL: url, projectRoot: rootURL, text: text, version: revision)
+        }
+        onLanguageDocumentSave = { [weak manager] url in
+            manager?.save(fileURL: url, projectRoot: rootURL)
+        }
+        onLanguageDocumentClose = { [weak manager] url in
+            manager?.close(fileURL: url, projectRoot: rootURL)
+        }
+        manager.open(
+            fileURL: fileURL,
+            projectRoot: rootURL,
+            text: text,
+            version: documentSession?.revision ?? 0,
+            status: { [weak self] status in
+                guard let self, self.bridgeDocumentID == identity else { return }
+                self.showLanguageServiceStatus(status)
+            },
+            diagnostics: { [weak self] diagnostics in
+                guard let self, self.bridgeDocumentID == identity, let editor = self.codeEditor, self.filePath != nil,
+                      let session = self.documentSession else { return }
+                editor.setDiagnostics(
+                    documentID: self.bridgeDocumentID,
+                    revision: session.revision,
+                    diagnostics: diagnostics.compactMap { value in
+                        guard let range = self.utf16Range(value.range) else { return nil }
+                        let severity: CodeEditorDiagnostic.Severity
+                        switch value.severity {
+                        case 1: severity = .error
+                        case 2: severity = .warning
+                        case 3: severity = .info
+                        default: severity = .hint
+                        }
+                        return CodeEditorDiagnostic(fromUTF16: range.location, toUTF16: range.location + range.length, severity: severity, message: value.message)
+                    }
+                )
+            }
+        )
+        codeEditor?.onCompletionRequest = { [weak manager] request in
+            guard let manager else { return }
+            Task {
+                let items = await manager.completion(
+                    fileURL: fileURL, projectRoot: rootURL,
+                    position: LSPPosition(line: request.line, character: request.columnUTF16)
+                )
+                await MainActor.run { [weak self] in
+                    guard let self, self.bridgeDocumentID == identity,
+                          self.documentSession?.revision == request.revision else { return }
+                    self.codeEditor?.provideCompletions(
+                        documentID: request.documentID,
+                        requestID: request.requestID,
+                        items: items.map { CodeEditorCompletionItem(label: $0.label, detail: $0.detail, insertText: $0.insertText, kind: nil) },
+                        isIncomplete: false
+                    )
+                }
+            }
+        }
+        codeEditor?.onHoverRequest = { [weak self, weak manager] request in
+            guard let manager else { return }
+            Task {
+                let text = await manager.hover(
+                    fileURL: fileURL, projectRoot: rootURL,
+                    position: LSPPosition(line: request.line, character: request.columnUTF16)
+                )
+                await MainActor.run { [weak self] in
+                    guard let self, self.bridgeDocumentID == identity,
+                          self.documentSession?.revision == request.revision else { return }
+                    self.codeEditor?.provideHover(
+                        documentID: request.documentID,
+                        requestID: request.requestID,
+                        text: text
+                    )
+                }
+            }
+        }
+        codeEditor?.onDefinitionRequest = { [weak self, weak manager] request in
+            guard let manager else { return }
+            Task {
+                let locations = await manager.definition(
+                    fileURL: fileURL, projectRoot: rootURL,
+                    position: LSPPosition(line: request.line, character: request.columnUTF16)
+                )
+                guard let first = locations.first, let url = URL(string: first.uri), url.isFileURL else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.bridgeDocumentID == identity,
+                          self.documentSession?.revision == request.revision else { return }
+                    self.navigateDocument(url, disposition: .replaceCurrent)
+                }
+            }
+        }
+    }
+
+    private func utf16Range(_ range: LSPRange) -> NSRange? {
+        guard let text = documentSession?.draftText else { return nil }
+        func offset(_ position: LSPPosition) -> Int? {
+            let ns = Self.normalizedEditorText(text) as NSString
+            var start = 0
+            for _ in 0..<position.line {
+                let hit = ns.range(of: "\n", options: [], range: NSRange(location: start, length: ns.length - start))
+                guard hit.location != NSNotFound else { return nil }
+                start = hit.location + hit.length
+            }
+            return min(ns.length, start + max(0, position.character))
+        }
+        guard let lower = offset(range.start), let upper = offset(range.end), upper >= lower else { return nil }
+        return NSRange(location: lower, length: upper - lower)
+    }
+
+    private func showLanguageServiceStatus(_ status: EditorLanguageServiceManager.Status) {
+        switch status {
+        case .unavailable: languageLabel?.toolTip = "No language service available"
+        case let .installing(name): languageLabel?.toolTip = "Installing \(name)…"
+        case let .starting(name): languageLabel?.toolTip = "Starting \(name)…"
+        case let .ready(name): languageLabel?.toolTip = "\(name) ready"
+        case let .failed(message): languageLabel?.toolTip = "Language service unavailable: \(message)"
+        }
     }
 
     private func applyCodePresentation() {
@@ -774,23 +1867,27 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         }
     }
 
-    private func flushRecoveryDraft() {
+    @discardableResult
+    private func flushRecoveryDraft() -> Bool {
         recoverySaveTimer?.invalidate()
         recoverySaveTimer = nil
-        guard presentation == .markdown, isDirty,
-              let recoveryURL, let filePath, let savedText else { return }
+        guard isDirty, let recoveryURL, let filePath,
+              let baseline = documentSession?.baselineText ?? savedText,
+              let draft = documentSession?.draftText ?? loadedText else { return !isDirty }
         let record = RecoveryDraft(
             filePath: filePath,
-            baseText: savedText,
-            draftText: textView.string,
+            baseText: baseline,
+            draftText: draft,
             updatedAt: Date()
         )
         do {
             try AtomicWriter(backupsDirectory: nil, retainedBackups: 0).write(record, to: recoveryURL)
+            return true
         } catch {
             let message = "Could not protect the unsaved draft: \(error.localizedDescription)"
             showSaveFailure(message)
             onSaveFailure?(message)
+            return false
         }
     }
 
@@ -801,16 +1898,21 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
     }
 
     private func loadRecoveryDraft(forDiskText diskText: String) -> RecoveryDraft? {
+        guard let record = readRecoveryDraft() else { return nil }
+        if record.draftText == diskText {
+            discardRecoveryDraft()
+            return nil
+        }
+        return record
+    }
+
+    private func readRecoveryDraft() -> RecoveryDraft? {
         guard let recoveryURL, let filePath,
               let record: RecoveryDraft = try? AtomicWriter(
                 backupsDirectory: nil,
                 retainedBackups: 0
               ).read(at: recoveryURL),
               record.filePath == filePath else { return nil }
-        if record.draftText == diskText {
-            discardRecoveryDraft()
-            return nil
-        }
         return record
     }
 
@@ -854,6 +1956,16 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
         return false
     }
 
+    private static func unavailableMessage(_ reason: FileDocumentUnavailableReason) -> String {
+        switch reason {
+        case .missing: return "The file no longer exists. Your draft was preserved."
+        case .notRegularFile: return "The path is no longer a regular file."
+        case let .tooLarge(maxBytes): return "The file is larger than \(maxBytes / 1_024) KB."
+        case .unsupportedEncoding: return "The file is binary or is not UTF-8."
+        case let .unreadable(message): return "The file could not be read: \(message)"
+        }
+    }
+
     nonisolated private static func fileSignature(for path: String) -> FileSignature? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
         return FileSignature(
@@ -862,4 +1974,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate {
             fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
         )
     }
+}
+
+extension Notification.Name {
+    static let arrayProjectFileMoved = Notification.Name("ArrayProjectFileMoved")
+    static let arrayProjectFileTrashed = Notification.Name("ArrayProjectFileTrashed")
 }

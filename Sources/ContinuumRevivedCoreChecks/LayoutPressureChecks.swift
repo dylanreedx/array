@@ -132,5 +132,102 @@ func runLayoutPressureChecks() {
         let released = MagneticPlacement.resolve(free: free, neighbors: [neighbor], previous: held.target, gap: 16, zoom: zoom)
         expect(released.target == nil && released.frame == free, "magnet breaks away without changing raw pointer")
     }
+    // A held suggestion is a safe destination, even when the raw pointer crosses
+    // into the docked tile. Attraction must not display an overlapping tile.
+    for zoom in [0.25, 0.5, 1.0, 2.0] {
+        let n = MagneticPlacement.Neighbor(id: ids[1], frame: TileFrame(x: 500, y: 500, width: 400, height: 400))
+        for start in [TileFrame(x: 384, y: 600, width: 100, height: 100),
+                      TileFrame(x: 916, y: 600, width: 100, height: 100),
+                      TileFrame(x: 600, y: 384, width: 100, height: 100),
+                      TileFrame(x: 600, y: 916, width: 100, height: 100)] {
+            let acquired = MagneticPlacement.resolve(free: start, neighbors: [n], previous: nil, gap: 16, zoom: zoom)
+            var penetrating = start
+            if start.x == 384 { penetrating.x += 40 / zoom }
+            if start.x == 916 { penetrating.x -= 40 / zoom }
+            if start.y == 384 { penetrating.y += 40 / zoom }
+            if start.y == 916 { penetrating.y -= 40 / zoom }
+            let held = MagneticPlacement.resolve(free: penetrating, neighbors: [n], previous: acquired.target, gap: 16, zoom: zoom)
+            expect(held.target != nil, "penetrating pointer retains nearby dock")
+            let f = held.frame
+            expect(f.x + f.width + 16 <= n.frame.x || n.frame.x + n.frame.width + 16 <= f.x ||
+                   f.y + f.height + 16 <= n.frame.y || n.frame.y + n.frame.height + 16 <= f.y,
+                   "displayed magnetic tile must preserve dock gap on every side and zoom")
+        }
+    }
+    let dock = MagneticPlacement.Neighbor(id: ids[1], frame: TileFrame(x: 500, y: 200, width: 200, height: 200))
+    let blockedFree = TileFrame(x: 384, y: 200, width: 100, height: 100)
+    let blockedHeld = MagneticPlacement.resolve(free: blockedFree, neighbors: [dock], previous: nil, gap: 16, zoom: 1)
+    let blocker = MagneticPlacement.Neighbor(id: ids[2], frame: blockedFree)
+    let obstructed = MagneticPlacement.resolve(free: blockedFree, neighbors: [dock, blocker], previous: blockedHeld.target, gap: 16, zoom: 1)
+    expect(obstructed.target != nil && obstructed.target?.frame != blockedHeld.target?.frame,
+           "an occupied suggestion must switch to a different clear slot")
+    // Crossing an occupied cluster can put every legal edge farther than the
+    // ordinary 44-point acquisition radius. The preview must switch to the
+    // nearest clear escape slot instead of disappearing mid-gesture.
+    let crossingLeft = MagneticPlacement.Neighbor(id: UUID(), frame: TileFrame(x: 500, y: 200, width: 200, height: 200))
+    let crossingRight = MagneticPlacement.Neighbor(id: UUID(), frame: TileFrame(x: 716, y: 200, width: 200, height: 200))
+    let fromRight = MagneticPlacement.resolve(
+        free: TileFrame(x: 760, y: 200, width: 200, height: 200),
+        neighbors: [crossingLeft, crossingRight], previous: nil, gap: 16, zoom: 1)
+    expect(fromRight.target != nil && fromRight.target!.frame.x == 932,
+           "overlap on the cluster right must preview the nearest clear escape slot")
+    let crossedLeft = MagneticPlacement.resolve(
+        free: TileFrame(x: 450, y: 200, width: 200, height: 200),
+        neighbors: [crossingLeft, crossingRight], previous: fromRight.target, gap: 16, zoom: 1)
+    expect(crossedLeft.target != nil && crossedLeft.target!.frame.x == 284,
+           "crossing through the cluster must switch directly to its clear left slot")
+    // Measure fresh target acquisition, including crossing occupied cells.
+    for count in [128, 512, 1024] {
+        let neighbors = (0..<count).map { index in
+            MagneticPlacement.Neighbor(id: UUID(), frame: TileFrame(
+                x: Double(index % 32) * 216, y: Double(index / 32) * 216,
+                width: 200, height: 200))
+        }
+        var samples: [Double] = []
+        for step in 0..<80 {
+            let free = TileFrame(x: Double(step % 32) * 216 + 70,
+                                 y: Double((step / 32) % 4) * 216 + 25,
+                                 width: 180, height: 150)
+            let start = ProcessInfo.processInfo.systemUptime
+            let result = MagneticPlacement.resolve(free: free, neighbors: neighbors,
+                previous: nil, gap: 16, zoom: 0.5)
+            samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+            let reversed = MagneticPlacement.resolve(free: free, neighbors: neighbors.reversed(),
+                previous: nil, gap: 16, zoom: 0.5)
+            expect(result.target == reversed.target && result.frame == reversed.frame,
+                   "snap selection is deterministic regardless of neighbor enumeration")
+            if let target = result.target {
+                expect(neighbors.allSatisfy { n in
+                    target.frame.x + target.frame.width + 16 <= n.frame.x + 0.000001 ||
+                    n.frame.x + n.frame.width + 16 <= target.frame.x + 0.000001 ||
+                    target.frame.y + target.frame.height + 16 <= n.frame.y + 0.000001 ||
+                    n.frame.y + n.frame.height + 16 <= target.frame.y + 0.000001
+                }, "many-tile suggestions preserve clearance")
+            }
+        }
+        samples.sort()
+        print("Magnetic acquisition \(count) tiles: p95 \(samples[76]) ms")
+    }
+    // A pinned drop touching a populated grid must not search placements for
+    // all the residents that already have zero-cost gap contact.
+    let gridZone = ZonePlacement(zoneId: zoneId, projectId: nil,
+        origin: ZonePoint(x: 100, y: 100), size: ZoneSize(width: 5400, height: 2200),
+        color: "teal", collapsed: false, hydrationPolicy: .automatic)
+    var gridTiles = (0..<128).map { index in
+        CanvasAutoLayoutEngine.LayoutTile(id: UUID(), frame: TileFrame(
+            x: 124 + Double(index % 16) * 328, y: 158 + Double(index / 16) * 228,
+            width: 320, height: 220), zoneId: zoneId)
+    }
+    gridTiles[0].frame.y = 1982
+    let gridScene = CanvasAutoLayoutEngine.Scene(tiles: gridTiles, zones: [gridZone])
+    let settleStart = ProcessInfo.processInfo.systemUptime
+    let gridDrop = CanvasAutoLayoutEngine.solve(scene: gridScene,
+        mutation: .settle(zoneId: zoneId, anchor: gridTiles[0].id, pin: true),
+        gap: 8, zonePadding: 16, headerHeight: 32)
+    let settleMs = (ProcessInfo.processInfo.systemUptime - settleStart) * 1000
+    print("Connected 128-tile drop settle: \(settleMs) ms")
+    expect(gridDrop.tileFrames.isEmpty && gridDrop.zonePlacements.isEmpty,
+           "settling an already connected grid preserves every tile and the pinned drop")
+    expect(settleMs < 250, "connected 128-tile settling must avoid a main-thread stall (250 ms generous debug ceiling)")
     print("layout pressure checks passed")
 }

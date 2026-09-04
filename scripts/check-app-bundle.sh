@@ -182,6 +182,21 @@ if ! cmp -s "$SPAWN_AGENT_EXTENSION_SOURCE" "$SPAWN_AGENT_EXTENSION_BUNDLED"; th
   exit 1
 fi
 
+# The app target's SwiftPM resource bundle owns the fully local CodeMirror
+# surface. Verify the executable page and generated assets all reached the
+# signed app; loading any of these from the network is intentionally forbidden.
+APP_RESOURCE_BUNDLE_PATH="$RESOURCES/continuum-revived_ContinuumRevived.bundle"
+CODE_EDITOR_SOURCE="$ROOT_DIR/Sources/ContinuumRevived/Resources/CodeEditor"
+CODE_EDITOR_BUNDLED="$APP_RESOURCE_BUNDLE_PATH/CodeEditor"
+for editor_resource in index.html editor.js editor.css ASSET_VERSION LICENSE.txt VIM-LICENSE.txt; do
+  [[ -f "$CODE_EDITOR_BUNDLED/$editor_resource" ]] \
+    || { echo "FAIL: missing bundled code editor resource $editor_resource" >&2; exit 1; }
+  if ! cmp -s "$CODE_EDITOR_SOURCE/$editor_resource" "$CODE_EDITOR_BUNDLED/$editor_resource"; then
+    echo "FAIL: bundled code editor resource differs from committed source: $editor_resource" >&2
+    exit 1
+  fi
+done
+
 # Sparkle (go-live Phase 2): feed keys in the plist, framework embedded with
 # its updater pieces, and the rpath that lets the bundled binary find it. The
 # launch probe below is the behavioral proof the rpath resolves.

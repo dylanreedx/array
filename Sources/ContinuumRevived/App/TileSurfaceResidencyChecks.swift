@@ -57,7 +57,8 @@ enum TileSurfaceResidencyChecks {
         init(
             tileCount: Int, turns: Int = 4,
             viewportSize: CGSize = CGSize(width: 1_600, height: 1_000),
-            tileSize: CGSize = CGSize(width: 420, height: 300)
+            tileSize: CGSize = CGSize(width: 420, height: 300),
+            hydrateAfterMount: Bool = false
         ) {
             canvas = CanvasNSView(
                 canvasState: CanvasState(
@@ -103,11 +104,20 @@ enum TileSurfaceResidencyChecks {
             for (index, tile) in built.enumerated() {
                 let threadId = "surface-residency-\(index)"
                 let view = ManagedAgentTileNSView(tile: tile, threadId: threadId)
-                view.renderRehydratedPreviousSession(Self.transcript(threadId: threadId, turns: turns))
+                if !hydrateAfterMount {
+                    view.renderRehydratedPreviousSession(Self.transcript(threadId: threadId, turns: turns))
+                }
                 agentViews[tile.id] = view
                 layer.tileViews[tile.id] = view
             }
             canvas.setZones([layer])
+            if hydrateAfterMount {
+                canvas.layoutSubtreeIfNeeded()
+                for (index, tile) in built.enumerated() {
+                    let threadId = "surface-residency-\(index)"
+                    agentViews[tile.id]?.renderRehydratedPreviousSession(Self.transcript(threadId: threadId, turns: turns))
+                }
+            }
 
             zoomGain = canvas.cameraDriver.tuning.scrollZoomGain
             commitGap = canvas.cameraDriver.tuning.minCommitInterval + 0.001
@@ -270,7 +280,7 @@ enum TileSurfaceResidencyChecks {
     /// Both images are redrawn into freshly created contexts of one fixed format
     /// first, so a difference in `bytesPerRow`, alpha layout or colour space cannot
     /// masquerade as a difference in content.
-    private static func meanChannelDifference(_ lhs: CGImage, _ rhs: CGImage) -> Double {
+    static func meanChannelDifference(_ lhs: CGImage, _ rhs: CGImage) -> Double {
         guard lhs.width == rhs.width, lhs.height == rhs.height,
               let a = normalizedBytes(lhs), let b = normalizedBytes(rhs),
               a.count == b.count, !a.isEmpty else { return .infinity }
@@ -304,6 +314,7 @@ enum TileSurfaceResidencyChecks {
     // MARK: - Run
 
     static func run() throws {
+        if CommandLine.arguments.contains("--bake-cost-only") { try checkBakeCost(); return }
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
         try checkQuietSurfacesAndLiveStaysNative()
@@ -1758,8 +1769,10 @@ enum TileSurfaceResidencyChecks {
                    "a mode switch on a surfaced file tile must promote before swapping the body")
         try expect(fileView.qaParkedBody == nil,
                    "the mode switch stranded the previous body in the park")
-        try expect(fileView.contentView !== nil && fileView.surfaceableBody === fileView.contentView,
-                   "after the swap the tracked body must be the installed content view")
+        try expect(fileView.contentView != nil && !(fileView.contentView is TileSurfaceHostView),
+                   "after the mode swap a live body must replace the cached presentation")
+        try expect(fileView.surfaceableBody == nil,
+                   "the source editor must remain excluded from preview caching")
 
         world.window.makeFirstResponder(nil)
     }
@@ -2509,7 +2522,10 @@ enum TileSurfaceResidencyChecks {
                 viewportSize: CGSize(
                     width: max(1_600, size.width * 3 + 200), height: max(1_000, size.height * 2 + 200)
                 ),
-                tileSize: size
+                tileSize: size,
+                // This measures an already-visible streamer. Hydrating before
+                // mounting leaves the large offscreen collection unmaterialized.
+                hydrateAfterMount: true
             )
             defer { world.teardown() }
             world.pump()
@@ -2552,10 +2568,31 @@ enum TileSurfaceResidencyChecks {
                     ))
                     view.qaTranscriptCollectionFixture?.flushPendingVisualUpdate()
                     target.layoutSubtreeIfNeeded()
+                    if view.surfaceResidency == .native,
+                       let document = view.qaTranscriptCollectionFixture?.qaScrollViewForChecks.documentView {
+                        document.prepareContent(in: document.visibleRect)
+                        document.layoutSubtreeIfNeeded()
+                    }
                     if let revision = view.currentSurfaceRevision {
                         store.bake(tileId: tileId, body: target, revision: revision)
                     }
                 }
+            }
+
+            // An offscreen window has no responsive-scrolling display cycle.
+            // Explicitly prepare the visible collection region before timing a
+            // stream; otherwise the large fixture can have rows but zero views.
+            for tile in tiles {
+                guard let list = try agent(tile.id).qaTranscriptCollectionFixture else {
+                    throw Failure(message: "bake cost: transcript fixture is missing")
+                }
+                list.jumpToLatest()
+                if let document = list.qaScrollViewForChecks.documentView {
+                    document.prepareContent(in: document.visibleRect)
+                    document.layoutSubtreeIfNeeded()
+                }
+                try expect(!list.qaVisibleAccessibilityText.isEmpty,
+                           "bake cost: visible transcript must materialize before timing")
             }
 
             // Warm. The first bake of a body pays for context creation, font and
@@ -2596,7 +2633,6 @@ enum TileSurfaceResidencyChecks {
                 throw Failure(message: "bake cost: the refresh path stored no surface")
             }
             let refreshDelta = meanChannelDifference(beforeRefresh, afterRefresh)
-
             // Now the state Option A lives in: the body parked outside the world
             // plane, reached through the PRODUCTION residency pass rather than by
             // moving views here. Production never bakes in this state — the pass bakes
@@ -2734,7 +2770,7 @@ enum TileSurfaceResidencyChecks {
             // arrived".
             print(String(format: "tile-surface-residency bake: PARKED PIXELS ARE NOT THE BODY'S — parked "
                          + "vs in-plane bake of the same body at the same content, mean channel difference "
-                         + "%.4f | parked refresh is FROZEN: rows %d -> %d, pixels unchanged (%.4f) | "
+                         + "%.4f | parked refresh: rows %d -> %d, pixel difference %.4f | "
                          + "transcript visibleRect in plane %@ vs parked %@ against a %.0fpt document. "
                          + "A surfaced body cannot be re-baked in place; see .plans/37 Step 0.",
                          parkedVsPlane, rowsBeforeParkedRefresh, rowsAfterParkedRefresh, parkedRefreshDelta,

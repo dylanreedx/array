@@ -16,6 +16,7 @@ struct TileSurfaceRevision: Equatable {
     let contentVersion: UInt64
     let bodySize: CGSize
     let appearanceName: String
+    var accessoryVersion: UInt64 = 0
 }
 
 /// One tile's baked pixels plus the revision they represent.
@@ -197,7 +198,7 @@ final class TileSurfaceStore {
     /// cost is a few hundred pointer reads per bake rather than `colorAt`'s
     /// per-pixel object allocation. Any single differing byte answers "not
     /// uniform" and returns immediately, so a real tile costs almost nothing.
-    private static func isUniform(_ rep: NSBitmapImageRep) -> Bool {
+    static func isUniform(_ rep: NSBitmapImageRep) -> Bool {
         guard let data = rep.bitmapData else { return false }
         let width = rep.pixelsWide
         let height = rep.pixelsHigh
@@ -206,7 +207,6 @@ final class TileSurfaceStore {
         guard width > 0, height > 0, rowBytes > 0, sample >= 1 else { return false }
         let strideX = max(1, width / 24)
         let strideY = max(1, height / 24)
-        let first = data[0]
         var y = 0
         while y < height {
             var x = 0
@@ -214,7 +214,9 @@ final class TileSurfaceStore {
             while x < width {
                 let offset = row + x * sample
                 guard offset < rowBytes * height else { break }
-                if data[offset] != first { return false }
+                for channel in 0..<sample where offset + channel < rowBytes * height {
+                    if data[offset + channel] != data[channel] { return false }
+                }
                 x += strideX
             }
             y += strideY

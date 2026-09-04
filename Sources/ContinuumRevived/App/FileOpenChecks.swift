@@ -1437,10 +1437,15 @@ enum FileOpenChecks {
             view.qaInlineTextViews().first?.textStorage?
                 .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
         }
-        host.appearance = NSAppearance(named: .aqua)
+        let originalArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(originalArguments, forName: UserDefaults.argumentDomain) }
+        var editorArguments = originalArguments
+        editorArguments[EditorPreferences.appearanceKey] = EditorAppearance.light.rawValue
+        UserDefaults.standard.setVolatileDomain(editorArguments, forName: UserDefaults.argumentDomain)
         markdownTile.applyTokens()
         let lightColor = inlineColor(document)?.usingColorSpace(.sRGB)
-        host.appearance = NSAppearance(named: .darkAqua)
+        editorArguments[EditorPreferences.appearanceKey] = EditorAppearance.dark.rawValue
+        UserDefaults.standard.setVolatileDomain(editorArguments, forName: UserDefaults.argumentDomain)
         markdownTile.applyTokens()
         let darkColor = inlineColor(document)?.usingColorSpace(.sRGB)
         try expect(lightColor != nil && darkColor != nil && lightColor != darkColor,
@@ -1475,8 +1480,8 @@ enum FileOpenChecks {
         try expect(markdownTile.mode == .edit, "a real click on the mode control must switch the tile to Edit")
         try expect(markdownTile.textView.string == sentinelMarkdown,
                    "Edit must show the exact decoded Markdown")
-        try expect(markdownTile.hasVisibleTextLayout(containing: "# Sentinel Report"),
-                   "Edit must lay the raw Markdown out visibly")
+        try expect(markdownTile.qaCodeEditorVisible,
+                   "Edit must mount a visible CodeMirror surface")
         try expect(markdownTile.tile.id == identityBefore, "switching modes must not change tile identity")
         try expect(markdownTile.loadedText == loadedBefore, "switching modes must reuse the one loaded snapshot")
 
@@ -1529,10 +1534,8 @@ enum FileOpenChecks {
         try expect(swiftTile.qaHasLineNumbers, "a source tile must show a line-number gutter")
         try expect(swiftTile.qaSyntaxForegroundCount >= 2,
                    "a Swift source tile must render more than one syntax foreground")
-        let evidence = swiftTile.textVisibilityEvidence(containing: "let wide")
-        try expect(evidence.visibleLayoutOK, "a source tile must still lay text out visibly: \(evidence)")
-        try expect(evidence.longFileBehaviorOK,
-                   "a long source file must keep vertical AND horizontal scrolling: \(evidence)")
+        try expect(swiftTile.qaCodeEditorVisible,
+                   "a source tile must mount a visible CodeMirror surface")
         let agentEdit = "let agentChangedThis = true\n"
         try agentEdit.write(to: swiftURL, atomically: true, encoding: .utf8)
         swiftTile.refreshFromDisk()

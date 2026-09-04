@@ -640,6 +640,19 @@ public enum CanvasAutoLayoutEngine {
     ) {
         while !pending.isEmpty {
             let wave = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending
+            // memberIds (and therefore wave) retain stable UUID order. A
+            // valid existing contact costs zero: no candidate search can beat
+            // it. Check those contacts first, preserving the greedy tie-break,
+            // before generating placements for disconnected tiles.
+            if let touching = wave.first(where: { id in
+                guard let frame = result[id] else { return false }
+                return cluster.contains { isGapAdjacent(frame, $0, gap: gap, tolerance: 0.26) }
+                    && valid(frame, in: content, against: cluster, gap: gap - 0.26)
+            }) {
+                cluster.append(result[touching]!)
+                pending.removeAll { $0 == touching }
+                continue
+            }
             var best: (id: UUID, frame: TileFrame, cost: Double)?
             for id in wave {
                 guard let frame = result[id] else { continue }

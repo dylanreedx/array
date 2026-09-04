@@ -95,6 +95,8 @@ GHOSTTY_TERMINFO_SOURCE="$GHOSTTY_SHARE_SOURCE/terminfo"
 # exactly the shipped-but-not-bundled failure this ticket exists to end.
 CORE_RESOURCE_BUNDLE="continuum-revived_ContinuumRevivedCore.bundle"
 CORE_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$CORE_RESOURCE_BUNDLE"
+APP_RESOURCE_BUNDLE="continuum-revived_ContinuumRevived.bundle"
+APP_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$APP_RESOURCE_BUNDLE"
 
 [[ -x "$EXECUTABLE" ]] || { echo "built executable not found: $EXECUTABLE" >&2; exit 1; }
 [[ -f "$PLIST_SOURCE" ]] || { echo "Info.plist source not found: $PLIST_SOURCE" >&2; exit 1; }
@@ -103,6 +105,7 @@ CORE_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$CORE_RESOURCE_BUNDLE"
 [[ -f "$AGENT_SOUND_SOURCE/manifest.json" ]] || { echo "agent sound manifest not found" >&2; exit 1; }
 [[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
 [[ -d "$CORE_RESOURCE_BUNDLE_SOURCE" ]] || { echo "Core resource bundle not found: $CORE_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
+[[ -d "$APP_RESOURCE_BUNDLE_SOURCE" ]] || { echo "App resource bundle not found: $APP_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
 [[ -s "$GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" ]] || { echo "Ghostty terminfo not found: $GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" >&2; exit 1; }
 [[ -s "$GHOSTTY_RESOURCE_SOURCE/shell-integration/zsh/ghostty-integration" ]] || { echo "Ghostty shell integration not found: $GHOSTTY_RESOURCE_SOURCE/shell-integration" >&2; exit 1; }
 
@@ -113,6 +116,7 @@ chmod 0755 "$OUTPUT/Contents/MacOS/Array"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 ditto "$CORE_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CORE_RESOURCE_BUNDLE"
+ditto "$APP_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$APP_RESOURCE_BUNDLE"
 mkdir -p "$OUTPUT/Contents/Resources/BrandMarks"
 for mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
   [[ -f "$BRAND_MARK_SOURCE/$mark" ]] || { echo "brand mark not found: $mark" >&2; exit 1; }

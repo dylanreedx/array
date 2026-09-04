@@ -1,0 +1,37 @@
+:root { color-scheme: light; --editor-background: #fafbfc; --editor-text: #263244; --editor-muted: #69788c; --editor-surface: #f3f5f7; --editor-border: #e1e6ec; --editor-active: #edf0f5; --editor-selection: #ced9fa; --editor-accent: #4263eb; --editor-search: #f8e5a8; }
+:root[data-appearance="dark"] { color-scheme: dark; --editor-background: #171b22; --editor-text: #dce3ed; --editor-muted: #8996aa; --editor-surface: #1c212a; --editor-border: #303846; --editor-active: #212834; --editor-selection: #364665; --editor-accent: #91a7ff; --editor-search: #695827; }
+html, body, #editor { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--editor-background); }
+.cm-editor { height: 100%; color: var(--editor-text); background: var(--editor-background); }
+.cm-editor.cm-focused { outline: none; }
+.cm-scroller { overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cm-content { padding: 12px 0; caret-color: var(--editor-accent); }
+.cm-line { padding: 0 14px 0 8px; }
+.cm-gutters { background: var(--editor-background); color: var(--editor-muted); border-right: none; padding-left: 6px; }
+.cm-gutterElement { font-variant-numeric: tabular-nums; }
+.cm-lineNumbers .cm-gutterElement { padding: 0 8px; min-width: 24px; }
+.cm-foldGutter .cm-gutterElement { padding: 0 5px; opacity: .65; }
+.cm-activeLine, .cm-activeLineGutter { background: var(--editor-active); }
+.cm-activeLineGutter { color: var(--editor-text); }
+.cm-cursor, .cm-dropCursor { border-left-color: var(--editor-accent); }
+.cm-editor .cm-selectionBackground, .cm-editor.cm-focused .cm-selectionBackground, ::selection { background: var(--editor-selection); }
+.cm-searchMatch { background: var(--editor-search); border-radius: 2px; }
+.cm-searchMatch.cm-searchMatch-selected { outline: 1px solid var(--editor-accent); }
+.cm-selectionMatch { background: var(--editor-active); outline: 1px solid var(--editor-border); }
+.cm-editor .cm-matchingBracket { background: var(--editor-selection); outline: 1px solid var(--editor-border); }
+.cm-editor .cm-tooltip { color: var(--editor-text); background: var(--editor-surface); border: 1px solid var(--editor-border); border-radius: 6px; box-shadow: 0 6px 20px #0002; font: 12px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+.cm-editor .cm-tooltip-autocomplete ul li { padding: 4px 8px; }
+.cm-editor .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--editor-selection); color: var(--editor-text); }
+.cm-completionDetail { color: var(--editor-muted); }
+.cm-native-hover { max-width: 42rem; padding: 8px 10px; white-space: pre-wrap; }
+.cm-editor .cm-panels { background: var(--editor-surface); color: var(--editor-text); border-color: var(--editor-border); font: 12px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; }
+.cm-editor .cm-search { padding: 8px; }
+.cm-editor .cm-textfield, .cm-editor .cm-button { background: var(--editor-background); color: var(--editor-text); border: 1px solid var(--editor-border); border-radius: 4px; padding: 3px 7px; }
+.cm-editor .cm-textfield:focus { outline: 2px solid var(--editor-accent); outline-offset: -1px; }
+.cm-editor .cm-button { cursor: pointer; }
+.cm-editor .cm-button:hover { background: var(--editor-active); }
+.cm-editor .cm-panel.cm-search [name=close] { color: var(--editor-muted); }
+.cm-editor .cm-foldPlaceholder { background: var(--editor-surface); border-color: var(--editor-border); color: var(--editor-muted); border-radius: 4px; }
+.cm-editor .cm-diagnostic { border-bottom-color: var(--editor-border); padding: 6px 10px; }
+.cm-editor .cm-fat-cursor { background: var(--editor-accent); color: var(--editor-background); }
+.cm-editor:not(.cm-focused) .cm-fat-cursor { outline-color: var(--editor-accent); }
+.cm-editor .cm-vim-panel { background: var(--editor-surface); color: var(--editor-text); }

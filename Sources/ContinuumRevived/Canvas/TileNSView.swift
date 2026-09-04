@@ -45,6 +45,10 @@ class TileNSView: NSView, TokenThemed {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        if surfaceResidency == .surfaced,
+           abs(frame.width - newSize.width) > 0.0001 || abs(frame.height - newSize.height) > 0.0001 {
+            promoteBodyToNative()
+        }
         super.setFrameSize(newSize)
         invalidateWorldPlaneVisibilityIndex()
     }
@@ -101,9 +105,26 @@ class TileNSView: NSView, TokenThemed {
 
     var chromeSnapshot: ChromeSnapshot? { titleBar?.snapshot }
 
+    private var accessoryVersion: UInt64 = 0
+
+    func invalidateTitleBarAccessory() {
+        accessoryVersion &+= 1
+        promoteForIncomingFocus()
+    }
+
     func setTitleBarAccessory(_ accessory: NSView?) {
+        invalidateTitleBarAccessory()
         titleBar?.setAccessory(accessory)
     }
+
+    var surfacesTitleAccessory: Bool { false }
+
+
+    var qaAccessoryIsSurfaced: Bool { titleBar?.accessoryIsSurfaced ?? false }
+    var qaTitleAccessory: NSView? { titleBar?.nativeAccessory }
+    var qaDisplayedTitleAccessory: NSView? { titleBar?.displayedAccessory }
+    var surfaceAccessoryBytes: Int { titleBar?.surfaceAccessoryBytes ?? 0 }
+
 
     /// Managed agents have an entity-owned conversation name that may change
     /// after this tile was created. Present it without copying it into `Tile.title`,
@@ -252,7 +273,8 @@ class TileNSView: NSView, TokenThemed {
         return TileSurfaceRevision(
             contentVersion: version,
             bodySize: body.bounds.size,
-            appearanceName: body.effectiveAppearance.name.rawValue
+            appearanceName: body.effectiveAppearance.name.rawValue,
+            accessoryVersion: accessoryVersion
         )
     }
 
@@ -302,6 +324,7 @@ class TileNSView: NSView, TokenThemed {
         // `setContentView` unparents the outgoing body, so the park has to adopt it
         // immediately afterwards or it stops being laid out and stops streaming —
         // which is the entire property this design depends on.
+        if surfacesTitleAccessory { titleBar?.surfaceAccessory() }
         setContentView(host)
         let t2 = ProcessInfo.processInfo.systemUptime
         body.frame = CGRect(origin: .zero, size: bodySize)
@@ -330,6 +353,7 @@ class TileNSView: NSView, TokenThemed {
         // view and its uploaded texture alive for the next gesture.
         surfaceHost = nil
         surfaceResidency = .native
+        titleBar?.restoreAccessory()
     }
 
     /// Drop the retained host and its texture. For teardown and for a tile whose
@@ -395,7 +419,6 @@ class TileNSView: NSView, TokenThemed {
     private var dragSnapTarget: TileFrame?
 
     override var isFlipped: Bool { true }
-
     init(tile: Tile) {
         self.tile = tile
         self.agentStatus = nil
@@ -752,6 +775,13 @@ class TileNSView: NSView, TokenThemed {
             qaHitTestPromotionCount &+= 1
             promoteBodyToNative()
         }
+        // Keep the visible close glyph usable when the enlarged corner target
+        // overlaps it at low zoom. The outer resize edge still takes precedence.
+        let edge = resizeMarginInLocalCoordinates
+        if bounds.insetBy(dx: edge, dy: edge).contains(local),
+           qaCloseButtonFrame.contains(local), let titleBar {
+            return titleBar.hitTest(convert(local, to: titleBar))
+        }
         if bounds.contains(local), resizeEdge(at: local) != nil {
             return self
         }
@@ -778,7 +808,14 @@ class TileNSView: NSView, TokenThemed {
 
     override func mouseDown(with event: NSEvent) {
         mouseDraggedSinceDown = false
+        // A fresh pointer-down is an unconditional gesture boundary. Normally
+        // mouseUp/cancellation clears these, but an interrupted AppKit sequence
+        // must not make the next drag inherit a target or suppress its preview.
+        moveFreeWorldFrame = nil
         resizeFreeFrame = nil
+        magneticTarget = nil
+        dragSnapTarget = nil
+        canvas?.hideDragGhost()
         dragLastWindowPoint = event.locationInWindow
         // Cmd/Space camera gestures must win before stale selection/resize-ring
         // state classifies this press as a tile resize. Limit interception to tile
@@ -1157,6 +1194,61 @@ class TileNSView: NSView, TokenThemed {
     }
 }
 
+/// A plain image control avoids NSButton's bezel/layout machinery during camera
+/// scale changes. It retains button accessibility and release-inside activation.
+@MainActor
+private final class TileCloseControl: NSControl {
+    private let glyph = NSImageView(frame: .zero)
+    var image: NSImage? {
+        get { glyph.image }
+        set { glyph.image = newValue }
+    }
+    var contentTintColor: NSColor? {
+        get { glyph.contentTintColor }
+        set { glyph.contentTintColor = newValue }
+    }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        glyph.imageScaling = .scaleProportionallyDown
+        glyph.setAccessibilityElement(false)
+        addSubview(glyph)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        focusRingType = .exterior
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override var acceptsFirstResponder: Bool { isEnabled }
+    override func layout() {
+        super.layout()
+        if glyph.frame != bounds { glyph.frame = bounds }
+    }
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, let window else { return }
+        defer { alphaValue = 1 }
+        alphaValue = 0.6
+        while let next = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            let inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            alphaValue = inside ? 0.6 : 1
+            if next.type == .leftMouseUp {
+                if inside { _ = sendAction(action, to: target) }
+                return
+            }
+        }
+    }
+    override func keyDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        if event.keyCode == 36 || event.keyCode == 49 {
+            _ = sendAction(action, to: target)
+        } else { super.keyDown(with: event) }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        return sendAction(action, to: target)
+    }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { NSBezierPath(ovalIn: bounds).fill() }
+}
+
 /// Lightweight chrome view drawing the tile title, a drag-handle indicator,
 /// and a close button. Claims its own clicks (`hitTest` returns self for
 /// non-button areas) and forwards mouse events to its parent `TileNSView`,
@@ -1188,6 +1280,14 @@ private final class TitleBarView: NSView, TokenThemed {
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
     private var accessoryView: NSView?
+    private var retainedNativeAccessory: NSView?
+    var accessoryIsSurfaced: Bool { retainedNativeAccessory != nil }
+    var nativeAccessory: NSView? { retainedNativeAccessory ?? accessoryView }
+    var displayedAccessory: NSView? { accessoryView }
+    var surfaceAccessoryBytes: Int {
+        guard retainedNativeAccessory != nil, let host = accessoryView as? TileSurfaceHostView else { return 0 }
+        return host.surface.width * host.surface.height * 4
+    }
     private let providerMarkView = NSImageView(frame: .zero)
     private var displayTitleOverride: String?
     private var closeActionTitle = "Close tile"
@@ -1208,13 +1308,11 @@ private final class TitleBarView: NSView, TokenThemed {
         )
     }
 
-    private let closeButton: NSButton
+    private let closeButton: TileCloseControl
     /// Desired close-button edge length (world units) + glyph point size, set
     /// from the parent tile's `layout()` so the × holds a usable on-screen size
-    /// across zoom (see `applyCloseButtonSizing`). The button is framed manually
-    /// in `layout()` — NSButton's bezel imposes its own required height
-    /// constraint that fights an explicit height constraint, so manual framing
-    /// (matching the body's manual-layout idiom) is the deterministic path.
+    /// across zoom (see `applyCloseButtonSizing`). Manual framing keeps these
+    /// dimensions in world coordinates, like the tile body.
     private var closeButtonWorldSize: CGFloat = TileNSView.closeButtonSize
     private var closeGlyphPointSize: CGFloat = TileNSView.closeGlyphPointSize
     /// Trailing inset of the close button from the bar's right edge (world).
@@ -1223,17 +1321,13 @@ private final class TitleBarView: NSView, TokenThemed {
     init(tile: Tile, agentStatus: AgentStatus? = nil) {
         self.tile = tile
         self.agentStatus = agentStatus
-        let btn = NSButton()
+        let btn = TileCloseControl(frame: .zero)
         // Plain `xmark` (not `xmark.circle.fill`) is a monochrome SF symbol
         // that respects contentTintColor — the filled multicolor variant
         // renders red regardless of tint, which read as "alert" inside a
         // dark, dense canvas.
         btn.image = Self.closeGlyphImage(pointSize: TileNSView.closeGlyphPointSize)
-        btn.imageScaling = .scaleProportionallyDown
-        btn.isBordered = false
-        btn.bezelStyle = .smallSquare
         btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.setButtonType(.momentaryChange)
         self.closeButton = btn
 
         super.init(frame: .zero)
@@ -1284,7 +1378,7 @@ private final class TitleBarView: NSView, TokenThemed {
 
     /// Set the close button's edge length (world units) and glyph point size.
     /// Called from the tile's `layout()` so both track the current zoom; the
-    /// button is then framed in `layout()`. The glyph is only re-imaged when its
+    /// control is then framed in `layout()`. The glyph is only re-imaged when its
     /// size changes (rebuilding the NSImage is needless churn on identity layout).
     func applyCloseButtonSizing(buttonSize: CGFloat, glyphPointSize: CGFloat) {
         if closeButtonWorldSize != buttonSize {
@@ -1350,7 +1444,43 @@ private final class TitleBarView: NSView, TokenThemed {
         invalidateChrome()
     }
 
+    /// Quiet previews retain the toolbar's pixels as well as the document.
+    /// Native title controls otherwise relayout on every backing-scale change,
+    /// even with the body surfaced (128 file tiles cost ~108 ms per zoom step).
+    func surfaceAccessory() {
+        guard retainedNativeAccessory == nil, let native = accessoryView,
+              native.window != nil, native.bounds.width >= 1, native.bounds.height >= 1 else { return }
+        if let responder = window?.firstResponder as? NSView,
+           responder === native || responder.isDescendant(of: native) { return }
+        func isTracking(_ view: NSView) -> Bool {
+            if let control = view as? NSControl, control.cell?.isHighlighted == true { return true }
+            return view.subviews.contains(where: isTracking)
+        }
+        guard !isTracking(native) else { return }
+        native.layoutSubtreeIfNeeded()
+        guard let rep = native.bitmapImageRepForCachingDisplay(in: native.bounds) else { return }
+        native.cacheDisplay(in: native.bounds, to: rep)
+        guard let image = rep.cgImage, !TileSurfaceStore.isUniform(rep) else { return }
+        let host = TileSurfaceHostView(surface: image,
+            bakedScale: CGFloat(rep.pixelsWide) / native.bounds.width,
+            backingScale: window?.backingScaleFactor ?? 2)
+        let size = native.frame.size
+        host.frame = native.frame
+        host.widthAnchor.constraint(equalToConstant: size.width).isActive = true
+        setAccessory(host)
+        retainedNativeAccessory = native
+    }
+
+    func restoreAccessory() {
+        guard let native = retainedNativeAccessory else { return }
+        setAccessory(native)
+        // The bar's chrome floor may have moved while zooming. Hit testing must
+        // see the restored controls at today's position on the very first click.
+        layoutSubtreeIfNeeded()
+    }
+
     func setAccessory(_ accessory: NSView?) {
+        retainedNativeAccessory = nil
         accessoryView?.removeFromSuperview()
         accessoryView = accessory
         guard let accessory else { return }

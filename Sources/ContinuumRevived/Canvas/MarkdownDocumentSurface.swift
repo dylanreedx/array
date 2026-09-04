@@ -74,10 +74,18 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
     var activeBody: NSView { body(for: mode) }
     var currentDraft: String { draft }
 
-    func setMode(_ newMode: MarkdownDocumentMode) {
+    /// A rich repository editor can provide its own source view while reusing
+    /// this native preview. Notes continue to use `activeBody` unchanged.
+    func previewBody() -> NSView {
+        let value = preview()
+        renderDraft()
+        return value
+    }
+
+    func setMode(_ newMode: MarkdownDocumentMode, sourceDraft: String? = nil) {
         capturePresentationState()
         mode = newMode
-        draft = textView.string
+        draft = sourceDraft ?? textView.string
         if newMode != .edit { renderDraft() }
     }
 

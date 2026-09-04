@@ -106,13 +106,6 @@ MATRIX_KNOWN_RED=(
   # is Slice 5's semantic-zoom work. Published in
   # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
   --perf-budget-zoom-check
-  # The diagnosis behind the zoom leg above, published RED as its own product
-  # target: a camera gesture may cost each tile about one settling layout, never
-  # one per step. Its OTHER conditions are green and are the attribution — a
-  # bounds-origin step, a bounds-size step, and the whole production camera path
-  # minus the zoom branch all cost zero tile layouts. Goes green when the chrome
-  # floor stops changing on every zoom step.
-  --canvas-zoom-invalidation-probe-check
   # Zoom's complexity witness, publishing the one number the visible-only chrome
   # refresh could not move: durationSlope. The WORK slopes gate at zero — a zoom
   # step performs the same chrome refreshes and layout passes at 128 installed
@@ -139,11 +132,7 @@ MATRIX_KNOWN_RED=(
   # the gate red on any run that is not idle. It leaves this list when the
   # measurement has headroom, not when one run happens to land under.
   --perf-budget-gesture-transition-check
-  # This display-dependent speed tripwire is calibrated to ~2.9 ms/live tile,
-  # but the exact 0.5.7 release commit measures 4.86 ms and this candidate 5.04
-  # ms on the same host. All correctness assertions inside the leg stay green.
-  # Preserve the tripwire as an inherited RED; do not weaken or rebaseline it.
-  --tile-surface-residency-check
+
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.
@@ -347,6 +336,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # cannot prevent this contract from running.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -711,6 +702,7 @@ run_app_check .build/debug/Array --agent-stop-outcome-check
 # time. Before the repair, an open after an in-process workspace switch installed
 # into the departed zone's model and persisted through the boot project's store.
 run_app_check .build/debug/Array --file-open-active-context-check
+run_app_check .build/debug/Array --project-file-operation-check
 # T8 (.plans/48): the agent<->document connector painted at worldOrigin + W,
 # displaced by exactly the camera pan, because the overlay was handed raw
 # worldPlane frames while its own bounds origin stayed at zero. Runs at a
@@ -729,6 +721,8 @@ run_app_check .build/debug/Array --transcript-provider-parity-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check
+run_app_check .build/debug/Array --editor-web-bridge-check
+run_app_check .build/debug/Array --editor-navigation-check
 # A transcript file link resolves against its source checkout/zone, canonicalizes
 # to one tile, preserves line reveal, and records/draws multiple referring agents.
 run_app_check .build/debug/Array --agent-local-file-link-check
@@ -777,6 +771,7 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
+run_app_check .build/debug/Array --file-tile-zoom-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must

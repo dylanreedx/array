@@ -770,6 +770,11 @@ final class WorkspaceRuntime {
     /// any layer or controller is released. A failed write deliberately leaves
     /// the scene mounted so callers can surface the failure and retry or cancel.
     func flushMountedWorkspaceState() throws {
+        if let canvasView {
+            for tile in canvasView.allWorkspaceTiles() where tile.kind == .file {
+                try (canvasView.tileView(for: tile.id) as? FileTileNSView)?.captureForSceneTransition()
+            }
+        }
         let focus = departingFocusSnapshot(from: canvasView)
         flushAll()
         flushPendingArmingSave()
@@ -1189,8 +1194,10 @@ final class WorkspaceRuntime {
     }
 
     func removeDocumentLinks(agentId: AgentID? = nil, tileId: UUID? = nil) throws {
+        let previousLinks = document.documentLinks
         document.removeDocumentLinks(agentId: agentId, tileId: tileId)
-        try persistWorkspaceDocument()
+        do { try persistWorkspaceDocument() }
+        catch { document.documentLinks = previousLinks; throw error }
         refreshDocumentRelationships()
     }
 

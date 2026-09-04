@@ -184,13 +184,24 @@ final class CanvasWorldPlaneView: NSView {
         visibilityIndexIsDirty = true
     }
 
+    private(set) var fileTileViewCount = 0
+    var onFileTileCountChanged: (() -> Void)?
+
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
+        if subview is FileTileNSView {
+            fileTileViewCount += 1
+            onFileTileCountChanged?()
+        }
         invalidateVisibilityIndex()
     }
 
     override func willRemoveSubview(_ subview: NSView) {
         super.willRemoveSubview(subview)
+        if subview is FileTileNSView {
+            fileTileViewCount -= 1
+            onFileTileCountChanged?()
+        }
         invalidateVisibilityIndex()
     }
 

@@ -50,6 +50,16 @@ public enum SettingsSchema {
                 .choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Auto-Settle After", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption),
                 .agentSounds(label: "Sounds"),
             ]),
+            SettingsSection(id: "editor", title: "Editor", iconSystemName: "curlybraces", fields: [
+                .info(label: "Applies live to all Editor tiles. Editor appearance is independent of Array’s app theme."),
+                .choice(key: EditorPreferences.appearanceKey, label: "Appearance", options: EditorAppearance.allCases.map(\.rawValue), default: EditorAppearance.system.rawValue),
+                .text(key: EditorPreferences.fontFamilyKey, label: "Font Family", default: EditorPreferences.defaultFontFamily),
+                .number(key: EditorPreferences.fontSizeKey, label: "Font Size", range: EditorPreferences.fontSizeRange, default: EditorPreferences.defaultFontSize, unit: "pt", step: 1),
+                .number(key: EditorPreferences.lineHeightKey, label: "Line Height", range: EditorPreferences.lineHeightRange, default: EditorPreferences.defaultLineHeight, unit: "×", step: 0.1),
+                .toggle(key: EditorPreferences.lineNumbersKey, label: "Line Numbers", default: true),
+                .toggle(key: EditorPreferences.wordWrapKey, label: "Word Wrap", default: false),
+                .toggle(key: EditorPreferences.vimEnabledKey, label: "Vim Mode (All Editors)", default: false),
+            ]),
             SettingsSection(id: "terminal", title: "Terminal", iconSystemName: "terminal", fields: [
                 .toggle(key: TmuxPersistenceConfig.enabledKey, label: "Keep Shells Alive (tmux)", default: TmuxPersistenceConfig.defaultEnabled),
                 .text(key: TmuxPersistenceConfig.pathKey, label: "tmux Path", default: TmuxPersistenceConfig.defaultPath),
@@ -143,7 +153,7 @@ public enum SettingsSchema {
 private extension SettingsCategory {
     init(sectionID: String) {
         switch sectionID {
-        case "appearance": self = .appearance
+        case "appearance", "editor": self = .appearance
         case "canvasAndZones": self = .canvasAndZones
         case "navigation": self = .navigation
         case "keybindings": self = .keybindings

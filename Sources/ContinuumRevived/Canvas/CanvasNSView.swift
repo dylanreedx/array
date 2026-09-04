@@ -432,7 +432,7 @@ final class CanvasNSView: NSView, TokenThemed {
     var onLayoutCommitted: ((CanvasLayoutTransaction) -> Bool)?
 
     private func autoLayoutScene() -> CanvasAutoLayoutEngine.Scene {
-        var layoutTiles = canvasState.tiles.map {
+        var layoutTiles = (flatCompatibilitySceneActive ? canvasState.tiles : []).map {
             CanvasAutoLayoutEngine.LayoutTile(
                 id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id],
                 minimumSize: TileGeometry.minimumSize(for: $0.kind))
@@ -726,7 +726,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for staged in stagedLayerFrames {
             staged.layer.tiles[staged.tileIndex].frame = staged.frame
         }
-        layoutAllTiles()
+        layoutAllTiles(onlyChangedTiles: true)
 
         guard !autoLayoutReduceMotionProvider() else { return }
         let activeZoneMembers: Set<UUID> = activeZoneId.map { zoneId in
@@ -1235,6 +1235,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// environment after launch is not reliably visible through `ProcessInfo`. No
     /// production path assigns this; the check is the only caller.
     var surfaceResidencyEnabled: Bool = TileSurfaceResidencyConfig.enabled()
+    // Static native file previews use the existing freshness/focus/scroll gates.
+    // Other families remain behind their experimental opt-in, including editors.
+    var filePreviewResidencyEnabled = true
+    private var hasSurfaceResidency: Bool {
+        surfaceResidencyEnabled || (filePreviewResidencyEnabled && worldPlane.fileTileViewCount > 0)
+    }
 
     private(set) var qaSurfaceDemotionCount = 0
     private(set) var qaSurfacePromotionCount = 0
@@ -1305,6 +1311,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// require the two to agree — a maintained set that drifts from the tree is the
     /// bug this shape invites.
     private var surfacedTiles: [UUID: TileNSView] = [:]
+    var qaTotalSurfaceBytes: Int { totalSurfaceBytes }
+    private var totalSurfaceBytes: Int {
+        tileSurfaceStore.totalBytes + surfacedTiles.values.reduce(0) { $0 + $1.surfaceAccessoryBytes }
+    }
 
     /// Tile views currently rendering from a surface rather than their real body,
     /// read from the view tree.
@@ -1651,6 +1661,11 @@ final class CanvasNSView: NSView, TokenThemed {
         // every screen-fixed overlay added later with `positioned: .above` sits
         // above all world content without any further ordering work.
         worldPlane.frame = bounds
+        worldPlane.onFileTileCountChanged = { [weak self] in
+            guard let self else { return }
+            if self.hasSurfaceResidency { self.startResidencyEvaluation() }
+            else { self.stopResidencyEvaluation() }
+        }
         addSubview(worldPlane, positioned: .below, relativeTo: nil)
         // BELOW the plane, and installed before anything else can claim that
         // slot. Nothing is added `.below` the background afterwards except the
@@ -2753,7 +2768,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let baseline = autoLayoutGestureBaseline ?? autoLayoutScene()
         let previousTile: Tile
         let requestedWorldFrame: TileFrame
-        if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
+        if flatCompatibilitySceneActive, let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
             previousTile = canvasState.tiles[idx]
             canvasState.tiles[idx] = tile
             requestedWorldFrame = tile.frame
@@ -2774,7 +2789,7 @@ final class CanvasNSView: NSView, TokenThemed {
         } else if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
             growZoneToFitMembers(zoneId, notifyChange: false)
         }
-        if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutAllTiles() }
+        if !CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) { layoutAllTiles(onlyChangedTiles: true) }
         layoutZoneChromeViews()
         updateContextualAgentLineageGeometry()
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
@@ -2864,6 +2879,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// world frames directly; these two conversions keep the gesture's stored
     /// frame in its owner's coordinate system without hiding layered neighbors.
     func worldFrame(forTileFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+        if flatCompatibilitySceneActive, canvasState.tiles.contains(where: { $0.id == tileId }) { return frame }
         guard let placement = zoneLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
@@ -2871,6 +2887,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func tileFrame(fromWorldFrame frame: TileFrame, tileId: UUID) -> TileFrame {
+        if flatCompatibilitySceneActive, canvasState.tiles.contains(where: { $0.id == tileId }) { return frame }
         guard let placement = zoneLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
@@ -2886,8 +2903,10 @@ final class CanvasNSView: NSView, TokenThemed {
             label: label,
             detail: detail
         )
-        overlay.removeFromSuperview()
-        addSubview(overlay, positioned: .above, relativeTo: nil)
+        // Keep the same attached layer across pointer updates. Removing and
+        // re-adding it cancels/restarts Core Animation presentation state, which
+        // made the preview appear on alternating or later drag events.
+        overlay.layer?.zPosition = 1_000_000
     }
 
     func showDragGhost(atTileFrame frame: TileFrame, tileId: UUID) {
@@ -2911,6 +2930,8 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let overlay = dragGhostOverlay, !overlay.isHidden else { return nil }
         return overlay.frame
     }
+
+    var qaDragGhostAttachmentCount: Int { dragGhostOverlay?.attachmentCount ?? 0 }
 
     func showWorkspaceTransitionLabel(_ text: String, duration: TimeInterval = 1.2) {
         workspaceTransitionLabelView?.removeFromSuperview()
@@ -3843,7 +3864,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // Occluded is checked HERE, not only where the timer is armed: the guard
         // is what makes a stray fire or a direct call provably inert, and a
         // guard cannot be defeated by a path that forgot to stop the timer.
-        guard surfaceResidencyEnabled, window != nil, windowOcclusionVisible else { return }
+        guard hasSurfaceResidency, window != nil, windowOcclusionVisible else { return }
         qaResidencyEvaluationCount += 1
         // `TileNSView.hitTest` and `promoteForIncomingFocus` promote on their own, to
         // keep a click or a keystroke from reaching a picture. That leaves this set
@@ -3923,8 +3944,18 @@ final class CanvasNSView: NSView, TokenThemed {
             guard lhsVisible else { return false }
             return anchorDistance(lhs) < anchorDistance(rhs)
         }
+        let occurrenceCounts = Dictionary(grouping: ordered, by: { $0.tile.id }).mapValues(\.count)
         for tileView in ordered {
-            guard tileView.surfaceableBody != nil else { continue }
+            guard tileView.surfaceableBody != nil,
+                  surfaceResidencyEnabled || (filePreviewResidencyEnabled && tileView is FileTileNSView) else { continue }
+            // The surface store is keyed by tile ID. Two mounted occurrences of
+            // one record must never borrow each other's pixels or scroll state.
+            guard occurrenceCounts[tileView.tile.id] == 1 else {
+                tileView.promoteBodyToNative()
+                surfacedTiles.removeValue(forKey: tileView.tile.id)
+                tileSurfaceStore.drop(tileView.tile.id)
+                continue
+            }
             let tileId = tileView.tile.id
             var liveness = tileLiveness[tileId] ?? TileResidencyPolicy.Liveness()
 
@@ -4105,7 +4136,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// invisible.
     private func enforceSurfaceMemoryBudget() {
         let budget = residencySurfaceByteBudget
-        guard tileSurfaceStore.totalBytes > budget, !surfacedTiles.isEmpty else { return }
+        guard totalSurfaceBytes > budget, !surfacedTiles.isEmpty else { return }
         let centre = CGPoint(x: worldPlane.bounds.midX, y: worldPlane.bounds.midY)
         let ordered = surfacedTiles.sorted { lhs, rhs in
             func distance(_ view: TileNSView) -> CGFloat {
@@ -4115,7 +4146,7 @@ final class CanvasNSView: NSView, TokenThemed {
             return distance(lhs.value) > distance(rhs.value)
         }
         for (tileId, tileView) in ordered {
-            guard tileSurfaceStore.totalBytes > budget else { break }
+            guard totalSurfaceBytes > budget else { break }
             tileView.promoteBodyToNative()
             surfacedTiles.removeValue(forKey: tileId)
             tileView.discardRetainedSurfaceHost()
@@ -4165,7 +4196,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // Composed as a String first: `OSLogMessage` is built from one interpolated
         // literal and cannot be concatenated.
         let line = "surfaced \(surfaced) of \(eligibleViews.count) eligible tiles, "
-            + "\(tileSurfaceStore.totalBytes / 1_024) KB of surfaces"
+            + "\(totalSurfaceBytes / 1_024) KB of surfaces"
             + " | native by: [\(native)]"
             + " | promotions \(qaSurfacePromotionCount) demotions \(qaSurfaceDemotionCount)"
             + " | hitTest promotes \(hitTestPromotes), ax reads \(axReads)"
@@ -4220,7 +4251,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func bakeWouldFit(_ tileView: TileNSView, tileId: UUID, at scale: CGFloat) -> Bool {
         guard let body = tileView.surfaceableBody else { return false }
         let existing = tileSurfaceStore.surface(for: tileId)?.byteCount ?? 0
-        return tileSurfaceStore.totalBytes - existing
+        return totalSurfaceBytes - existing
             + Self.estimatedSurfaceBytes(of: body, scale: scale)
             <= residencySurfaceByteBudget
     }
@@ -4356,7 +4387,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `tileView.canvas` to be set on every install path, which `_installLayer`
     /// does not do.
     private func startResidencyEvaluation() {
-        guard surfaceResidencyEnabled, residencyTimer == nil, window != nil,
+        guard hasSurfaceResidency, residencyTimer == nil, window != nil,
               windowOcclusionVisible else { return }
         let timer = Timer(
             timeInterval: residencyTuning.evaluationInterval, repeats: true
@@ -4525,7 +4556,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Brief peripheral softness on moving content was chosen over the
     /// whole-canvas hitch (2026-08-19, `.plans/38`).
     private func enforceSurfaceSharpness() {
-        guard surfaceResidencyEnabled, !surfacedTiles.isEmpty else { return }
+        guard hasSurfaceResidency, !surfacedTiles.isEmpty else { return }
         // **The hold (Dylan's ruling, 2026-08-19).** While the camera is in flight,
         // nothing crosses: tiles may go progressively soft, and they converge ONCE at
         // the settle edge, which `cameraGestureDidSettle` already drives.
@@ -5365,14 +5396,34 @@ final class CanvasNSView: NSView, TokenThemed {
         )
     }
 
-    private func layoutAllTiles(invalidateTileDisplay: Bool = true) {
+    private func layoutAllTiles(invalidateTileDisplay: Bool = true, onlyChangedTiles: Bool = false) {
         layoutZoneChromeViews()
+        // Gesture transactions restore a complete baseline-relative scene, but
+        // only changed occurrences need AppKit layout or surface invalidation.
+        // Compare both model and world geometry: zone moves can change the latter
+        // without changing a member's local frame. Keep duplicate layer owners
+        // independent, and let non-gesture callers explicitly refresh all tiles.
+        func needsLayout(_ tile: Tile, view: TileNSView?, worldFrame: TileFrame, hidden: Bool) -> Bool {
+            guard onlyChangedTiles else { return true }
+            guard let view else { return false }
+            let rect = Self.worldRect(worldFrame)
+            return view.tile != tile || view.isHidden != hidden
+                || !Self.geometryNearlyEqual(view.frame.minX, rect.minX)
+                || !Self.geometryNearlyEqual(view.frame.minY, rect.minY)
+                || !Self.geometryNearlyEqual(view.frame.width, rect.width)
+                || !Self.geometryNearlyEqual(view.frame.height, rect.height)
+        }
         for tile in canvasState.tiles {
+            guard needsLayout(tile, view: tileViews[tile.id], worldFrame: tile.frame,
+                              hidden: membershipPlacement(of: tile.id)?.collapsed == true) else { continue }
             layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
         }
         // Lay out tiles for every installed ZoneLayer (T05).
         for layer in zoneLayers {
             for tile in layer.tiles {
+                guard needsLayout(tile, view: layer.tileViews[tile.id],
+                                  worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                                  hidden: layer.placement.collapsed) else { continue }
                 _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
             }
         }
@@ -8230,6 +8281,14 @@ final class CanvasNSView: NSView, TokenThemed {
         // Enabled pressure must relax from the same baseline on every event,
         // including an exact return to the starting width and zone bounds.
         layerCanvas.activateUndoWorkspace(UUID())
+        // Production retains the departed flat canvas after mounting ZoneLayers.
+        // Same-UUID stale world records must not become gesture owners.
+        layerCanvas.flatCompatibilitySceneActive = false
+        layerCanvas.canvasState.tiles = layer.tiles.map { tile in
+            var stale = tile
+            stale.frame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+            return stale
+        }
         let pressureBaseline = try layerWorldFrames()
         let pressureZoneBaseline = layer.placement
         let pressureCommits = layerCommits.count
@@ -12226,6 +12285,12 @@ private final class WorkspaceTransitionLabelView: NSView {
 /// mirrors `FocusBorderOverlayView`.
 final class DragGhostOverlayView: NSView {
     override var isFlipped: Bool { true }
+    private(set) var attachmentCount = 0
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if superview != nil { attachmentCount += 1 }
+    }
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
 
@@ -12293,7 +12358,10 @@ final class DragGhostOverlayView: NSView {
         }
     }
 
-    func hide() { isHidden = true }
+    func hide() {
+        layer?.removeAllAnimations()
+        isHidden = true
+    }
 }
 
 final class FocusBorderOverlayView: NSView {
@@ -12488,6 +12556,49 @@ final class ZoneChromeNSView: NSView {
 
     private var model: CanvasNSView.ZoneRenderModel
     private let headerHeight: CGFloat = 34
+    private let backgroundShape = CAShapeLayer()
+    private let outlineShape = CAShapeLayer()
+    private let headerDrawingView = HeaderDrawingView()
+
+    /// Only the 34-point header needs a raster backing. Keeping the entire
+    /// zone in draw(_:) replays a large translucent fill at every camera scale.
+    private final class HeaderDrawingView: NSView {
+        weak var owner: ZoneChromeNSView?
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func draw(_ dirtyRect: NSRect) { owner?.drawHeader() }
+    }
+
+    private func refreshChrome() {
+        needsLayout = true
+        headerDrawingView.needsDisplay = true
+        toolTip = model.qaVerdict?.tooltip
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let path = CGPath(roundedRect: rect, cornerWidth: 12, cornerHeight: 12, transform: nil)
+        let accent = Self.color(named: model.placement.color)
+        backgroundShape.frame = bounds
+        backgroundShape.path = path
+        backgroundShape.fillColor = accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).cgColor
+        outlineShape.frame = bounds
+        outlineShape.path = path
+        outlineShape.fillColor = nil
+        outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : 0.75).cgColor
+        outlineShape.lineWidth = isArmed ? 3 : 2
+        outlineShape.lineDashPattern = model.isProvisional ? [6, 4] : nil
+        if headerDrawingView.frame != headerRect { headerDrawingView.frame = headerRect }
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshChrome()
+    }
 
     /// Whether this is the zone new tiles will be created in. T5 (`.plans/47`).
     ///
@@ -12501,13 +12612,13 @@ final class ZoneChromeNSView: NSView {
     /// colour literal, no new `TokenThemed` surface for the ui-probe census to
     /// hunt, and a resting zone paints exactly what it painted before.
     var isArmed: Bool = false {
-        didSet { if isArmed != oldValue { needsDisplay = true } }
+        didSet { if isArmed != oldValue { refreshChrome() } }
     }
 
     /// Replace the render model (e.g. after a rename) and redraw the header.
     func update(model: CanvasNSView.ZoneRenderModel) {
         self.model = model
-        needsDisplay = true
+        refreshChrome()
     }
 
     var snapshot: Snapshot {
@@ -12537,28 +12648,29 @@ final class ZoneChromeNSView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
+        layer?.addSublayer(backgroundShape)
+        headerDrawingView.owner = self
+        headerDrawingView.wantsLayer = true
+        headerDrawingView.clipsToBounds = true
+        addSubview(headerDrawingView)
+        layer?.addSublayer(outlineShape)
+        refreshChrome()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+    private func drawHeader() {
         let accent = Self.color(named: model.placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
         let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
-        path.lineWidth = isArmed ? 3 : 2
 
-        // The body and header share one overflow boundary. Filling `zoneRect`
-        // and `headerRect` as bare rectangles paints square pixels through the
-        // rounded top corners; clip every interior draw to the rounded path, then
-        // restore and stroke the outline last so the header cannot paint over it.
+        // Match the vector body's rounded boundary so the header cannot
+        // paint square pixels through the top corners. The outline layer sits
+        // above this narrow drawing surface.
         NSGraphicsContext.saveGraphicsState()
         path.addClip()
-        accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).setFill()
-        zoneRect.fill()
-
         accent.withAlphaComponent(isArmed ? 0.38 : 0.24).setFill()
         headerRect.fill()
         let title = model.placement.collapsed ? "▸ \(model.displayName)" : model.displayName
@@ -12628,10 +12740,7 @@ final class ZoneChromeNSView: NSView {
             let badgeSize = (glyph as NSString).size(withAttributes: badgeAttributes)
             let badgeRect = CGRect(x: headerRect.maxX - badgeSize.width - 12 - closeSize - 6, y: 8, width: badgeSize.width, height: 16)
             glyph.draw(in: badgeRect, withAttributes: badgeAttributes)
-            toolTip = qaVerdict.tooltip
             rightInset += badgeSize.width + 10
-        } else {
-            toolTip = nil
         }
 
         if let rollup = model.agentStatusRollup.displayText {
@@ -12650,9 +12759,6 @@ final class ZoneChromeNSView: NSView {
         }
         NSGraphicsContext.restoreGraphicsState()
 
-        accent.withAlphaComponent(isArmed ? 1.0 : 0.75).setStroke()
-        if model.isProvisional { path.setLineDash([6, 4], count: 2, phase: 0) }
-        path.stroke()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
