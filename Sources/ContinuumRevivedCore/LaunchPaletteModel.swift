@@ -9,6 +9,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     /// in its own worktree.
     case fanOutQueueSelection
     case newNote
+    case newBoard
     case newBrowser
     case openFile
     case openFileTree
@@ -57,6 +58,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Fan Out Selected Tickets…"
         case .newNote:
             return "New Note"
+        case .newBoard:
+            return "New Board"
         case .newBrowser:
             return "New Browser"
         case .openFile:
@@ -124,6 +127,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["fan", "out", "fanout", "agents", "tickets", "queue", "selected", "batch"]
         case .newNote:
             return ["new", "note"]
+        case .newBoard:
+            return ["new", "board", "kanban", "tasks", "cards"]
         case .newBrowser:
             return ["new", "browser", "web"]
         case .openFile:
@@ -738,6 +743,7 @@ public enum LaunchPaletteModel {
         case .newHeadlessAgent: return item(row, .developer, "Background agent", "Run without a canvas tile", "bolt.horizontal", ["headless", "tileless"], false, false, "action:headless-agent")
         case .fanOutQueueSelection: return item(row, .developer, "Fan out selected tickets", "Start one agent per selected ticket", "arrow.triangle.branch", ["queue", "batch"], false, false, "action:fan-out")
         case .newNote: return item(row, .create, "Note", "Add a canvas note", "note.text", ["new"], true, true, "action:new-note")
+        case .newBoard: return item(row, .create, "Board", "Add a kanban board", "rectangle.split.3x1", ["new", "kanban"], true, true, "action:new-board")
         case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
         case .openFile: return item(row, .create, "Editor", "Open a project file to edit", "doc", ["open file", "text editor", "code editor"], true, true, "action:open-file")
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")

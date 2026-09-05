@@ -4443,6 +4443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.notePersistenceHandler = { [weak self] in
                 self?.scheduleNoteSave()
             }
+            spawner.boardRuntimeProvider = { [weak self] in
+                self?.workspaceRuntime?.activeController?.boardRuntime
+            }
             spawner.fileTreePersistenceHandler = { [weak self] in
                 self?.scheduleFileTreeSave()
             }
@@ -6160,6 +6163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ticketQueueViews.removeValue(forKey: id)
         case .conductorQueue:
             break
+        case .kanban:
+            // Closing a board tile is closing a WINDOW, not deleting the board —
+            // the same rule `case .managedAgent` states below. The document and
+            // its index row survive; only the tile pointer is cleared.
+            if let boardId = tile.metadata.boardId, let projectStore {
+                BoardRuntime.detachTile(id, boardId: boardId, in: projectStore)
+            }
         case .diffReview:
             if let reviewId = tile.metadata.reviewId,
                let projectStore {
@@ -6937,6 +6947,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let view = canvasView.tileView(for: tile.id) as? NoteTileNSView {
             noteViews[view.noteId] = view
         }
+    }
+
+    /// Boot-only, deliberately flat — the same tier as `installInitialNoteTile`.
+    /// A board with no `boardId`, or whose document is gone, installs nothing
+    /// rather than minting a replacement board: the boot walk already writes the
+    /// canvas as a side effect, and creating user data there would make a render
+    /// path a producer.
+    private func installInitialKanbanTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        guard let boardId = tile.metadata.boardId,
+              let controller = workspaceRuntime?.activeController,
+              let board = controller.boardRuntime.board(id: boardId) else { return }
+        let view = KanbanTileNSView(tile: tile, board: board)
+        controller.boardRuntime.attach(view, to: boardId)
+        canvasView.install(tileView: view, for: tile)
     }
 
     private func installInitialFileTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
@@ -13407,6 +13431,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let before = tileCount()
             spawnNoteFromPalette()
             return tileCount() > before
+        case .newBoard:
+            let before = tileCount()
+            spawnBoardFromPalette()
+            return tileCount() > before
         case .newBrowser:
             let before = tileCount()
             spawnBrowserDefault()
@@ -14618,6 +14646,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    @discardableResult
+    private func spawnBoardFromPalette() -> Bool {
+        // Same refusal shape as `spawnNoteFromPalette`: the signal is "no
+        // spawner", not "no scope", so a boot-only app with no WorkspaceRuntime
+        // still creates boards.
+        guard let spawner = spawnerForFilesystemCreation() else {
+            guard offerCreationScope(then: { [weak self] in self?.spawnBoardFromPalette() }) else {
+                presentSpawnRefusal("Add a project to this workspace before creating a board.")
+                return false
+            }
+            return false
+        }
+        switch spawner.spawnBoard(title: "New Board") {
+        case let .spawned(_, tileId):
+            focusSpawnedTile(tileId)
+            return true
+        case let .failure(error):
+            fputs("TileSpawner.spawnBoard failed: \(error)\n", stderr)
+            return false
+        }
+    }
+
     private func openFileFromPalette() {
         // M1.11: refuse audibly, and offer a way out, instead of returning into
         // silence when there is no active controller.
@@ -15287,6 +15337,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 installInitialTicketQueueTile(tile, in: canvasView)
             case .conductorQueue:
                 installInitialConductorQueueTile(tile, in: canvasView)
+            case .kanban:
+                installInitialKanbanTile(tile, in: canvasView)
             case .diffReview:
                 installInitialDiffReviewTile(tile, in: canvasView)
             case .runArtifacts:
@@ -15470,6 +15522,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .conductorQueue:
             return ConductorQueueTileNSView(tile: tile, projectRoot: controller.projectRoot)
 
+        case .kanban:
+            // Phase A: a board needs no runtime, only its persisted document.
+            // A tile whose board file is missing renders the placeholder rather
+            // than minting a replacement board — a render path must not create
+            // user data as a side effect.
+            guard let boardId = tile.metadata.boardId,
+                  let board = controller.boardRuntime.board(id: boardId) else { return nil }
+            let view = KanbanTileNSView(tile: tile, board: board)
+            controller.boardRuntime.attach(view, to: boardId)
+            return view
+
         case .diffReview:
             let view = DiffReviewTileNSView(
                 tile: tile,
@@ -15632,6 +15695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.browserPersistenceHandler = { [weak self] in self?.scheduleBrowserSave() }
         spawner.notePersistenceHandler = { [weak self] in self?.scheduleNoteSave() }
         spawner.fileTreePersistenceHandler = { [weak self] in self?.scheduleFileTreeSave() }
+        spawner.boardRuntimeProvider = { [weak self] in
+            self?.workspaceRuntime?.activeController?.boardRuntime
+        }
         configureFileOpenRoute(on: spawner)
         wireBrowserRuntimeRegistration(on: spawner)
     }

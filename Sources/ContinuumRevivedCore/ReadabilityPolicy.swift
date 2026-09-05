@@ -30,7 +30,7 @@ public enum ReadabilityPolicy {
             case .terminal:
                 if zoom < 0.85 { return .overviewLabelOnly }
                 return zoom < 0.95 ? .readableSummary : .editableDetail
-            case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent:
+            case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent, .kanban:
                 if zoom < 0.70 { return .overviewLabelOnly }
                 return zoom < 0.90 ? .readableSummary : .editableDetail
             }

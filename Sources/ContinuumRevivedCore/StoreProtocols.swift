@@ -42,6 +42,13 @@ public protocol ProjectStoring: Sendable {
     func tryLoadNoteBody(id: UUID) -> String?
     func deleteNoteBody(id: UUID) throws           // NEW — replaces layout.noteFile removal
 
+    // Boards (KB-01)
+    func saveBoardState(_ state: BoardState) throws
+    func tryLoadBoardState() throws -> BoardState?
+    func saveBoard(_ board: Board) throws
+    func tryLoadBoard(id: UUID) throws -> Board?
+    func deleteBoard(id: UUID) throws
+
     // Reviews
     func saveReviewCommentState(_ state: ReviewCommentState) throws
     func loadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState

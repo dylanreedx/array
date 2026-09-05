@@ -88,6 +88,7 @@ public enum CanvasSceneGlyph {
         case .diffReview: return "arrow.triangle.branch"
         case .runArtifacts: return "shippingbox"
         case .managedAgent: return "person.crop.square"
+        case .kanban: return "rectangle.split.3x1"
         }
     }
 }

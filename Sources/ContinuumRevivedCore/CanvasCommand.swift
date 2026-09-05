@@ -40,6 +40,7 @@ public enum CommandRegistry {
             // sibling of the ticket tile's own one-row dispatch.
             definition("agent.fanOut", .fanOutQueueSelection, aliases: ["batch agents", "tickets"]),
             definition("tile.newNote", .newNote, aliases: ["note"]),
+            definition("tile.newBoard", .newBoard, aliases: ["kanban", "board", "tasks"]),
             definition("tile.newBrowser", .newBrowser, aliases: ["web"]),
             definition("tile.openFile", .openFile, aliases: ["document"]),
             definition("tile.openFileTree", .openFileTree, aliases: ["directory", "folder"]),

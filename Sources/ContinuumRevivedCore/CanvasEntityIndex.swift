@@ -481,6 +481,10 @@ public extension CanvasEntityIndex {
         case .file: kind = .file
         case .browser, .browserInspector: kind = .browser
         case .runArtifacts: kind = .artifact("runArtifacts")
+        // KB-01/CX-01: the TILE is the spatial entity. Columns and cards have no
+        // world frame and deliberately never become canvas entities — their
+        // identity must not depend on an animated screen position.
+        case .kanban: kind = .artifact("board")
         default: kind = .tile
         }
         // Canonical identity policy: a visual tile is always registered under

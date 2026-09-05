@@ -18,6 +18,9 @@ final class ZoneRuntimeController {
     var browserRuntimes: [WKWebViewBrowserRuntime] = []
     var noteViews: [UUID: NoteTileNSView] = [:]
     var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
+    /// KB-01. This project's board authority. Lazy so a controller for a project
+    /// with no boards never touches the store.
+    lazy var boardRuntime: BoardRuntime = BoardRuntime(projectStore: projectStore)
 
     weak var canvasView: CanvasNSView?
     /// STRONG on purpose. `WorkspaceRuntime.install`/`switchWorkspace` build the

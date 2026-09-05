@@ -29,7 +29,7 @@ public enum CameraFraming {
         case .note: return 0.60
         case .browser, .browserInspector: return 0.70
         case .terminal: return 0.85
-        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent:
+        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent, .kanban:
             return 0.70
         }
     }
@@ -39,7 +39,7 @@ public enum CameraFraming {
         case .note: return 0.85
         case .browser, .browserInspector: return 0.90
         case .terminal: return 0.95
-        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent:
+        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts, .managedAgent, .kanban:
             return 0.90
         }
     }

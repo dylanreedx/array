@@ -48,6 +48,10 @@ final class TileSpawner {
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
     private let projectStore: any ProjectStoring
+    /// KB-01. Resolves this project's board authority. A closure rather than a
+    /// stored reference because `ZoneRuntimeController` owns both the spawner and
+    /// the runtime, and the spawner is rebuilt on workspace switches.
+    var boardRuntimeProvider: (() -> BoardRuntime?)?
     private let managedSessionStore: ManagedAgentSessionStore
     private let project: Project
     private let registry: LaunchProfileRegistry
@@ -758,6 +762,11 @@ final class TileSpawner {
 
     enum NoteOutcome {
         case spawned(noteId: UUID, tileId: UUID)
+        case failure(Error)
+    }
+
+    enum BoardOutcome {
+        case spawned(boardId: UUID, tileId: UUID)
         case failure(Error)
     }
 
@@ -2008,6 +2017,56 @@ final class TileSpawner {
             return .failure(error)
         }
         return .spawned(noteId: noteId, tileId: tileId)
+    }
+
+    /// KB-01. Spawns a board tile and its backing document.
+    ///
+    /// Follows the `.plans/47` contract exactly: ONE `targetZoneId`, used for all
+    /// four of `makeProjectTilePlacement`, the sibling set the placement dodges,
+    /// `zPositionAbove`, and `installProjectTile`. Framing against one zone while
+    /// installing into another is invisible until the two can differ — which is
+    /// now, because clicking, focusing, creating a zone and panning all re-point
+    /// the armed zone.
+    func spawnBoard(title: String, at worldPoint: CGPoint? = nil) -> BoardOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let runtime = boardRuntimeProvider?() else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        let boardId = UUID()
+        let tileId = UUID()
+        // The document FIRST. A tile whose board file was never written would
+        // hydrate to a placeholder forever, and the canvas write below is the
+        // harder one to undo.
+        guard let board = runtime.createBoard(id: boardId, title: title) else {
+            return .failure(SpawnError.canvasUnavailable)
+        }
+        let targetZoneId = creationScopeProvider?()?.zoneId
+        let frame = makeProjectTilePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .kanban),
+            in: canvasView,
+            targetZoneId: targetZoneId
+        )
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
+        let tile = Tile(
+            id: tileId,
+            kind: .kanban,
+            title: title,
+            frame: frame,
+            zPosition: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(boardId: boardId)
+        )
+        let view = KanbanTileNSView(tile: tile, board: board)
+        runtime.attach(view, to: boardId)
+        runtime.bindTile(tileId, to: boardId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        do {
+            try persistProjectCanvas(after: target, in: canvasView)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(boardId: boardId, tileId: tileId)
     }
 
     /// Installs a note tile view for an existing `Tile` (e.g. canvas restore).
@@ -4866,6 +4925,11 @@ final class TileSpawner {
             func loadFileTreeState() throws -> FileTreeState { try base.loadFileTreeState() }
             func tryLoadFileTreeState() throws -> FileTreeState? { try base.tryLoadFileTreeState() }
             func fileTreeStateFileExists() -> Bool { base.fileTreeStateFileExists() }
+            func saveBoardState(_ state: BoardState) throws { try base.saveBoardState(state) }
+            func tryLoadBoardState() throws -> BoardState? { try base.tryLoadBoardState() }
+            func saveBoard(_ board: Board) throws { try base.saveBoard(board) }
+            func tryLoadBoard(id: UUID) throws -> Board? { try base.tryLoadBoard(id: id) }
+            func deleteBoard(id: UUID) throws { try base.deleteBoard(id: id) }
             func saveNoteState(_ state: NoteState) throws { try base.saveNoteState(state) }
             func loadNoteState() throws -> NoteState { try base.loadNoteState() }
             func tryLoadNoteState() throws -> NoteState? { try base.tryLoadNoteState() }

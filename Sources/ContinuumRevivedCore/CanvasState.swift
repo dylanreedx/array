@@ -172,6 +172,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case diffReview
     case runArtifacts
     case managedAgent
+    case kanban
 
     /// Human label for chrome. `rawValue.capitalized` produced "Managedagent",
     /// "Filetree", "Browserinspector" — camelCase gets lowercased after the
@@ -189,6 +190,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
         case .diffReview: return "Diff"
         case .runArtifacts: return "Artifacts"
         case .managedAgent: return "Agent"
+        case .kanban: return "Board"
         }
     }
 }
@@ -296,6 +298,11 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var markdownDocumentMode: MarkdownDocumentMode?
     /// Optional so canvases written before the rich editor remain decodable.
     public var fileEditorViewState: FileEditorViewState?
+    /// KB-01. The ONLY board data a canvas carries. Columns and cards live in
+    /// `<project root>/.array/boards/<boardId>.json`, deliberately outside the
+    /// canvas: a card move must not race the canvas persistence merge nor land
+    /// on the geometry undo stack.
+    public var boardId: UUID?
 
     public init(
         launchProfileId: String? = nil,
@@ -319,7 +326,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         worktreeId: String? = nil,
         agentSoundOverrides: AgentSoundOverrides? = nil,
         markdownDocumentMode: MarkdownDocumentMode? = nil,
-        fileEditorViewState: FileEditorViewState? = nil
+        fileEditorViewState: FileEditorViewState? = nil,
+        boardId: UUID? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -343,6 +351,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.agentSoundOverrides = agentSoundOverrides
         self.markdownDocumentMode = markdownDocumentMode
         self.fileEditorViewState = fileEditorViewState
+        self.boardId = boardId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -368,6 +377,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case agentSoundOverrides
         case markdownDocumentMode
         case fileEditorViewState
+        case boardId
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -394,6 +404,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(agentSoundOverrides, forKey: .agentSoundOverrides)
         try container.encodeIfPresent(markdownDocumentMode, forKey: .markdownDocumentMode)
         try container.encodeIfPresent(fileEditorViewState, forKey: .fileEditorViewState)
+        try container.encodeIfPresent(boardId, forKey: .boardId)
     }
 }
 
