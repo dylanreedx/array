@@ -649,6 +649,16 @@ public struct PiEventTranslator {
         if let description = string("description") {
             fields.append((key: "description", value: description))
         }
+        // TR-03 — the delegation ROLE, on the same reasoning the claude
+        // translator already crosses `subagent_type` on: a role id is
+        // publishable (`RoleRegistry` reads them out of project files and the
+        // inbox already shows them). Without it a pi delegation row could say
+        // nothing at all but its own tool name, because every other key on
+        // `delegate_agent`/`spawn_agent` is the child's PROMPT BODY — `task` and
+        // `prompt`, which stay out here and always will.
+        if let role = string("agent") ?? string("role") ?? string("subagent_type") {
+            fields.append((key: "subagent_type", value: role))
+        }
         return fields
     }
 

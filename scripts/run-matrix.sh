@@ -722,10 +722,16 @@ run_app_check .build/debug/Array --transcript-provider-parity-check
 # (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
 # stay two cards, and pins that no card prints a count it did not measure.
 run_app_check .build/debug/Array --file-card-check
-# `--tool-detail-check` has existed since `.plans/45` and was registered
-# NOWHERE (called out in `.plans/44`): the host-local store's immutable scope
-# and expiry had a witness that no gate ever ran. TR-01 leans on that store, so
-# it is wired in here rather than left as another unreported leg.
+# The host-local tool-detail supply: immutable scope, expiry, and the real
+# translator sequences (claude search + delegation, pi delegation, codex exit
+# code) driven through the host's own capture path.
+#
+# This leg has existed since `.plans/45` and was registered NOWHERE — called out
+# in `.plans/44`, and found independently by TR-01 (which leans on the store for
+# its file counts) and TR-03 (whose tool rows are entirely fed by it) while they
+# were running in parallel. Two tickets tripping over the same hole is the
+# clearest evidence there is that a witness the gate does not report is not a
+# witness (CLAUDE.md, non-negotiable #2).
 run_app_check .build/debug/Array --tool-detail-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.

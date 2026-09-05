@@ -894,6 +894,28 @@ public actor AgentToolDetailStore {
     }
 }
 
+/// WHICH normalized items carry a host-local detail record.
+///
+/// TR-03 — this predicate existed twice: once in `AgentTranscriptListView`
+/// (production) and once, hand-copied, in `ComponentLab`'s review fixture. A
+/// change to one silently stopped the other from matching production, which is
+/// the failure mode where a fixture keeps passing about a surface it no longer
+/// resembles. One definition, both callers.
+public enum AgentToolDetailPolicy {
+    public static func carriesHostLocalDetail(_ kind: ItemKind) -> Bool {
+        switch kind {
+        case .commandExecution, .fileChange, .mcpToolCall, .webSearch: return true
+        // A delegation row publishes the same whitelisted argument fields every
+        // other row does (claude's `description`/`subagent_type`, pi's). The
+        // child's own TRANSCRIPT is a different thing and is still not this.
+        case .subagent: return true
+        case .assistantMessage, .reasoning, .plan, .error: return false
+        // An unknown kind has no whitelist to publish through.
+        case .compaction, .unknown: return false
+        }
+    }
+}
+
 /// `.plans/45` S3 — what a collapsed action-first tool row shows: the action
 /// sentence and, when both instants are known, the duration for the trailing
 /// column. Status stays out; the row renders its lifecycle separately.
@@ -1092,10 +1114,12 @@ public enum AgentToolDetailPresenter {
         // could ever catch. A line that is only the tool name adds nothing over a
         // title that is only the tool name, so emit none.
         let actionLine = pureSummary(for: detail).map { shortLine($0) }
-        let echo = actionLine ?? shortLine(capitalizedPhrase(safeToolName(detail.toolName)))
+        let echo = actionLine
+            ?? shortLine(capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName))))
         var lines: [String] = []
         if let actionLine { lines.append(actionLine) }
-        let fileLabel = observableFileAction(detail.toolName)
+        let kind = AgentToolKind.resolve(toolName: safeToolName(detail.toolName))
+        let fileLabel = kind.fileLineLabel
         let affectedFileNames = observableAffectedFileNames(detail)
         // Suppression is only sound when there is exactly ONE affected file: the
         // title names at most one basename ("Edited foo.js"), so with two or
@@ -1108,7 +1132,7 @@ public enum AgentToolDetailPresenter {
             // the basename, and the directory it came from is still there
             // expanded. The argument loop below has had this suppression since
             // `.plans/45`; the file line never did.
-            guard !(affectedFileNames.count == 1 && echoNamesFile(echo, fileName, fileLabel: fileLabel)) else { continue }
+            guard !(affectedFileNames.count == 1 && echoNamesFile(echo, fileName, kind: kind)) else { continue }
             lines.append("\(fileLabel): \(fileName)")
         }
         for change in detail.fileChanges.prefix(12) {
@@ -1143,14 +1167,14 @@ public enum AgentToolDetailPresenter {
     /// because the line carries an abbreviated path and the title carries the
     /// bare name.
     ///
-    /// Restricted to `fileLabel`s that `pureSummary` actually builds AROUND a
-    /// basename ("Read"/"Changed" — the "Edited <basename>" / "Read <basename>"
-    /// sentences). For any other label the title's words are unrelated
-    /// narration (a bash command, a search description), and a substring hit
-    /// there is a coincidence, not doubling — e.g. an affected file literally
-    /// named "test" must not be swallowed by the title "Ran npm test".
-    private static func echoNamesFile(_ echo: String, _ fileName: String, fileLabel: String) -> Bool {
-        guard fileLabel == "Read" || fileLabel == "Changed" else { return false }
+    /// Restricted to the kinds whose sentence `pureSummary` actually builds
+    /// AROUND a basename ("Edited <basename>" / "Read <basename>"). For any
+    /// other kind the title's words are unrelated narration (a shell
+    /// description, a search query), and a substring hit there is a
+    /// coincidence, not doubling — e.g. an affected file literally named "test"
+    /// must not be swallowed by the title "Run the npm tests".
+    private static func echoNamesFile(_ echo: String, _ fileName: String, kind: AgentToolKind) -> Bool {
+        guard kind.actionLineNamesABasename else { return false }
         let basename = fileName.split(separator: "/").last.map(String.init) ?? fileName
         guard !basename.isEmpty else { return false }
         return echo.contains(basename)
@@ -1238,31 +1262,52 @@ public enum AgentToolDetailPresenter {
         )
     }
 
+    /// TR-03. The kind comes from `AgentToolKind`, the one classifier the icon
+    /// and the fold noun also read, so a row can no longer be drawn as one kind
+    /// of work and described as another.
+    ///
+    /// Every branch is CONDITIONAL on the datum it needs. It used to be enough
+    /// for the tool NAME to look like an edit — a `TodoWrite` was titled "Edited
+    /// file" though it touched no file at all, and any MCP tool whose name
+    /// contained "create" would have joined it. A kind with nothing to say now
+    /// falls through to the provider's own summary, and then to the tool name.
     private static func pureSummary(for detail: AgentToolDetailRecord) -> String? {
-        let normalizedTool = safeToolName(detail.toolName).lowercased().filter { $0.isLetter || $0.isNumber }
-        if let command = safeArgument(detail, keys: ["command", "cmd", "shellcommand"]),
-           ["bash", "shell", "sh", "zsh", "command", "run"].contains(where: { normalizedTool.contains($0) }) {
-            return "Ran \(command)"
-        }
-        if let query = safeArgument(detail, keys: ["query", "pattern", "regex", "search"]),
-           ["grep", "search", "rg", "glob", "find"].contains(where: { normalizedTool.contains($0) }) {
-            return "Searched for \u{201C}\(query)\u{201D}"
-        }
-        if let url = safeArgument(detail, keys: ["url"]),
-           ["fetch", "web"].contains(where: { normalizedTool.contains($0) }) {
-            return "Fetched \(url)"
-        }
-        if ["edit", "write", "patch"].contains(where: { normalizedTool.contains($0) }) {
+        switch AgentToolKind.resolve(toolName: safeToolName(detail.toolName)) {
+        case .shell:
+            // No production translator forwards a command body — claude's
+            // whitelist drops `Bash.command` on purpose, pi's carries no command
+            // key, and codex's shell start carries no arguments at all (I5). The
+            // `description` fallback below is where a claude shell row actually
+            // gets its sentence; there is deliberately no "Ran <command>" branch
+            // to promise a string that can never arrive.
+            break
+        case .search:
+            if let query = safeArgument(detail, keys: ["query", "pattern", "regex", "search"]) {
+                return "Searched for \u{201C}\(query)\u{201D}"
+            }
+        case .fetch:
+            if let url = safeArgument(detail, keys: ["url"]) { return "Fetched \(url)" }
+        case .edit:
             if let basename = affectedBasename(detail) ?? safeBasenameArgument(detail, keys: ["path", "file", "target"]) {
                 return "Edited \(basename)"
             }
-            return "Edited file"
-        }
-        if ["read", "open", "cat"].contains(where: { normalizedTool.contains($0) }) {
+        case .read:
             if let basename = affectedBasename(detail) ?? safeBasenameArgument(detail, keys: ["path", "file"]) {
                 return "Read \(basename)"
             }
-            return "Read file"
+        case .delegate:
+            // The role, when the provider published one — claude sends
+            // `subagent_type`, and a role id is publishable (`RoleRegistry`
+            // reads them out of project files). The `description` below is the
+            // richer line and wins when both are present.
+            if let description = safeArgument(detail, keys: ["description"]) {
+                return capitalizedPhrase(description)
+            }
+            if let role = safeArgument(detail, keys: ["subagenttype", "agent", "role"]) {
+                return "Delegated to \(role)"
+            }
+        case .todo, .unknown:
+            break
         }
         // `.plans/45` S3 — claude's Bash/Task `description` is the sanctioned
         // human summary and already reads as an action ("List files in the
@@ -1279,7 +1324,10 @@ public enum AgentToolDetailPresenter {
     /// capitalized — pi reports names like "search" in lowercase (C6).
     public static func collapsed(_ detail: AgentToolDetailRecord) -> AgentToolDetailCollapsedPresentation {
         AgentToolDetailCollapsedPresentation(
-            actionLine: shortLine(pureSummary(for: detail) ?? capitalizedPhrase(safeToolName(detail.toolName))),
+            actionLine: shortLine(
+                pureSummary(for: detail)
+                    ?? capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName)))
+            ),
             durationText: detail.duration.map(formatDuration)
         )
     }
@@ -1325,14 +1373,6 @@ public enum AgentToolDetailPresenter {
         guard let url = detail.affectedFiles.first else { return nil }
         let basename = url.lastPathComponent
         return basename.isEmpty ? nil : basename
-    }
-
-    private static func observableFileAction(_ toolName: String) -> String {
-        let tool = safeToolName(toolName).lowercased().filter { $0.isLetter || $0.isNumber }
-        if ["read", "open", "cat"].contains(where: { tool.contains($0) }) { return "Read" }
-        if ["edit", "write", "patch"].contains(where: { tool.contains($0) }) { return "Changed" }
-        if ["grep", "search", "find", "glob"].contains(where: { tool.contains($0) }) { return "Searched in" }
-        return "File"
     }
 
     private static func abbreviatedFilePath(_ file: URL) -> String {

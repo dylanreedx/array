@@ -2804,17 +2804,20 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         return minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
     }
 
+    /// TR-03 — one classifier, shared with the icon and the action sentence.
+    /// This used to be a third raw-substring matcher in a third precedence
+    /// order, so a `TodoWrite` folded as an "edit" while its icon said wrench
+    /// and its title said "Edited file": three answers about one row.
+    ///
+    /// The name it is handed is the SEMANTIC one — `clusterSummaryText` reads
+    /// `rows[...].block`, and the presented copy is composed later, per host
+    /// apply — so this classifies a tool NAME, never an action sentence. The
+    /// needles it replaced included `"ran "` and `"read "` with trailing spaces,
+    /// which could only ever have matched a sentence: dead weight, like the two
+    /// the icon map shed in T2.
     static func clusterNoun(forToolNamed name: String?) -> String {
-        guard let name = name?.lowercased(), !name.isEmpty else { return "step" }
-        func any(_ needles: [String]) -> Bool { needles.contains { name.contains($0) } }
-        if any(["search", "grep", "glob", "find"]) { return "search" }
-        if any(["fetch"]) { return "fetch" }
-        if any(["edit", "write", "patch", "changed"]) { return "edit" }
-        if any(["read ", "read"]) { return "read" }
-        if any(["bash", "shell", "terminal", "command", "ran "]) { return "command" }
-        // Not "step": the summary already opens with "N steps", and "3 steps ·
-        // 2 reads, 1 step" reads as a counting error.
-        return "tool"
+        guard let name, !name.isEmpty else { return "step" }
+        return AgentToolKind.resolve(toolName: name).clusterNoun
     }
 
     private func toggleCluster(_ id: AgentNodeID) {
@@ -3170,14 +3173,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         )
     }
 
+    /// TR-03 — the predicate itself moved to `AgentToolDetailPolicy` in Core so
+    /// `ComponentLab`'s review fixture reads the same one instead of its own
+    /// hand-copied list, and so it can be witnessed without a view.
     private static func isToolDetailKind(_ kind: ItemKind) -> Bool {
-        switch kind {
-        case .commandExecution, .fileChange, .mcpToolCall, .webSearch: return true
-        case .assistantMessage, .reasoning, .plan, .error: return false
-        // A subagent row's detail is the CHILD's transcript, not a host-local
-        // tool record, and an unknown kind has no whitelist to publish through.
-        case .subagent, .compaction, .unknown: return false
-        }
+        AgentToolDetailPolicy.carriesHostLocalDetail(kind)
     }
 
     private func track(_ host: AgentBlockHostView) {
