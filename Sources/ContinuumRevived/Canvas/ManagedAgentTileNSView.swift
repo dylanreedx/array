@@ -277,12 +277,13 @@ final class ManagedAgentTileNSView: TileNSView {
         monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         let fileIndex = AgentFileIndex()
+        // No fixtures. The filter here used to drop `fixture.files` and
+        // `fixture.commands` and keep `fixture.skills`, which put two invented
+        // rows ("review", "research") on the live `$` menu of every managed
+        // agent tile — and `$` is a real trigger for this composer variant.
         self.v2DefaultCompletionRegistry = AgentCompletionProviderRegistry(
-            providers: AgentCompletionFixtures.providers().filter {
-                $0.providerID != "fixture.files" && $0.providerID != "fixture.commands"
-            }
-                + [AgentCommandCompletionProvider()]
-                + [AgentFileCompletionProvider(index: fileIndex)]
+            providers: [AgentCommandCompletionProvider(),
+                        AgentFileCompletionProvider(index: fileIndex)]
         )
         self.threadId = threadId
         self.statusRowPlacement = statusRowPlacement

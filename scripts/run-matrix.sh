@@ -441,6 +441,13 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+# TR-04: the completion/dispatch seam driven through the REAL composer, popover
+# and synthetic key events — a typed payload (command, file, directory) must
+# never degrade into literal text in the draft. This check has existed since it
+# was written and was invoked by nothing; `.plans/44` recorded it as unregistered
+# on 2026-08-21 and it was still unregistered at 0.7.15. Offline and
+# display-independent, so it belongs in the gate like any other app leg.
+run_app_check .build/debug/Array --agent-completion-semantic-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with

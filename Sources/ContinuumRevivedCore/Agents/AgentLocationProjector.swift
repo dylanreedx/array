@@ -55,6 +55,22 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// row rendered as `search` / `searching` / `Completed` and nothing else.
     /// The location projector ignores this case: it is not a location fact.
     case toolDetail(itemId: String, detail: AgentToolDetailObservation)
+    /// TR-04 — the slash commands the harness itself says this session has.
+    ///
+    /// claude publishes `slash_commands` on `system/init` and Array threw it
+    /// away, so `AgentSessionCommandCapabilities.advertisedNames` was nil in
+    /// every production code path that ever existed. The classifier's "the
+    /// harness did not advertise this, refuse it" branch was therefore
+    /// unreachable, and every one of the 34 baseline claude commands — including
+    /// the ones that only mean anything inside claude's own TUI — was serialized
+    /// and sent as an ordinary prompt.
+    ///
+    /// It rides this host-local side channel for exactly the reason
+    /// `providerSessionId` does: the supervisor rebinds every event's threadId
+    /// before delivery, so a fact captured mid-stream cannot survive on an
+    /// `AgentRuntimeEvent`. It is also not Codable state and must never cross
+    /// the I5 sync boundary. Not a location fact: the projector ignores it.
+    case advertisedCommands([String])
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -380,6 +396,12 @@ public struct AgentLocationProjector: Sendable {
             // Argument/output detail for `AgentToolDetailStore`, not a Home /
             // Where / What fact. The host consumes it; the projector ignores it
             // (same shape as `.threadId`).
+            break
+
+        case .advertisedCommands:
+            // The harness's own slash-command list, feeding the command
+            // classifier. Host-local capability state, not a Home / Where /
+            // What fact.
             break
         }
     }

@@ -111,8 +111,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     // their checkout-aware registry later, while palette/component surfaces can
     // still discover Array/provider commands without a separate wiring step.
     private var completionSource: any AgentCompletionSuggestionSource =
-        AgentCompletionProviderRegistry(providers: [AgentCommandCompletionProvider()]
-            + AgentCompletionFixtures.providers().filter { $0.providerID != "fixture.commands" })
+        AgentCompletionProviderRegistry(providers: [AgentCommandCompletionProvider()])
     private var completionContext: AgentCompletionContext?
     /// `@` browsing state belongs to the live composer surface, never the draft.
     private var completionNavigationPath: String?
@@ -731,14 +730,23 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             let intent: AgentComposerIntent?
             if importedAttachments.isEmpty, importedFileReferences.isEmpty,
                let invocation = resolvedSelectedCommand(in: prompt) {
-                if invocation.name == "compact" {
+                // By descriptor ID, not by name. `/compact` is Array's own typed
+                // operation, and matching on the string "compact" handed the
+                // native compaction route to any command that happened to share
+                // the name — including a project's own `.claude/commands/compact.md`.
+                if invocation.descriptorID == "array:compact" {
                     let focus = invocation.arguments.joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     intent = .compact(AgentCompactionRequest(
                         focus: focus.isEmpty ? nil : focus))
                 } else {
-                    intent = snapshot.executionState == .ready && snapshot.capabilities.canSend
-                        ? .providerCommand(invocation) : nil
+                    // Submitted whatever the turn state is, and refused by the
+                    // ACTION SINK when the agent is busy. This used to resolve to
+                    // `nil` while working, and `guard let intent else { return }`
+                    // below then swallowed the keystroke whole: no send, no queue,
+                    // no refusal, no repaint — Enter did nothing at all and the
+                    // user had no way to tell whether the command had run.
+                    intent = .providerCommand(invocation)
                 }
             } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
                 let attachedPrompt = AgentPrompt(

@@ -68,6 +68,19 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     private var compactionSemaphore: DispatchSemaphore?
     private var compactionOutcomeError: Error?
     private var observedAutomaticCompactionPolicy: AgentAutomaticCompactionPolicy?
+    private var observedAdvertisedCommands: Set<String>?
+
+    /// The session's own slash commands, as answered by `get_commands`, or nil
+    /// when this session has not answered with a parseable list.
+    ///
+    /// `get_commands` is deliberately absent from `PiRpcCommand.knownTypes` --
+    /// it returns the SESSION's slash commands rather than the rpc vocabulary --
+    /// and nothing had ever called it. It is pi's exact counterpart to claude's
+    /// `slash_commands` on `system/init`, and it is what lets the command
+    /// classifier narrow instead of trusting a frozen baseline forever.
+    public var advertisedCommandNames: Set<String>? {
+        queue.sync { observedAdvertisedCommands }
+    }
 
     public init(config: Config) {
         self.config = config
@@ -300,6 +313,45 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
                 }
             }
         }
+        if let response = try? transport.sendAndAwait(type: "get_commands"),
+           let names = Self.parseAdvertisedCommands(response), !names.isEmpty {
+            queue.sync { observedAdvertisedCommands = names }
+        }
+    }
+
+    /// `get_commands`' response shape is NOT measured -- unlike every other
+    /// command in `PiRpcCommand.knownTypes`, which were probed live. So this
+    /// reads the plausible shapes and, crucially, **fails open**: an
+    /// unrecognised or empty response leaves `observedAdvertisedCommands` nil,
+    /// which the classifier reads as "not discovered yet" and answers from the
+    /// baseline catalogue.
+    ///
+    /// Getting that direction wrong is the whole risk here. Adopting an empty
+    /// set on a shape we guessed wrong would disable EVERY pi slash command,
+    /// which is strictly worse than the frozen baseline it replaces. Widen this
+    /// only against a captured fixture.
+    public static func parseAdvertisedCommands(_ response: [String: Any]) -> Set<String>? {
+        let candidates: [Any]?
+        if let direct = response["commands"] as? [Any] {
+            candidates = direct
+        } else if let nested = (response["result"] as? [String: Any])?["commands"] as? [Any] {
+            candidates = nested
+        } else if let bare = response["result"] as? [Any] {
+            candidates = bare
+        } else {
+            candidates = nil
+        }
+        guard let candidates else { return nil }
+        let names = candidates.compactMap { entry -> String? in
+            if let text = entry as? String { return text }
+            if let object = entry as? [String: Any] {
+                return (object["name"] as? String) ?? (object["command"] as? String)
+            }
+            return nil
+        }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        return names.isEmpty ? nil : Set(names)
     }
 
     /// Queue-confined: translate one raw rpc line, forward each resulting

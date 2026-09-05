@@ -366,13 +366,20 @@ enum AgentFirstPaintChecks {
             turnStartedAt: nil
         ))
 
+        // The REAL catalogue id. This fixture used to say "array.compact", an id
+        // `AgentCommandCatalog` has never minted — and it passed anyway, because
+        // both the composer and the supervisor recognised `/compact` by NAME.
+        // Name-matching is what let any command called "compact" (a project's own
+        // `.claude/commands/compact.md`, now that dispatch can resolve one) seize
+        // the native compaction route, so both sites match on the id instead, and
+        // a witness driving an invocation production cannot mint proves nothing.
         let invocation = AgentCommandInvocation(
-            descriptorID: "array.compact",
+            descriptorID: "array:compact",
             name: "compact",
             surface: .array
         )
         let completion = AgentCompletion(
-            id: "array.compact",
+            id: "array:compact",
             title: "compact",
             insertionText: "/compact",
             payload: .command(invocation)
