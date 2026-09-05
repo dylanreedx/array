@@ -156,6 +156,24 @@ public struct ClaudeEventTranslator {
                 workingDirectory = directory
                 onRuntimeObservation?(.workingDirectory(directory, observedAt: now()))
             }
+            // TR-04 — the command list claude itself publishes here. Parsed and
+            // then DROPPED before this: `AgentSessionCommandCapabilities`
+            // documented `advertisedNames` as coming from `slash_commands` on
+            // `system/init`, the classifier had a branch that refuses anything
+            // outside it, and nothing in the app had ever read the key — so the
+            // list was permanently nil and the branch permanently unreachable.
+            //
+            // Entries arrive bare (`"compact"`) and sometimes plugin-scoped
+            // (`"some-plugin:review"`); normalization to the descriptor's own
+            // form is `AgentCommandExecutionPlanner.bareName`'s job, not this
+            // translator's. Empty is reported as empty, which is a real answer
+            // ("this session has no commands"), distinct from never having asked.
+            if let advertised = object["slash_commands"] as? [Any] {
+                let names = advertised.compactMap { $0 as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                onRuntimeObservation?(.advertisedCommands(names))
+            }
             // One `claude -p` process is exactly one turn, so init is claude's
             // session + agent_start + turn_start rolled into one line.
             turnCounter += 1

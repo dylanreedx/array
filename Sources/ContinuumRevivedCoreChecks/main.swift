@@ -12332,6 +12332,8 @@ runSpawnRequestChecks()
 // and a spawn's role decides what it runs with.
 try runItemKindLenientDecodingChecks()
 try runAgentCommandExecutionPlannerChecks()
+try runAgentCommandSurfaceTruthChecks()
+try runAgentCommandDiscoveryChecks()
 runClaudeSubagentSupplyChecks()
 runPiDelegateSupplyChecks()
 try runRoleRegistryChecks()

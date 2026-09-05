@@ -208,7 +208,12 @@ func runAgentCompletionChecks() async throws {
         harnessRows.contains(where: {
             $0.id == "array:qa"
                 && !$0.isEnabled
-                && $0.disabledReason == "Run from Array Command Center"
+                // TR-04: this used to pin the literal "Run from Array Command
+                // Center" — a route that does not exist. Pinned to the catalogue
+                // constant now, so the string and the check cannot drift, and so
+                // re-introducing a phantom destination fails
+                // `runAgentCommandSurfaceTruthChecks` instead of passing here.
+                && $0.disabledReason == AgentCommandCatalog.cliSurfaceReason
         }),
         "AgentCommandCompletionProvider: CLI/harness actions bypassed the approval surface"
     )

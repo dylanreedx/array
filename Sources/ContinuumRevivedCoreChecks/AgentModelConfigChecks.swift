@@ -14,6 +14,7 @@ func runAgentModelConfigChecks() {
     // the whole catalogue. Pinned as a literal so the matrix stays offline and
     // deterministic; refresh it when the provider catalogue changes.
     let catalogue: Set<String> = [
+        "openai-codex/gpt-6-astra",
         "openai-codex/gpt-5.3-codex-spark",
         "openai-codex/gpt-5.4",
         "openai-codex/gpt-5.4-mini",
@@ -22,6 +23,12 @@ func runAgentModelConfigChecks() {
         "openai-codex/gpt-5.6-sol",
         "openai-codex/gpt-5.6-terra",
     ]
+    // `gpt-6-astra` arrived in `c9f7bc89` ("Refresh live provider model
+    // catalogues") without this literal moving with it, and `expect` calls
+    // `exit(1)` — so that refresh took every check registered after this one
+    // with it. The rule below keeps the two from drifting silently again.
+    expect(Set(CodexCLIBackend.curatedCatalogModels).isSubset(of: catalogue),
+           "the pinned pi catalogue snapshot is missing curated codex ids: \(Set(CodexCLIBackend.curatedCatalogModels).subtracting(catalogue).sorted()) — refresh this literal when the provider catalogue changes")
 
     // Strict harness ownership gave each CLI its own catalogue, so "the exact id
     // rule" is now per-harness: an id is exact for the harness that owns it and
