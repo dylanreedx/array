@@ -33,8 +33,11 @@ fractional ordering — mutated only through `BoardEngine`, persisted to
 | KB-01.8 | `BoardRuntime` + `BoardHistoryController` + undo rung | **landed** |
 | KB-01.9 | Drag controller: lift, displacement, autoscroll, settle, cancel | **landed, not yet driven on screen** |
 | KB-01.10 | B10 lifecycle witness (`--board-tile-lifecycle-check`) | **landed, teeth-verified** |
-| KB-01.11 | `board.large-drag` perf scenario + matrix registration | not started |
-| KB-01.12 | CX-01 surface: snapshot DTO, command service, typed links | not started |
+| KB-01.11 | Task primitive: body, typed links, assignee, `assignCard` | **landed** |
+| KB-01.12 | Drag a task onto an agent tile to assign + prompt it | **landed, not yet driven on screen** |
+| KB-01.13 | Task detail surface: edit the markdown body, attach images | not started |
+| KB-01.14 | `board.large-drag` perf scenario + matrix registration | not started |
+| KB-01.15 | CX-01 surface: snapshot DTO, command service | not started |
 
 A board is now reachable: `⌘K → New Board` spawns one, it persists, and it comes
 back on relaunch. The drag is implemented and compiles but **has not been driven
@@ -249,6 +252,69 @@ rebuilt. Build to a file, check the exit code, then run.
 - **Not run:** `scripts/run-matrix.sh`, the app bundle check, and any UI or
   perf leg. Nothing has been launched, so **no claim is made about how the drag
   feels**.
+
+## Round 2 — Dylan's review
+
+1. **Same preview as tiles.** The lane now shows the canvas's own drag phantom
+   (`BoardCardGhostView` mirrors `DragGhostOverlayView`): accent wash, 2pt accent
+   border, 0.14s fade-and-scale on appear, and the 0.16s eased position TRAIL
+   that makes the phantom lag behind the card instead of snapping. The phantom is
+   drawn IN the gap the lane opens, so the preview is the destination itself
+   rather than a second hint. One ghost instance, reparented between lanes, so
+   crossing lanes keeps the trail continuous.
+2. **Card look.** A card is now a RAISED object: `overlay` fill, a real shadow,
+   no resting border, on a `canvas`-toned recessed lane. Selection is a ring.
+   Outlined cards on a near-identical fill read as a wireframe. Titles run to
+   three lines, and a quiet meta row appears only when a task has an assignee,
+   a body or links.
+3. **Cards were uneditable — a real bug.** `mouseDown` always opened a drag
+   session, so `mouseUp` always took the drag path and the click-to-edit branch
+   was unreachable code. Double-click now edits; a click on an already-selected
+   card edits; and clicking a card gives the TILE the keyboard, without which
+   none of the existing shortcuts worked either.
+4. **No per-lane add buttons.** One verb does not need N pieces of chrome, and
+   they competed with the tasks. Adding is the tile's title-bar action, `⌘N`, or
+   Return at the end of a lane.
+5. **A task is a primitive.** See below.
+
+## The task primitive
+
+A card IS a task: markdown `body`, typed `links`, and an `assignee`.
+
+**Assignment is not a link.** `CardLink.agent` already existed, and assignment
+deliberately does not reuse it: a task can reference five things and still be
+owned by exactly one agent. Only one of those answers "who is doing this".
+
+**`assignCard` is its own command**, not a flavour of `editCard`, for two
+reasons: it is one undoable act with its own Edit-menu name, and it lets the
+canvas API offer assignment without offering arbitrary text edits.
+
+**Dragging a task onto an agent tile assigns it and hands the agent the task as
+its prompt.** The drag leaves the board, the lane preview gets out of the way
+(showing an insertion slot for a card about to be handed away would promise a
+move that is not going to happen), and the target agent is marked with the
+canvas's own drag phantom — the same affordance a tile drag uses for its
+destination.
+
+The assignment is recorded **before and independently of** the send. An agent
+that is busy, refusing or not yet started still owns the task; losing the
+assignment because a prompt bounced would make the board lie about who is
+responsible. A tile with no agent yet refuses out loud rather than silently
+doing nothing.
+
+Witnessed by **B10**: body and links survive, assignment is singular, a
+REASSIGNMENT's inverse restores the *previous* owner rather than clearing it
+(teeth-verified — clearing it passes every other assertion), unassign
+round-trips, and all three survive a save/load.
+
+### Still to design here
+
+- A task detail surface. The body is modelled and persisted but there is no way
+  to *edit* it yet — only the title is inline-editable. This is the next slice,
+  and it is where images and attachments belong.
+- What assignment should do when the task is already assigned to a different
+  agent — silently reassign, or ask.
+- Whether moving an assigned task to "Done" should tell the agent anything.
 
 ## Still open
 
