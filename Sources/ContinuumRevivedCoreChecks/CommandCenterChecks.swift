@@ -17,10 +17,18 @@ func runCommandCenterChecks() {
     )
 
     let home = LaunchPaletteModel.makeSections(rows: rows, query: "")
+    for query in ["editor", "text editor", "code editor", "open file"] {
+        let results = LaunchPaletteModel.makeSections(rows: rows, query: query).flatMap(\.items)
+        expect(results.contains { $0.row == .action(.openFile) }, "\(query) finds editor creation with the existing file-open dispatch")
+    }
+    expect(home.flatMap(\.items).contains { $0.row == .action(.openFile) && $0.title == "Editor" && $0.category == .create }, "Editor is visible among default creation actions")
+    let editorTile = JumpTileRow(id: UUID(), title: "README.md", kind: .file)
+    let editorRows = LaunchPaletteModel.makeRows(profiles: [], jumpTiles: [editorTile])
+    expect(LaunchPaletteModel.makeSections(rows: editorRows, query: "editor").flatMap(\.items).contains { $0.row == .jumpToTile(editorTile) }, "editor search also finds existing file tiles")
     expect(home.flatMap(\.items).count <= LaunchPaletteModel.defaultItemLimit, "command center caps its default home")
     expect(!home.contains(where: { $0.items.isEmpty }), "command center omits empty sections")
     expect(!home.contains(where: { $0.category == .developer }), "command center keeps developer commands off the default home")
-    expect(home.first(where: { $0.category == .create })?.items.first?.title == "Terminal", "command center cleans Shell up to Terminal")
+    expect(home.first(where: { $0.category == .create })?.items.contains { $0.title == "Terminal" && $0.stableID == "profile:shell" } == true, "command center cleans Shell up to Terminal")
 
     let tile = LaunchPaletteModel.makeSections(rows: rows, query: "fix command").flatMap(\.items).first
     expect(tile?.row == .jumpToTile(JumpTileRow(id: tileID, title: "Fix command menu")), "typed command-center search preserves tile dispatch identity")

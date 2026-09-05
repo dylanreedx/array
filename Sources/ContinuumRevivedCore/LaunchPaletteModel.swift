@@ -568,7 +568,7 @@ public enum LaunchPaletteModel {
         }
         let needsYouItems = Array(allItems.filter { $0.category == .needsYou }.prefix(defaultItemLimit))
         let needsYouIDs = Set(needsYouItems.map(\.stableID))
-        // Keep the five actions that establish Array's basic workflow visible in
+        // Keep the actions that establish Array's basic workflow visible in
         // a stable order. A terminal is a dynamic launch profile, so find it by
         // its product-facing title rather than assuming a profile id.
         let pinnedStableIDs = [
@@ -578,11 +578,13 @@ public enum LaunchPaletteModel {
                 return false
             })?.stableID,
             "action:new-browser",
+            "action:open-file",
             "action:new-note",
             "action:create-zone",
         ].compactMap { $0 }
-        let pinnedItems = pinnedStableIDs.compactMap { byID[$0] }
+        let pinnedItems = Array(pinnedStableIDs.compactMap { byID[$0] }
             .filter { !needsYouIDs.contains($0.stableID) }
+            .prefix(max(0, defaultItemLimit - needsYouItems.count)))
         let pinnedIDs = Set(pinnedItems.map(\.stableID))
 
         let recentItems = Array(sanitizeRecentIDs(recentIDs, rows: rows)
@@ -643,7 +645,7 @@ public enum LaunchPaletteModel {
             if let model = tile.modelDisplayName { subtitleParts.append(model) }
             if let context = tile.contextTitle { subtitleParts.append(context) }
             if subtitleParts.isEmpty { subtitleParts.append(kind) }
-            let aliases = ["jump", "go", "tile", kind, tile.modelID, tile.modelDisplayName, tile.contextTitle, tile.statusLabel, tile.attentionReason?.displayName]
+            let aliases = ["jump", "go", "tile", kind, tile.kind == .file ? "text editor code editor" : nil, tile.modelID, tile.modelDisplayName, tile.contextTitle, tile.statusLabel, tile.attentionReason?.displayName]
                 .compactMap { $0 }
             let icon = tile.kind == .managedAgent ? "sparkles" : "rectangle.on.rectangle"
             return item(row, category, tile.title, subtitleParts.joined(separator: " · "), icon, aliases, tile.attentionReason != nil, true, "tile:\(tile.id.uuidString)")
@@ -737,7 +739,7 @@ public enum LaunchPaletteModel {
         case .fanOutQueueSelection: return item(row, .developer, "Fan out selected tickets", "Start one agent per selected ticket", "arrow.triangle.branch", ["queue", "batch"], false, false, "action:fan-out")
         case .newNote: return item(row, .create, "Note", "Add a canvas note", "note.text", ["new"], true, true, "action:new-note")
         case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
-        case .openFile: return item(row, .actions, "Open file", "Choose a file in this project", "doc", [], false, true, "action:open-file")
+        case .openFile: return item(row, .create, "Editor", "Open a project file to edit", "doc", ["open file", "text editor", "code editor"], true, true, "action:open-file")
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
         case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")
         case .fitCanvasToAll: return item(row, .actions, "Show entire canvas", "Fit every tile and zone", "arrow.up.left.and.arrow.down.right", ["fit", "zoom", "all"], true, true, "action:fit-canvas")
