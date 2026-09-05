@@ -562,6 +562,14 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# TR-06: responding to a request the provider is HOLDING. Drives the real
+# `wireManagedAgentTile` and asserts the response transport is bound by
+# production — the seam sat declared-and-unbound through every release of the
+# request system, and the one check that touched it bound the closure itself.
+# Also gates the rules that keep a press honest: a runner with no transport
+# offers no controls at all, a press dispatches exactly once, dispatching is
+# never resolving, and a failed delivery leaves the request open and answerable.
+run_app_check .build/debug/Array --provider-request-response-check
 # WS5: per-managed-agent-tile page zoom. Six discrete rungs reflowing REAL AppKit
 # geometry — the tile's composition constraints, the transcript's measurement
 # identity and prepared layout, the composer and every rail — while the tile's

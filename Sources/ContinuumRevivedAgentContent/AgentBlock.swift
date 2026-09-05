@@ -264,6 +264,26 @@ public struct AgentDiffPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// TR-06 — the LOCAL delivery lifecycle of a response Array sent to an open
+/// provider request.
+///
+/// Deliberately SEPARATE from `AgentRequestPayload.status`, which is the
+/// PROVIDER's truth about the request and moves only on a real
+/// `requestResolved`/`userInputResolved` event. This field only ever says what
+/// Array did with the user's press. Collapsing the two would let a local
+/// dispatch — or a local transport failure — look like the provider had
+/// answered, which is the exact fabrication the request system is built to
+/// prevent.
+public enum AgentRequestResponseState: String, Codable, Equatable, Sendable {
+    /// Nothing has been dispatched. The request is the provider's to hold.
+    case idle
+    /// A response left Array; the provider has not resolved the request yet.
+    case submitting
+    /// The transport refused or errored. The request is STILL OPEN — a delivery
+    /// failure is not a resolution, and the user may try again.
+    case failed
+}
+
 public struct AgentRequestPayload: Codable, Equatable, Sendable {
     /// Opaque provider request identity. Without it a request remains readable
     /// history but cannot acquire response controls.
@@ -271,20 +291,26 @@ public struct AgentRequestPayload: Codable, Equatable, Sendable {
     public var prompt: [AgentInline]
     public var status: AgentItemStatus
     public var choices: [String]
+    /// See `AgentRequestResponseState`. Local delivery state, never provider truth.
+    public var responseState: AgentRequestResponseState
 
     public init(
         requestID: String? = nil,
         prompt: [AgentInline],
         status: AgentItemStatus,
-        choices: [String] = []
+        choices: [String] = [],
+        responseState: AgentRequestResponseState = .idle
     ) {
         self.requestID = requestID
         self.prompt = prompt
         self.status = status
         self.choices = choices
+        self.responseState = responseState
     }
 
-    private enum CodingKeys: String, CodingKey { case requestID, prompt, status, choices }
+    private enum CodingKeys: String, CodingKey {
+        case requestID, prompt, status, choices, responseState
+    }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -292,6 +318,10 @@ public struct AgentRequestPayload: Codable, Equatable, Sendable {
         prompt = try values.decode([AgentInline].self, forKey: .prompt)
         status = try values.decode(AgentItemStatus.self, forKey: .status)
         choices = try values.decodeIfPresent([String].self, forKey: .choices) ?? []
+        // A document written before TR-06 has no local delivery state, and the
+        // honest reading of "absent" is "nothing was dispatched".
+        responseState = try values.decodeIfPresent(
+            AgentRequestResponseState.self, forKey: .responseState) ?? .idle
     }
 }
 

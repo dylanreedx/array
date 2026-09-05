@@ -110,6 +110,28 @@ protocol AgentCompactionRunning: AgentRunning {
     ) throws
 }
 
+/// TR-06 — the response transport for a request a provider OPENED and is
+/// holding. A REFINEMENT of `AgentRunning`, for the same reason
+/// `AgentSessionRunning` is one: only some transports can carry a response back.
+///
+/// Deliberately NOT `AgentAdapter`. That protocol already declares
+/// `respondToRequest`/`respondToUserInput`, and has had exactly one conformer
+/// since it was written — `ProbeAdapter`, inside CoreChecks. Reviving it is a
+/// program (tickets 67/69/70, all `[gaps]`); this is the seam the runners Array
+/// actually spawns can implement.
+///
+/// **A conformer must acknowledge, not assume.** `respond` returns only after
+/// the provider has accepted the response frame; a transport error throws. The
+/// caller turns that into a visible failed state rather than a silent no-op,
+/// because the failure mode this whole ticket exists to kill is a control that
+/// looks like it worked.
+protocol AgentRequestResponding: AgentRunning {
+    /// True only while a response could actually be delivered — the process is
+    /// alive and its transport is open. Read per-snapshot, never cached.
+    var canRespondToRequests: Bool { get }
+    func respond(requestID: String, decision: ApprovalDecision) throws
+}
+
 extension PiAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentSessionRunning {}
@@ -4742,6 +4764,11 @@ final class AgentSupervisor {
         // runner. That is honest for every harness with an occupied runner,
         // one-shot or session-backed alike — there is no RPC to gate on.
         let queueable = occupied && !mirrored
+        // TR-06 — same sourcing rule as `steerable`: asked of the BOUND RUNNER.
+        // A mirrored agent has no runner here at all, so it can never respond;
+        // that is the same reason it gets no composer and no Stop.
+        let responder = mirrored ? nil : (runners[id] as? AgentRequestResponding)
+        let canRespond = responder?.canRespondToRequests ?? false
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
@@ -4753,7 +4780,12 @@ final class AgentSupervisor {
                 // "Unavailable" on the composer.
                 canStop: !mirrored && occupied && record.capabilities.canStop,
                 canSteer: steerable && occupied,
-                canQueue: queueable && occupied
+                canQueue: queueable && occupied,
+                // NOT gated on `occupied`. A held request is exactly the state
+                // where the provider is waiting on the user and the runner may
+                // read as idle; requiring occupancy would hide the buttons on
+                // the only request that matters.
+                canRespondToRequests: canRespond
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
@@ -4762,6 +4794,46 @@ final class AgentSupervisor {
             submittedAt: facts.submittedAt,
             isMirrored: mirrored
         )
+    }
+
+    /// TR-06 — carries a user's decision back to a request the provider OPENED.
+    ///
+    /// Returns whether the response was ACCEPTED FOR DISPATCH, synchronously, on
+    /// the same main-actor turn as the press — the same contract as `accept`, and
+    /// for the same reason: a control must not be told "yes" by one check and
+    /// "no" by another hidden further down.
+    ///
+    /// It deliberately does NOT report delivery. The transport blocks on a
+    /// provider round trip (`CodexAppServerTransport.sendRequest` waits on a
+    /// semaphore), so it runs off the main thread and reports a failure through
+    /// `onDispatchFailure`. And it never resolves anything: a delivered response
+    /// leaves the request open until the provider's own
+    /// `requestResolved`/`userInputResolved` event arrives. Array does not get to
+    /// decide that the provider agreed.
+    @discardableResult
+    func respondToRequest(
+        agentID: AgentID,
+        requestID: String,
+        decision: ApprovalDecision,
+        onDispatchFailure: @escaping @MainActor (String) -> Void = { _ in }
+    ) -> Bool {
+        guard records[agentID] != nil else { return false }
+        // The request must be one this supervisor is actually holding open. A
+        // press against a request already resolved (or never opened) is a stale
+        // callback, and forwarding it would put a second answer on the wire.
+        guard turnFacts[agentID]?.pendingRequests[requestID] != nil else { return false }
+        guard let responder = runners[agentID] as? AgentRequestResponding,
+              responder.canRespondToRequests else { return false }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try responder.respond(requestID: requestID, decision: decision)
+            } catch {
+                let message = SecretRedactor.redactLocalDiagnostics("\(error)")
+                DispatchQueue.main.async { MainActor.assumeIsolated { onDispatchFailure(message) } }
+            }
+        }
+        return true
     }
 
     /// One action owner for the v2 composer. Validation and mutation happen on the

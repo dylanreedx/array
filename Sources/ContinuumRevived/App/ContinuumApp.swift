@@ -2700,6 +2700,20 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--provider-request-response-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ProviderRequestResponseChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--completion-awareness-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -12825,6 +12839,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 view?.showActionFailedNotice(
                     "Couldn't open that subagent — it may have been deleted.")
             }
+        }
+        // TR-06 — the response transport for a request the provider is holding.
+        // This binding is the whole point of the ticket: it was declared and left
+        // unbound, so every choice button in a request block pressed into nil.
+        // The buttons are additionally gated on `canRespondToRequests`, so this
+        // seam and the controls that reach it appear and disappear together.
+        view.onProviderResponse = { [weak self, weak view] requestID, value in
+            guard let self, let decision = ApprovalDecision(rawValue: value) else { return false }
+            return self.agentSupervisor.respondToRequest(
+                agentID: agentId,
+                requestID: requestID,
+                decision: decision,
+                onDispatchFailure: { [weak view] message in
+                    view?.reportProviderResponseFailure(requestID: requestID, message: message)
+                }
+            )
         }
         // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
         // the same restamped event stream every consumer sees, so a tile-less
