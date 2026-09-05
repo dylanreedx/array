@@ -718,6 +718,15 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
 run_app_check .build/debug/Array --transcript-provider-parity-check
+# TR-01 — the change card's file list and counts. Drives the RESTORE path
+# (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
+# stay two cards, and pins that no card prints a count it did not measure.
+run_app_check .build/debug/Array --file-card-check
+# `--tool-detail-check` has existed since `.plans/45` and was registered
+# NOWHERE (called out in `.plans/44`): the host-local store's immutable scope
+# and expiry had a witness that no gate ever ran. TR-01 leans on that store, so
+# it is wired in here rather than left as another unreported leg.
+run_app_check .build/debug/Array --tool-detail-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

@@ -433,7 +433,12 @@ public struct AgentToolDetailSanitizer: Sendable {
             guard change.renamePath == nil || rename != nil else { return nil }
             let diff = AgentToolDetailDisplaySanitizer.diffPreview(change.diffPreview, explicitSecrets: explicitSecrets,
                 maxBytes: limits.maxOutputBytes, maxLines: limits.maxOutputLines)
-            return .init(action: change.action, path: path, renamePath: rename, diffPreview: diff)
+            // Counts are integers with no redaction surface, so they survive a
+            // sanitizer pass that may well have dropped the preview they were
+            // measured from.
+            return .init(action: change.action, path: path, renamePath: rename, diffPreview: diff,
+                addedLines: change.addedLines, removedLines: change.removedLines,
+                countsAreLowerBound: change.countsAreLowerBound)
         }
     }
 
@@ -446,8 +451,16 @@ public struct AgentToolDetailSanitizer: Sendable {
                 // explicit previews choose one actually observed value by a
                 // stable total order; they never duplicate a disclosure row.
                 let selectedDiff = [prior.diffPreview, change.diffPreview].compactMap { $0 }.max()
+                // A measured count outranks an absent one, and an exact count
+                // outranks a floor, so the join stays commutative: whichever
+                // arrival order the two observations take, the richer fact wins.
+                let priorIsBetter = prior.hasAnyMeasuredCount
+                    && (!change.hasAnyMeasuredCount || (change.countsAreLowerBound && !prior.countsAreLowerBound))
+                let counts = priorIsBetter ? prior : change
                 unique[key] = .init(action: change.action, path: change.path,
-                    renamePath: change.renamePath, diffPreview: selectedDiff)
+                    renamePath: change.renamePath, diffPreview: selectedDiff,
+                    addedLines: counts.addedLines, removedLines: counts.removedLines,
+                    countsAreLowerBound: counts.countsAreLowerBound)
             } else {
                 unique[key] = change
             }
@@ -468,8 +481,12 @@ public struct AgentToolDetailSanitizer: Sendable {
         return changes.compactMap { change in
             let fields = [change.path, change.renamePath].compactMap { $0 }
             guard !containsSensitiveFingerprint(fields, fingerprints: fingerprints) else { return nil }
+            // The PREVIEW is dropped here (it is the text that could carry a
+            // secret); the counts measured from it are integers and stay.
             return .init(action: change.action, path: change.path,
-                renamePath: change.renamePath, diffPreview: nil)
+                renamePath: change.renamePath, diffPreview: nil,
+                addedLines: change.addedLines, removedLines: change.removedLines,
+                countsAreLowerBound: change.countsAreLowerBound)
         }
     }
 
@@ -981,7 +998,9 @@ public enum AgentToolDetailPresenter {
             let rename = change.renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
             let diff = AgentToolDetailDisplaySanitizer.diffPreview(change.diffPreview, maxBytes: 16_384, maxLines: 200)
             return AgentToolDetailObservation.FileChange(
-                action: change.action, path: path, renamePath: rename, diffPreview: diff)
+                action: change.action, path: path, renamePath: rename, diffPreview: diff,
+                addedLines: change.addedLines, removedLines: change.removedLines,
+                countsAreLowerBound: change.countsAreLowerBound)
         })
         sanitized.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(record.parentItemID)
         sanitized.observedParentItemIDs = Set(sanitized.parentItemID.map { [$0] } ?? [])
@@ -1135,6 +1154,65 @@ public enum AgentToolDetailPresenter {
         let basename = fileName.split(separator: "/").last.map(String.init) ?? fileName
         guard !basename.isEmpty else { return false }
         return echo.contains(basename)
+    }
+
+    /// TR-01 — every file ONE operation touched, as the change card presents it.
+    ///
+    /// Two host-local sources describe the same operation and neither is
+    /// sufficient alone. `affectedFiles` holds full URLs but arrives from the
+    /// activity channel, which carries a SINGLE target — a codex change that
+    /// rewrote four files landed here as one. `fileChanges` holds every file
+    /// with its action and counts, but its paths were reduced to basenames at
+    /// the privacy boundary. The card was built from `affectedFiles` alone,
+    /// which is why a four-file change drew one row and why a claude edit whose
+    /// path never resolved drew none at all.
+    ///
+    /// So: walk `fileChanges` in provider order, borrowing the richer display
+    /// name from the matching URL when there is one, then append any URL no
+    /// change claimed. Matching is by basename and each URL is consumed once,
+    /// so two files with the same basename in different directories stay two
+    /// rows.
+    public static func observableChangedFiles(_ detail: AgentToolDetailRecord) -> [AgentDiffFileSummary] {
+        var availableURLs = detail.affectedFiles
+        var result: [AgentDiffFileSummary] = []
+        for change in detail.fileChanges.prefix(maxObservableFiles) {
+            guard !change.path.isEmpty else { continue }
+            let changeBasename = change.path.split(separator: "/").last.map(String.init) ?? change.path
+            let matchIndex = availableURLs.firstIndex { $0.lastPathComponent == changeBasename }
+            let name: String
+            if let matchIndex {
+                name = abbreviatedFilePath(availableURLs.remove(at: matchIndex))
+            } else {
+                name = change.path
+            }
+            result.append(AgentDiffFileSummary(
+                displayName: change.renamePath.map { "\(name) → \($0)" } ?? name,
+                addedLineCount: change.addedLines,
+                removedLineCount: change.removedLines,
+                countsAreLowerBound: change.countsAreLowerBound,
+                action: diffAction(change.action)
+            ))
+        }
+        for url in availableURLs.prefix(max(0, maxObservableFiles - result.count)) {
+            result.append(AgentDiffFileSummary(displayName: abbreviatedFilePath(url)))
+        }
+        return result
+    }
+
+    /// The store's own cap on how many rows one operation may publish. The card
+    /// shows fewer and says "+N more"; this only stops an unbounded provider
+    /// list from becoming unbounded presentation work.
+    private static let maxObservableFiles = 24
+
+    private static func diffAction(_ action: AgentToolDetailObservation.FileAction) -> AgentDiffFileAction {
+        switch action {
+        case .add: return .add
+        case .edit: return .edit
+        case .write: return .write
+        case .delete: return .delete
+        case .rename: return .rename
+        case .unknown: return .unknown
+        }
     }
 
     /// Display-only host-local file names for transcript composition. These are

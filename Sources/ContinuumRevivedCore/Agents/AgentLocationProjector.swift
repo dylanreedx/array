@@ -258,12 +258,41 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         public let path: String
         public let renamePath: String?
         public let diffPreview: String?
-        public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
+        /// TR-01 — per-operation line counts, when the provider's own event
+        /// supplied enough to measure them (claude's `old_string`/`new_string`,
+        /// a codex `changes[].diff` that really is a unified diff). Each is
+        /// independently optional: a whole-file write knows its additions and
+        /// cannot know what it replaced.
+        ///
+        /// NUMBERS, not content. This is the same boundary `AgentDiffSource`
+        /// draws — counts are safe to carry where a path or a diff body is not
+        /// — so a translator may compute these from raw input it must not, and
+        /// does not, forward.
+        public let addedLines: UInt?
+        public let removedLines: UInt?
+        /// The counts were measured from a preview that had already been cut to
+        /// a byte/line bound, so they are a floor rather than a total.
+        public let countsAreLowerBound: Bool
+
+        public init(
+            action: FileAction,
+            path: String,
+            renamePath: String? = nil,
+            diffPreview: String? = nil,
+            addedLines: UInt? = nil,
+            removedLines: UInt? = nil,
+            countsAreLowerBound: Bool = false
+        ) {
             self.action = action
             self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
             self.renamePath = renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
             self.diffPreview = AgentToolDetailDisplaySanitizer.diffPreview(diffPreview, maxBytes: Self.maxDiffCharacters, maxLines: 80)
+            self.addedLines = addedLines
+            self.removedLines = removedLines
+            self.countsAreLowerBound = countsAreLowerBound
         }
+
+        public var hasAnyMeasuredCount: Bool { addedLines != nil || removedLines != nil }
     }
     public enum Phase: Equatable, Sendable {
         case started

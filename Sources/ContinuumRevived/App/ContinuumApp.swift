@@ -1062,6 +1062,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--file-card-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await FileCardChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("file-card check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--transcript-provider-parity-check") {
             do {
                 try TranscriptProviderParityChecks.run()

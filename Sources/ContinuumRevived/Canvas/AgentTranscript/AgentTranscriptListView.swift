@@ -2382,10 +2382,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // abbreviated host-local targets into this ephemeral presentation.
             // No filesystem capability or absolute path enters AgentDocument.
             if payload.files.isEmpty {
-                payload.files = AgentToolDetailPresenter.observableAffectedFileNames(detail).map {
-                    AgentDiffFileSummary(displayName: $0)
-                }
+                payload.files = AgentToolDetailPresenter.observableChangedFiles(detail)
             }
+            // TR-01 — an operation still running has not finished telling us
+            // which files it touched. Saying so is the difference between "not
+            // yet" and the card's old claim that it had counted zero files.
+            payload.presentedFilesArePending = payload.files.isEmpty
+                && (detail.status == .inProgress || detail.status == .pending)
             presented.payload = .diff(payload)
         default:
             return block
@@ -3288,6 +3291,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
               case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
         return payload.summary
     }
+    /// TR-01 — the whole presented diff payload, so a witness can drive the real
+    /// renderer with it and assert the SENTENCE the user reads, not just the
+    /// array behind it.
+    func qaPresentedDiffPayload(for blockID: AgentNodeID) -> AgentDiffPayload? {
+        guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
+              case let .diff(payload) = presentedToolBlock(block).payload else { return nil }
+        return payload
+    }
+
     func qaPresentedDiffFiles(for blockID: AgentNodeID) -> [AgentDiffFileSummary]? {
         guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
               case let .diff(payload) = presentedToolBlock(block).payload else { return nil }
