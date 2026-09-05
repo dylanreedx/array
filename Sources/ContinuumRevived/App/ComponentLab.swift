@@ -246,7 +246,10 @@ enum LabFixtures {
                 case let .turnStarted(_, turnId):
                     currentTurnID = turnId
                 case let .itemStarted(_, itemId, kind, title):
-                    guard [.commandExecution, .fileChange, .mcpToolCall, .webSearch].contains(kind),
+                    // TR-03 — the SAME predicate production uses. This was a
+                    // hand-copied list, so the fixture could quietly stop
+                    // resembling the surface it exists to review.
+                    guard AgentToolDetailPolicy.carriesHostLocalDetail(kind),
                           let turnID = currentTurnID,
                           let scope = reviewScope(turnID: turnID),
                           let providerID = AgentToolDetailID(itemId) else { break }

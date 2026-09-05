@@ -14,9 +14,11 @@ func runAgentToolDetailStoreChecks() async throws {
     try await runAgentToolDetailPresentationChecks()
     try await runAgentToolDetailDisclosureCollisionChecks()
     try await runAgentToolDetailSemanticFileChecks()
+    runAgentToolKindChecks()
+    await runAgentToolDetailSupplyContractChecks()
     runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
-    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, compact summaries, and source boundaries")
+    print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, one tool taxonomy behind icon/sentence/fold, the supply contract behind shell and delegation rows, and source boundaries")
 }
 
 private func runAgentToolDetailSemanticFileChecks() async throws {
@@ -1032,22 +1034,40 @@ private func runAgentToolDetailConcurrencyChecks() async throws {
 private func runAgentToolDetailPresentationChecks() async throws {
     let clock = ManualToolDetailClock(Date(timeIntervalSinceReferenceDate: 5_000))
     let store = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
+    // TR-03. This block used to feed the store a `command` argument and assert
+    // the presenter said "Ran swift test --filter Core". No production
+    // translator has ever forwarded a command body: claude drops `Bash.command`
+    // on purpose, pi's whitelist has no command key, and codex's shell start
+    // carries no arguments at all (I5). So the most-asserted sentence in this
+    // suite described a branch that could not run, while the sentence a real
+    // shell row DOES get went unwitnessed. It is now the claude shape — a
+    // `description` and nothing else — asserted through `collapsed`, which is
+    // what production actually reads.
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-command-summary"),
-        toolName: "bash",
-        arguments: [AgentToolDetailField(key: "command", value: "swift test --filter Core")]
+        toolName: "Bash",
+        arguments: [AgentToolDetailField(key: "description", value: "run the core checks")]
     ))
     var detail = await store.detail(for: testToolDetailKey("tool-command-summary"))
-    expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Ran swift test --filter Core"),
-           "AgentToolDetailPresenter compact: command summary should be useful and sanitized")
+    expect(AgentToolDetailPresenter.collapsed(detail!).actionLine == "Run the core checks",
+           "AgentToolDetailPresenter collapsed: a claude shell row reads its own description, got \(AgentToolDetailPresenter.collapsed(detail!).actionLine)")
+    // And a shell row with NO description falls back to the tool name rather
+    // than inventing one — codex and pi shell rows are exactly this shape.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-command-no-description"),
+        toolName: "Shell"
+    ))
+    let bareShell = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-command-no-description")))!)
+    expect(bareShell.actionLine == "Shell",
+           "AgentToolDetailPresenter collapsed: a shell row with no safe summary must fall back to its tool name, got \(bareShell.actionLine)")
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-command-summary-long"),
-        toolName: "bash",
-        arguments: [AgentToolDetailField(key: "command", value: "line one\nline two " + String(repeating: "long ", count: 80))]
+        toolName: "Bash",
+        arguments: [AgentToolDetailField(key: "description", value: "line one\nline two " + String(repeating: "long ", count: 80))]
     ))
-    let oneLineSummary = AgentToolDetailPresenter.compact((await store.detail(for: testToolDetailKey("tool-command-summary-long")))!).summary
+    let oneLineSummary = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-command-summary-long")))!).actionLine
     expect(!oneLineSummary.contains("\n") && oneLineSummary.utf8.count <= 180,
-           "AgentToolDetailPresenter compact: command summaries must be one short normalized line, got \(oneLineSummary)")
+           "AgentToolDetailPresenter collapsed: action lines must be one short normalized line, got \(oneLineSummary)")
 
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-search-summary"),
@@ -1057,8 +1077,8 @@ private func runAgentToolDetailPresentationChecks() async throws {
     detail = await store.detail(for: testToolDetailKey("tool-search-summary"))
     // `.plans/45` S3 — the action sentence quotes the query (Dylan's
     // action-first row design).
-    expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Searched for \u{201C}AgentToolDetail\u{201D}"),
-           "AgentToolDetailPresenter compact: search summary should be useful and sanitized, got \(AgentToolDetailPresenter.compact(detail!).summary)")
+    expect(AgentToolDetailPresenter.collapsed(detail!).actionLine.hasPrefix("Searched for \u{201C}AgentToolDetail\u{201D}"),
+           "AgentToolDetailPresenter collapsed: search summary should be useful and sanitized, got \(AgentToolDetailPresenter.collapsed(detail!).actionLine)")
 
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-edit-summary"),
@@ -1066,8 +1086,8 @@ private func runAgentToolDetailPresentationChecks() async throws {
         affectedFiles: [URL(fileURLWithPath: "/tmp/project/File.swift")]
     ))
     detail = await store.detail(for: testToolDetailKey("tool-edit-summary"))
-    expect(AgentToolDetailPresenter.compact(detail!).summary.hasPrefix("Edited File.swift"),
-           "AgentToolDetailPresenter compact: edit summary should use safe basename")
+    expect(AgentToolDetailPresenter.collapsed(detail!).actionLine.hasPrefix("Edited File.swift"),
+           "AgentToolDetailPresenter collapsed: edit summary should use safe basename")
     let disclosure = AgentToolDetailPresenter.observableDisclosureText(detail!)
     // T2 (2026-08-25) — this used to pin the DOUBLING:
     // "Edited File.swift\nChanged: …/project/File.swift", a title and a body line
@@ -1098,8 +1118,8 @@ private func runAgentToolDetailPresentationChecks() async throws {
         expect(!text.contains("/tmp/") && !text.contains("/Users/"),
                "AgentToolDetailPresenter disclosure: expanded target must not print an absolute host path, got \(text)")
     }
-    expect(!AgentToolDetailPresenter.compact(detail!).accessibilitySummary.contains("File.swift"),
-           "AgentToolDetailPresenter compact: accessibility summary must not expose raw file names")
+    expect(!AgentToolDetailPresenter.expanded(detail!).accessibilitySummary.contains("File.swift"),
+           "AgentToolDetailPresenter: accessibility summary must not expose raw file names")
 }
 
 /// T2 follow-up (2026-08-25) — the single-file dedupe shipped in
@@ -1142,6 +1162,160 @@ private func runAgentToolDetailDisclosureCollisionChecks() async throws {
     let collisionDisclosure = AgentToolDetailPresenter.observableDisclosureText(collisionDetail)
     expect(collisionDisclosure.contains("File: …/repo/test"),
            "AgentToolDetailPresenter disclosure: an action line that merely CONTAINS a file's name as a substring (\u{201C}Ran npm test\u{201D} vs. a file literally named \u{201C}test\u{201D}) must not suppress that file's line, got \(collisionDisclosure)")
+}
+
+/// TR-03. One row, one classification.
+///
+/// Three independent classifiers used to read the same tool name — the icon by
+/// word-boundary match, the action sentence by raw `contains`, the fold noun by
+/// raw `contains` in a different order — and they disagreed on real, shipping
+/// names. A `TodoWrite` drew a wrench, was titled "Edited file", and folded as
+/// an "edit": three answers about one row, none of them right.
+///
+/// The two historical failure modes are opposites, so a fixture list has to
+/// carry both or a fix for one silently reintroduces the other:
+///
+///  - raw substring OVER-matches: "cat" inside "locate"/"relocate", "task"
+///    inside `mcp__linear__create_task`;
+///  - word-boundary UNDER-matches: `_` is a word character, so "read" is not
+///    `\b`-bounded inside `read_file`, and every snake_case name — which is
+///    every MCP tool there is — fell to the wrench.
+private func runAgentToolKindChecks() {
+    // The names in this table are real: each is a tool one of the three
+    // harnesses actually sends, or a name shape they actually produce.
+    let expectations: [(String, AgentToolKind)] = [
+        // claude
+        ("Bash", .shell), ("Read", .read), ("Grep", .search), ("Glob", .search),
+        ("WebSearch", .search), ("WebFetch", .fetch), ("Task", .delegate),
+        ("Agent", .delegate), ("TodoWrite", .todo), ("MultiEdit", .edit),
+        ("NotebookEdit", .edit), ("Write", .edit), ("Edit", .edit),
+        ("ToolSearch", .search), ("BashOutput", .shell),
+        // codex
+        ("Shell", .shell), ("Web search", .search),
+        // pi
+        ("read", .read), ("grep", .search), ("apply_patch", .edit),
+        ("execute_command", .shell), ("delegate_agent", .delegate),
+        ("spawn_agent", .delegate),
+        // MCP / unknown: snake_case must classify, and a namespaced name whose
+        // LAST word is a delegation noun is not a delegation.
+        ("read_file", .read), ("search_issues", .search),
+        ("mcp__linear__create_task", .unknown),
+        ("mcp__notion__search_pages", .search),
+        // Over-match guards. "cat" lives inside both of these.
+        ("locate", .unknown), ("relocate", .unknown), ("deactivate", .unknown),
+        // Nothing to classify.
+        ("", .unknown), ("   ", .unknown),
+    ]
+    for (name, expected) in expectations {
+        let resolved = AgentToolKind.resolve(toolName: name)
+        expect(resolved == expected,
+               "AgentToolKind: '\(name)' resolved to .\(resolved.rawValue), expected .\(expected.rawValue)")
+    }
+    expect(AgentToolKind.resolve(toolName: nil) == .unknown,
+           "AgentToolKind: a nil tool name must resolve to .unknown")
+
+    // The three presentations must be DERIVED, not re-derived: every kind owes
+    // a distinct glyph and a noun that is not the word the fold already prints.
+    var glyphs: Set<String> = []
+    for kind in AgentToolKind.allCases {
+        expect(glyphs.insert(kind.symbolName).inserted,
+               "AgentToolKind: .\(kind.rawValue) shares a glyph with another kind, so the icon column carries no information")
+        expect(kind.clusterNoun != "step",
+               "AgentToolKind: .\(kind.rawValue) folds as 'step', which reads as a counting error next to 'N steps'")
+    }
+
+    // The tokenizer is the whole mechanism; assert it directly so a failure
+    // above can be read rather than guessed at.
+    expect(AgentToolKind.tokens("TodoWrite") == ["todo", "write"],
+           "AgentToolKind: camelCase must split, got \(AgentToolKind.tokens("TodoWrite"))")
+    expect(AgentToolKind.tokens("mcp__linear__create_task") == ["mcp", "linear", "create", "task"],
+           "AgentToolKind: snake_case must split, got \(AgentToolKind.tokens("mcp__linear__create_task"))")
+    expect(AgentToolKind.tokens("relocate") == ["relocate"],
+           "AgentToolKind: an ordinary word must stay one token, got \(AgentToolKind.tokens("relocate"))")
+
+    // A provider IDENTIFIER shown as a title. Rows printed "Delegate_agent" and
+    // "Spawn_agent" verbatim — every pi and MCP tool name is snake_case.
+    for (raw, expected) in [
+        ("delegate_agent", "delegate agent"),
+        ("spawn_agent", "spawn agent"),
+        ("read_file", "read file"),
+        ("mcp__linear__create_issue", "mcp linear create issue"),
+        // Names that already read as words are left exactly alone.
+        ("Bash", "Bash"), ("WebSearch", "WebSearch"), ("Shell", "Shell"),
+    ] {
+        let humanized = AgentToolKind.humanizedToolName(raw)
+        expect(humanized == expected,
+               "AgentToolKind: '\(raw)' humanized to '\(humanized)', expected '\(expected)'")
+    }
+}
+
+/// TR-03. What a tool row can SAY is bounded by what the provider whitelists
+/// let cross, and two of those bounds had drifted out of the presenter's view.
+private func runAgentToolDetailSupplyContractChecks() async {
+    let store = AgentToolDetailStore()
+
+    // A kind with nothing to say must not invent a sentence. `TodoWrite` shipped
+    // titled "Edited file" — it edits no file, and any MCP tool whose name
+    // merely contained "create" would have joined it. It falls back to its own
+    // name instead.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-todo-write"), toolName: "TodoWrite"))
+    let todo = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-todo-write")))!)
+    expect(todo.actionLine == "TodoWrite",
+           "AgentToolDetailPresenter: a tool that touches no file must not be titled 'Edited file', got \(todo.actionLine)")
+
+    // The delegation row: claude's whitelist forwards `description` and
+    // `subagent_type` for exactly this call, and the row rendered the raw
+    // identifier because the record never existed. Both orders of preference
+    // are pinned — the description is the richer line.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-delegation"),
+        toolName: "Agent",
+        arguments: [
+            AgentToolDetailField(key: "description", value: "Read notes.txt contents"),
+            AgentToolDetailField(key: "subagent_type", value: "general-purpose"),
+        ]
+    ))
+    let delegation = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-delegation")))!)
+    expect(delegation.actionLine == "Read notes.txt contents",
+           "AgentToolDetailPresenter: a delegation row must say what it delegated, got \(delegation.actionLine)")
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-delegation-role"),
+        toolName: "delegate_agent",
+        arguments: [AgentToolDetailField(key: "subagent_type", value: "reviewer")]
+    ))
+    let role = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-delegation-role")))!)
+    expect(role.actionLine == "Delegated to reviewer",
+           "AgentToolDetailPresenter: a delegation row with only a role must name the role, got \(role.actionLine)")
+
+    // A delegation tool that published NOTHING still has to read as words.
+    // "Delegate_agent" is what the row printed, capitalized straight off the
+    // wire.
+    _ = await store.recordStart(AgentToolDetailStart(
+        identity: testToolDetailKey("tool-delegation-bare"), toolName: "delegate_agent"))
+    let bareDelegation = AgentToolDetailPresenter.collapsed((await store.detail(for: testToolDetailKey("tool-delegation-bare")))!)
+    expect(bareDelegation.actionLine == "Delegate agent",
+           "AgentToolDetailPresenter: a bare delegation row must read as words, got \(bareDelegation.actionLine)")
+    // And the disclosure's echo must use the SAME fallback, or the renderer's
+    // dedupe stops matching and the row prints its own title underneath itself.
+    let bareDisclosure = AgentToolDetailPresenter.observableDisclosureText(
+        (await store.detail(for: testToolDetailKey("tool-delegation-bare")))!)
+    expect(bareDisclosure.isEmpty,
+           "AgentToolDetailPresenter: a row with nothing but its own name must have no body line, got \(bareDisclosure)")
+
+    // And the kind list that decides whether a record exists at all. `.subagent`
+    // was excluded, so everything above was unreachable in production no matter
+    // what the presenter did.
+    expect(AgentToolDetailPolicy.carriesHostLocalDetail(.subagent),
+           "AgentToolDetailPolicy: a delegation item must carry host-local detail, or its whitelisted description is collected and dropped")
+    for kind in [ItemKind.commandExecution, .fileChange, .mcpToolCall, .webSearch] {
+        expect(AgentToolDetailPolicy.carriesHostLocalDetail(kind),
+               "AgentToolDetailPolicy: .\(kind.rawValue) must carry host-local detail")
+    }
+    for kind in [ItemKind.assistantMessage, .reasoning, .plan, .error, .compaction] {
+        expect(!AgentToolDetailPolicy.carriesHostLocalDetail(kind),
+               "AgentToolDetailPolicy: .\(kind.rawValue) has no whitelist to publish through and must not carry detail")
+    }
 }
 
 private func runAgentToolDetailSourceBoundaryChecks() {

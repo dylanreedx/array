@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 /// Compact structured-tool presentation. The renderer intentionally consumes
 /// only the safe name/summary fields; opaque arguments never enter the view.
@@ -26,6 +27,10 @@ final class ToolCallRenderer: AgentBlockRendering {
         )
         return ToolCallView.measuredHeight(
             summary: payload.summary,
+            // Derived exactly as `apply` derives them, or the measurement
+            // dedupes against a title the row does not have.
+            title: ToolCallView.safeSingleLine(payload.name, fallback: "Tool"),
+            statusLabel: payload.status.agentToolStatusPresentation.label,
             outputText: payload.presentedOutputText,
             outputNote: payload.presentedOutputNote,
             width: width,
@@ -92,6 +97,12 @@ final class ToolCallView: NSView {
     static func clusterIndent(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
 
     private var blockID: AgentNodeID?
+    /// The SEMANTIC tool name, kept so the accessibility label cannot drift onto
+    /// whatever the title happens to read. `toggleDisclosure` used to relabel
+    /// from `titleLabel`, which is the ACTION SENTENCE — so expanding a row
+    /// silently changed its VoiceOver identity from "Bash" to "Ran npm test".
+    private var toolNameForAccessibility = "Tool"
+    private var trailingDetailText: String?
     private var disclosureText = ""
     private var compactSummary = ""
     private var hasDisclosureDetail = false
@@ -192,18 +203,13 @@ final class ToolCallView: NSView {
         // `.plans/45` S4 — the title is the action sentence; the tool NAME
         // lives in the icon, the tooltip and the AX label.
         let toolName = payload.presentedToolNameText ?? payload.name
+        toolNameForAccessibility = Self.safeSingleLine(toolName, fallback: "Tool")
+        trailingDetailText = payload.presentedTrailingDetailText
         iconView.image = Self.symbolImage(forToolNamed: toolName)
         toolTip = payload.presentedToolNameText.map { Self.safeSingleLine($0, fallback: "Tool") }
         let presentation = payload.status.agentToolStatusPresentation
-        // `.plans/45` S3/S4 — the trailing column reads "2.1s ✓" when the
-        // host-local detail knows the duration; the wordy status label remains
-        // the fallback (and the failure presentation keeps its label).
-        if let duration = payload.presentedTrailingDetailText,
-           payload.status == .completed {
-            statusLabel.stringValue = "\(duration) \(presentation.glyph)"
-        } else {
-            statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
-        }
+        statusLabel.stringValue = Self.statusText(
+            status: payload.status, duration: payload.presentedTrailingDetailText)
         // A row resolving under the reader — in progress becoming "2.1s ✓" —
         // settles rather than swapping. Two conditions, both learned from the
         // witness: the SAME block (a recycled view arriving with different
@@ -216,27 +222,21 @@ final class ToolCallView: NSView {
         if previousBlockID == blockID, previousStatus != payload.status {
             AgentTranscriptMotion.settle(statusLabel)
         }
-        let candidateSummary = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        disclosureText = candidateSummary.caseInsensitiveCompare(presentation.label) == .orderedSame
-            ? "" : candidateSummary
-        var lines = disclosureText.split(whereSeparator: { $0.isNewline }).map(String.init)
-        // `.plans/45` S3 — when the title already IS the action sentence, the
-        // disclosure's first line repeats it; show the additional facts only.
-        // Case-INSENSITIVE, matching the idiom three lines above. It was exact,
-        // and the two strings it compares are composed in different places with
-        // different fallbacks — `capitalizedPhrase(toolName)` for the title,
-        // bare `safeToolName` for the body — so "Bash" over "bash" slipped
-        // through every time a tool produced no action sentence. The presenter
-        // no longer emits that line at all; this is the second wall, and it is
-        // what makes a render-level witness for the doubling possible.
-        if lines.first?.caseInsensitiveCompare(titleLabel.stringValue) == .orderedSame {
-            lines.removeFirst()
-            disclosureText = lines.joined(separator: "\n")
-        }
-        compactSummary = lines.first ?? ""
+        // TR-03 — one dedupe, shared with `measuredHeight`. It used to live only
+        // here, so the MEASUREMENT was made from the undeduped summary: a row
+        // whose only body line repeated its title hid that line and kept the
+        // height it would have needed. Every single-file `Read` row is exactly
+        // that shape, so the commonest row on the surface reserved a blank line.
+        let presented = Self.presentedSummary(
+            title: titleLabel.stringValue,
+            summary: payload.summary,
+            statusLabel: presentation.label
+        )
+        disclosureText = presented.disclosureText
+        compactSummary = presented.compactLine
         outputText = payload.presentedOutputText?.isEmpty == false ? payload.presentedOutputText : nil
         outputNote = payload.presentedOutputNote
-        hasDisclosureDetail = lines.count > 1 || outputText != nil
+        hasDisclosureDetail = presented.lineCount > 1 || outputText != nil
         if !hasDisclosureDetail { isExpanded = false }
         summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
         summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
@@ -248,14 +248,28 @@ final class ToolCallView: NSView {
         disclosureButton.isEnabled = hasDisclosureDetail
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue, zoom: zoom)
         identifier = NSUserInterfaceItemIdentifier("agent.toolCall.\(blockID.rawValue)")
-        applyAccessibility(name: toolName, status: payload.status)
+        applyAccessibility(status: payload.status)
         applyTokens()
         needsLayout = true
     }
 
     func applyAccessibility(name: String, status: AgentItemStatus) {
+        toolNameForAccessibility = Self.safeSingleLine(name, fallback: "Tool")
+        applyAccessibility(status: status)
+    }
+
+    /// TR-03 — the label carries the facts the row is showing, not just its name
+    /// and state. The duration and the presence of an output pane are exactly
+    /// what a sighted reader gets from the trailing column and the chevron, and
+    /// they were the two things the label omitted.
+    private func applyAccessibility(status: AgentItemStatus) {
         let presentation = status.agentToolStatusPresentation
-        setAccessibilityLabel("Tool, \(Self.safeSingleLine(name, fallback: "Tool")), \(presentation.label)")
+        var parts = ["Tool", toolNameForAccessibility, presentation.label]
+        if let trailingDetailText, !trailingDetailText.isEmpty, status.agentToolIsTerminal {
+            parts.append("took \(trailingDetailText)")
+        }
+        if outputText != nil { parts.append("output available") }
+        setAccessibilityLabel(parts.joined(separator: ", "))
         var children: [NSView] = disclosureButton.isHidden
             ? [titleLabel, statusLabel] : [disclosureButton, titleLabel, statusLabel]
         if !summaryLabel.isHidden { children.append(summaryLabel) }
@@ -380,7 +394,11 @@ final class ToolCallView: NSView {
         // so it is applied to the row as a whole and never stacked with a further
         // colour reduction. A failure never recedes: only failures should pull
         // the eye.
-        alphaValue = status == .completed ? Opacity.receded : Opacity.full
+        // TR-03: `.completed` alone left a cancelled or interrupted row at the
+        // same visual weight as live work, so a turn the reader stopped still
+        // read as running. Any settled row recedes; a FAILURE is the exception
+        // handled below, where only the status colour pulls the eye.
+        alphaValue = status.agentToolIsTerminal && status != .failed ? Opacity.receded : Opacity.full
         titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         summaryLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         statusLabel.textColor = status == .failed
@@ -402,14 +420,17 @@ final class ToolCallView: NSView {
     /// `.plans/45` T11 — one glyph per kind of work, instead of one wrench for
     /// everything.
     ///
-    /// Resolved from the provider-supplied tool NAME, matched on substrings
-    /// because the three harnesses disagree on casing and wording for the same
-    /// operation (codex sends literal `"Shell"` and `"Edit"`, claude sends
-    /// `bash`/`Bash`, pi sends its own). Unknown names keep the wrench, so a new
-    /// provider tool degrades to today's behaviour rather than to a blank column.
+    /// TR-03: the mapping itself now lives in `AgentToolKind`, which the action
+    /// sentence and the fold noun read too. It used to be a private
+    /// word-boundary matcher here, and `_` counts as a word character — so every
+    /// snake_case tool name (`read_file`, `search_issues`, and every
+    /// `mcp__server__tool`) fell to the wrench while the presenter, matching by
+    /// raw substring, happily titled the same row "Read foo.swift". One row, two
+    /// classifiers, two answers.
     ///
-    /// The mapping lives here as one static function rather than in `apply` so a
-    /// witness can exercise it without building a view.
+    /// Unknown names keep the wrench, so a new provider tool degrades to today's
+    /// behaviour rather than to a blank column.
+    ///
     /// The mapping's doc comment promises it "degrades to today's behaviour
     /// rather than to a blank column", but `CanvasSymbolImage.image(named:)`
     /// returns nil for any symbol this OS does not have and the result went
@@ -422,69 +443,78 @@ final class ToolCallView: NSView {
         return CanvasSymbolImage.image(named: fallbackSymbolName)
     }
 
-    static let fallbackSymbolName = "wrench.and.screwdriver"
+    static let fallbackSymbolName = AgentToolKind.unknown.symbolName
 
     static func symbolName(forToolNamed name: String?) -> String {
-        let fallback = fallbackSymbolName
-        guard let name = name?.lowercased(), !name.isEmpty else { return fallback }
-        // Word-boundary matching, not raw substring: `name.contains("cat")` also
-        // matched inside "locate"/"relocate". A "word" here is a run of
-        // letters/digits/underscore — underscore counts as a word character (as
-        // it does for regex `\b`), so this alone is not enough for the
-        // delegation category below: "task"/"agent" are common SUFFIX words in
-        // namespaced tool names ("mcp__linear__create_task" is one underscore
-        // away from a `\b` match) and are handled separately.
-        func containsWord(_ name: String, _ needle: String) -> Bool {
-            guard !needle.isEmpty else { return false }
-            func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
-            var searchStart = name.startIndex
-            while let range = name.range(of: needle, range: searchStart..<name.endIndex) {
-                let leftBoundary = range.lowerBound == name.startIndex || !isWordChar(name[name.index(before: range.lowerBound)])
-                let rightBoundary = range.upperBound == name.endIndex || !isWordChar(name[range.upperBound])
-                if leftBoundary && rightBoundary { return true }
-                searchStart = range.upperBound
-            }
-            return false
+        AgentToolKind.resolve(toolName: name).symbolName
+    }
+
+    /// What a row will actually SHOW, once the lines that merely restate the
+    /// title or the status word have been removed. One derivation, read by
+    /// `apply` (which paints it) and `measuredHeight` (which reserves space for
+    /// it) — they disagreed before, and the reader saw the difference as a blank
+    /// line under most rows.
+    struct PresentedSummary: Equatable {
+        /// Every surviving line, joined — what an EXPANDED row shows.
+        var disclosureText: String
+        /// The first surviving line — what a COLLAPSED row shows.
+        var compactLine: String
+        /// How many lines survived; > 1 is what earns a disclosure control.
+        var lineCount: Int
+    }
+
+    static func presentedSummary(
+        title: String, summary: String?, statusLabel: String
+    ) -> PresentedSummary {
+        let candidate = summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // A summary that is only the status word ("Completed") says nothing the
+        // trailing column has not already said.
+        guard candidate.caseInsensitiveCompare(statusLabel) != .orderedSame else {
+            return PresentedSummary(disclosureText: "", compactLine: "", lineCount: 0)
         }
-        func any(_ needles: [String]) -> Bool { needles.contains { containsWord(name, $0) } }
-        // Delegation FIRST, and not a bubble. `bubble.left` is what
-        // `CompletedReasoningDisclosureView` paints for reasoning, so a
-        // `delegate_agent` row rendered as a thought — Dylan saw exactly that.
-        // This rhymes with the chip the row becomes instead
-        // (`AgentReferenceRenderer` paints `person.crop.circle.badge.arrow.forward`).
-        // It is tested before "read"/"search" because a delegation tool name can
-        // contain either.
-        //
-        // "task" and "agent" are the delegation NOUN, not a verb, and they are
-        // common suffix words on unrelated namespaced tools (an MCP tool named
-        // `mcp__linear__create_task` is not a subagent). They only count when
-        // they are the tool's WHOLE name — the bare "Task"/"Agent" identifiers
-        // claude/pi actually send — never as a fragment of a longer name.
-        // "subagent"/"delegate_agent"/"spawn_agent" are themselves the known,
-        // unambiguous compound identifiers, so plain containment is fine there
-        // (word-boundary matching would reject them too: the "_" joining
-        // "delegate"/"spawn" to "agent" is itself a word character, so neither
-        // half alone is `\b`-bounded inside the compound).
-        let delegationCompounds = ["subagent", "delegate_agent", "spawn_agent"]
-        if delegationCompounds.contains(where: { name.contains($0) }) || name == "task" || name == "agent" {
-            return "person.2"
+        var lines = candidate.split(whereSeparator: { $0.isNewline }).map(String.init)
+        // `.plans/45` S3 — when the title already IS the action sentence, the
+        // disclosure's first line repeats it; show the additional facts only.
+        // Case-INSENSITIVE: the two strings are composed in different places
+        // with different fallbacks, so "Bash" over "bash" slipped through an
+        // exact match every time a tool produced no action sentence.
+        if lines.first?.caseInsensitiveCompare(title) == .orderedSame {
+            lines.removeFirst()
         }
-        // "run"/"cat" without the trailing space they used to carry: `"run "` and
-        // `"cat "` could not match a bare tool name, only a sentence.
-        if any(["bash", "shell", "terminal", "command", "run", "exec"]) { return "terminal" }
-        if any(["edit", "write", "patch", "apply_patch", "create", "replace"]) { return "square.and.pencil" }
-        if any(["read", "view", "cat", "open"]) { return "eye" }
-        if any(["search", "grep", "glob", "find"]) { return "magnifyingglass" }
-        if any(["fetch", "web", "http", "url", "browse"]) { return "globe" }
-        if any(["todo", "plan"]) { return "checklist" }
-        return fallback
+        return PresentedSummary(
+            disclosureText: lines.joined(separator: "\n"),
+            compactLine: lines.first ?? "",
+            lineCount: lines.count
+        )
+    }
+
+    /// The trailing column.
+    ///
+    /// TR-03: the duration used to be gated on `.completed`, so a row that
+    /// FAILED — or was cancelled, or was swept when the turn was interrupted —
+    /// threw away the one number saying how long it had burned before it died.
+    /// Those are the states where the number matters most. Every terminal state
+    /// that knows its duration now shows it; an unfinished row keeps the wordy
+    /// label, because "In progress" is the fact and there is no span yet.
+    static func statusText(status: AgentItemStatus, duration: String?) -> String {
+        let presentation = status.agentToolStatusPresentation
+        guard let duration, !duration.isEmpty, status.agentToolIsTerminal else {
+            return "\(presentation.glyph) \(presentation.label)"
+        }
+        return "\(duration) \(presentation.glyph)"
     }
 
     static let maximumOutputHeight: CGFloat = 240
     static func maximumOutputHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
 
+    /// TR-03 — `title` and `statusLabel` are what the row will actually show, so
+    /// the measurement can run the SAME dedupe the view runs. Passing them is
+    /// not optional: measuring the raw `summary` is precisely the defect, and a
+    /// defaulted parameter would let a caller reintroduce it silently.
     static func measuredHeight(
         summary: String?,
+        title: String,
+        statusLabel: String,
         outputText: String? = nil,
         outputNote: String? = nil,
         width: CGFloat,
@@ -494,9 +524,12 @@ final class ToolCallView: NSView {
         _ = outputNote
         let zoomedRowHeight = rowHeight(zoom: zoom)
         let zoomedDetailBottomInset = detailBottomInset(zoom: zoom)
+        let presented = presentedSummary(title: title, summary: summary, statusLabel: statusLabel)
+        let visibleSummary = expanded ? presented.disclosureText : presented.compactLine
         var height: CGFloat
-        if let summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
-            height = zoomedRowHeight + measuredSummaryHeight(summary, width: width, expanded: expanded, zoom: zoom)
+        if !visibleSummary.isEmpty {
+            height = zoomedRowHeight
+                + measuredSummaryHeight(visibleSummary, width: width, expanded: expanded, zoom: zoom)
                 + zoomedDetailBottomInset
         } else {
             height = zoomedRowHeight
@@ -543,7 +576,7 @@ final class ToolCallView: NSView {
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         syncOutputPaneVisibility()
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue, zoom: zoom)
-        applyAccessibility(name: titleLabel.stringValue, status: status)
+        applyAccessibility(status: status)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -567,7 +600,7 @@ final class ToolCallView: NSView {
         if let blockID { context.actions.perform(.copy(blockID: blockID)) }
     }
 
-    private static func safeSingleLine(_ value: String, fallback: String) -> String {
+    static func safeSingleLine(_ value: String, fallback: String) -> String {
         let line = value
             .split(whereSeparator: { $0.isNewline })
             .first

@@ -718,6 +718,13 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
 run_app_check .build/debug/Array --transcript-provider-parity-check
+# TR-03: the host-local tool-detail supply — immutable scope, expiry, and the
+# real translator sequences (claude search + delegation, codex exit code) driven
+# through the host's own capture path. This leg has existed since `.plans/45` and
+# has NEVER been in this script: the strongest witness the tool rows own ran only
+# when someone typed it by hand. A witness the gate does not report is not a
+# witness (CLAUDE.md, non-negotiable #2).
+run_app_check .build/debug/Array --tool-detail-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check
