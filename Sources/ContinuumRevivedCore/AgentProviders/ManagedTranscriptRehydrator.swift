@@ -159,7 +159,10 @@ public enum ManagedTranscriptRehydrator {
     /// exact tool name rides `title`.
     static func itemKind(forTool tool: String) -> ItemKind {
         switch tool.lowercased() {
-        case "edit", "write", "multiedit", "notebookedit":
+        // `apply_patch` is codex's file-change verb (and pi's alias for it).
+        // Without it a RESTORED codex patch bucketed as a command and rendered
+        // as a shell row rather than a change card.
+        case "edit", "write", "multiedit", "notebookedit", "apply_patch", "applypatch":
             return .fileChange
         case "websearch", "webfetch":
             return .webSearch

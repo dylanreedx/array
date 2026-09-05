@@ -662,7 +662,40 @@ public struct PiEventTranslator {
         if name == "write" { action = .write }
         else if name.contains("edit") || name.contains("patch") { action = .edit }
         else { return [] }
-        return [.init(action: action, path: path)]
+        let counts = editCounts(toolName: name, args: args)
+        return [.init(action: action, path: path,
+                      addedLines: counts.added, removedLines: counts.removed)]
+    }
+
+    /// TR-01 — pi hands over enough to MEASURE its edits, in a shape captured
+    /// live from pi 0.85.0 on 2026-09-05:
+    ///
+    ///   edit  → `{"path": …, "edits": [{"oldText": …, "newText": …}]}`
+    ///   write → `{"path": …, "content": …}`
+    ///
+    /// Same rule as claude's: the TEXT stays in this translator and only the two
+    /// integers cross onto the host-local channel. A write knows what it wrote
+    /// and cannot know what it replaced, so its removal count stays absent
+    /// rather than becoming a zero.
+    private static func editCounts(
+        toolName: String, args: [String: Any]
+    ) -> (added: UInt?, removed: UInt?) {
+        if toolName == "write" {
+            guard let content = args["content"] as? String else { return (nil, nil) }
+            return (AgentFileChangeCounting.lineCount(content), nil)
+        }
+        guard let edits = args["edits"] as? [[String: Any]], !edits.isEmpty else { return (nil, nil) }
+        var added: UInt = 0
+        var removed: UInt = 0
+        for edit in edits {
+            guard let old = (edit["oldText"] as? String) ?? (edit["old_string"] as? String),
+                  let new = (edit["newText"] as? String) ?? (edit["new_string"] as? String),
+                  let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+            else { return (nil, nil) }
+            added += counts.added
+            removed += counts.removed
+        }
+        return (added, removed)
     }
 
     /// A bounded preview of `result.content[].text`. Non-text blocks and

@@ -253,8 +253,13 @@ private func runCodexSessionTranscriptParseChecks() {
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .reasoning, delta: "CODEX_REASON")),
         .event(.itemStarted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, title: "shell_command")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, status: .completed)),
-        .event(.itemStarted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, title: "apply_patch")),
-        .event(.itemCompleted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, status: .failed)),
+        // TR-01 — `apply_patch` is codex's file-change verb, so it buckets as a
+        // change card rather than a shell row. This call's envelope is empty
+        // (`"arguments":"{}"`), so it carries no file facts and no observation:
+        // the kind comes from the tool NAME, the facts only ever from a patch
+        // that really names files.
+        .event(.itemStarted(threadId: threadId, itemId: "call_bad", kind: .fileChange, title: "apply_patch")),
+        .event(.itemCompleted(threadId: threadId, itemId: "call_bad", kind: .fileChange, status: .failed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "CODEX_REPLY")),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
     ]

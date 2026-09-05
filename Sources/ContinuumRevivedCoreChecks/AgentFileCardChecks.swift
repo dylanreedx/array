@@ -23,7 +23,83 @@ func runAgentFileCardChecks() {
     runFileChangeCountingChecks()
     runCodexFileChangeReaderChecks()
     runObservableChangedFilesChecks()
-    print("AgentFileCard checks passed: measured-or-absent line counts, codex kind/diff parity, per-operation file projection")
+    runCapturedProviderShapeChecks()
+    print("AgentFileCard checks passed: measured-or-absent line counts, codex kind/diff parity, per-operation file projection, and the three live-captured provider shapes")
+}
+
+/// The three shapes captured live on 2026-09-05, each with the production argv,
+/// and each committed as a fixture beside this file:
+///
+///   codex-cli 0.153.4 `codex exec --json --skip-git-repo-check
+///     -c approval_policy=never -c sandbox_mode=workspace-write -m <model> -C <cwd>`
+///   pi 0.85.0 `pi -p --mode json --model <id> --thinking low --session-id <id>`
+///
+/// They settle three questions the earlier hand-written fixtures could not.
+private func runCapturedProviderShapeChecks() {
+    // 1. Codex exec sends NO diff. The old hand-written parity fixture invented
+    //    a `diff` field for `changes[]`; the real stream has path and kind only,
+    //    so a live codex card cannot have counts and must not pretend to.
+    let execLines = loadFileCardFixture("codex-exec-file-change-live.jsonl")
+    let execBox = ObservationBox()
+    var exec = CodexEventTranslator(runToken: "captured")
+    exec.onRuntimeObservation = execBox.append
+    _ = exec.translate(stream: execLines)
+    let execChanges = execBox.fileChanges
+    expect(execChanges.count == 2,
+           "captured codex exec: one file_change item carried TWO files; the card must show both, got \(execChanges.count)")
+    expect(execChanges.map(\.action) == [.add, .edit],
+           "captured codex exec: kinds drifted, got \(execChanges.map(\.action))")
+    expect(execChanges.allSatisfy { !$0.hasAnyMeasuredCount },
+           "captured codex exec: the stream carries no diff, so counts must stay unknown rather than be invented")
+
+    // 2. The rollout DOES carry the patch, so a RESTORED codex change can be
+    //    measured even though the live one cannot.
+    let rollout = loadFileCardFixture("codex-rollout-apply-patch-live.jsonl")
+    let restored = CodexSessionTranscriptReader.parse(
+        lines: rollout, threadId: "t-codex", now: { Date(timeIntervalSince1970: 0) })
+    let restoredChanges = restored.steps.compactMap { step -> AgentToolDetailObservation? in
+        guard case let .observation(.toolDetail(_, detail)) = step else { return nil }
+        return detail
+    }.flatMap(\.fileChanges)
+    expect(restoredChanges.count == 2,
+           "captured codex rollout: the apply_patch envelope names two files, got \(restoredChanges.count)")
+    expect(restoredChanges.first?.action == .edit
+               && restoredChanges.first?.addedLines == 2
+               && restoredChanges.first?.removedLines == 1,
+           "captured codex rollout: the Update section is +2 −1, got \(String(describing: restoredChanges.first))")
+    expect(restoredChanges.last?.action == .add
+               && restoredChanges.last?.addedLines == 1
+               && restoredChanges.last?.removedLines == 0,
+           "captured codex rollout: a new file is +1 and a MEASURED −0, got \(String(describing: restoredChanges.last))")
+
+    // 3. Pi's edit carries `edits[{oldText,newText}]` and its write carries
+    //    `content` — so pi is measurable after all, which no committed fixture
+    //    had ever shown.
+    let piLines = loadFileCardFixture("pi-file-edit-live.jsonl")
+    let piBox = ObservationBox()
+    var pi = PiEventTranslator()
+    pi.onRuntimeObservation = piBox.append
+    _ = pi.translate(stream: ["{\"type\":\"session\",\"id\":\"captured\",\"cwd\":\"/tmp/fixture\"}",
+                              "{\"type\":\"agent_start\"}"] + piLines)
+    let piChanges = piBox.fileChanges
+    let piEdit = piChanges.first { $0.action == .edit }
+    let piWrite = piChanges.first { $0.action == .write }
+    expect(piEdit?.addedLines == 2 && piEdit?.removedLines == 1,
+           "captured pi edit: 'alpha/beta/delta' → 'ALPHA/beta/delta/gamma' is +2 −1, got \(String(describing: piEdit))")
+    expect(piWrite?.addedLines == 1 && piWrite?.removedLines == nil,
+           "captured pi write: one written line, and it cannot know what it replaced, got \(String(describing: piWrite))")
+}
+
+private func loadFileCardFixture(_ name: String) -> [String] {
+    let url = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures", isDirectory: true)
+        .appendingPathComponent(name)
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        expect(false, "missing captured fixture \(name)")
+        return []
+    }
+    return text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
 }
 
 private func runFileChangeCountingChecks() {
@@ -48,18 +124,33 @@ private func runFileChangeCountingChecks() {
     // it — not "+3 −3" because the tool call quoted three lines of context.
     let anchored = AgentFileChangeCounting.replacementCounts(
         old: "keep\nchange me\ntail", new: "keep\nchanged\ntail")
-    expect(anchored == (added: 1, removed: 1),
-           "replacementCounts: unchanged context must be peeled off, got \(anchored)")
+    expect(anchored?.added == 1 && anchored?.removed == 1,
+           "replacementCounts: unchanged context must be peeled off, got \(String(describing: anchored))")
+
+    // The shape that made the cheap version wrong, captured from pi: the first
+    // line changes AND a line is appended, so there is no common prefix and no
+    // common suffix — but the middle is untouched and must not be counted.
+    let bothEnds = AgentFileChangeCounting.replacementCounts(
+        old: "alpha\nbeta\ndelta\n", new: "ALPHA\nbeta\ndelta\ngamma\n")
+    expect(bothEnds?.added == 2 && bothEnds?.removed == 1,
+           "replacementCounts: an untouched middle must not count as rewritten, got \(String(describing: bothEnds))")
 
     let pureInsert = AgentFileChangeCounting.replacementCounts(old: "a\nb", new: "a\nnew\nb")
-    expect(pureInsert == (added: 1, removed: 0),
-           "replacementCounts: an insertion removes nothing, got \(pureInsert)")
+    expect(pureInsert?.added == 1 && pureInsert?.removed == 0,
+           "replacementCounts: an insertion removes nothing, got \(String(describing: pureInsert))")
     let pureDelete = AgentFileChangeCounting.replacementCounts(old: "a\ngone\nb", new: "a\nb")
-    expect(pureDelete == (added: 0, removed: 1),
-           "replacementCounts: a deletion adds nothing, got \(pureDelete)")
+    expect(pureDelete?.added == 0 && pureDelete?.removed == 1,
+           "replacementCounts: a deletion adds nothing, got \(String(describing: pureDelete))")
     let identical = AgentFileChangeCounting.replacementCounts(old: "same", new: "same")
-    expect(identical == (added: 0, removed: 0),
-           "replacementCounts: an unchanged replacement is zero, got \(identical)")
+    expect(identical?.added == 0 && identical?.removed == 0,
+           "replacementCounts: an unchanged replacement is zero, got \(String(describing: identical))")
+
+    // Too large to diff inside the budget: unknown, never an overcount. The
+    // card prints these as measurements.
+    let huge = (0..<600).map(String.init).joined(separator: "\n")
+    let hugeOther = (0..<600).map { String($0 * 7) }.joined(separator: "\n")
+    expect(AgentFileChangeCounting.replacementCounts(old: huge, new: hugeOther) == nil,
+           "replacementCounts: a replacement past the diff budget must be unknown, not approximated")
 
     // A unified diff counts its content lines and ignores its file headers.
     let unified = AgentFileChangeCounting.unifiedDiffCounts(

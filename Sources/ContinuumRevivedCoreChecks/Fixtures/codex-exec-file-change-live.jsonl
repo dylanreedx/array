@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a07197-ffbd-7ce2-b75e-41bb4210b316"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_4","type":"file_change","changes":[{"path":"/tmp/fixture/extra.txt","kind":"add"},{"path":"/tmp/fixture/notes.txt","kind":"update"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"file_change","changes":[{"path":"/tmp/fixture/extra.txt","kind":"add"},{"path":"/tmp/fixture/notes.txt","kind":"update"}],"status":"completed"}}

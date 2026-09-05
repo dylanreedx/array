@@ -714,8 +714,9 @@ public struct ClaudeEventTranslator {
         switch toolName {
         case "edit":
             guard input["replace_all"] as? Bool != true,
-                  let old = text("old_string"), let new = text("new_string") else { return (nil, nil) }
-            let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+                  let old = text("old_string"), let new = text("new_string"),
+                  let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+            else { return (nil, nil) }
             return (counts.added, counts.removed)
         case "multiedit":
             guard let edits = input["edits"] as? [[String: Any]], !edits.isEmpty else { return (nil, nil) }
@@ -724,8 +725,9 @@ public struct ClaudeEventTranslator {
             for edit in edits {
                 guard edit["replace_all"] as? Bool != true,
                       let old = edit["old_string"] as? String,
-                      let new = edit["new_string"] as? String else { return (nil, nil) }
-                let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+                      let new = edit["new_string"] as? String,
+                      let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+                else { return (nil, nil) }
                 added += counts.added
                 removed += counts.removed
             }
