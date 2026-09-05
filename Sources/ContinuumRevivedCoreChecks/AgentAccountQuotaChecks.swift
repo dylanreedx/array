@@ -266,12 +266,29 @@ func runAgentAccountQuotaChecks() {
     expect(visible == [.location, .activity, .contextMeter, .cost],
            "visible elements must come back in fixed presentation order, got \(visible)")
 
-    // Every element owns a registered setting: a new element cannot ship
-    // without a way to turn it off.
+    // Every element owns a registered setting AND a field in the schema the
+    // settings panel actually renders.
+    //
+    // The registry half alone is not enough, and shipping it alone is exactly
+    // what went wrong: `BuiltInSettingRegistry.all()` feeds
+    // `SettingsSchema.registeredDefinitions()`, a metadata/search bridge, while
+    // the panel renders `SettingsSchema.sections()`. Asserting only the first
+    // left seven toggles that existed, were honoured by the status row, and
+    // could not be reached from the UI — with a green check. The panel witness
+    // in `--settings-panel-check` drives the real control; this one keeps the
+    // two sources from drifting apart again.
     let registeredKeys = Set(BuiltInSettingRegistry.all().map(\.id.rawValue))
+    let agentsSection = SettingsSchema.sections().first { $0.id == "agents" }
+    expect(agentsSection != nil, "the settings schema must still have an agents section")
+    let renderedToggleKeys = Set((agentsSection?.fields ?? []).compactMap { field -> String? in
+        guard case .toggle = field else { return nil }
+        return field.key
+    })
     for element in AgentStatusElement.allCases {
         expect(registeredKeys.contains(element.settingKey),
                "status element \(element.rawValue) has no registered setting")
+        expect(renderedToggleKeys.contains(element.settingKey),
+               "status element \(element.rawValue) has no toggle in the schema the panel renders — it would be unreachable from the UI")
     }
 
     // MARK: - overflow drops in the declared order, and location never goes

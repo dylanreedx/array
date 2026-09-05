@@ -49,7 +49,16 @@ public enum SettingsSchema {
                 .choice(key: AgentModelConfig.thinkingKey, label: "Default Reasoning Effort", options: AgentModelConfig.thinkingOptions, default: AgentModelConfig.defaultThinking),
                 .choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Auto-Settle After", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption),
                 .agentSounds(label: "Sounds"),
-            ]),
+                // ST-01 — one independent toggle per compact-status element.
+                //
+                // These are LIVE, not creation defaults, so they sit below the
+                // `.info` note above rather than under it: the note says
+                // "newly created agents only", which is true of the harness,
+                // model and effort fields and false of these.
+                .info(label: "Status row elements apply live to every agent tile. Account usage windows are reported per provider account and are shared by every agent signed into it."),
+            ] + AgentStatusElement.presentationOrder.map { element in
+                .toggle(key: element.settingKey, label: element.title, default: element.defaultVisible)
+            }),
             SettingsSection(id: "editor", title: "Editor", iconSystemName: "curlybraces", fields: [
                 .info(label: "Applies live to all Editor tiles. Editor appearance is independent of Array’s app theme."),
                 .choice(key: EditorPreferences.appearanceKey, label: "Appearance", options: EditorAppearance.allCases.map(\.rawValue), default: EditorAppearance.system.rawValue),
