@@ -652,7 +652,10 @@ public struct PiEventTranslator {
         return fields
     }
 
-    private static func fileDetails(toolName: String, args: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
+    /// Internal, not private: `PiSessionTranscriptReader` describes a RESTORED
+    /// tool call with the very same extractor the live stream uses, so a
+    /// rehydrated card and a live card cannot disagree about one operation.
+    static func fileDetails(toolName: String, args: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
         guard let path = (args["path"] as? String) ?? (args["file"] as? String) ?? (args["file_path"] as? String) else { return [] }
         let name = toolName.lowercased()
         let action: AgentToolDetailObservation.FileAction
