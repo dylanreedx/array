@@ -1,0 +1,1 @@
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"call_apply_patch_live","status":"completed","input":"*** Begin Patch\n*** Update File: /tmp/fixture/notes.txt\n@@\n-alpha\n+ALPHA\n beta\n delta\n+gamma\n*** Add File: /tmp/fixture/extra.txt\n+hello\n*** End Patch\n"}}

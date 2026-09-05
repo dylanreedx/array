@@ -37,6 +37,95 @@ enum CodexFileChangeReader {
         }
     }
 
+    /// TR-01 — codex's `apply_patch` envelope, which is the ONLY place codex
+    /// states what a file change actually did.
+    ///
+    /// Captured live from codex-cli 0.153.4 on 2026-09-05: the exec stream's
+    /// `file_change` item carries `changes[].path` and `kind` and NOTHING else —
+    /// no `diff` field at all — so a live codex card cannot have counts. The
+    /// rollout, however, records the patch verbatim:
+    ///
+    ///     *** Begin Patch
+    ///     *** Update File: /abs/notes.txt
+    ///     @@
+    ///     -alpha
+    ///     +ALPHA
+    ///      beta
+    ///     +gamma
+    ///     *** Add File: /abs/extra.txt
+    ///     +hello
+    ///     *** End Patch
+    ///
+    /// so a RESTORED codex change can show counts a live one cannot. That is
+    /// the right way round to be wrong: history gains detail, and nothing is
+    /// invented for the live row.
+    ///
+    /// A deleted file's section has no body, so its counts stay absent — codex
+    /// never says how many lines it removed, and "−0" would be a lie.
+    static func fileChanges(applyPatchEnvelope envelope: String) -> [AgentToolDetailObservation.FileChange] {
+        var result: [AgentToolDetailObservation.FileChange] = []
+        var path: String?
+        var action: AgentToolDetailObservation.FileAction = .unknown
+        var renamePath: String?
+        var added: UInt = 0
+        var removed: UInt = 0
+        var sawBody = false
+
+        func flush() {
+            guard let current = path else { return }
+            let measured = sawBody || action == .add
+            result.append(.init(
+                action: action, path: current, renamePath: renamePath,
+                addedLines: measured ? added : nil,
+                removedLines: measured ? removed : nil))
+            path = nil
+            renamePath = nil
+            action = .unknown
+            added = 0
+            removed = 0
+            sawBody = false
+        }
+
+        for line in envelope.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("*** ") {
+                let directive = line.dropFirst(4)
+                if let name = directive.hasPrefix("Update File: ") ? directive.dropFirst(13) : nil {
+                    flush(); path = String(name); action = .edit
+                } else if let name = directive.hasPrefix("Add File: ") ? directive.dropFirst(10) : nil {
+                    flush(); path = String(name); action = .add
+                } else if let name = directive.hasPrefix("Delete File: ") ? directive.dropFirst(13) : nil {
+                    flush(); path = String(name); action = .delete
+                } else if directive.hasPrefix("Move to: ") {
+                    // Rides the section it follows, so it renames THAT file.
+                    renamePath = String(directive.dropFirst(9))
+                    action = .rename
+                } else if directive.hasPrefix("End Patch") {
+                    flush()
+                }
+                continue
+            }
+            guard path != nil else { continue }
+            if line.hasPrefix("+") { added += 1; sawBody = true }
+            else if line.hasPrefix("-") { removed += 1; sawBody = true }
+        }
+        flush()
+        return result
+    }
+
+    /// The first file the envelope names, unabbreviated, for the detail store's
+    /// affected-file list. `FileChange.path` is reduced to a basename at the
+    /// privacy boundary, so the card needs this to keep the directory.
+    static func firstEnvelopePath(_ envelope: String) -> String? {
+        for line in envelope.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard line.hasPrefix("*** ") else { continue }
+            let directive = line.dropFirst(4)
+            for prefix in ["Update File: ", "Add File: ", "Delete File: "] where directive.hasPrefix(prefix) {
+                return String(directive.dropFirst(prefix.count))
+            }
+        }
+        return nil
+    }
+
     /// exec: `"kind": "add"`. app-server: `"kind": {"type": "add"}`. Some
     /// builds spell the field `type`. All three resolve here.
     private static func action(_ change: [String: Any]) -> AgentToolDetailObservation.FileAction {

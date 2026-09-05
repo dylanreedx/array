@@ -159,7 +159,10 @@ public enum ManagedTranscriptRehydrator {
     /// exact tool name rides `title`.
     static func itemKind(forTool tool: String) -> ItemKind {
         switch tool.lowercased() {
-        case "edit", "write", "multiedit", "notebookedit":
+        // `apply_patch` is codex's file-change verb (and pi's alias for it).
+        // Without it a RESTORED codex patch bucketed as a command and rendered
+        // as a shell row rather than a change card.
+        case "edit", "write", "multiedit", "notebookedit", "apply_patch", "applypatch":
             return .fileChange
         case "websearch", "webfetch":
             return .webSearch
@@ -248,7 +251,12 @@ public enum ManagedTranscriptRehydrator {
                         ? call.name
                         : (call.detail.map { "\(call.name) · \($0)" } ?? call.name)
                     // Before the item, mirroring the live claude frame order.
-                    if let path = call.absolutePath, (path as NSString).isAbsolutePath {
+                    // Gated on `fileChanges`: this observation says "editing",
+                    // so it may only describe a call that really changed a file.
+                    // A restored Read carries `file_path` too and must not claim
+                    // to have edited it.
+                    if !call.fileChanges.isEmpty,
+                       let path = call.absolutePath, (path as NSString).isAbsolutePath {
                         steps.append(.observation(.toolActivity(
                             itemId: call.id,
                             activity: AgentObservedActivity(

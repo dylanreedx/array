@@ -151,7 +151,10 @@ private func runPiSessionTranscriptParseChecks() {
         #"{"type":"message","message":{"role":"toolResult","toolCallId":"call_2","toolName":"write","isError":true,"content":[{"type":"text","text":"denied"}]}}"#,
         #"{"type":"compaction","summary":"old history","tokensBefore":26268}"#,
     ]
-    let transcript = PiSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+    // TR-01 — pinned clock for the replayed observations, as in the claude case.
+    let piObservedAt = Date(timeIntervalSince1970: 1_700_000_001)
+    let transcript = PiSessionTranscriptReader.parse(
+        lines: lines, threadId: threadId, now: { piObservedAt })
 
     // B6.3 — pi never rewrites or truncates the session file at compaction
     // (verified against `dist/core/session-manager.js`: `appendCompaction`/
@@ -164,8 +167,14 @@ private func runPiSessionTranscriptParseChecks() {
     let compactionKind = ItemKind.compaction
     let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: nil, automaticCompaction: nil)
     let compactionBoundaryID = "pi:t-pi:unknown:26268"
-    guard transcript.steps.count > 9,
-          case .event(.compactionChanged(let lifecycleThreadID, let lifecycle)) = transcript.steps[9] else {
+    // Found by SHAPE, not by index: TR-01 adds host-local observation steps
+    // ahead of the file-change item, and a positional lookup here would report
+    // a missing compaction boundary every time the step list grows.
+    let lifecycleStep = transcript.steps.compactMap { step -> (String, AgentCompactionLifecycleEvent)? in
+        guard case let .event(.compactionChanged(threadID, lifecycle)) = step else { return nil }
+        return (threadID, lifecycle)
+    }.first
+    guard let (lifecycleThreadID, lifecycle) = lifecycleStep else {
         expect(false, "PiSessionTranscriptReader: persisted compaction must rehydrate a first-class lifecycle event")
         return
     }
@@ -183,6 +192,27 @@ private func runPiSessionTranscriptParseChecks() {
         .event(.itemStarted(threadId: threadId, itemId: "call_1", kind: .commandExecution, title: "read")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_1", kind: .commandExecution, status: .completed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "PI_ANSWER_TWO")),
+        // TR-01 — pi's session file carries this call's `arguments`, so a
+        // restored pi write names its file exactly as the live one does. The
+        // preceding `read` gets NO observation: it changed nothing, and the
+        // replayed activity says "editing".
+        .observation(.toolActivity(
+            itemId: "call_2",
+            activity: AgentObservedActivity(
+                operation: .editing,
+                targetPath: URL(fileURLWithPath: "/z"),
+                startedAt: piObservedAt,
+                updatedAt: piObservedAt,
+                evidenceSource: .toolEvent))),
+        .observation(.toolDetail(
+            itemId: "call_2",
+            detail: AgentToolDetailObservation(
+                phase: .started,
+                toolName: "write",
+                // Pi's session entry carries the path and no content, so the
+                // action is known and the counts honestly are not.
+                fileChanges: [.init(action: .write, path: "/z")],
+                observedAt: piObservedAt))),
         .event(.itemStarted(threadId: threadId, itemId: "call_2", kind: .fileChange, title: "write")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_2", kind: .fileChange, status: .failed)),
         .event(.compactionChanged(threadId: threadId, event: lifecycle)),
@@ -223,8 +253,13 @@ private func runCodexSessionTranscriptParseChecks() {
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .reasoning, delta: "CODEX_REASON")),
         .event(.itemStarted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, title: "shell_command")),
         .event(.itemCompleted(threadId: threadId, itemId: "call_ok", kind: .commandExecution, status: .completed)),
-        .event(.itemStarted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, title: "apply_patch")),
-        .event(.itemCompleted(threadId: threadId, itemId: "call_bad", kind: .commandExecution, status: .failed)),
+        // TR-01 — `apply_patch` is codex's file-change verb, so it buckets as a
+        // change card rather than a shell row. This call's envelope is empty
+        // (`"arguments":"{}"`), so it carries no file facts and no observation:
+        // the kind comes from the tool NAME, the facts only ever from a patch
+        // that really names files.
+        .event(.itemStarted(threadId: threadId, itemId: "call_bad", kind: .fileChange, title: "apply_patch")),
+        .event(.itemCompleted(threadId: threadId, itemId: "call_bad", kind: .fileChange, status: .failed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "CODEX_REPLY")),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
     ]
