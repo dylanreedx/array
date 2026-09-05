@@ -4671,6 +4671,12 @@ final class AgentSupervisor {
         records.values.first(where: { $0.tileId == tileId })?.id
     }
 
+    /// KB-01: the label a board task's assignee chip shows. Read-only, and nil
+    /// for an agent this supervisor does not know.
+    func displayName(forAgent id: AgentID) -> String? {
+        records[id]?.displayName
+    }
+
     /// True while a prompt is in flight. Exposed for the checks and for P2A.5,
     /// which must know whether detaching a view leaves work running.
     func isRunning(_ id: AgentID) -> Bool {

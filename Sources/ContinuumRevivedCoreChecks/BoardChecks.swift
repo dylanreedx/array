@@ -28,7 +28,8 @@ func runBoardChecks() {
     runBoardDragCommitCheck()
     runBoardDragColumnCrossingCheck()
     runBoardPersistenceCheck()
-    print("Board (KB-01) checks: B1-B9 passed")
+    runBoardAssignmentCheck()
+    print("Board (KB-01) checks: B1-B10 passed")
 }
 
 private let boardNow = Date(timeIntervalSinceReferenceDate: 760_000_000)
@@ -549,6 +550,65 @@ private func runBoardPersistenceCheck() {
     try! store.deleteBoard(id: board.id)
     expect(!FileManager.default.fileExists(atPath: store.layout.boardFile(id: board.id).path),
            "B9: deleteBoard must remove the file")
+}
+
+// MARK: - B10: a task is a document, and assignment is its own undoable act
+
+private func runBoardAssignmentCheck() {
+    let (board, columns, cards) = makeFixture()
+    let agent = AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000A0001")!)
+    let other = AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000A0002")!)
+
+    // A task carries the context you would hand a person: prose, and typed
+    // links that resolve rather than strings that might.
+    let described = applyOrFail(
+        .editCard(id: cards[0], title: "Fix the drag", body: "## Repro\n1. drag a card\n"),
+        to: board, "B10 body").after
+    let linked = applyOrFail(
+        .setCardLinks(id: cards[0], links: [
+            .document(DocumentLocation(path: "/tmp/plan.md", scope: .standalone)),
+            .url("https://example.invalid/issue/1")
+        ]), to: described, "B10 links").after
+    expect(linked.card(cards[0])?.body.contains("Repro") == true,
+           "B10: a task must keep its markdown body")
+    expect(linked.card(cards[0])?.links.count == 2, "B10: a task must keep its typed links")
+
+    // Assignment is singular and is NOT a link. A task can reference five things
+    // and still be owned by exactly one agent.
+    let assigned = applyOrFail(.assignCard(id: cards[0], to: agent), to: linked, "B10 assign")
+    expect(assigned.after.card(cards[0])?.assignee == agent, "B10: assignment must record the agent")
+    expect(assigned.after.card(cards[0])?.links.count == 2,
+           "B10: assigning must not disturb the task's links")
+
+    // Reassignment is one act, and its inverse restores the PREVIOUS owner —
+    // not "unassigned", which would quietly drop a real relationship on undo.
+    let reassigned = applyOrFail(.assignCard(id: cards[0], to: other), to: assigned.after, "B10 reassign")
+    expect(reassigned.after.card(cards[0])?.assignee == other, "B10: reassignment must replace the owner")
+    let undone = applyOrFail(reassigned.inverse, to: reassigned.after, "B10 undo reassign").after
+    expect(undone.card(cards[0])?.assignee == agent,
+           "B10: undoing a reassignment must restore the previous assignee, not clear it")
+
+    // Unassigning is expressible, and round-trips.
+    let cleared = applyOrFail(.assignCard(id: cards[0], to: nil), to: reassigned.after, "B10 unassign")
+    expect(cleared.after.card(cards[0])?.assignee == nil, "B10: a task can be taken back")
+    let restored = applyOrFail(cleared.inverse, to: cleared.after, "B10 undo unassign").after
+    expect(restored.card(cards[0])?.assignee == other, "B10: undoing an unassign restores the owner")
+
+    // Assignment survives the round trip that matters — the one to disk.
+    let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("kb01-assign-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let store = ProjectStore(projectRoot: root)
+    try! store.saveBoard(assigned.after)
+    let reread = try! ProjectStore(projectRoot: root).tryLoadBoard(id: assigned.after.id)
+    expect(reread?.card(cards[0])?.assignee == agent,
+           "B10: an assignment must survive a save/load round trip")
+    expect(reread?.card(cards[0])?.links.count == 2,
+           "B10: typed links must survive a save/load round trip")
+    expect(reread?.card(cards[0])?.body.contains("Repro") == true,
+           "B10: the task body must survive a save/load round trip")
+    _ = columns
 }
 
 private func digest(of url: URL) -> String {

@@ -38,6 +38,10 @@ final class BoardRuntime {
     /// absorbs it on its next pointer event.
     private(set) var cardHeldByPointer: UUID?
 
+    /// Applied to every tile this runtime adopts. The app installs it once; the
+    /// runtime knows nothing about agents or supervisors itself.
+    var tileConfigurator: ((KanbanTileNSView) -> Void)?
+
     init(projectStore: any ProjectStoring) {
         self.projectStore = projectStore
     }
@@ -83,6 +87,7 @@ final class BoardRuntime {
             guard let self, let view else { return }
             _ = self.apply(command, to: boardId, originatingView: view)
         }
+        tileConfigurator?(view)
         if let board = board(id: boardId) { view.render(board) }
     }
 
@@ -207,7 +212,7 @@ extension BoardCommand {
     func touches(cardId: UUID, in board: Board) -> Bool {
         switch self {
         case let .editCard(id, _, _), let .moveCard(id, _, _, _),
-             let .deleteCard(id), let .setCardLinks(id, _):
+             let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _):
             return id == cardId
         case let .restoreCard(card):
             return card.id == cardId

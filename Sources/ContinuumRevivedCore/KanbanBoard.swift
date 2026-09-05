@@ -83,8 +83,15 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
     public var columnId: UUID
     public var position: FracIndex
     public var title: String
+    /// Markdown. A task is a DOCUMENT, not a label: it is the thing you hand an
+    /// agent, so it has to be able to hold context, links and reasoning rather
+    /// than one line of text.
     public var body: String
     public var links: [CardLink]
+    /// The agent this task is assigned to. Distinct from a `CardLink.agent`:
+    /// a link is one of many references, an assignee is a singular
+    /// responsibility, and only one of those answers "who is doing this".
+    public var assignee: AgentID?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -95,6 +102,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         title: String,
         body: String = "",
         links: [CardLink] = [],
+        assignee: AgentID? = nil,
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -104,6 +112,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         self.title = title
         self.body = body
         self.links = links
+        self.assignee = assignee
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

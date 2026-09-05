@@ -22,6 +22,11 @@ public enum BoardCommand: Equatable, Sendable {
     /// original position, so an undone delete lands exactly where it was.
     case restoreCard(BoardCard)
     case setCardLinks(id: UUID, links: [CardLink])
+    /// Hand a task to an agent, or take it back with `nil`. Its own command
+    /// rather than a flavour of `editCard` so assignment is one undoable act
+    /// with its own name in the Edit menu, and so the canvas API can offer it
+    /// without offering arbitrary text edits.
+    case assignCard(id: UUID, to: AgentID?)
 
     case createColumn(id: UUID, name: String, after: UUID?, before: UUID?)
     case renameColumn(id: UUID, name: String)
@@ -158,6 +163,14 @@ public enum BoardEngine {
             }
             inverse = .setCardLinks(id: id, links: next.cards[index].links)
             next.cards[index].links = links
+            next.cards[index].updatedAt = now
+
+        case let .assignCard(id, agent):
+            guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
+                return .failure(.unknownCard(id))
+            }
+            inverse = .assignCard(id: id, to: next.cards[index].assignee)
+            next.cards[index].assignee = agent
             next.cards[index].updatedAt = now
 
         case let .createColumn(id, name, after, before):

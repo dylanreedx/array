@@ -4455,7 +4455,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.scheduleNoteSave()
             }
             spawner.boardRuntimeProvider = { [weak self] in
-                self?.workspaceRuntime?.activeController?.boardRuntime
+                guard let self, let controller = self.workspaceRuntime?.activeController else { return nil }
+                return self.configuredBoardRuntime(controller)
             }
             spawner.fileTreePersistenceHandler = { [weak self] in
                 self?.scheduleFileTreeSave()
@@ -6965,13 +6966,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// rather than minting a replacement board: the boot walk already writes the
     /// canvas as a side effect, and creating user data there would make a render
     /// path a producer.
+    /// The board authority for a project, with its tile wiring installed once.
+    /// Every path that builds a board tile — spawn, hydration, the boot walk —
+    /// goes through here, so a tile can never come up without its assignment
+    /// route or its assignee names.
+    func configuredBoardRuntime(_ controller: ZoneRuntimeController) -> BoardRuntime {
+        let runtime = controller.boardRuntime
+        guard runtime.tileConfigurator == nil else { return runtime }
+        runtime.tileConfigurator = { [weak self, weak runtime] view in
+            guard let self else { return }
+            view.agentDisplayName = { [weak self] id in
+                self?.agentSupervisor.displayName(forAgent: id)
+            }
+            view.onAssignToAgent = { [weak self, weak runtime, weak view] cardId, agentTileId in
+                guard let self, let runtime, let boardId = view?.boardIdForUndo else { return }
+                self.assignBoardTask(cardId: cardId, toAgentTile: agentTileId, boardId: boardId, runtime: runtime)
+            }
+        }
+        return runtime
+    }
+
+    /// Hand a task to an agent: record the assignment, then give the agent the
+    /// task itself as its prompt.
+    ///
+    /// The assignment is recorded FIRST and independently of the send. An agent
+    /// that is busy, refusing, or not yet started still owns the task — losing
+    /// the assignment because a prompt bounced would make the board lie about
+    /// who is responsible.
+    private func assignBoardTask(
+        cardId: UUID, toAgentTile agentTileId: UUID, boardId: UUID, runtime: BoardRuntime
+    ) {
+        guard let agentId = agentSupervisor.agent(forTile: agentTileId) else {
+            presentSpawnRefusal("That tile has no agent yet — start it, then assign the task.")
+            return
+        }
+        guard let card = runtime.board(id: boardId)?.card(cardId) else { return }
+        let outcome = runtime.apply(.assignCard(id: cardId, to: agentId), to: boardId)
+        guard case .applied = outcome else {
+            if case .rejectedCardHeldByPointer = outcome { return }
+            presentSpawnRefusal("That task could not be assigned.")
+            return
+        }
+        // The task IS the prompt. Title first, then the body verbatim — a task's
+        // markdown is written to be read by whoever picks it up.
+        var prompt = card.title
+        let body = card.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !body.isEmpty { prompt += "\n\n" + body }
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if !agentSupervisor.send(prompt, to: agentId) {
+            // The assignment stands; only the send failed, and the agent's own
+            // surface reports why.
+            fputs("board: assigned task \(cardId) to \(agentId.rawValue) but the prompt was refused\n", stderr)
+        }
+    }
+
     private func installInitialKanbanTile(_ tile: Tile, in canvasView: CanvasNSView) {
         KanbanHydrationProbe.hydratedViaBootWalk += 1
         guard let boardId = tile.metadata.boardId,
-              let controller = workspaceRuntime?.activeController,
-              let board = controller.boardRuntime.board(id: boardId) else { return }
+              let controller = workspaceRuntime?.activeController else { return }
+        let runtime = configuredBoardRuntime(controller)
+        guard let board = runtime.board(id: boardId) else { return }
         let view = KanbanTileNSView(tile: tile, board: board)
-        controller.boardRuntime.attach(view, to: boardId)
+        runtime.attach(view, to: boardId)
         canvasView.install(tileView: view, for: tile)
     }
 
@@ -15540,10 +15596,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // A tile whose board file is missing renders the placeholder rather
             // than minting a replacement board — a render path must not create
             // user data as a side effect.
-            guard let boardId = tile.metadata.boardId,
-                  let board = controller.boardRuntime.board(id: boardId) else { return nil }
+            guard let boardId = tile.metadata.boardId else { return nil }
+            let runtime = configuredBoardRuntime(controller)
+            guard let board = runtime.board(id: boardId) else { return nil }
             let view = KanbanTileNSView(tile: tile, board: board)
-            controller.boardRuntime.attach(view, to: boardId)
+            runtime.attach(view, to: boardId)
             return view
 
         case .diffReview:
@@ -15709,7 +15766,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.notePersistenceHandler = { [weak self] in self?.scheduleNoteSave() }
         spawner.fileTreePersistenceHandler = { [weak self] in self?.scheduleFileTreeSave() }
         spawner.boardRuntimeProvider = { [weak self] in
-            self?.workspaceRuntime?.activeController?.boardRuntime
+            guard let self, let controller = self.workspaceRuntime?.activeController else { return nil }
+            return self.configuredBoardRuntime(controller)
         }
         configureFileOpenRoute(on: spawner)
         wireBrowserRuntimeRegistration(on: spawner)

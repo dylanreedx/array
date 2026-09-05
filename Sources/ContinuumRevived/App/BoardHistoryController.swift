@@ -73,6 +73,7 @@ extension BoardTransaction {
         case .moveCard: return "Move Card"
         case .deleteCard, .restoreCard: return "Delete Card"
         case .setCardLinks: return "Change Card Links"
+        case .assignCard(_, let agent): return agent == nil ? "Unassign Task" : "Assign Task"
         case .createColumn: return "Add Column"
         case .renameColumn: return "Rename Column"
         case .moveColumn: return "Move Column"

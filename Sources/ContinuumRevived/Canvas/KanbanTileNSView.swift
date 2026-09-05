@@ -51,6 +51,16 @@ final class KanbanTileNSView: TileNSView {
     /// leave the next drag inheriting a target.
     var dragSession: BoardDragSession?
     var dragCancelMonitor: Any?
+    /// The insertion phantom, reparented into whichever lane currently holds the
+    /// preview. One instance, so moving between lanes keeps its trailing
+    /// animation continuous instead of restarting it.
+    var cardGhost: BoardCardGhostView?
+    /// Resolves an agent's display name for a card's assignee chip. Supplied by
+    /// the app; the view must not reach into the supervisor itself.
+    var agentDisplayName: ((AgentID) -> String?)?
+    /// Fires when a task is dropped on a managed-agent tile. The app turns it
+    /// into an assignment plus a prompt; the view knows nothing about either.
+    var onAssignToAgent: ((UUID, UUID) -> Void)?
     /// The board authority, so a drag can take and release the lease that makes
     /// a concurrent API edit on the carried card reject rather than race.
     weak var boardRuntime: BoardRuntime?
@@ -71,6 +81,10 @@ final class KanbanTileNSView: TileNSView {
     /// zoom 0.35 that used raw board points would catch at a third the distance.
     var canvasZoomForDrag: Double { canvas?.viewport.zoom ?? 1 }
 
+    func assigneeName(for card: BoardCard) -> String? {
+        card.assignee.flatMap { agentDisplayName?($0) } ?? (card.assignee == nil ? nil : "agent")
+    }
+
     init(tile: Tile, board: Board) {
         self.board = board
         super.init(tile: tile)
@@ -88,11 +102,34 @@ final class KanbanTileNSView: TileNSView {
         body.addSubview(emptyBoardLabel)
 
         setContentView(horizontalScroll)
+        installAddAccessory()
         rebuildColumns()
         applyTokens()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// A single add action in the tile's title bar. Previously every lane carried
+    /// its own "+", which is N pieces of chrome for one verb and competed with
+    /// the tasks for attention.
+    private func installAddAccessory() {
+        let button = NSButton()
+        button.title = "+"
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.font = NSFont.token(.label)
+        button.target = self
+        button.action = #selector(addTaskFromTitleBar)
+        button.setAccessibilityLabel("Add a task")
+        button.toolTip = "Add a task (⌘N)"
+        button.frame = NSRect(x: 0, y: 0, width: 18, height: 16)
+        setTitleBarAccessory(button)
+    }
+
+    @objc private func addTaskFromTitleBar() {
+        guard let columnId = focusedColumnId ?? board.orderedColumns.first?.id else { return }
+        createCard(in: columnId)
+    }
 
     // MARK: - Rendering
 
@@ -108,7 +145,9 @@ final class KanbanTileNSView: TileNSView {
             for column in board.orderedColumns {
                 guard let view = columnViews.first(where: { $0.columnId == column.id }) else { continue }
                 view.name = column.name
-                view.setCards(board.orderedCards(in: column.id))
+                view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
+                    self?.agentDisplayName?(id)
+                })
             }
         }
         // A card the model no longer has cannot stay selected.
@@ -133,8 +172,9 @@ final class KanbanTileNSView: TileNSView {
         for view in columnViews { view.removeFromSuperview() }
         columnViews = board.orderedColumns.map { column in
             let view = KanbanColumnView(columnId: column.id, name: column.name)
-            view.setCards(board.orderedCards(in: column.id))
-            view.onAddCard = { [weak self] in self?.createCard(in: column.id) }
+            view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
+                self?.agentDisplayName?(id)
+            })
             body.addSubview(view)
             return view
         }
@@ -222,7 +262,16 @@ final class KanbanTileNSView: TileNSView {
 
     // MARK: - Commands the view originates
 
-    private func createCard(in columnId: UUID) {
+    /// Takes the keyboard for the board unless a card is being edited, whose text
+    /// field must keep first responder — that is also what decides whether Cmd-Z
+    /// reaches the board stack or the field's own.
+    func takeKeyboardFocusIfIdle() {
+        if case .editing = focusState { return }
+        guard window?.firstResponder !== self else { return }
+        window?.makeFirstResponder(self)
+    }
+
+    func createCard(in columnId: UUID) {
         let id = UUID()
         let last = board.orderedCards(in: columnId).last?.id
         onCommand?(.createCard(id: id, columnId: columnId, title: "", after: last, before: nil))
