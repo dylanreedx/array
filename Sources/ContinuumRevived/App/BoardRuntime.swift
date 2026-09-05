@@ -77,6 +77,8 @@ final class BoardRuntime {
         guard !existing.contains(where: { $0.view === view }) else { return }
         existing.append(WeakBoardView(view: view))
         views[boardId] = existing
+        view.boardRuntime = self
+        view.boardIdForUndo = boardId
         view.onCommand = { [weak self, weak view] command in
             guard let self, let view else { return }
             _ = self.apply(command, to: boardId, originatingView: view)

@@ -85,6 +85,43 @@ final class KanbanCardView: NSView, TokenThemed {
         return max(minimumHeight, measured + verticalPadding * 2)
     }
 
+    // MARK: - Pointer
+
+    private var tile: KanbanTileNSView? {
+        var view: NSView? = superview
+        while let current = view {
+            if let tile = current as? KanbanTileNSView { return tile }
+            view = current.superview
+        }
+        return nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Editing owns the pointer while it is editing; a drag must not start
+        // from inside a text selection.
+        guard !isEditing else { super.mouseDown(with: event); return }
+        // A Cmd/Space-modified press belongs to the canvas camera, which claims
+        // it before the tile ever routes here. Never start a card drag on one.
+        if event.modifierFlags.contains(.command) { super.mouseDown(with: event); return }
+        tile?.setFocusState(.selected(cardId))
+        tile?.beginCardDrag(cardId: cardId, event: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let tile, tile.dragSession != nil else { super.mouseDragged(with: event); return }
+        tile.continueCardDrag(event: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let tile, tile.dragSession != nil else {
+            // A plain click on an already-selected card opens it for editing.
+            if isSelected, !isEditing { tile?.setFocusState(.editing(cardId)) }
+            super.mouseUp(with: event)
+            return
+        }
+        tile.finishCardDrag()
+    }
+
     override func layout() {
         super.layout()
         titleField.frame = NSRect(

@@ -29,6 +29,18 @@ final class KanbanColumnView: NSView, TokenThemed {
     private var cardHeights: [UUID: CGFloat] = [:]
     private var measuredWidth: CGFloat = 0
 
+    /// The card the pointer is carrying. Removed from the flow entirely — a
+    /// lifted card's space is represented by the preview gap, never by both.
+    private(set) var liftedCardId: UUID?
+    /// Where the preview says the carried card would land, and how tall it is.
+    /// The gap is the card's OWN height, so releasing changes nothing visually
+    /// and the settle has nothing to correct.
+    private var previewGapIndex: Int?
+    private var previewGapHeight: CGFloat = 0
+    /// Set while a displacement should animate. Layout is also driven by
+    /// resizes and scrolls, which must stay instant.
+    private var animatesNextLayout = false
+
     static let headerHeight: CGFloat = 30
     static let footerHeight: CGFloat = 28
     static let cardSpacing: CGFloat = 8
@@ -133,7 +145,7 @@ final class KanbanColumnView: NSView, TokenThemed {
         var centers: [Double] = []
         var tops: [Double] = []
         var bottoms: [Double] = []
-        for view in cardViews where view.cardId != excluding {
+        for view in cardViews where view.cardId != excluding && view.cardId != liftedCardId {
             let frame = view.convert(view.bounds, to: reference)
             ids.append(view.cardId)
             centers.append(Double(frame.midY))
@@ -199,8 +211,24 @@ final class KanbanColumnView: NSView, TokenThemed {
             measuredWidth = cardWidth
             cardHeights.removeAll(keepingCapacity: true)
         }
+        let animates = animatesNextLayout
+        animatesNextLayout = false
+
         var y: CGFloat = Self.contentInset
+        var flowIndex = 0
+        var targets: [(KanbanCardView, NSRect)] = []
         for view in cardViews {
+            // The carried card leaves the flow completely; the gap stands in for
+            // it. Keeping both would double its space and make the column grow
+            // under the pointer.
+            if view.cardId == liftedCardId {
+                view.isHidden = true
+                continue
+            }
+            view.isHidden = false
+            if previewGapIndex == flowIndex {
+                y += previewGapHeight + Self.cardSpacing
+            }
             let height: CGFloat
             if let cached = cardHeights[view.cardId] {
                 height = cached
@@ -208,11 +236,60 @@ final class KanbanColumnView: NSView, TokenThemed {
                 height = KanbanCardView.height(for: view.title, width: cardWidth)
                 cardHeights[view.cardId] = height
             }
-            view.frame = NSRect(x: Self.contentInset, y: y, width: cardWidth, height: height)
+            targets.append((view, NSRect(x: Self.contentInset, y: y, width: cardWidth, height: height)))
             y += height + Self.cardSpacing
+            flowIndex += 1
         }
+        if previewGapIndex == flowIndex { y += previewGapHeight + Self.cardSpacing }
+
+        if animates, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = BoardDragConfig.displacementDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                for (view, frame) in targets {
+                    // ORIGIN only. A displaced neighbour must never resize —
+                    // preserving card dimensions during displacement is the
+                    // requirement, and `animateSnapLanding` sets the precedent.
+                    view.setFrameSize(frame.size)
+                    view.animator().setFrameOrigin(frame.origin)
+                }
+            }
+        } else {
+            for (view, frame) in targets { view.frame = frame }
+        }
+
         let documentHeight = max(scrollView.contentSize.height, y + Self.contentInset)
         cardsContainer.frame = NSRect(x: 0, y: 0, width: width, height: documentHeight)
+    }
+
+    /// Lifts a card out of the flow for the duration of a drag.
+    func setLifted(_ cardId: UUID?) {
+        guard liftedCardId != cardId else { return }
+        liftedCardId = cardId
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    /// Opens (or closes) the insertion gap. `index` counts the cards remaining
+    /// in the flow, which already excludes the lifted one — the same space the
+    /// drag resolver's slot indices live in.
+    func setPreviewGap(index: Int?, height: CGFloat, animated: Bool) {
+        guard previewGapIndex != index || previewGapHeight != height else { return }
+        previewGapIndex = index
+        previewGapHeight = height
+        animatesNextLayout = animated
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    func clearDragState() {
+        liftedCardId = nil
+        previewGapIndex = nil
+        previewGapHeight = 0
+        animatesNextLayout = false
+        for view in cardViews { view.isHidden = false }
+        needsLayout = true
     }
 
     /// Height each card occupies, in rendered order — the drag controller uses it

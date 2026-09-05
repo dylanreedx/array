@@ -2980,6 +2980,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--board-tile-lifecycle-check") {
+            do {
+                _ = NSApplication.shared
+                try BoardTileLifecycleChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--add-zone-check") {
             do {
                 let artifact = try AppDelegate.runAddZoneSelfCheck()
@@ -6955,6 +6966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// canvas as a side effect, and creating user data there would make a render
     /// path a producer.
     private func installInitialKanbanTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        KanbanHydrationProbe.hydratedViaBootWalk += 1
         guard let boardId = tile.metadata.boardId,
               let controller = workspaceRuntime?.activeController,
               let board = controller.boardRuntime.board(id: boardId) else { return }
@@ -15523,6 +15535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return ConductorQueueTileNSView(tile: tile, projectRoot: controller.projectRoot)
 
         case .kanban:
+            KanbanHydrationProbe.hydratedViaMakeHydratedTileView += 1
             // Phase A: a board needs no runtime, only its persisted document.
             // A tile whose board file is missing renders the placeholder rather
             // than minting a replacement board — a render path must not create

@@ -1592,6 +1592,17 @@ final class CanvasNSView: NSView, TokenThemed {
         return editor.undoManager
     }
 
+    /// KB-01. A focused board tile's own stack. Sits BELOW `focusedTextUndoManager`
+    /// — editing a card's title is text editing and must keep its own undo — and
+    /// ABOVE the canvas geometry stack, so Cmd-Z on a board undoes the card move
+    /// rather than the last tile drag.
+    private var focusedBoardUndoManager: UndoManager? {
+        guard let responder = window?.firstResponder as? NSView,
+              let tile = TileNSView.enclosingTileId(of: responder),
+              let view = tileView(for: tile) as? KanbanTileNSView else { return nil }
+        return view.boardUndoManager
+    }
+
     /// Custom views must expose the standard responder actions explicitly.
     /// Editors nested inside tiles implement these actions themselves and win
     /// first; canvas chrome falls through here.
@@ -1600,12 +1611,20 @@ final class CanvasNSView: NSView, TokenThemed {
             focusedTextUndoManager.undo()
             return
         }
+        if let focusedBoardUndoManager {
+            focusedBoardUndoManager.undo()
+            return
+        }
         activeCanvasUndoManager?.undo()
     }
 
     @objc func redo(_ sender: Any?) {
         if let focusedTextUndoManager {
             focusedTextUndoManager.redo()
+            return
+        }
+        if let focusedBoardUndoManager {
+            focusedBoardUndoManager.redo()
             return
         }
         activeCanvasUndoManager?.redo()
@@ -1617,6 +1636,10 @@ final class CanvasNSView: NSView, TokenThemed {
                 menuItem.title = focusedTextUndoManager.undoMenuItemTitle
                 return focusedTextUndoManager.canUndo
             }
+            if let focusedBoardUndoManager {
+                menuItem.title = focusedBoardUndoManager.undoMenuItemTitle
+                return focusedBoardUndoManager.canUndo
+            }
             menuItem.title = activeCanvasUndoManager?.undoMenuItemTitle ?? "Undo"
             return activeCanvasUndoManager?.canUndo ?? false
         }
@@ -1624,6 +1647,10 @@ final class CanvasNSView: NSView, TokenThemed {
             if let focusedTextUndoManager {
                 menuItem.title = focusedTextUndoManager.redoMenuItemTitle
                 return focusedTextUndoManager.canRedo
+            }
+            if let focusedBoardUndoManager {
+                menuItem.title = focusedBoardUndoManager.redoMenuItemTitle
+                return focusedBoardUndoManager.canRedo
             }
             menuItem.title = activeCanvasUndoManager?.redoMenuItemTitle ?? "Redo"
             return activeCanvasUndoManager?.canRedo ?? false

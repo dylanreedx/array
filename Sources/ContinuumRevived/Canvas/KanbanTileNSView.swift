@@ -37,7 +37,7 @@ final class KanbanTileNSView: TileNSView {
 
     private let body = FlippedContainerView()
     private let horizontalScroll = NSScrollView()
-    private var columnViews: [KanbanColumnView] = []
+    fileprivate var columnViews: [KanbanColumnView] = []
     private let emptyBoardLabel = NSTextField(labelWithString: "")
 
     /// Extra top inset so no card can be laid out inside the tile's move grab
@@ -45,6 +45,31 @@ final class KanbanTileNSView: TileNSView {
     /// `chromeScaleBucket` ENLARGES it as zoom falls — so a fixed inset chosen at
     /// zoom 1 is not enough. Recomputed whenever the canvas rescales chrome.
     private var grabStripInset: CGFloat = 0
+
+    /// The live pointer drag, if any. Nil outside a gesture — a fresh mouse-down
+    /// is an unconditional boundary, so an interrupted AppKit sequence cannot
+    /// leave the next drag inheriting a target.
+    var dragSession: BoardDragSession?
+    var dragCancelMonitor: Any?
+    /// The board authority, so a drag can take and release the lease that makes
+    /// a concurrent API edit on the carried card reject rather than race.
+    weak var boardRuntime: BoardRuntime?
+    /// Which board this tile's Cmd-Z reaches.
+    var boardIdForUndo: UUID?
+
+    /// The undo stack a focused board tile owns. Deliberately separate from the
+    /// canvas geometry stack: one accepted card move is one BOARD undo, and a
+    /// geometry mismatch elsewhere must not wipe it.
+    var boardUndoManager: UndoManager? {
+        guard let boardIdForUndo, let boardRuntime else { return nil }
+        return boardRuntime.history(for: boardIdForUndo).undoManager
+    }
+
+    var allColumnViews: [KanbanColumnView] { columnViews }
+
+    /// Canvas zoom, so the drag bands stay constant in SCREEN points. A drag at
+    /// zoom 0.35 that used raw board points would catch at a third the distance.
+    var canvasZoomForDrag: Double { canvas?.viewport.zoom ?? 1 }
 
     init(tile: Tile, board: Board) {
         self.board = board
@@ -91,6 +116,17 @@ final class KanbanTileNSView: TileNSView {
             setFocusState(.none)
         }
         needsLayout = true
+        // A drag in flight re-resolves against the board that just arrived. This
+        // is the interruptibility seam: an agent-originated move lands, and the
+        // displacement absorbs it on this very render rather than conflicting.
+        if let session = dragSession {
+            if board.card(session.cardId) == nil {
+                cancelCardDrag()
+            } else {
+                layoutSubtreeIfNeeded()
+                updateDragPreview(freePoint: session.freePoint)
+            }
+        }
     }
 
     private func rebuildColumns() {

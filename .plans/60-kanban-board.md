@@ -28,17 +28,21 @@ fractional ordering — mutated only through `BoardEngine`, persisted to
 | KB-01.3 | `BoardEngine` reducer, commands, inverses, rebase | **landed** |
 | KB-01.4 | `BoardDragResolver` — the jelly, pure | **landed** |
 | KB-01.5 | Witnesses B1–B9 (`--board-model-check`) | **landed, teeth-verified** |
-| KB-01.6 | Tile view: render, select, edit, keyboard moves | next |
-| KB-01.7 | `TileKind` integration: spawn, hydration, cleanup, palette | not started |
-| KB-01.8 | `BoardRuntime` + undo routing | not started |
-| KB-01.9 | Drag controller: overlay, displacement, autoscroll, settle | not started |
-| KB-01.10 | `board.large-drag` perf scenario + matrix registration | not started |
-| KB-01.11 | CX-01 surface: snapshot, command service, typed links | not started |
+| KB-01.6 | Tile view: render, select, edit, keyboard moves | **landed** |
+| KB-01.7 | `TileKind` integration: spawn, hydration, cleanup, palette | **landed** |
+| KB-01.8 | `BoardRuntime` + `BoardHistoryController` + undo rung | **landed** |
+| KB-01.9 | Drag controller: lift, displacement, autoscroll, settle, cancel | **landed, not yet driven on screen** |
+| KB-01.10 | B10 lifecycle witness (`--board-tile-lifecycle-check`) | **landed, teeth-verified** |
+| KB-01.11 | `board.large-drag` perf scenario + matrix registration | not started |
+| KB-01.12 | CX-01 surface: snapshot DTO, command service, typed links | not started |
 
-Nothing is wired into the app yet. Everything landed so far is pure Core plus
-its witnesses, which is deliberate: `.plans/59/coordination.md` reserves
-`TileKind` switches, palette, spawn and hydration for a single integration
-owner, and the model can be finished and proven without touching any of them.
+A board is now reachable: `⌘K → New Board` spawns one, it persists, and it comes
+back on relaunch. The drag is implemented and compiles but **has not been driven
+on screen** — no build has been launched, so nothing about the feel is verified.
+
+`.plans/59/coordination.md` reserves `TileKind` switches, palette, spawn and
+hydration for a single integration owner. Those are now touched, so this branch
+holds that lane.
 
 ---
 
@@ -166,23 +170,85 @@ the full `ContinuumRevivedCoreChecks` sweep).
 | B8 | column leave-hysteresis; exactly one retarget per crossing; an empty column is a reachable drop target |
 | B9 | round trip through a fresh store; **a card move does not modify `canvas.json`**; the file lives at `.array/boards/<id>.json`; a future schema is refused with `unknownFutureSchema`; delete is idempotent |
 
+### B10 — the lifecycle witness
+
+`.build/debug/Array --board-tile-lifecycle-check`. Drives
+`mountWorkspaceSceneAtBoot` (never `install(into:)`), across three launches that
+each read from disk.
+
+Two zones for one project, at deliberately different non-zero origins: the armed
+zone is A, the creation scope points at B. With a single zone the armed zone and
+the scope are necessarily the same placement, and the whole spawn assertion is
+vacuous.
+
+It asserts: the spawned tile lands inside zone B's world rect **and** at the
+camera centre; the relaunch hydrates through `makeHydratedTileView` exactly once
+and through the boot walk zero times; the cards survive; a card move leaves
+`canvas.json` byte-identical; an API move of the card under the pointer is
+rejected while an unrelated edit still applies; and closing the tile leaves the
+board FILE on disk with its index entry's tile pointer cleared.
+
 ### Teeth verification
 
-Each mutation below was applied to the source, the suite was run, and the source
-was restored. A check that cannot fail is not a witness.
+Each mutation was applied to the source, the suite run, the source restored.
+A check that cannot fail is not a witness.
 
 | Mutation | Result |
 |---|---|
-| `boundaryMarginScreenPoints` → 0 | **B6 fails** |
-| remove the renormalize-and-retry path | **B2 fails** at insert 51 |
-| `columnReleaseFraction` → 0 | **B8 fails** |
-| `moveCard` ignores its anchors | **B1 fails** |
-| `saveBoard` also rewrites `canvas.json` | **B9 fails** |
+| `boundaryMarginScreenPoints` → 0 | **B6 red** |
+| remove the renormalize-and-retry path | **B2 red** at insert 51 |
+| `columnReleaseFraction` → 0 | **B8 red** |
+| `moveCard` ignores its anchors | **B1 red** |
+| `saveBoard` also rewrites `canvas.json` | **B9 red**, **B10 red** |
+| spawn frames against the armed zone, not the scope's | **B10 red** |
+| closing the tile deletes the board file | **B10 red** |
+| `BoardRuntime.board(id:)` loses its disk load | **B10 red** |
+| the boot walk hydrates instead of Phase A | **B10 red** |
 
-The first of these is the one that found the radius/boundary defect above; it
-passed before the resolver was corrected.
+### Four witness defects this found — in the checks, not the code
+
+Worth recording, because each one passed while guarding nothing:
+
+1. **The hysteresis was decorative.** Collapsing the two radii changed no
+   assertion. A radius around the held slot's centre is inert whenever it is
+   smaller than half the slot spacing, which at ordinary card sizes it always is.
+   Fixed by moving to a boundary margin — this changed the *product*, not just
+   the test.
+2. **"Inside the zone rect" was too weak.** When the frame is computed against
+   the wrong zone, `clampedZoneLocalViewport` parks it at the target zone's
+   top-left CORNER — still inside the rect. The assertion now also requires the
+   tile to land at the camera centre, which is what centre-aware placement
+   promises.
+3. **The survival assertion read a cache, then a backup.** Asking
+   `BoardRuntime.board(id:)` returns the in-memory copy; asking
+   `tryLoadBoard` lets `AtomicWriter` restore from a backup. Both stayed green
+   through an outright `deleteBoard`. It now asserts the FILE exists.
+4. **The summary named a path it never checked.** It claimed
+   `makeHydratedTileView` while the boot walk would have satisfied every
+   assertion equally. Two QA counters now make the claim falsifiable.
+
+A fifth, procedural: piping `swift build` through `head` truncates the pipe and
+can leave a **stale binary**, so three teeth "passed" against code that was never
+rebuilt. Build to a file, check the exit code, then run.
 
 ---
+
+## Verification actually run
+
+- `--board-model-check` — B1-B9 green.
+- `--board-tile-lifecycle-check` — B10 green, five teeth confirmed.
+- Full `ContinuumRevivedCoreChecks` in an isolated `TMUX_TMPDIR` namespace: the
+  board section is green. The sweep exits non-zero on a **real-tmux** leg that
+  is unrelated to this work and varies run to run in this sandboxed shell
+  (`KindClassifier ... got unknown` on one run, `I2: the production grouped-view
+  profile did not create array-view-…` on another). This branch touches no tmux,
+  Substrates or KindClassifier source. `AgentKind.from` matches only the bare
+  basename `zsh` while the assertion above it also accepts a `/zsh`-suffixed
+  path, so a tmux that reports a full path fails the second assertion and not
+  the first — pre-existing, and not chased here.
+- **Not run:** `scripts/run-matrix.sh`, the app bundle check, and any UI or
+  perf leg. Nothing has been launched, so **no claim is made about how the drag
+  feels**.
 
 ## Still open
 
