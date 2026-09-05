@@ -113,6 +113,7 @@ check --project-lock-check
 check --project-picker-resolution-check
 check --project-root-resolution-check
 check --provider-model-picker-check
+check --provider-request-response-check
 check --push-payload-dump-check
 check --relationship-geometry-check
 check --reserved-dispatch-check
@@ -312,6 +313,7 @@ leg run_app_check .build/debug/Array --project-lock-check
 leg run_app_check .build/debug/Array --project-picker-resolution-check
 leg run_app_check .build/debug/Array --project-root-resolution-check
 leg run_app_check .build/debug/Array --provider-model-picker-check
+leg run_app_check .build/debug/Array --provider-request-response-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check

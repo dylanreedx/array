@@ -358,7 +358,7 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            format: "UIProbeGeometry: reusable block host identity/reset and 9-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, toolCompositionAssertions, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
@@ -8386,10 +8386,16 @@ enum UIProbeGeometry {
         }
 
         var actions: [AgentRenderAction] = []
+        // TR-06 — a request may only offer controls when the BOUND RUNNER can
+        // carry a response. This context grants that; `checkRequestWithoutTransport`
+        // below is the negative twin, and it is the one that matters: for the
+        // whole life of this subsystem the buttons rendered regardless, and
+        // pressing one dispatched into an unbound seam.
         let context = AgentRenderContext(
             actions: AgentRenderActions { actions.append($0) },
             tokens: .transcript,
-            appearance: .dark
+            appearance: .dark,
+            canRespondToRequests: true
         )
         let approval = AgentBlock(
             id: id("approval-first"), revision: 1, kind: .approval,
@@ -8455,6 +8461,142 @@ enum UIProbeGeometry {
         guard actions.count == 2,
               (approvalHost.rendererView as? AgentRequestView)?.choiceButtons.isEmpty == true else {
             throw fail("resolved approval retained a response control or stale choice action")
+        }
+
+        // MARK: TR-06 — no transport, no controls
+
+        // THE anti-dead-button witness. Same pending payload, same real request
+        // id, same supplied choices as the actionable case above — the ONLY
+        // difference is that the bound runner cannot carry a response. The
+        // request must stay readable and offer nothing, and the reserved height
+        // must lose the action row with it, or the buttons come back as a
+        // clipped strip nobody can press.
+        // Its own action sink, deliberately: the assertions further down pin
+        // `actions` by exact count and index, so a section that appended to the
+        // shared array would silently renumber them.
+        var requestActions: [AgentRenderAction] = []
+        let transportlessContext = AgentRenderContext(
+            actions: AgentRenderActions { requestActions.append($0) },
+            tokens: .transcript,
+            appearance: .dark,
+            canRespondToRequests: false
+        )
+        let respondingContext = AgentRenderContext(
+            actions: AgentRenderActions { requestActions.append($0) },
+            tokens: .transcript,
+            appearance: .dark,
+            canRespondToRequests: true
+        )
+        let heldRequest = AgentBlock(
+            id: id("approval-no-transport"), revision: 1, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices
+            ))
+        )
+        let heldHost = AgentBlockHostView()
+        let heldHeight = try heldHost.measuredHeight(
+            for: heldRequest, width: 320, context: transportlessContext)
+        heldHost.frame = NSRect(x: 0, y: 0, width: 320, height: heldHeight)
+        try heldHost.apply(block: heldRequest, context: transportlessContext)
+        heldHost.layoutSubtreeIfNeeded()
+        let actionsBeforeHeld = requestActions.count
+        guard let heldView = heldHost.rendererView as? AgentRequestView,
+              heldView.choiceButtons.isEmpty,
+              visibleStrings(in: heldView).contains(where: {
+                  $0.contains("Allow the provider-enforced operation?")
+              }) else {
+            throw fail(
+                "TR-06: a request with no response transport rendered controls (or lost its "
+                + "readable prompt) — every press would dispatch into an unbound seam")
+        }
+        let actionableHeight = try heldHost.measuredHeight(
+            for: heldRequest, width: 320, context: respondingContext)
+        guard heldHeight < actionableHeight else {
+            throw fail(
+                "TR-06: the transport-less request reserved the same height as the actionable "
+                + "one (\(heldHeight) vs \(actionableHeight)) — the action row is measured but "
+                + "never rendered")
+        }
+        guard requestActions.count == actionsBeforeHeld else {
+            throw fail("TR-06: rendering a transport-less request emitted an action")
+        }
+
+        // MARK: TR-06 — the compiled vocabulary is never shown raw
+
+        try heldHost.apply(block: heldRequest, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        guard let vocabularyView = heldHost.rendererView as? AgentRequestView,
+              vocabularyView.choiceButtons.count == ApprovalDecision.compiledChoices.count else {
+            throw fail("TR-06: the compiled decision set lost a choice with a live transport")
+        }
+        let titles = vocabularyView.choiceButtons.map(\.title)
+        guard titles == ["Allow", "Allow for session", "Decline", "Cancel"] else {
+            throw fail(
+                "TR-06: compiled decisions reached the user as raw enum values \(titles) — a real "
+                + "approval offered a button labelled 'acceptForSession'")
+        }
+        // The wire value is untouched by the display mapping.
+        vocabularyView.choiceButtons[1].performClick(nil)
+        guard requestActions.count == actionsBeforeHeld + 1,
+              case .submitResponse(
+                requestID: "provider-request-held",
+                value: ApprovalDecision.acceptForSession.rawValue) = requestActions[actionsBeforeHeld]
+        else {
+            throw fail("TR-06: the display title replaced the wire value in the dispatched action")
+        }
+
+        // MARK: TR-06 — local delivery state is visible and blocks a second press
+
+        let submitting = AgentBlock(
+            id: id("approval-no-transport"), revision: 2, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices,
+                responseState: .submitting
+            ))
+        )
+        try heldHost.apply(block: submitting, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        let actionsBeforeSecondPress = requestActions.count
+        guard let submittingView = heldHost.rendererView as? AgentRequestView,
+              submittingView.choiceButtons.allSatisfy({ !$0.isEnabled }),
+              visibleStrings(in: submittingView).contains(where: { $0.contains("Sending") }),
+              submittingView.accessibilityLabel()?.contains("Sending") == true else {
+            throw fail(
+                "TR-06: a response already on the wire left its choices pressable, or said "
+                + "nothing about it in either the visible label or the accessibility label")
+        }
+        submittingView.choiceButtons[0].performClick(nil)
+        guard requestActions.count == actionsBeforeSecondPress else {
+            throw fail("TR-06: a disabled choice on an in-flight response still dispatched")
+        }
+        // A dispatch that never reached the provider says so, and — crucially —
+        // leaves the request OPEN and pressable again. A delivery failure is not
+        // a decision.
+        let failedSend = AgentBlock(
+            id: id("approval-no-transport"), revision: 3, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices,
+                responseState: .failed
+            ))
+        )
+        try heldHost.apply(block: failedSend, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        guard let failedView = heldHost.rendererView as? AgentRequestView,
+              failedView.choiceButtons.allSatisfy({ $0.isEnabled }),
+              visibleStrings(in: failedView).contains(where: { $0.contains("Not sent") }) else {
+            throw fail(
+                "TR-06: a response that never reached the provider either stayed silent or "
+                + "latched the request unpressable — the user cannot retry an answer they "
+                + "believe they already gave")
         }
 
         let question = AgentBlock(
@@ -8572,13 +8714,16 @@ enum UIProbeGeometry {
         try registry.freeze()
 
         var actions: [String] = []
-        func context(_ name: String, appearance: TokenTheme) -> AgentRenderContext {
+        func context(
+            _ name: String, appearance: TokenTheme, canRespondToRequests: Bool = false
+        ) -> AgentRenderContext {
             AgentRenderContext(
                 actions: AgentRenderActions { action in
                     if case let .copy(blockID) = action { actions.append("\(name):\(blockID.rawValue)") }
                 },
                 tokens: .transcript,
-                appearance: appearance
+                appearance: appearance,
+                canRespondToRequests: canRespondToRequests
             )
         }
         let firstID = AgentNodeID(rawValue: "geometry-host-first")!
@@ -8663,6 +8808,14 @@ enum UIProbeGeometry {
             contentSizePolicy: AgentContentSizePolicy(scaleBucket: 125), renderer: renderer
         )
         _ = cache.height(for: firstAsHeading, width: 100.1, context: dark, renderer: headingRenderer)
+        // TR-06 — the response capability changes a request block's reserved
+        // height without changing its revision, so it is a key dimension. Without
+        // this measurement nothing would notice the field being dropped again.
+        _ = cache.height(
+            for: revised, width: 101.2,
+            context: context("responding", appearance: .dark, canRespondToRequests: true),
+            renderer: renderer
+        )
         try expectIsolatedBlockMeasurements(
             cacheCount: cache.cachedMeasurementCount,
             rendererCount: renderer.measureCount + headingRenderer.measureCount
@@ -8682,8 +8835,8 @@ enum UIProbeGeometry {
         cacheCount: Int,
         rendererCount: Int
     ) throws {
-        guard cacheCount == 6, rendererCount == 6 else {
-            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size/presentation-revision keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
+        guard cacheCount == 7, rendererCount == 7 else {
+            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size/presentation-revision/respond-capability keys (cache \(cacheCount), renderer \(rendererCount), expected 7)")
         }
     }
 

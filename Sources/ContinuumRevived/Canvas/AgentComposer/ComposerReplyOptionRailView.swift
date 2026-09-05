@@ -151,6 +151,12 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     var qaChipTitles: [String] {
         stack.arrangedSubviews.compactMap { ($0 as? ComposerReplyOptionChipButton)?.title }
     }
+    /// Non-empty AND every chip focusable: an empty rail must not read as
+    /// "accessible" by vacuous truth.
+    var qaChipsAcceptFocus: Bool {
+        let chips = stack.arrangedSubviews.compactMap { $0 as? ComposerReplyOptionChipButton }
+        return !chips.isEmpty && chips.allSatisfy(\.acceptsFirstResponder)
+    }
 
     @discardableResult
     func qaPressChip(titled title: String) -> Bool {

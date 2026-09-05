@@ -1457,6 +1457,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     // Deterministic AppKit probes; not a tile integration seam.
     var qaReplyOptionChipTitles: [String] { replyOptionRail.qaChipTitles }
+    var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
     var qaDraftText: String { draft.text }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {
