@@ -60,6 +60,22 @@ public struct ProjectStoreLayout: Sendable {
         notesDirectory.appendingPathComponent("\(id.uuidString).md", isDirectory: false)
     }
 
+    // KB-01. Board data is a per-project DOCUMENT, deliberately not part of
+    // `canvas.json`: a card move must not race the canvas geometry merge, must
+    // not cross the world/zone-local frame boundary, and must not land on the
+    // geometry undo stack. The tile carries only `TileMetadata.boardId`.
+    public var boardsDirectory: URL {
+        stateRoot.appendingPathComponent("boards", isDirectory: true)
+    }
+
+    public var boardsIndexFile: URL {
+        boardsDirectory.appendingPathComponent("index.json", isDirectory: false)
+    }
+
+    public func boardFile(id: UUID) -> URL {
+        boardsDirectory.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
     public var reviewsDirectory: URL {
         stateRoot.appendingPathComponent("reviews", isDirectory: true)
     }
@@ -248,6 +264,58 @@ public struct ProjectStore: Sendable {
     public func tryLoadFileTreeState() throws -> FileTreeState? {
         do { return try loadFileTreeState() }
         catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    // MARK: - Boards (KB-01)
+
+    public func saveBoardState(_ state: BoardState) throws {
+        try FileManager.default.createDirectory(
+            at: layout.boardsDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil)
+        try writer.write(state, to: layout.boardsIndexFile)
+    }
+
+    public func loadBoardState() throws -> BoardState {
+        let state: BoardState = try writer.read(at: layout.boardsIndexFile)
+        try checkSchema(
+            state.schemaVersion,
+            supported: BoardState.currentSchemaVersion,
+            at: layout.boardsIndexFile)
+        return state
+    }
+
+    public func tryLoadBoardState() throws -> BoardState? {
+        do { return try loadBoardState() }
+        catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    public func saveBoard(_ board: Board) throws {
+        try FileManager.default.createDirectory(
+            at: layout.boardsDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil)
+        try writer.write(board, to: layout.boardFile(id: board.id))
+    }
+
+    public func loadBoard(id: UUID) throws -> Board {
+        let board: Board = try writer.read(at: layout.boardFile(id: id))
+        try checkSchema(
+            board.schemaVersion,
+            supported: Board.currentSchemaVersion,
+            at: layout.boardFile(id: id))
+        return board
+    }
+
+    public func tryLoadBoard(id: UUID) throws -> Board? {
+        do { return try loadBoard(id: id) }
+        catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    public func deleteBoard(id: UUID) throws {
+        let url = layout.boardFile(id: id)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
     }
 
     // MARK: - Notes

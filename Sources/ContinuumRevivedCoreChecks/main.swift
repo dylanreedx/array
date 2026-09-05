@@ -188,6 +188,11 @@ if let seedIndex = CommandLine.arguments.firstIndex(of: "--jelly-seed-project"),
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--board-model-check") {
+    runBoardChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--canvas-entity-index-p7-check") {
     runCanvasEntityIndexP7Checks()
     Foundation.exit(0)
@@ -347,6 +352,7 @@ try runCompanionFreshnessChecks()
 runAgentContextGravityChecks()
 try runLocationSessionIndexP5Checks()
 runCanvasEntityIndexP7Checks()
+runBoardChecks()
 try runAsyncCheck {
     try await runAgentToolDetailStoreChecks()
 }
