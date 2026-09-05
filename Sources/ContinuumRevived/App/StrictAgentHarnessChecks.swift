@@ -119,6 +119,25 @@ func runStrictAgentHarnessChecks() throws {
     try expect(catalog.snapshot(for: .codex).readiness == .loggedOut, "Codex readiness leaked")
     try expect(catalog.snapshot(for: .pi).displayNames == ["google/gemini": "Gemini"], "Pi metadata leaked")
 
+    let codexCache = Data(#"{"models":[{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","context_window":1050000},{"slug":"internal","display_name":"Internal","visibility":"hide"}]}"#.utf8)
+    guard let liveCodex = AgentModelCatalog.parseCodexModelsCache(codexCache) else {
+        throw Failure(description: "a valid Codex models cache did not parse")
+    }
+    try expect(liveCodex.models == ["openai-codex/gpt-6-astra"], "Codex live catalogue did not preserve its exact visible model id: \(liveCodex.models)")
+    try expect(liveCodex.displayNames["openai-codex/gpt-6-astra"] == "GPT-6-Astra", "Codex live display name was lost")
+    try expect(liveCodex.contextWindows["openai-codex/gpt-6-astra"] == 1_050_000, "Codex live context window was lost")
+    try expect(AgentModelCatalog.parseCodexModelsCache(Data(#"{"models":[]}"#.utf8)) == nil, "an empty Codex cache replaced the fallback")
+    let codexRPC: [String: Any] = ["data": [
+        ["model": "gpt-6-astra", "displayName": "GPT-6 Astra", "hidden": false],
+        ["model": "service-only", "displayName": "Service", "hidden": true],
+    ]]
+    try expect(AgentModelCatalog.parseCodexModelListResponse(codexRPC)?.models == ["openai-codex/gpt-6-astra"],
+               "Codex app-server model/list did not remain the visible account-aware source")
+
+    let claudeHelp = "  --model <model>                       Model for the current session. Provide\n                                        an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a\n                                        model's full name (e.g. 'claude-fable-5').\n  -n, --name <name>"
+    try expect(AgentModelCatalog.parseClaudeModelAliases(helpOutput: claudeHelp) == ["anthropic/fable", "anthropic/opus", "anthropic/sonnet"],
+               "Claude's live aliases were not read from its own help output")
+
     try expect(LegacyAgentHarnessMigration.resolve(
         evidence: .init(hasCodexThread: false, hasClaudeConversation: true, hasPiSession: true),
         storedPreference: .claudeCode) == nil, "ambiguous Claude/Pi evidence guessed")
@@ -153,6 +172,7 @@ func runStrictAgentHarnessChecks() throws {
         switch arguments {
         case ["--list-models"]: return "provider model context max-out thinking images\nopenai-codex gpt-test 1 1 yes no"
         case ["auth", "status", "--json"]: return #"{"loggedIn":true}"#
+        case ["--help"]: return claudeHelp
         case ["login", "status"]: return "Logged in using ChatGPT"
         default: return nil
         }
@@ -161,7 +181,7 @@ func runStrictAgentHarnessChecks() throws {
     try expect(!countable.requestRefresh(), "an in-flight catalogue refresh was not coalesced")
     for _ in 0..<100 where countable.refreshInFlightForQA { Thread.sleep(forTimeInterval: 0.01) }
     let completedProbeCount = countable.probeLaunchCountForQA
-    try expect(completedProbeCount == 3, "one refresh did not run exactly three harness probes: \(completedProbeCount)")
+    try expect(completedProbeCount == 4, "one refresh did not run the Pi list, Claude auth/help and Codex auth probes: \(completedProbeCount)")
     try expect(!countable.requestRefresh(now: Date()), "the 15-second refresh throttle was bypassed")
     _ = countable.snapshot(for: .claudeCode)
     _ = countable.snapshot(for: .codex)

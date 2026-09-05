@@ -73,6 +73,11 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         harnessButton.onSelection = { [weak self] item in self?.pick(harness: AgentHarness(rawValue: item.id)) }
         modelButton.onSelection = { [weak self] item in self?.pick(model: item.id) }
         effortButton.onSelection = { [weak self] item in self?.pick(thinking: item.id) }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(modelCatalogDidRefresh(_:)),
+            name: AgentModelCatalog.didRefreshNotification,
+            object: AgentModelCatalog.shared)
 
         // A bare spacer absorbs the row's surplus (the header-row convention), so
         // the buttons hold their intrinsic width instead of stretching — and so
@@ -111,6 +116,14 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func modelCatalogDidRefresh(_ notification: Notification) {
+        rebuildChoices()
+    }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: rowHeight)

@@ -33,10 +33,10 @@ public enum CodexCLIBackend {
     }
 
     /// pi `--thinking` level → codex `model_reasoning_effort`. Codex's set is
-    /// {minimal, low, medium, high}; only an exact match passes through, and
-    /// pi-only levels (off/xhigh/max) omit the config so codex takes its own
-    /// default. Same exact-match-or-omit rule as `ClaudeCLIBackend`.
-    public static let effortLevels: Set<String> = ["minimal", "low", "medium", "high"]
+    /// Only exact levels accepted by current Codex releases pass through;
+    /// `off` remains Pi-only and omits the config so Codex takes its default.
+    /// Same exact-match-or-omit rule as `ClaudeCLIBackend`.
+    public static let effortLevels: Set<String> = ["minimal", "low", "medium", "high", "xhigh", "max"]
     public static func effortArgument(forThinking thinking: String) -> String? {
         effortLevels.contains(thinking) ? thinking : nil
     }
@@ -47,6 +47,7 @@ public enum CodexCLIBackend {
     /// as pi lists them, so a pi machine's ids dedup against these. Exact ids,
     /// never patterns.
     public static let curatedCatalogModels: [String] = [
+        "openai-codex/gpt-6-astra",
         "openai-codex/gpt-5.6-sol",
         "openai-codex/gpt-5.6-terra",
         "openai-codex/gpt-5.6-luna",
@@ -56,6 +57,7 @@ public enum CodexCLIBackend {
         "openai-codex/gpt-5.3-codex-spark",
     ]
     public static let curatedCatalogDisplayNames: [String: String] = [
+        "openai-codex/gpt-6-astra": "GPT-6 Astra",
         "openai-codex/gpt-5.6-sol": "GPT-5.6 Sol",
         "openai-codex/gpt-5.6-terra": "GPT-5.6 Terra",
         "openai-codex/gpt-5.6-luna": "GPT-5.6 Luna",

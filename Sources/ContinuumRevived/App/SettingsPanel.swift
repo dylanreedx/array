@@ -46,6 +46,21 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         self.defaults = defaults
         self.navKeymap = navKeymap
         self.customSectionViews = customSectionViews
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(modelCatalogDidRefresh(_:)),
+            name: AgentModelCatalog.didRefreshNotification,
+            object: AgentModelCatalog.shared)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func modelCatalogDidRefresh(_ notification: Notification) {
+        guard isVisible else { return }
+        refreshModelPickerForHarnessChange()
     }
 
     var isVisible: Bool { panel?.isVisible ?? false }
