@@ -295,3 +295,45 @@ needing Dylan:
   Text editing inside a card must still win.
 - **`run-matrix.sh`.** Two program checks pin its lines verbatim with
   `grep -Fxc`, and the inventory reads a wrapper rename as deleted checks.
+
+---
+
+## Seeing it
+
+An isolated debug bundle is assembled at `/tmp/kb01-preview/Array Dev.app`
+(`dev.arrayapp.macos.dev`, "Array Dev"), with an empty scratch root at
+`~/kb01-scratch`. It was built with `scripts/make-app-bundle.sh`, **not**
+`scripts/dev-app.sh` — that script quits the shared preview app before it
+builds, which is not safe while other lanes are using it.
+
+```sh
+open --env CONTINUUM_PROJECT_ROOT="$HOME/kb01-scratch" "/tmp/kb01-preview/Array Dev.app"
+```
+
+Then `⌘K → New Board`.
+
+**Not launched from here, on purpose.** `.plans/59/findings.md` records that
+bundle-path and Application-Support isolation do NOT isolate the shared DEV
+preference domain: two Dev-channel copies running at once are one GUI lane, not
+two. Quit `~/Desktop/Array Dev.app` first, or accept that they share defaults.
+The scratch root is outside `~/Documents`, `~/Desktop` and `~/Downloads` so the
+explicit folder-grant modal does not appear on every launch.
+
+## What to look at first, and what is honestly unknown
+
+The drag compiles and its pure resolver is witnessed, but **no build has been
+driven on screen**, so every statement about feel below is a design intention,
+not an observation:
+
+1. Nested scrolling. A column's `NSScrollView` inside a zoomed, layer-backed
+   world plane is the least-proven part of this. `CanvasNSView.scrollWheel`
+   was read, not exercised.
+2. A card drag starting just below the title bar at LOW zoom. The inset is
+   recomputed from `grabHeightInLocalCoordinates` every layout, but the
+   enlarged low-zoom strip has not been measured.
+3. Whether the tile keeps first responder well enough for `⌘Z` to reach the
+   board stack (`focusedBoardUndoManager` resolves through
+   `TileNSView.enclosingTileId`).
+4. Whether a residency demote mid-drag pins the tile native. `surfaceScrollOffsets`
+   and `surfaceContentRevision` are declared; the interaction with a live drag
+   is unverified.
