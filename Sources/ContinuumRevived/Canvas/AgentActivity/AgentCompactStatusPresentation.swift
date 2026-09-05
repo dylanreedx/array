@@ -78,13 +78,26 @@ struct AgentCompactStatusPresentation: Equatable {
     /// enabled-but-silent element is distinguishable from a disabled one.
     let enabledElements: [AgentStatusElement]
 
+    /// NO DEFAULTS on `quotas`, `cost` and `enabledElements`, deliberately.
+    ///
+    /// They had defaults for one commit and it cost a whole build. Every
+    /// production paint of the row goes through
+    /// `ManagedAgentTileNSView.presentationWithoutThinkingIndicator`, which
+    /// rebuilds this value to strip the thinking indicator — and with defaults
+    /// available it compiled happily while dropping the account chips, the cost
+    /// and the enabled set on every single repaint. The row rendered exactly
+    /// what it had before the feature existed, and no check caught it because
+    /// the witnesses called `row.apply` directly and never crossed the rebuild.
+    ///
+    /// Requiring all six arguments makes that omission a compile error. Any
+    /// future field belongs here too, without a default, for the same reason.
     init(
         location: Location,
         activity: Activity,
         context: AgentRadialContextMeterPresentation,
-        quotas: [AgentQuotaElementPresentation] = [],
-        cost: AgentCostElementPresentation? = nil,
-        enabledElements: [AgentStatusElement] = [.location, .activity, .contextMeter]
+        quotas: [AgentQuotaElementPresentation],
+        cost: AgentCostElementPresentation?,
+        enabledElements: [AgentStatusElement]
     ) {
         self.location = location
         self.activity = activity

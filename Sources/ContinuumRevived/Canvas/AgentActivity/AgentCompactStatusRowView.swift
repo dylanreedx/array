@@ -247,7 +247,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         apply(AgentCompactStatusPresentation(
             location: .init(symbolName: "house", text: "—", accessibilityLabel: "Home and Where: unknown.", detailText: "Location unavailable", isExternal: false),
             activity: .init(phase: .ready, symbolName: "checkmark.circle", text: "Ready", elapsedText: nil, accessibilityLabel: "Activity: ready.", detailText: "Activity phase: ready.", showsThinkingIndicator: false),
-            context: AgentRadialContextMeterPresenter.present(nil)))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // The row's own placeholder, before any caller has applied a real
+            // presentation: nothing is enabled beyond the three original
+            // elements and there is no reading of any kind yet.
+            quotas: [],
+            cost: nil,
+            enabledElements: [.location, .activity, .contextMeter]))
         applyTokens()
     }
 

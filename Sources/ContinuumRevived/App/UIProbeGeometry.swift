@@ -6057,6 +6057,48 @@ enum UIProbeGeometry {
             throw fail("\(label): a derived-occupancy snapshot must fill the radial meter with a real percentage and disclose the derivation, fraction \(String(describing: meterRow.qaContextFraction)) text \(meterRow.qaContextText)")
         }
 
+        // ST-01, THROUGH THE TILE. The row-level assertions elsewhere in this
+        // file call `row.apply` with a presentation they built themselves, and
+        // that is precisely why they missed the real defect: every production
+        // repaint goes through `presentationWithoutThinkingIndicator`, which
+        // rebuilt the presentation and dropped the account chips, the cost and
+        // the enabled set. The row was perfect and the tile showed nothing.
+        //
+        // Driving `qaApplyCompactStatusFacts` crosses that rebuild, so this is
+        // the assertion that has teeth. Deleting the carry-through lines in the
+        // helper fails HERE and passes every row-level check.
+        let quotaReading = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [
+                AgentQuotaWindow(kind: .fiveHour, utilization: 0.18,
+                                 resetsAt: now.addingTimeInterval(3_600)),
+                AgentQuotaWindow(kind: .sevenDay, utilization: 0.67,
+                                 resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            observedAt: now,
+            source: .claudeRateLimitEvent)
+        tile.qaApplyCompactStatusFacts(
+            .init(interaction: .pending(startedAt: now.addingTimeInterval(-5))),
+            location: location, contextWindow: occupied,
+            accountQuota: quotaReading, now: now)
+        let quotaRow = tile.qaCompactStatusRow
+        quotaRow.layoutSubtreeIfNeeded()
+        guard quotaRow.qaEnabledElements.contains(.quotaFiveHour) else {
+            throw fail("\(label): the 5-hour element must be enabled by default; enabled set was \(quotaRow.qaEnabledElements)")
+        }
+        guard quotaRow.qaQuotaText(.quotaFiveHour) == "5h 18%" else {
+            throw fail("\(label): the tile must paint the account chip through presentationWithoutThinkingIndicator, got \"\(quotaRow.qaQuotaText(.quotaFiveHour))\" — a rebuild that drops `quotas` shows exactly this")
+        }
+        guard quotaRow.qaQuotaState(.quotaFiveHour) == .known,
+              quotaRow.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent") else {
+            throw fail("\(label): the tile lost the account reading's state or its spoken scope, state \(String(describing: quotaRow.qaQuotaState(.quotaFiveHour)))")
+        }
+        // The per-agent occupancy must still be its own number beside it, or the
+        // two concepts have been merged.
+        guard quotaRow.qaContextText == "21%" else {
+            throw fail("\(label): the account chip must not disturb per-agent occupancy, context read \(quotaRow.qaContextText)")
+        }
+
         // A zero-turn session is empty for ANY window size: the seeded
         // zero-used/no-max snapshot renders an authoritative 0%, never
         // "unknown". A real report always carries a max and keeps the
