@@ -39,6 +39,155 @@ func runCodexAppServerParityChecks() {
     runCodexAppServerTranslatorMappingChecks()
     runCodexAppServerSingleAgentParityChecks()
     runCodexAppServerOrderingHazardChecks()
+    runCodexAppServerSubagentVisibilityChecks()
+}
+
+/// TR-07 — a subagent tile must not sit blank while its parent reports the
+/// child's findings.
+///
+/// Dylan, watching a delegating codex turn: "why is the subagent empty but the
+/// main agent said it was done??? … i opened it once it was created and i
+/// didn't see any tooling or anything."
+///
+/// Replayed from `codex-appserver-delegating-websearch.jsonl`, captured live
+/// against codex-cli 0.153.4 with the runner's own argv. The measured timeline
+/// is the whole bug:
+///
+///     17.07s  parent  announce child        child  turn/started
+///     29.73s  child   item/started webSearch          <- unmapped: no row
+///     38.73s  child   item/started webSearch          <- unmapped: no row
+///     47.12s  child   181 x agentMessage delta        <- text at last
+///     53.51s  child   turn/completed
+///
+/// Thirty seconds in which the child's ONLY activity was two `webSearch`
+/// items that this translator did not map, so the tile had literally nothing
+/// to draw. Not a streaming bug, not a routing bug — a hole in the mapping.
+private func runCodexAppServerSubagentVisibilityChecks() {
+    let fixturesDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Fixtures", isDirectory: true)
+    let url = fixturesDir.appendingPathComponent(
+        "codex-appserver-delegating-websearch.jsonl", isDirectory: false)
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        fputs("FAIL: codex app-server delegating web-search fixture missing at \(url.path)\n", stderr)
+        Foundation.exit(1)
+    }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+
+    let parentThread = "00000000-0000-4000-8000-000000000001"
+    let childThread = "00000000-0000-4000-8000-000000000004"
+
+    // Same `@unchecked Sendable` box the mapping checks above use — the
+    // observation callback is a `@Sendable` closure.
+    final class DetailBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var names: [String: String] = [:]
+        private var fields: [String: [(key: String, value: String)]] = [:]
+        func record(_ itemId: String, _ detail: AgentToolDetailObservation) {
+            lock.withLock {
+                if let name = detail.toolName { names[itemId] = name }
+                if !detail.fields.isEmpty { fields[itemId] = detail.fields }
+            }
+        }
+        func snapshot() -> ([String: String], [String: [(key: String, value: String)]]) {
+            lock.withLock { (names, fields) }
+        }
+    }
+    var translator = CodexAppServerEventTranslator()
+    let box = DetailBox()
+    translator.onRuntimeObservation = { observation in
+        guard case let .toolDetail(itemId, detail) = observation else { return }
+        box.record(itemId, detail)
+    }
+    let events = lines.flatMap { translator.translate(line: $0) }
+    let (detailNames, detailFields) = box.snapshot()
+
+    // 1. The child's searches produce rows on the CHILD's thread. This is the
+    //    assertion that fails on the old translator: zero, on both counts.
+    let childSearchStarts = events.filter {
+        if case let .itemStarted(thread, _, kind, _) = $0 { return thread == childThread && kind == .webSearch }
+        return false
+    }
+    expect(childSearchStarts.count == 2,
+           "a subagent's web searches must draw rows in its own tile — got \(childSearchStarts.count), expected 2")
+    let childSearchCompletions = events.filter {
+        if case let .itemCompleted(thread, _, kind, _) = $0 { return thread == childThread && kind == .webSearch }
+        return false
+    }
+    expect(childSearchCompletions.count == 2,
+           "a subagent's web searches must also RESOLVE, or the tile shows two rows stuck in progress — got \(childSearchCompletions.count)")
+
+    // 2. The two actions are different work and must read as different rows.
+    let names = Set(detailNames.values)
+    expect(names.contains("Web search"),
+           "a `search` action must be titled as a search — got \(names.sorted())")
+    expect(names.contains("Fetch page"),
+           "an `openPage` action is a fetch, not a search, and must be titled apart — got \(names.sorted())")
+
+    // 3. The query crosses; the fetched PAGE CONTENT never does.
+    let crossed = detailFields.values.flatMap { $0 }
+    expect(crossed.contains { $0.key == "query" && $0.value.contains("Formula 1") },
+           "the search query must reach the row, or it reads as a bare 'Web search' — got \(crossed.map(\.key).sorted())")
+    expect(crossed.contains { $0.key == "url" },
+           "an openPage action must publish its url, not a query")
+    for field in crossed {
+        expect(!field.value.contains("snippet") && !field.value.contains("FORMULA 1 HEINEKEN"),
+               "fetched page content must never cross the whitelist — leaked via \(field.key)")
+    }
+
+    // 4. The child's answer crosses exactly once. On this capture the child
+    //    STREAMS (181 deltas), so `item/completed` must stay silent; on the
+    //    0.148.0 capture it does not stream, and the completion is the only
+    //    copy. Same translator, both behaviours, never doubled.
+    let childText = events.compactMap { event -> String? in
+        if case let .contentDelta(thread, _, kind, delta) = event, thread == childThread, kind == .assistant {
+            return delta
+        }
+        return nil
+    }.joined()
+    expect(childText.contains("Dutch Grand Prix"),
+           "the child's answer must reach its own tile")
+    let marker = "The latest completed Grand Prix"
+    let occurrences = childText.components(separatedBy: marker).count - 1
+    expect(occurrences == 1,
+           "the child's answer must cross exactly once — \(occurrences) copies means the completion re-emitted streamed text")
+
+    // 5. And the parent is unaffected: its own reply still arrives once.
+    let parentText = events.compactMap { event -> String? in
+        if case let .contentDelta(thread, _, kind, delta) = event, thread == parentThread, kind == .assistant {
+            return delta
+        }
+        return nil
+    }.joined()
+    expect(parentText.contains("Dutch Grand Prix"),
+           "the parent's own reply must still arrive")
+    let parentMarker = "The latest completed Formula 1 race"
+    let parentOccurrences = parentText.components(separatedBy: parentMarker).count - 1
+    expect(parentOccurrences == 1,
+           "the parent's reply must not double — got \(parentOccurrences) copies")
+
+    // 6. The non-streaming case. NOT from a capture, and labelled as such: it is
+    //    a protocol-shape probe, because neither committed capture can express
+    //    it. The 0.148.0 delegating fixture PROVES a child can complete without
+    //    streaming a single delta — but its child's `text` came back empty, so
+    //    there is no answer there to lose. The 0.153.4 capture has the text and
+    //    streams it. The property under test belongs to neither: an item that
+    //    completes having streamed NOTHING must still deliver its text.
+    var lone = CodexAppServerEventTranslator()
+    let loneFrames = [
+        #"{"method":"thread/started","params":{"thread":{"id":"00000000-0000-4000-8000-000000000004"}}}"#,
+        #"{"method":"turn/started","params":{"threadId":"00000000-0000-4000-8000-000000000004","turn":{"id":"00000000-0000-4000-8000-000000000021"}}}"#,
+        #"{"method":"item/started","params":{"threadId":"00000000-0000-4000-8000-000000000004","turnId":"00000000-0000-4000-8000-000000000021","item":{"id":"msg_silent","type":"agentMessage","text":""}}}"#,
+        #"{"method":"item/completed","params":{"threadId":"00000000-0000-4000-8000-000000000004","turnId":"00000000-0000-4000-8000-000000000021","item":{"id":"msg_silent","type":"agentMessage","text":"A child that never streamed still has an answer."}}}"#,
+    ]
+    let loneEvents = loneFrames.flatMap { lone.translate(line: $0) }
+    let loneText = loneEvents.compactMap { event -> String? in
+        if case let .contentDelta(_, _, kind, delta) = event, kind == .assistant { return delta }
+        return nil
+    }.joined()
+    expect(loneText == "A child that never streamed still has an answer.",
+           "an agentMessage that completed without streaming must deliver its whole text — got \(loneText.isEmpty ? "NOTHING (the tile stays blank)" : loneText)")
+
+    print("codex app-server subagent visibility: a child's 2 web searches draw and resolve rows in its own tile, search/openPage read apart, page content stays out, both answers cross exactly once, and a non-streaming completion still delivers its text")
 }
 
 // MARK: - 1. mapping pins

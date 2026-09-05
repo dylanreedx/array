@@ -66,6 +66,17 @@ public struct CodexAppServerEventTranslator {
     /// here needs synthesizing or salting. Kept per-thread so a child thread's
     /// turn id is never confused with the parent's.
     private var sawSessionStart = false
+    /// Item ids that have actually streamed at least one `item/agentMessage/delta`.
+    ///
+    /// TR-07 — `item/completed` used to drop every `agentMessage`'s whole text
+    /// unconditionally, on the belief that "the text already crossed as streamed
+    /// deltas". That is a property of the CAPTURE it was written from, not of the
+    /// protocol: in the 0.148.0 delegating fixture the parent streams 12 deltas
+    /// and the child streams NONE, so a child's only copy of its answer was the
+    /// one this translator threw away. (On 0.153.4 children do stream — measured
+    /// — which is exactly why this is tracked per item rather than assumed either
+    /// way. Whichever a given codex build does, the text crosses exactly once.)
+    private var streamedItemIDs: Set<String> = []
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -193,6 +204,28 @@ public struct CodexAppServerEventTranslator {
             onSubagentAnnouncement?(threadId, childThreadID, itemId, label)
             return []
 
+        case "webSearch":
+            // TR-07 — `webSearch` was unmapped, so a codex agent that searched
+            // the web drew NO row at all: the parent's searches AND every
+            // search a subagent ran were invisible. Measured on 0.153.4, a
+            // delegating turn spent 30s in which the child's only activity was
+            // two `webSearch` items — which is exactly the window Dylan opened
+            // the child tile in and found it blank.
+            //
+            // The query is EMPTY on `item/started` (it arrives on
+            // `item/completed`), so this opens the row and the completion below
+            // supplies the text. Two actions exist on the wire, and they are
+            // different work: `search` runs a query, `openPage` fetches a URL.
+            // Naming them apart is what lets `AgentToolKind` give one a
+            // magnifying glass and the other a globe.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started, toolName: Self.webSearchToolName(item), observedAt: now())))
+            }
+            return [.itemStarted(
+                threadId: threadId, itemId: itemId,
+                kind: .webSearch, title: Self.webSearchToolName(item))]
+
         case "commandExecution":
             // Same I5 posture as exec: `command`/`aggregatedOutput` are the
             // sensitive payload, so the title is the generic literal "Shell",
@@ -248,11 +281,15 @@ public struct CodexAppServerEventTranslator {
     /// single-agent fixture (reasoning never streamed a delta live — see the
     /// header note). A future ticket mapping reasoning deltas needs to track
     /// itemId -> item type from `item/started` to disambiguate.
-    private func translateAgentMessageDelta(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateAgentMessageDelta(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
               let turnId = params["turnId"] as? String,
               let delta = params["delta"] as? String, !delta.isEmpty
         else { return [] }
+        // Recorded BEFORE the guard on emptiness would matter: an item that
+        // streamed anything at all has told its story, and `item/completed`
+        // must not repeat it.
+        if let itemId = params["itemId"] as? String { streamedItemIDs.insert(itemId) }
         return [.contentDelta(threadId: threadId, turnId: turnId, streamKind: .assistant, delta: delta)]
     }
 
@@ -285,10 +322,44 @@ public struct CodexAppServerEventTranslator {
                 .itemCompleted(threadId: threadId, itemId: itemId, kind: .compaction, status: .completed),
             ]
         case "agentMessage":
-            // The text already crossed as streamed deltas (restructure #1) —
-            // re-emitting the whole `item.text` here would double it in the
-            // transcript. Nothing to do.
-            return []
+            // Emit the whole text ONLY if this item never streamed. A streaming
+            // item has already delivered every character (restructure #1) and
+            // re-emitting would double it; a NON-streaming one — a subagent on
+            // codex-cli 0.148.0, and whatever else a future build decides not to
+            // stream — has delivered nothing, and dropping it is what left a
+            // child tile blank while its parent reported the child's findings.
+            guard !streamedItemIDs.contains(itemId),
+                  let text = item["text"] as? String, !text.isEmpty,
+                  let turnId = params["turnId"] as? String
+            else { return [] }
+            return [.contentDelta(
+                threadId: threadId, turnId: turnId, streamKind: .assistant, delta: text
+            )]
+
+        case "webSearch":
+            // `results[]` is fetched PAGE CONTENT — snippets, titles, domains.
+            // It never crosses: the whitelist here is the same one claude's and
+            // pi's searches publish, the query or the URL and nothing else.
+            if let onRuntimeObservation {
+                let action = item["action"] as? [String: Any]
+                let isOpenPage = (action?["type"] as? String) == "openPage"
+                let value = isOpenPage
+                    ? (action?["url"] as? String) ?? (item["query"] as? String)
+                    : (action?["query"] as? String) ?? (item["query"] as? String)
+                let field = value
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    .map { [(key: isOpenPage ? "url" : "query", value: $0)] } ?? []
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: Self.webSearchToolName(item),
+                    fields: field,
+                    observedAt: now())))
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .ended, observedAt: now())))
+            }
+            return [.itemCompleted(
+                threadId: threadId, itemId: itemId, kind: .webSearch, status: .completed)]
 
         case "commandExecution":
             let exitCode = Self.intValue(item["exitCode"])
@@ -392,6 +463,15 @@ public struct CodexAppServerEventTranslator {
 
     private func fileDetails(_ item: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
         CodexFileChangeReader.fileDetails(item)
+    }
+
+    /// A `webSearch` item's two actions are different work and read as
+    /// different rows. The names are chosen so `AgentToolKind` classifies them
+    /// without a second table: "Web search" tokenizes to .search (magnifying
+    /// glass, "Searched for ..."), "Fetch page" to .fetch (globe, "Fetched ...").
+    private static func webSearchToolName(_ item: [String: Any]) -> String {
+        let action = item["action"] as? [String: Any]
+        return (action?["type"] as? String) == "openPage" ? "Fetch page" : "Web search"
     }
 
     private static let maximumObservedPathBytes = 4_096

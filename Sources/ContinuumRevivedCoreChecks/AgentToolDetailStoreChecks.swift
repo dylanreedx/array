@@ -1192,6 +1192,11 @@ private func runAgentToolKindChecks() {
         ("ToolSearch", .search), ("BashOutput", .shell),
         // codex
         ("Shell", .shell), ("Web search", .search),
+        // TR-07 — codex's app-server `webSearch` item carries two actions, and
+        // they are different work: a `search` runs a query, an `openPage`
+        // fetches a URL. The titles are chosen so this one table decides both
+        // the glyph and the action sentence.
+        ("Fetch page", .fetch),
         // pi
         ("read", .read), ("grep", .search), ("apply_patch", .edit),
         ("execute_command", .shell), ("delegate_agent", .delegate),
