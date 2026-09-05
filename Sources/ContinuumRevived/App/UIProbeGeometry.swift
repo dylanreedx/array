@@ -888,6 +888,59 @@ enum UIProbeGeometry {
                     "a list-price cost estimate must be labelled as one, got \"\(wide.qaQuotaText(.cost))\"")
         try require(wide.qaDroppedElements.isEmpty,
                     "a 1200pt row must drop nothing, dropped \(wide.qaDroppedElements)")
+
+        // NO TRUNCATION WITH ROOM TO SPARE. `locationGroup` used to be the only
+        // low-hugging view in the row, so it swallowed every spare point — 721
+        // of a 1200pt row for a 61pt name — and left the phase label 44.0pt for
+        // a 45.0pt word. One point short is all it takes: AppKit drew "Waiti…"
+        // beside 600pt of empty space. A dedicated spacer owns the slack now.
+        if let actLabel = wide.qaActivityLabelFrame {
+            try require(actLabel.width >= wide.qaActivityLabelFittingWidth,
+                        "the phase label was given \(actLabel.width)pt for \(wide.qaActivityLabelFittingWidth)pt of text on a 1200pt row — it will render truncated with room to spare")
+        }
+        if let locFrame = wide.qaLocationFrame {
+            try require(locFrame.width < wide.bounds.width / 2,
+                        "the location group claimed \(locFrame.width)pt of a \(wide.bounds.width)pt row; slack belongs in the spacer, not in a rendering view")
+        }
+
+        // DISTINCT GLYPHS. Three chips sharing one icon was half of why the row
+        // read as a single string: a repeated mark implies sameness.
+        let glyphs = [AgentStatusElement.quotaFiveHour, .quotaSevenDay, .quotaSpendLimit]
+            .compactMap { wide.qaQuotaPill($0)?.qaSymbolName }
+        try require(glyphs.count == 3 && Set(glyphs).count == 3,
+                    "each account pill needs its own glyph, got \(glyphs)")
+        // The capsules must not touch. Adjacent pills with no gap read as one
+        // wide chip, which is the grouping failure again in a new shape.
+        for (lhs, rhs) in [
+            (AgentStatusElement.quotaFiveHour, AgentStatusElement.quotaSevenDay),
+            (.quotaSevenDay, .quotaSpendLimit),
+        ] {
+            guard let a = wide.qaQuotaFrame(lhs), let b = wide.qaQuotaFrame(rhs) else {
+                throw fail("compactStatusRow.accountElements: \(lhs.rawValue)/\(rhs.rawValue) pill frames missing")
+            }
+            let gap = b.minX - a.maxX
+            try require(gap >= CGFloat(Space.s),
+                        "\(lhs.rawValue) and \(rhs.rawValue) are \(gap)pt apart; capsules that touch read as one chip")
+        }
+        // Label and value must be separately legible inside the pill, which is
+        // the whole reason `49%` no longer sits against `7d`.
+        for element in [AgentStatusElement.quotaFiveHour, .quotaSevenDay] {
+            guard let pill = wide.qaQuotaPill(element) else {
+                throw fail("compactStatusRow.accountElements: \(element.rawValue) pill missing at 1200pt")
+            }
+            try require(!pill.qaLabelText.isEmpty && !pill.qaValueText.isEmpty
+                            && pill.qaLabelText != pill.qaValueText,
+                        "\(element.rawValue) must render its label and value as separate text, got \"\(pill.qaLabelText)\"/\"\(pill.qaValueText)\"")
+            try require(pill.qaCornerRadius == pill.bounds.height / 2 && pill.bounds.height > 0,
+                        "\(element.rawValue) is not a capsule at 1200pt")
+        }
+        // The metrics sit apart from identity and phase. Without the wider gap
+        // the context capsule butts against the activity label and the row's two
+        // halves stop being distinguishable.
+        if let activityFrame = wide.qaActivityFrame, let contextFrame = wide.qaContextFrame {
+            try require(contextFrame.minX - activityFrame.maxX >= CGFloat(Space.l),
+                        "the metrics cluster must be set apart from the phase; gap was \(contextFrame.minX - activityFrame.maxX)pt")
+        }
         try expectNoClipping(wide, label: "compactStatusRow.accountElements.wide")
 
         // SCOPE IS SPOKEN. A number shared by every agent on the login must not
@@ -6077,10 +6130,15 @@ enum UIProbeGeometry {
             ],
             observedAt: now,
             source: .claudeRateLimitEvent)
+        // An EXPLICIT element set: three metrics that fit at 320pt, so the
+        // assertion is about the tile delivering the reading rather than about
+        // whichever toggles this machine happens to have set.
         tile.qaApplyCompactStatusFacts(
             .init(interaction: .pending(startedAt: now.addingTimeInterval(-5))),
             location: location, contextWindow: occupied,
-            accountQuota: quotaReading, now: now)
+            accountQuota: quotaReading,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
+            now: now)
         let quotaRow = tile.qaCompactStatusRow
         quotaRow.layoutSubtreeIfNeeded()
         guard quotaRow.qaEnabledElements.contains(.quotaFiveHour) else {
@@ -6097,6 +6155,29 @@ enum UIProbeGeometry {
         // two concepts have been merged.
         guard quotaRow.qaContextText == "21%" else {
             throw fail("\(label): the account chip must not disturb per-agent occupancy, context read \(quotaRow.qaContextText)")
+        }
+
+        // PILL SHAPE AND GROUPING. The readings used to render as one run of
+        // digits — `3% 5h 49% 7d 15% spend —` — where a value sat beside the
+        // NEXT window's label and nothing said which belonged to which. Each
+        // metric is now a capsule, and these are the properties that make it one.
+        guard let fivePill = quotaRow.qaQuotaPill(.quotaFiveHour) else {
+            throw fail("\(label): the 5-hour reading must render as a pill in the live tile")
+        }
+        guard fivePill.qaHasFill else {
+            throw fail("\(label): the 5-hour pill has no fill, so it groups nothing")
+        }
+        guard fivePill.qaCornerRadius == fivePill.bounds.height / 2, fivePill.bounds.height > 0 else {
+            throw fail("\(label): the 5-hour pill is not a capsule — radius \(fivePill.qaCornerRadius) against height \(fivePill.bounds.height)")
+        }
+        guard fivePill.qaIconHasImage, fivePill.qaLabelText == "5h", fivePill.qaValueText == "18%" else {
+            throw fail("\(label): the pill must carry an icon, its own label and its own value; got icon \(fivePill.qaIconHasImage) label \"\(fivePill.qaLabelText)\" value \"\(fivePill.qaValueText)\"")
+        }
+        // The context reading wears the same capsule, so the metrics cluster is
+        // one visual language rather than a bare number beside a pill.
+        guard quotaRow.qaContextPill.qaHasFill,
+              quotaRow.qaContextPill.qaCornerRadius == quotaRow.qaContextPill.bounds.height / 2 else {
+            throw fail("\(label): the context reading must wear the same pill as the account readings")
         }
 
         // A zero-turn session is empty for ANY window size: the seeded

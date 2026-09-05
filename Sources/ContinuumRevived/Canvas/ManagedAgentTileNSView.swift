@@ -1811,6 +1811,7 @@ final class ManagedAgentTileNSView: TileNSView {
         location: AgentLocationSnapshot,
         contextWindow: AgentContextWindowSnapshot? = nil,
         accountQuota: AgentAccountQuotaSnapshot? = nil,
+        enabledElements: [AgentStatusElement]? = nil,
         now: Date
     ) {
         compactStatusSession = facts.session
@@ -1830,7 +1831,10 @@ final class ManagedAgentTileNSView: TileNSView {
                 now: now,
                 contextWindow: contextWindow,
                 accountQuota: accountQuota ?? currentAccountQuota(),
-                enabledElements: AgentStatusElementConfig.visibleElements())
+                // An explicit set keeps a probe deterministic. Reading live
+                // defaults here would make the witness depend on whichever
+                // toggles the developer happens to have set.
+                enabledElements: enabledElements ?? AgentStatusElementConfig.visibleElements())
             // Same split as production: footer filter, then the gyro's words.
             // A probe that skipped either would witness a surface no user sees.
             // The rebuild is exactly where the account chips were being dropped,

@@ -817,6 +817,11 @@ enum UIProbeAppearance {
         // Queue 91 live managed-agent composition: the compact row owns the
         // single visible Home/Where/What surface and paints its tile-chrome fill.
         "AgentCompactStatusRowView",
+        // ST-01: each metric in the compact row is a capsule — a `cardMessage`
+        // fill one step off the row's own `tileChrome`, so a label-value pair
+        // reads as one object. A pill with no reading paints `nil`, never
+        // `.clear`, so an absent metric contributes no slot at all.
+        "AgentStatusPillView",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
         // paint the composer shell on every managed-agent surface, so the composer

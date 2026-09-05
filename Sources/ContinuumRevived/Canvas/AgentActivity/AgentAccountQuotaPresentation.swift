@@ -33,9 +33,16 @@ struct AgentQuotaElementPresentation: Equatable {
     let state: AgentQuotaElementState
     /// Raw fraction, uncapped. A spend limit above 1.0 stays above 1.0.
     let fraction: Double?
+    /// This element's OWN glyph. Not a shared account glyph: three chips
+    /// carrying one repeated icon was half the reason the row read as a single
+    /// string, because a repeated mark implies sameness.
     let symbolName: String
-    /// What the row draws, e.g. `5h 18%`, or `5h —` when unknown.
-    let text: String
+    /// The window's name, alone — `5h`, `7d`, `spend`.
+    let shortLabel: String
+    /// The reading, alone — `18%`, `! 94%`, or an em dash when there is none.
+    let valueText: String
+    /// Label and value joined, for surfaces that draw one string.
+    var text: String { valueText.isEmpty ? shortLabel : "\(shortLabel) \(valueText)" }
     let accessibilityLabel: String
     let detailText: String
 }
@@ -54,8 +61,18 @@ enum AgentAccountQuotaPresenter {
     static let warningThreshold = 0.75
     static let criticalThreshold = 0.90
 
-    /// The glyph that marks a reading as account-scoped rather than per-agent.
-    private static let accountSymbol = "person.crop.circle"
+    /// One glyph per window kind, so two pills are never distinguishable only
+    /// by their text. Account SCOPE is still stated — in the tooltip and the
+    /// spoken label, where there is room to say it unambiguously rather than
+    /// hint at it with a repeated mark.
+    private static func symbolName(for kind: AgentQuotaWindowKind) -> String {
+        switch kind {
+        case .fiveHour: return "clock"
+        case .sevenDay: return "calendar"
+        case .spendLimit: return "creditcard"
+        case .unknown: return "gauge.with.dots.needle.bottom.50percent"
+        }
+    }
 
     static func present(
         _ snapshot: AgentAccountQuotaSnapshot?,
@@ -89,8 +106,9 @@ enum AgentAccountQuotaPresenter {
                 element: element,
                 state: .expired,
                 fraction: window.utilization,
-                symbolName: accountSymbol,
-                text: "\(kind.shortLabel) —",
+                symbolName: symbolName(for: kind),
+                shortLabel: kind.shortLabel,
+                valueText: "—",
                 accessibilityLabel: "Account \(kind.spokenLabel) expired; awaiting a new reading.",
                 detailText: [
                     "Account \(kind.spokenLabel): expired",
@@ -104,8 +122,9 @@ enum AgentAccountQuotaPresenter {
                 element: element,
                 state: .unknown,
                 fraction: nil,
-                symbolName: accountSymbol,
-                text: "\(kind.shortLabel) —",
+                symbolName: symbolName(for: kind),
+                shortLabel: kind.shortLabel,
+                valueText: "—",
                 accessibilityLabel: "Account \(kind.spokenLabel) unknown.",
                 detailText: [
                     "Account \(kind.spokenLabel): unknown",
@@ -143,8 +162,9 @@ enum AgentAccountQuotaPresenter {
             element: element,
             state: state,
             fraction: fraction,
-            symbolName: accountSymbol,
-            text: "\(marker)\(kind.shortLabel) \(percent)%",
+            symbolName: symbolName(for: kind),
+            shortLabel: kind.shortLabel,
+            valueText: "\(marker)\(percent)%",
             accessibilityLabel: "Account \(kind.spokenLabel) \(percent) percent used"
                 + (window.resetsAt.map { ", resets \(relative($0, from: now))" } ?? "")
                 + ".",
@@ -190,8 +210,9 @@ enum AgentAccountQuotaPresenter {
         reason: String,
         snapshot: AgentAccountQuotaSnapshot? = nil
     ) -> AgentQuotaElementPresentation {
-        let kindLabel = windowKind(for: element)?.shortLabel ?? "—"
-        let spoken = windowKind(for: element)?.spokenLabel ?? "usage"
+        let kind = windowKind(for: element)
+        let kindLabel = kind?.shortLabel ?? "—"
+        let spoken = kind?.spokenLabel ?? "usage"
         var lines = ["Account \(spoken): unknown", reason]
         if let snapshot { lines.append(observedLine(snapshot)) }
         lines.append(scopeNote)
@@ -199,8 +220,9 @@ enum AgentAccountQuotaPresenter {
             element: element,
             state: .unknown,
             fraction: nil,
-            symbolName: accountSymbol,
-            text: "\(kindLabel) —",
+            symbolName: kind.map(symbolName(for:)) ?? "questionmark.circle",
+            shortLabel: kindLabel,
+            valueText: "—",
             accessibilityLabel: "Account \(spoken) unknown.",
             detailText: lines.joined(separator: "\n"))
     }
