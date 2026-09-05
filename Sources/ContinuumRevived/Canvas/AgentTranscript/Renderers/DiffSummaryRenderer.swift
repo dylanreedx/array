@@ -272,7 +272,7 @@ final class AgentDiffSummaryView: NSView {
                 // break the "100% is unchanged" contract.
                 .kern: 0.8,
             ])
-        countsLabel.stringValue = Self.countsText(payload.files)
+        countsLabel.stringValue = Self.countsText(payload.files, pending: payload.presentedFilesArePending)
         summaryLabel.stringValue = Self.safeSummary(payload.summary)
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         syncFileRows(previousFiles: previousFiles)
@@ -376,7 +376,8 @@ final class AgentDiffSummaryView: NSView {
     }
 
     func applyAccessibility(payload: AgentDiffPayload) {
-        setAccessibilityLabel("File changes, \(Self.countsText(payload.files))")
+        setAccessibilityLabel(
+            "File changes, \(Self.countsText(payload.files, pending: payload.presentedFilesArePending))")
         var children: [NSView] = [titleLabel, countsLabel]
         if !summaryLabel.isHidden { children.append(summaryLabel) }
         for index in 0..<displayedFiles.count {
@@ -565,26 +566,37 @@ final class AgentDiffSummaryView: NSView {
         return result + bottomInset(zoom: zoom)
     }
 
-    static func countsText(_ files: [AgentDiffFileSummary]) -> String {
+    /// TR-01 — the card's headline, and the one line that used to lie.
+    ///
+    /// An empty file list rendered "0 files · line counts unavailable", which
+    /// states a measurement ("we counted, there were none") for the one case
+    /// where nothing was ever measured. A `.fileChange` item exists BECAUSE a
+    /// file changed, so an empty list is only ever "not recorded" (the
+    /// host-local detail expired, or the row was replayed from a persisted
+    /// document that never carried file facts) or "not yet" while it runs.
+    static func countsText(_ files: [AgentDiffFileSummary], pending: Bool = false) -> String {
+        guard !files.isEmpty else { return pending ? "Working…" : "Files not recorded" }
         var additions: UInt = 0
         var removals: UInt = 0
-        let known = files.filter(\.lineCountsAreKnown)
-        for file in known {
-            let add = additions.addingReportingOverflow(file.addedLineCount)
-            let remove = removals.addingReportingOverflow(file.removedLineCount)
+        var sawLowerBound = false
+        let measured = files.filter(\.hasAnyKnownCount)
+        for file in measured {
+            let add = additions.addingReportingOverflow(file.addedLineCount ?? 0)
+            let remove = removals.addingReportingOverflow(file.removedLineCount ?? 0)
             additions = add.overflow ? .max : add.partialValue
             removals = remove.overflow ? .max : remove.partialValue
+            // A file whose own count is a floor makes the SUM a floor. So does
+            // a file that measured only one of its two numbers: the total is
+            // then at least this, never exactly this.
+            sawLowerBound = sawLowerBound || file.countsAreLowerBound || !file.lineCountsAreKnown
         }
         let noun = files.count == 1 ? "file" : "files"
-        let unavailable = files.count - known.count
-        if known.isEmpty {
-            return "\(files.count) \(noun) · line counts unavailable"
-        }
-        if unavailable > 0 {
-            let unavailableNoun = unavailable == 1 ? "file" : "files"
-            return "\(files.count) \(noun) · +\(additions) −\(removals) · \(unavailable) \(unavailableNoun) without counts"
-        }
-        return "\(files.count) \(noun) · +\(additions) −\(removals)"
+        guard !measured.isEmpty else { return "\(files.count) \(noun) · line counts unavailable" }
+        let stat = "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
+        let unmeasured = files.count - measured.count
+        guard unmeasured > 0 else { return "\(files.count) \(noun) · \(stat)" }
+        let unmeasuredNoun = unmeasured == 1 ? "file" : "files"
+        return "\(files.count) \(noun) · \(stat) · \(unmeasured) \(unmeasuredNoun) without counts"
     }
 
     /// One row per changed file: the path (monospaced, middle-truncated, so a
@@ -646,9 +658,7 @@ final class AgentDiffSummaryView: NSView {
             guard zoomChanged || !(previousFiles.indices.contains(index) && previousFiles[index] == file) else { continue }
             let name = Self.safeSingleLine(file.displayName, fallback: "Changed file")
             if label.stringValue != name { label.stringValue = name }
-            label.setAccessibilityLabel(file.lineCountsAreKnown
-                ? "\(name), \(file.addedLineCount) additions, \(file.removedLineCount) removals"
-                : "\(name), line counts unavailable")
+            label.setAccessibilityLabel("\(name), \(file.countsDescription)")
             let statString = Self.statText(
                 file,
                 added: added,
@@ -659,10 +669,7 @@ final class AgentDiffSummaryView: NSView {
             stat.attributedStringValue = statString
             qaStatMeasurementsForChecks += 1
             statLabelWidths[index] = ceil(statString.size().width) + CGFloat(zoom.scaled(Space.s))
-            bar.apply(
-                added: file.lineCountsAreKnown ? file.addedLineCount : 0,
-                removed: file.lineCountsAreKnown ? file.removedLineCount : 0
-            )
+            bar.apply(added: file.addedLineCount ?? 0, removed: file.removedLineCount ?? 0)
             bar.applyColors(added: added, removed: removed)
         }
         for index in displayedFiles.count..<fileLabels.count {
@@ -675,6 +682,13 @@ final class AgentDiffSummaryView: NSView {
 
     /// "+42 −3" with each number in its own accent. Monospaced digits so the
     /// columns line up down the card.
+    ///
+    /// TR-01 — the two counts are independently optional, so a row can be half
+    /// measured ("+42 −?" for a whole-file write, which knows what it wrote and
+    /// not what it replaced). An unmeasured row falls back to what the
+    /// operation DID ("deleted", "added") before it falls back to admitting it
+    /// has no numbers; "−0" for a delete is exactly the false precision this
+    /// card is being fixed for.
     static func statText(
         _ file: AgentDiffFileSummary,
         added: NSColor,
@@ -684,20 +698,29 @@ final class AgentDiffSummaryView: NSView {
     ) -> NSAttributedString {
         let font = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .medium)
-        guard file.lineCountsAreKnown else {
-            return NSAttributedString(
-                string: "counts unavailable",
+        func caption(_ text: String) -> NSAttributedString {
+            NSAttributedString(
+                string: text,
                 attributes: [
                     .font: NSFont.token(.caption, zoom: zoom), .foregroundColor: unavailable,
                 ]
             )
         }
+        guard file.hasAnyKnownCount else {
+            switch file.action {
+            case .delete: return caption("deleted")
+            case .add: return caption("added")
+            case .rename: return caption("renamed")
+            default: return caption("counts unavailable")
+            }
+        }
         let result = NSMutableAttributedString()
+        if file.countsAreLowerBound { result.append(caption("≥ ")) }
         result.append(NSAttributedString(
-            string: "+\(file.addedLineCount)",
+            string: file.addedLineCount.map { "+\($0)" } ?? "+?",
             attributes: [.font: font, .foregroundColor: added]))
         result.append(NSAttributedString(
-            string: " \u{2212}\(file.removedLineCount)",
+            string: file.removedLineCount.map { " \u{2212}\($0)" } ?? " \u{2212}?",
             attributes: [.font: font, .foregroundColor: removed]))
         return result
     }

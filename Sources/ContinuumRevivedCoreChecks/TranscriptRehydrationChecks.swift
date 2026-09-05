@@ -66,12 +66,16 @@ private func runClaudeSessionTranscriptParseChecks() {
         #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"REASON_ALPHA"},{"type":"text","text":"ANSWER_ALPHA"},{"type":"tool_use","id":"toolu_A","name":"Bash","input":{"command":"ls"}}]}}"#,
         #"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"SIDECHAIN_SECRET"},{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{}}]}}"#,
         #"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"tool_use_id":"toolu_A","type":"tool_result","is_error":false,"content":"ls output"}]}}"#,
-        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_BETA"},{"type":"tool_use","id":"toolu_B","name":"Edit","input":{"file_path":"/x"}}]}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_BETA"},{"type":"tool_use","id":"toolu_B","name":"Edit","input":{"file_path":"/x","old_string":"one\ntwo","new_string":"one\nTWO\nthree"}}]}}"#,
         #"{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"tool_use_id":"toolu_B","type":"tool_result","is_error":true,"content":"boom"}]}}"#,
         #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"HELLO_PROMPT_TWO"}}"#,
         #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"ANSWER_GAMMA"}]}}"#,
     ]
-    let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+    // TR-01 — the replayed observations carry an observed instant, so the clock
+    // is pinned to compare whole step lists.
+    let observedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    let transcript = ClaudeSessionTranscriptReader.parse(
+        lines: lines, threadId: threadId, now: { observedAt })
 
     let expected: [RehydratedTranscriptStep] = [
         .userPrompt("HELLO_PROMPT_ONE"),
@@ -83,7 +87,31 @@ private func runClaudeSessionTranscriptParseChecks() {
         .event(.itemStarted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, title: "Bash · ls")),
         .event(.itemCompleted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, status: .completed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "ANSWER_BETA")),
-        .event(.itemStarted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, title: "Edit · /x")),
+        // TR-01 — the restored file change now replays the host-local facts the
+        // session file already held, immediately BEFORE its item, the way the
+        // live claude frame delivers them. Without these two the card had
+        // nothing to show and said "0 files · line counts unavailable" about an
+        // edit whose path is right there in the line above.
+        .observation(.toolActivity(
+            itemId: "toolu_B",
+            activity: AgentObservedActivity(
+                operation: .editing,
+                targetPath: URL(fileURLWithPath: "/x"),
+                startedAt: observedAt,
+                updatedAt: observedAt,
+                evidenceSource: .toolEvent))),
+        .observation(.toolDetail(
+            itemId: "toolu_B",
+            detail: AgentToolDetailObservation(
+                phase: .started,
+                toolName: "Edit",
+                // "one\ntwo" → "one\nTWO\nthree": the shared line "one" is
+                // peeled off, so this is +2 −1 and not +3 −2.
+                fileChanges: [.init(action: .edit, path: "/x", addedLines: 2, removedLines: 1)],
+                observedAt: observedAt))),
+        // The path no longer rides the TITLE: it is the card's file row now, and
+        // the document keeps the bare tool name the live path uses.
+        .event(.itemStarted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, title: "Edit")),
         .event(.itemCompleted(threadId: threadId, itemId: "toolu_B", kind: .fileChange, status: .failed)),
         .event(.turnCompleted(threadId: threadId, turnId: "rehydrated-t1", outcome: .completed, errorMessage: nil)),
         .userPrompt("HELLO_PROMPT_TWO"),

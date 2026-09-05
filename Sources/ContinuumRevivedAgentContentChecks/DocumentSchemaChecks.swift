@@ -11,7 +11,63 @@ private func nodeID(_ value: String) -> AgentNodeID {
 private func assertSendable<T: Sendable>(_: T.Type) {}
 private func assertCodable<T: Codable>(_: T.Type) {}
 
+func runDiffFileSummaryCountsChecks() {
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+
+    // TR-01 — the two counts became independently optional, so the wire format
+    // has to carry "measured" and "not measured" as distinct facts. Zero is a
+    // measurement; absence is not.
+    func roundTrip(_ file: AgentDiffFileSummary) -> AgentDiffFileSummary? {
+        guard let data = try? encoder.encode(file) else { return nil }
+        return try? decoder.decode(AgentDiffFileSummary.self, from: data)
+    }
+
+    let measuredZero = AgentDiffFileSummary(
+        displayName: "a.swift", addedLineCount: 0, removedLineCount: 0, action: .edit)
+    let decodedZero = roundTrip(measuredZero)
+    expect(decodedZero == measuredZero,
+           "AgentDiffFileSummary: a MEASURED +0 −0 must survive the round trip as a measurement, got \(String(describing: decodedZero))")
+
+    // Half measured: a whole-file write knows its additions and cannot know its
+    // removals. The first cut encoded `lineCountsAreKnown: false` for this and
+    // its own decoder then threw the known half away.
+    let halfMeasured = AgentDiffFileSummary(
+        displayName: "b.swift", addedLineCount: 12, action: .write)
+    let decodedHalf = roundTrip(halfMeasured)
+    expect(decodedHalf?.addedLineCount == 12 && decodedHalf?.removedLineCount == nil,
+           "AgentDiffFileSummary: a half-measured pair lost its measured half: \(String(describing: decodedHalf))")
+
+    let unmeasured = AgentDiffFileSummary(displayName: "c.swift", action: .delete)
+    let decodedUnmeasured = roundTrip(unmeasured)
+    expect(decodedUnmeasured?.hasAnyKnownCount == false && decodedUnmeasured?.action == .delete,
+           "AgentDiffFileSummary: an unmeasured delete gained counts: \(String(describing: decodedUnmeasured))")
+
+    let lowerBound = AgentDiffFileSummary(
+        displayName: "d.swift", addedLineCount: 80, removedLineCount: 2,
+        countsAreLowerBound: true, action: .edit)
+    expect(roundTrip(lowerBound)?.countsAreLowerBound == true,
+           "AgentDiffFileSummary: a floor must not round-trip into a total")
+
+    // Legacy (schema 1) payloads. Non-zero numbers with no availability bit were
+    // real; an explicit `false` meant the numbers were placeholders.
+    func decodeLegacy(_ json: String) -> AgentDiffFileSummary? {
+        try? decoder.decode(AgentDiffFileSummary.self, from: Data(json.utf8))
+    }
+    let legacyKnown = decodeLegacy(#"{"displayName":"legacy.swift","addedLineCount":4,"removedLineCount":2}"#)
+    expect(legacyKnown?.addedLineCount == 4 && legacyKnown?.removedLineCount == 2,
+           "AgentDiffFileSummary: legacy non-zero counts must be preserved, got \(String(describing: legacyKnown))")
+    let legacyPlaceholder = decodeLegacy(
+        #"{"displayName":"legacy.swift","addedLineCount":0,"removedLineCount":0,"lineCountsAreKnown":false}"#)
+    expect(legacyPlaceholder?.hasAnyKnownCount == false,
+           "AgentDiffFileSummary: a legacy payload that said 'not known' must not become a measured zero")
+    // No numbers at all, no flag: nothing was measured.
+    expect(decodeLegacy(#"{"displayName":"legacy.swift"}"#)?.hasAnyKnownCount == false,
+           "AgentDiffFileSummary: an absent count is not a zero")
+}
+
 func runDocumentSchemaChecks() {
+    runDiffFileSummaryCountsChecks()
     assertSendable(AgentDocument.self)
     assertCodable(AgentDocument.self)
     assertSendable(AgentBlockPayload.self)

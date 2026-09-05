@@ -391,22 +391,7 @@ public struct CodexAppServerEventTranslator {
     }
 
     private func fileDetails(_ item: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
-        guard let changes = item["changes"] as? [[String: Any]] else { return [] }
-        return changes.compactMap { change in
-            guard let path = change["path"] as? String, !path.isEmpty else { return nil }
-            let rawKind = ((change["kind"] as? String) ?? (change["type"] as? String) ?? "").lowercased()
-            let action: AgentToolDetailObservation.FileAction
-            switch rawKind {
-            case "add", "create": action = .add
-            case "update", "edit", "modify": action = .edit
-            case "write": action = .write
-            case "delete", "remove": action = .delete
-            case "rename", "move": action = .rename
-            default: action = .unknown
-            }
-            let destination = (change["new_path"] as? String) ?? (change["newPath"] as? String) ?? (change["to"] as? String)
-            return .init(action: action, path: path, renamePath: destination, diffPreview: change["diff"] as? String)
-        }
+        CodexFileChangeReader.fileDetails(item)
     }
 
     private static let maximumObservedPathBytes = 4_096
