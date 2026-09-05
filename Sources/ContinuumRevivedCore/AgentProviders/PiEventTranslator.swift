@@ -491,6 +491,9 @@ public struct PiEventTranslator {
             cacheWriteTokens: Self.intValue(usage["cacheWrite"]),
             totalProcessedTokens: Self.intValue(usage["totalTokens"]),
             totalCostUsd: totalCost,
+            // pi meters a real account: `usage.cost.total` is a charge, not the
+            // list-price estimate claude reports.
+            costBasis: totalCost == nil ? nil : .providerMetered,
             automaticCompaction: nil,
             observedAt: observedAt,
             source: .piMessageUsage,

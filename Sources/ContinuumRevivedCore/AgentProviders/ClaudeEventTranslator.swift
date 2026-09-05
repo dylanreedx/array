@@ -101,7 +101,9 @@ public struct ClaudeEventTranslator {
 
     /// Translate one line of claude stream-json output into zero or more
     /// normalized events. Unrecognised lines (thinking_tokens estimates,
-    /// rate_limit_event telemetry, stream markers) return [].
+    /// stream markers) return []. `rate_limit_event` also returns [], but is
+    /// no longer discarded: it publishes an account quota reading on the
+    /// host-local observation channel first.
     public mutating func translate(line: String) -> [AgentRuntimeEvent] {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -198,9 +200,22 @@ public struct ClaudeEventTranslator {
         case "result":
             return translateResult(object)
 
+        // ST-01 — ACCOUNT quota, not a timeline item and not this thread's
+        // state. It leaves on the host-local observation side channel and
+        // contributes no `AgentRuntimeEvent`: the supervisor files it by
+        // harness, because every claude agent on this login shares one
+        // allowance. Emitting nothing here is deliberate, not an oversight.
+        case "rate_limit_event":
+            if let info = object["rate_limit_info"] as? [String: Any],
+               let snapshot = AgentAccountQuota.claudeSnapshot(
+                    rateLimitInfo: info, observedAt: now()) {
+                onRuntimeObservation?(.accountQuota(snapshot))
+            }
+            return []
+
         default:
-            // thinking_tokens estimates, rate_limit_event, tool progress
-            // telemetry, etc. — nothing the normalized timeline needs.
+            // thinking_tokens estimates, tool progress telemetry, etc. —
+            // nothing the normalized timeline needs.
             return []
         }
     }
@@ -575,6 +590,10 @@ public struct ClaudeEventTranslator {
                         cacheWriteTokens: prompt.cacheWrite,
                         totalProcessedTokens: total,
                         totalCostUsd: totalCost,
+                        // claude's `total_cost_usd` is a client-side list-price
+                        // estimate, not a bill — and under the subscription
+                        // login Array requires, nothing is billed per token.
+                        costBasis: totalCost == nil ? nil : .listPriceEstimate,
                         automaticCompaction: nil,
                         observedAt: now(),
                         source: .claudeAssistantUsage,

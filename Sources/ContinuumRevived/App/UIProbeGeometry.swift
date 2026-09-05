@@ -800,6 +800,193 @@ enum UIProbeGeometry {
                         "compact status row location was not the lowest compression sink under provider/action competition")
         }
 
+        assertions += try checkCompactStatusAccountElements()
+        return assertions
+    }
+
+    /// ST-01 — the ACCOUNT-scoped chips and the element toggles, in the real row.
+    ///
+    /// The pure parts (parsing, unit normalization, drop order) are pinned in
+    /// `--agent-account-quota-check`. What can only be seen here is whether the
+    /// row DRAWS them: whether a shared account number is labelled as shared,
+    /// whether an unknown window renders a dash instead of a zero, and whether an
+    /// element the width pass dropped is still reachable in the tooltip and to a
+    /// screen reader.
+    private static func checkCompactStatusAccountElements() throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let now = Date(timeIntervalSince1970: 1_787_700_000)
+        let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let location = AgentLocationSnapshot(
+            home: AgentHome(projectId: nil, projectRoot: checkout, checkoutRoot: checkout),
+            whereDirectory: checkout)
+
+        // A reading with one live window (18%), one high enough to be critical
+        // (94%), and NO spend limit at all — so the spend element must show
+        // unknown rather than inventing a zero.
+        let quota = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [
+                AgentQuotaWindow(kind: .fiveHour, utilization: 0.18,
+                                 resetsAt: now.addingTimeInterval(3_600)),
+                AgentQuotaWindow(kind: .sevenDay, utilization: 0.94,
+                                 resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            observedAt: now,
+            source: .claudeRateLimitEvent)
+
+        let contextWindow = AgentContextOccupancy.withDerivedOccupancy(
+            AgentContextWindowSnapshot(
+                inputTokens: 1_200, outputTokens: 900,
+                cacheReadTokens: 40_000, cacheWriteTokens: 800,
+                totalProcessedTokens: 42_900, totalCostUsd: 0.0149,
+                costBasis: .listPriceEstimate,
+                observedAt: now, source: .claudeAssistantUsage, freshness: .live),
+            contextWindow: 200_000)
+
+        let everything: [AgentStatusElement] = AgentStatusElement.presentationOrder
+
+        func makeRow(width: CGFloat, elements: [AgentStatusElement]) -> AgentCompactStatusRowView {
+            let row = AgentCompactStatusRowView(
+                frame: NSRect(x: 0, y: 0, width: width,
+                              height: AgentCompactStatusRowView.preferredHeight),
+                configuration: AgentCompactStatusRowConfiguration(
+                    reducedMotion: true, deterministicSnapshotPhase: 0.25),
+                thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+            row.apply(AgentCompactStatusPresentation.present(
+                location: location,
+                projectName: "continuum",
+                activity: AgentCompactActivityInput(
+                    phase: .waiting, phaseStartedAt: now.addingTimeInterval(-12)),
+                now: now,
+                contextWindow: contextWindow,
+                accountQuota: quota,
+                enabledElements: elements))
+            row.layoutSubtreeIfNeeded()
+            return row
+        }
+
+        // WIDE: every enabled element draws.
+        let wide = makeRow(width: 1_200, elements: everything)
+        try require(wide.qaQuotaText(.quotaFiveHour) == "5h 18%",
+                    "the 5-hour chip must draw its percentage, got \"\(wide.qaQuotaText(.quotaFiveHour))\"")
+        // 94% is past the critical threshold and must be marked, not merely
+        // coloured — colour alone is not a signal every reader receives.
+        try require(wide.qaQuotaText(.quotaSevenDay).contains("94%")
+                        && wide.qaQuotaState(.quotaSevenDay) == .critical,
+                    "a critical account window must be marked and stated, got \"\(wide.qaQuotaText(.quotaSevenDay))\" state \(String(describing: wide.qaQuotaState(.quotaSevenDay)))")
+        // UNKNOWN IS NOT ZERO. The provider reported no spend limit; the chip
+        // must say so with a dash.
+        try require(wide.qaQuotaText(.quotaSpendLimit) == "spend —"
+                        && wide.qaQuotaState(.quotaSpendLimit) == .unknown,
+                    "an unreported window must render a dash, never 0%, got \"\(wide.qaQuotaText(.quotaSpendLimit))\"")
+        try require(wide.qaQuotaText(.cost).contains("est"),
+                    "a list-price cost estimate must be labelled as one, got \"\(wide.qaQuotaText(.cost))\"")
+        try require(wide.qaDroppedElements.isEmpty,
+                    "a 1200pt row must drop nothing, dropped \(wide.qaDroppedElements)")
+        try expectNoClipping(wide, label: "compactStatusRow.accountElements.wide")
+
+        // SCOPE IS SPOKEN. A number shared by every agent on the login must not
+        // be announced as this agent's own.
+        try require(wide.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent"),
+                    "the row must announce an account window as account-scoped, got \"\(wide.qaAccessibilityLabel)\"")
+        try require(wide.qaToolTip.contains("shared by every agent signed into it"),
+                    "the tooltip must state that a quota is account-wide, got \"\(wide.qaToolTip)\"")
+
+        // NARROW: the width pass drops the low-priority chips, and everything it
+        // drops stays reachable. This is the half a screenshot cannot show.
+        let narrow = makeRow(width: 300, elements: everything)
+        try expectNoClipping(narrow, label: "compactStatusRow.accountElements.narrow")
+        try require(!narrow.qaDroppedElements.isEmpty,
+                    "a 300pt row with seven elements must drop some of them")
+        try require(!narrow.qaDroppedElements.contains(.location),
+                    "location must never be dropped; it truncates instead")
+        for dropped in narrow.qaDroppedElements where dropped.isAccountScoped {
+            try require(narrow.qaQuotaText(dropped).isEmpty,
+                        "a dropped chip must not still be drawing")
+        }
+        // The 5-hour reading survives in speech and in the tooltip even at a
+        // width that cannot draw it.
+        try require(narrow.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent"),
+                    "a dropped element must still be announced, got \"\(narrow.qaAccessibilityLabel)\"")
+        try require(narrow.qaToolTip.contains("Account 5-hour usage: 18% used"),
+                    "a dropped element must still be in the tooltip")
+
+        // WIDENING RESTORES. A drop is a width constraint, not a latch.
+        narrow.setFrameSize(NSSize(width: 1_200, height: AgentCompactStatusRowView.preferredHeight))
+        narrow.layoutSubtreeIfNeeded()
+        try require(narrow.qaDroppedElements.isEmpty && narrow.qaQuotaText(.quotaFiveHour) == "5h 18%",
+                    "widening the row must bring dropped elements back, dropped \(narrow.qaDroppedElements) chip \"\(narrow.qaQuotaText(.quotaFiveHour))\"")
+
+        // DISABLED IS NOT DROPPED. With the quota elements off, the row neither
+        // draws them nor promises them in the tooltip, at any width.
+        let minimal = makeRow(width: 1_200, elements: [.location, .activity, .contextMeter])
+        try require(minimal.qaQuotaText(.quotaFiveHour).isEmpty
+                        && minimal.qaQuotaFrame(.quotaFiveHour) == nil,
+                    "a disabled element must not draw")
+        try require(!minimal.qaAccessibilityLabel.contains("Account"),
+                    "a disabled element must not be announced, got \"\(minimal.qaAccessibilityLabel)\"")
+        try require(minimal.qaContextText.isEmpty == false,
+                    "disabling the quota elements must not disturb the context meter")
+        try expectNoClipping(minimal, label: "compactStatusRow.accountElements.minimal")
+
+        // EXPIRED IS ITS OWN STATE. A window whose reset has passed must not
+        // keep asserting its last number.
+        let stale = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [AgentQuotaWindow(kind: .fiveHour, utilization: 0.42,
+                                       resetsAt: now.addingTimeInterval(-60))],
+            observedAt: now.addingTimeInterval(-7_200),
+            source: .claudeRateLimitEvent)
+        let expiredRow = AgentCompactStatusRowView(
+            frame: NSRect(x: 0, y: 0, width: 1_200,
+                          height: AgentCompactStatusRowView.preferredHeight),
+            configuration: AgentCompactStatusRowConfiguration(
+                reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+        expiredRow.apply(AgentCompactStatusPresentation.present(
+            location: location,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now),
+            now: now,
+            contextWindow: contextWindow,
+            accountQuota: stale,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour]))
+        expiredRow.layoutSubtreeIfNeeded()
+        try require(expiredRow.qaQuotaState(.quotaFiveHour) == .expired,
+                    "a window past its reset must read expired, got \(String(describing: expiredRow.qaQuotaState(.quotaFiveHour)))")
+        try require(!expiredRow.qaQuotaText(.quotaFiveHour).contains("42"),
+                    "an expired window must stop asserting its last number, got \"\(expiredRow.qaQuotaText(.quotaFiveHour))\"")
+        try require(expiredRow.qaToolTip.contains("no longer true"),
+                    "an expired window must explain itself in the tooltip")
+
+        // NO TELEMETRY AT ALL (pi, or before the first turn): unknown, and the
+        // tooltip says why rather than showing a confident nothing.
+        let noQuota = AgentCompactStatusRowView(
+            frame: NSRect(x: 0, y: 0, width: 1_200,
+                          height: AgentCompactStatusRowView.preferredHeight),
+            configuration: AgentCompactStatusRowConfiguration(
+                reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+        noQuota.apply(AgentCompactStatusPresentation.present(
+            location: location,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now),
+            now: now,
+            contextWindow: contextWindow,
+            accountQuota: nil,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour]))
+        noQuota.layoutSubtreeIfNeeded()
+        try require(noQuota.qaQuotaText(.quotaFiveHour) == "5h —"
+                        && noQuota.qaQuotaState(.quotaFiveHour) == .unknown,
+                    "with no telemetry the chip must read unknown, got \"\(noQuota.qaQuotaText(.quotaFiveHour))\"")
+        try require(noQuota.qaToolTip.contains("No account quota telemetry has been observed"),
+                    "an unknown quota must state that nothing was observed")
+
         return assertions
     }
 

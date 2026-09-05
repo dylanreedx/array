@@ -67,6 +67,32 @@ struct AgentCompactStatusPresentation: Equatable {
     let location: Location
     let activity: Activity
     let context: AgentRadialContextMeterPresentation
+    /// ST-01 — the ACCOUNT-scoped elements, already filtered to the ones the
+    /// user has enabled. Empty is the normal case for a provider that reports
+    /// no quota (pi) or before the first reading arrives.
+    let quotas: [AgentQuotaElementPresentation]
+    /// ST-01 — cost, when enabled and reported. Always carries its basis.
+    let cost: AgentCostElementPresentation?
+    /// Which elements the user has turned on, in presentation order. The row
+    /// needs this even for elements that produced no presentation, so an
+    /// enabled-but-silent element is distinguishable from a disabled one.
+    let enabledElements: [AgentStatusElement]
+
+    init(
+        location: Location,
+        activity: Activity,
+        context: AgentRadialContextMeterPresentation,
+        quotas: [AgentQuotaElementPresentation] = [],
+        cost: AgentCostElementPresentation? = nil,
+        enabledElements: [AgentStatusElement] = [.location, .activity, .contextMeter]
+    ) {
+        self.location = location
+        self.activity = activity
+        self.context = context
+        self.quotas = quotas
+        self.cost = cost
+        self.enabledElements = enabledElements
+    }
 
     /// Adapter seam for the current coarse facts. New provider/runtime wiring
     /// should construct `AgentCompactActivityInput` directly; this adapter only
@@ -79,7 +105,9 @@ struct AgentCompactStatusPresentation: Equatable {
         startedAt: Date?,
         now: Date,
         contextWindow: AgentContextWindowSnapshot?,
-        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault
+        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault,
+        accountQuota: AgentAccountQuotaSnapshot? = nil,
+        enabledElements: [AgentStatusElement] = AgentStatusElementConfig.visibleElements()
     ) -> AgentCompactStatusPresentation {
         present(
             location: snapshot,
@@ -87,7 +115,9 @@ struct AgentCompactStatusPresentation: Equatable {
             activity: activityInput(status: status, location: snapshot, phaseStartedAt: startedAt),
             now: now,
             contextWindow: contextWindow,
-            contextPolicy: contextPolicy)
+            contextPolicy: contextPolicy,
+            accountQuota: accountQuota,
+            enabledElements: enabledElements)
     }
 
     static func present(
@@ -96,13 +126,24 @@ struct AgentCompactStatusPresentation: Equatable {
         activity: AgentCompactActivityInput,
         now: Date,
         contextWindow: AgentContextWindowSnapshot?,
-        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault
+        contextPolicy: AgentRadialContextMeterPolicy = .productionDefault,
+        accountQuota: AgentAccountQuotaSnapshot? = nil,
+        enabledElements: [AgentStatusElement] = AgentStatusElementConfig.visibleElements()
     ) -> AgentCompactStatusPresentation {
         let locationDetail = AgentLocationStatusPresenter.present(snapshot, projectName: projectName)
+        let quotas = enabledElements
+            .filter(\.isAccountScoped)
+            .map { AgentAccountQuotaPresenter.present(accountQuota, element: $0, now: now) }
+        let cost = enabledElements.contains(.cost)
+            ? AgentAccountQuotaPresenter.presentCost(contextWindow)
+            : nil
         return AgentCompactStatusPresentation(
             location: presentLocation(snapshot, detail: locationDetail, projectName: projectName),
             activity: presentActivity(activity, now: now),
-            context: AgentRadialContextMeterPresenter.present(contextWindow, policy: contextPolicy))
+            context: AgentRadialContextMeterPresenter.present(contextWindow, policy: contextPolicy),
+            quotas: quotas,
+            cost: cost,
+            enabledElements: enabledElements)
     }
 
     static func activityInput(

@@ -570,6 +570,10 @@ final class ManagedAgentTileNSView: TileNSView {
         runtimeObservationObserverToken = supervisor.addRuntimeObservationObserver(for: agentID) { [weak self] observation in
             self?.transcriptCollectionFixture?.captureRuntimeObservation(observation)
             self?.updateLiveToolVerb(for: observation)
+            // ST-01 — an account quota reading changes a row element without
+            // producing any runtime EVENT, so nothing else in this tile would
+            // repaint it.
+            if case .accountQuota = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
@@ -1584,7 +1588,9 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: compactContextWindow)
+                contextWindow: compactContextWindow,
+                accountQuota: currentAccountQuota(),
+                enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
@@ -1594,7 +1600,10 @@ final class ManagedAgentTileNSView: TileNSView {
         compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
-            context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
+            context: AgentRadialContextMeterPresenter.present(compactContextWindow),
+            quotas: currentQuotaPresentations(at: now),
+            cost: currentCostPresentation(),
+            enabledElements: AgentStatusElementConfig.visibleElements())))
         transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
         syncCompactStatusTick(for: activity)
     }
@@ -1819,6 +1828,26 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// The words currently riding the gyro, for witnesses.
     var qaTailStatusText: String { transcriptCollectionFixture?.qaTailStatusText ?? "" }
+
+    /// This agent's harness-wide account quota, or nil when the provider reports
+    /// none. Read live rather than cached on the tile: one reading serves every
+    /// agent on the login, so the supervisor is its only owner.
+    private func currentAccountQuota() -> AgentAccountQuotaSnapshot? {
+        guard let id = projectedAgentID else { return nil }
+        return agentSource?.accountQuota(for: id)
+    }
+
+    private func currentQuotaPresentations(at now: Date) -> [AgentQuotaElementPresentation] {
+        let quota = currentAccountQuota()
+        return AgentStatusElementConfig.visibleElements()
+            .filter(\.isAccountScoped)
+            .map { AgentAccountQuotaPresenter.present(quota, element: $0, now: now) }
+    }
+
+    private func currentCostPresentation() -> AgentCostElementPresentation? {
+        guard AgentStatusElementConfig.isVisible(.cost) else { return nil }
+        return AgentAccountQuotaPresenter.presentCost(compactContextWindow)
+    }
 
     /// Fills a per-turn usage snapshot with an occupancy reading so the radial
     /// meter can show a real percentage: the prompt tokens the provider reported

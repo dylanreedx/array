@@ -947,6 +947,18 @@ final class AgentSupervisor {
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
+    ///
+    /// Deliberately not a field on `AgentRecord`. A record is per-agent and
+    /// persisted per-agent, so storing an account allowance there would mint one
+    /// racing copy per agent, write N files for one provider notification, and
+    /// resurrect whichever stale copy happened to load first on relaunch. One
+    /// login has one allowance; this dictionary is that shape.
+    ///
+    /// In-memory only, for the same reason the reading is `.live` or nothing: a
+    /// quota is a wall-clock fact that expires on its own schedule, so a
+    /// persisted copy is a number that goes wrong while the app is closed.
+    private var accountQuotas: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
     /// Live views of an agent's identity. Names are record state rather than
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
@@ -1584,6 +1596,16 @@ final class AgentSupervisor {
             persist(updated)
             return
         }
+        // An account quota belongs to the signed-in harness, not to this agent:
+        // file it by harness so every agent on the same login reads one value,
+        // then still fan the observation out so their tiles repaint.
+        if case let .accountQuota(snapshot) = observation {
+            accountQuotas[snapshot.harness] = snapshot
+            runtimeObservationObservers.values.forEach { observers in
+                observers.values.forEach { $0(observation) }
+            }
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -1597,6 +1619,20 @@ final class AgentSupervisor {
     /// Claude harness offers aliases (`anthropic/opus`) that are not catalogue
     /// keys, so without this a claude agent has no window and an empty ring.
     func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
+
+    /// The account quota for THIS agent's harness, or nil when the provider has
+    /// reported none. Pi reports no account windows at all, so nil there is
+    /// "unsupported" rather than "not yet observed" — the presenter says so
+    /// either way, because both are unknown and neither is zero.
+    func accountQuota(for id: AgentID) -> AgentAccountQuotaSnapshot? {
+        guard let harness = records[id]?.harness else { return nil }
+        return accountQuotas[harness]
+    }
+
+    /// QA seam: deliver a quota observation without a live provider.
+    func qaDeliverAccountQuota(_ snapshot: AgentAccountQuotaSnapshot) {
+        accountQuotas[snapshot.harness] = snapshot
+    }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;

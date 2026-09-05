@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 typealias AgentThinkingIndicatorFactory = () -> (NSView & AgentThinkingIndicatorAnimating)?
 
@@ -50,6 +51,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let contextMeter = AgentRadialContextMeterView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
     private let contextLabel = NSTextField(labelWithString: "")
+    /// ST-01 — one reusable chip per account-scoped element, plus cost. Created
+    /// once and reused; an element the user disabled is hidden, never rebuilt,
+    /// so toggling one costs no view churn.
+    private var quotaLabels: [AgentStatusElement: NSTextField] = [:]
+    private let quotaGroup: NSStackView
     private let thinkingIndicator: (NSView & AgentThinkingIndicatorAnimating)?
     private let thinkingSlot = NSView()
     private let locationGroup: NSStackView
@@ -80,6 +86,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         locationGroup = NSStackView(views: [locationIcon, locationLabel, actionButton])
         activityGroup = NSStackView(views: [])
         contextGroup = NSStackView(views: [contextMeter, contextLabel])
+        quotaGroup = NSStackView(views: [])
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
 
@@ -192,6 +199,27 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextGroup.setContentHuggingPriority(.required, for: .horizontal)
         contextGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        // The account/cost chips. `detachesHiddenViews` is what makes hiding one
+        // actually reclaim its width instead of leaving a gap the reader reads
+        // as a missing value.
+        quotaGroup.orientation = .horizontal
+        quotaGroup.alignment = .centerY
+        quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        quotaGroup.detachesHiddenViews = true
+        quotaGroup.setContentHuggingPriority(.required, for: .horizontal)
+        quotaGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for element in AgentStatusElement.presentationOrder
+        where element.isAccountScoped || element == .cost {
+            let label = NSTextField(labelWithString: "")
+            configureLabel(label, role: .captionMono)
+            label.lineBreakMode = .byClipping
+            label.setContentHuggingPriority(.required, for: .horizontal)
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            label.isHidden = true
+            quotaLabels[element] = label
+            quotaGroup.addArrangedSubview(label)
+        }
+
         rootStack.orientation = .horizontal
         rootStack.alignment = .centerY
         rootStack.spacing = CGFloat(pageZoom.scaled(Space.m))
@@ -200,6 +228,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         rootStack.addArrangedSubview(locationGroup)
         rootStack.addArrangedSubview(activityGroup)
         rootStack.addArrangedSubview(contextGroup)
+        rootStack.addArrangedSubview(quotaGroup)
         addSubview(rootStack)
 
         NSLayoutConstraint.activate([
@@ -290,18 +319,150 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextLabel.stringValue = next.context.label
         contextLabel.toolTip = next.context.detailText
         contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
+        applyQuotaElements(next)
         actionButton.toolTip = next.location.detailText + "\nLocation actions"
-        toolTip = [next.location.detailText, next.activity.detailText, next.context.detailText]
+        // Everything the row can drop under width pressure survives here, so a
+        // dropped element is never unreachable — only unshown.
+        toolTip = ([next.location.detailText, next.activity.detailText, next.context.detailText]
+            + next.quotas.map(\.detailText)
+            + [next.cost?.detailText].compactMap { $0 })
             .joined(separator: "\n\n")
         // A silent activity contributes nothing to speech either — VoiceOver must
         // not announce a phase the row is deliberately not showing.
         let spokenActivity = next.activity.isSilent ? "" : " \(next.activity.accessibilityLabel)"
-        setAccessibilityLabel("Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity) \(next.context.accessibilityLabel)")
+        // Account-scoped phrases are spoken in full even when their chip was
+        // dropped: losing width is a display constraint, not a reason to stop
+        // reporting a number to a screen reader.
+        let spokenContext = next.enabledElements.contains(.contextMeter)
+            ? " \(next.context.accessibilityLabel)" : ""
+        let spokenQuotas = next.quotas.map { " \($0.accessibilityLabel)" }.joined()
+        let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
+        setAccessibilityLabel(
+            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenContext)\(spokenQuotas)\(spokenCost)")
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only the single location-action control is separately reachable.
         setAccessibilityChildren([actionButton])
         updateThinkingLifecycle()
+        applyTokens()
+    }
+
+    /// Fills the account/cost chips, hides the ones the user disabled, then runs
+    /// the width pass.
+    ///
+    /// A DISABLED element and a DROPPED element look identical on screen and are
+    /// not the same thing: disabled means the user turned it off and it stays
+    /// out of the tooltip's promise; dropped means it did not fit right now and
+    /// its value is still in the tooltip and the accessibility label. Only the
+    /// latter comes back when the tile widens.
+    private func applyQuotaElements(_ next: AgentCompactStatusPresentation) {
+        let enabled = Set(next.enabledElements)
+        for (element, label) in quotaLabels {
+            guard enabled.contains(element) else {
+                label.isHidden = true
+                label.stringValue = ""
+                continue
+            }
+            if element == .cost {
+                if let cost = next.cost {
+                    label.stringValue = cost.text
+                    label.toolTip = cost.detailText
+                    label.setAccessibilityLabel(cost.accessibilityLabel)
+                    label.isHidden = false
+                } else {
+                    // Enabled but nothing reported yet. Silence rather than a
+                    // "$0.00" that would claim a free session.
+                    label.isHidden = true
+                    label.stringValue = ""
+                }
+                continue
+            }
+            guard let quota = next.quotas.first(where: { $0.element == element }) else {
+                label.isHidden = true
+                continue
+            }
+            label.stringValue = quota.text
+            label.toolTip = quota.detailText
+            label.setAccessibilityLabel(quota.accessibilityLabel)
+            label.isHidden = false
+        }
+        // Whole groups follow their own toggles.
+        locationGroup.isHidden = !enabled.contains(.location)
+        contextGroup.isHidden = !enabled.contains(.contextMeter)
+        if !enabled.contains(.activity) { activityGroup.isHidden = true }
+        droppedElements = []
+        applyOverflow()
+        // An empty group must leave the layout entirely, not sit in it at 0x0.
+        // A zero-size visible view is what `--ui-geometry-check` flags, and it is
+        // right to: a stack view with no visible arranged subview still claims a
+        // slot and its spacing, so the row gains a phantom gap at exactly the
+        // narrow widths where every chip has been dropped.
+        quotaGroup.isHidden = quotaLabels.values.allSatisfy(\.isHidden)
+        invalidateIntrinsicContentSize()
+        rootStack.needsLayout = true
+        needsLayout = true
+    }
+
+    /// Hides the elements that do not fit, lowest priority first.
+    ///
+    /// Bounded and O(elements) — seven chips, each already sized by AppKit, with
+    /// no text measurement of its own. This is deliberately not done inside
+    /// `layout()`: measurement in a layout pass is how the Markdown tile froze
+    /// the app (`docs/internals/performance.md`), and there is no reason to
+    /// recompute on every pass when the inputs only change on `apply` and on a
+    /// width change.
+    private func applyOverflow() {
+        guard let presentation else { return }
+        let available = bounds.width - Self.rootInsets(zoom: pageZoom).left
+            - Self.rootInsets(zoom: pageZoom).right
+        guard available > 0 else { return }
+
+        var widths: [AgentStatusElement: CGFloat] = [:]
+        for element in presentation.enabledElements {
+            switch element {
+            case .location:
+                widths[element] = locationGroup.fittingSize.width
+            case .activity:
+                widths[element] = presentation.activity.isSilent ? 0 : activityGroup.fittingSize.width
+            case .contextMeter:
+                widths[element] = contextGroup.fittingSize.width
+            case .quotaFiveHour, .quotaSevenDay, .quotaSpendLimit, .cost:
+                let label = quotaLabels[element]
+                widths[element] = (label?.stringValue.isEmpty ?? true) ? 0 : (label?.fittingSize.width ?? 0)
+            }
+        }
+
+        let kept = AgentStatusOverflowPolicy.fitting(
+            presentation.enabledElements,
+            widths: widths,
+            available: available,
+            spacing: rootStack.spacing,
+            locationFloor: CGFloat(pageZoom.scaled(48)))
+        let dropped = Set(presentation.enabledElements).subtracting(kept)
+        droppedElements = dropped
+
+        for element in dropped {
+            switch element {
+            case .activity: activityGroup.isHidden = true
+            case .contextMeter: contextGroup.isHidden = true
+            case .location: break  // never dropped; it truncates instead
+            default: quotaLabels[element]?.isHidden = true
+            }
+        }
+    }
+
+    /// Elements the width pass removed on the current bounds. Distinct from the
+    /// disabled set, and reported to QA so a witness can assert the drop ORDER
+    /// rather than merely that something vanished.
+    private(set) var droppedElements: Set<AgentStatusElement> = []
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changedWidth = abs(newSize.width - frame.width) > 0.5
+        super.setFrameSize(newSize)
+        guard changedWidth, let presentation else { return }
+        // Re-apply from the presentation so an element the last, narrower pass
+        // dropped can come back when the tile widens.
+        applyQuotaElements(presentation)
         applyTokens()
     }
 
@@ -319,6 +480,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         contextMeter.applyTokens()
+        for (element, label) in quotaLabels {
+            let state = presentation?.quotas.first(where: { $0.element == element })?.state
+            label.textColor = quotaLabelColor(for: state, theme: theme)
+        }
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -333,6 +498,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         activityLabel.font = .token(.label, zoom: pageZoom)
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         contextLabel.font = .token(.captionMono, zoom: pageZoom)
+        for label in quotaLabels.values { label.font = .token(.captionMono, zoom: pageZoom) }
+        quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         contextGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
@@ -496,6 +663,23 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
     }
 
+    /// Account chips reuse the context meter's colour ladder so one row does not
+    /// teach two colour languages. `expired` is deliberately the same subdued
+    /// treatment as `unknown` — both mean "no number you can trust right now" —
+    /// while the tooltip keeps them distinct in words.
+    private func quotaLabelColor(for state: AgentQuotaElementState?, theme: TokenTheme) -> NSColor {
+        switch state {
+        case .known:
+            return TextToken.textPrimary.color.nsColor(for: theme)
+        case .warning:
+            return AccentToken.accentApproval.color.nsColor(for: theme)
+        case .critical:
+            return AccentToken.accentFailed.color.nsColor(for: theme)
+        case .unknown, .expired, .none:
+            return TextToken.textSecondary.color.nsColor(for: theme)
+        }
+    }
+
     private func frame(of view: NSView) -> NSRect? {
         view.superview.map { $0.convert(view.frame, to: self) }
     }
@@ -507,6 +691,21 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaActivitySymbolName: String { presentation?.activity.symbolName ?? "" }
     var qaElapsedText: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
     var qaContextText: String { contextLabel.stringValue }
+    /// ST-01 QA surface: what each account/cost chip is currently drawing, the
+    /// elements the width pass dropped, and which elements are enabled at all.
+    func qaQuotaText(_ element: AgentStatusElement) -> String {
+        guard let label = quotaLabels[element], !label.isHidden else { return "" }
+        return label.stringValue
+    }
+    func qaQuotaState(_ element: AgentStatusElement) -> AgentQuotaElementState? {
+        presentation?.quotas.first(where: { $0.element == element })?.state
+    }
+    func qaQuotaFrame(_ element: AgentStatusElement) -> NSRect? {
+        quotaLabels[element].flatMap { $0.isHidden ? nil : frame(of: $0) }
+    }
+    var qaDroppedElements: Set<AgentStatusElement> { droppedElements }
+    var qaEnabledElements: [AgentStatusElement] { presentation?.enabledElements ?? [] }
+    var qaToolTip: String { toolTip ?? "" }
     var qaContextState: AgentRadialContextMeterState { contextMeter.qaState }
     var qaContextFraction: Double? { contextMeter.qaFraction }
     var qaContextDetail: String { contextMeter.qaDetail }
