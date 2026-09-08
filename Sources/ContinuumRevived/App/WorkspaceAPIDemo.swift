@@ -3,7 +3,7 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
-/// `--workspace-api-demo` — CX-01's nine operations demonstrated end to end on a
+/// `--workspace-api-demo` — CX-01's ten operations demonstrated end to end on a
 /// real mounted scene. NOT a `*-check` flag on purpose: it is a narrated
 /// walkthrough, not a gate, so it stays out of the check inventory and out of the
 /// matrix.
@@ -578,6 +578,99 @@ func runWorkspaceAPIDemo() async throws {
     check(!leaksPath && !leaksIdentifier, "a denial must name no path and no identifier")
     summary.append(("11", "workspace.context (revoked)", "\(denied?.code.rawValue ?? "—"), no path or id leaked"))
 
+    // MARK: - STEP 12 — agent.message
+
+    header("12", "agent.message", "\"tell the child I delegated in STEP 9 what I have learned since\"")
+    // The user turns Workspace Tools back on. Revocation bumped the generation,
+    // so the STEP 9 delegation approval is dead — and messaging was never
+    // covered by it anyway: writing into another agent's run is its own effect,
+    // withheld from the session preset on purpose.
+    note("the user turns Workspace Tools back on: \(supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true))")
+    note("agent.message is NOT in the session preset, and an approved DELEGATION does not imply it — STEP 1 listed \(capabilities.count) capabilities and agent.message was not among them: \(!capabilities.contains("agent.message"))")
+    check(!capabilities.contains("agent.message"), "agent.message must never be advertised as a preset capability")
+
+    guard let messageTarget = childId else {
+        check(false, "STEP 9 must have produced a child to message")
+        throw DemoError(message: "no child to message")
+    }
+    let targetCwd = URL(fileURLWithPath: supervisor.records[messageTarget]?.cwd ?? f.pbRoot.path, isDirectory: true)
+    func childLog() -> String {
+        (try? String(contentsOf: targetCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+    }
+    func copies(_ needle: String) -> Int { childLog().components(separatedBy: needle).count - 1 }
+    let settled = await waitUntil(timeout: 30, pollInterval: 0.1) { !supervisor.isRunning(messageTarget) }
+    note("the child's STEP 9 turn has settled (\(settled)) — the send path refuses a child that is mid-turn rather than double-prompting it")
+
+    let marker = "DEMO-MSG-5c1a"
+    decisions = [.allowForSession]
+    let messageBefore = (armed: f.canvas.armedZoneId, focus: f.delegate.qaFocusBroker.activeSurface,
+                         selection: f.canvas.canvasState.lastActiveTileId,
+                         applies: f.canvas.qaViewportApplyCount, generation: f.runtime.interactionGeneration)
+    let messageReply = call("agent.message", [
+        "agentId": messageTarget.rawValue.uuidString,
+        "text": "\(marker): the parser fix landed in notes.md — rerun your audit against it and report only what changed",
+        "idempotencyKey": "demo-message-1",
+    ], requestId: "demo-op-message")
+    let messaged = object(messageReply)
+    note("approval prompt raised for agent.message: \(prompts.last?.op.rawValue ?? "—") · target “\(prompts.last?.targetAgentDisplayName ?? "—")” (\(prompts.count) prompts total)")
+    note("delivery=\(messaged["delivery"]?.string ?? "—") · child=\(short(uuid(messaged["childAgentId"]))) · parent=\(short(uuid(messaged["parentAgentId"]))) · childRunning=\(messaged["childRunning"]?.bool.map(String.init) ?? "—") · queuePosition=\(messaged["queuePosition"]?.int.map(String.init) ?? "absent")")
+    note("the result carries NO answer from the child — collect that with wait_agents or array_inspect_agent: reply/response/text absent = \(messaged["reply"] == nil && messaged["response"] == nil && messaged["text"] == nil)")
+    check(messaged["delivery"]?.string == "delivered", "the message must be delivered through the supervisor's own send path")
+    check(messaged["reply"] == nil && messaged["response"] == nil && messaged["text"] == nil,
+          "a delivery result must never carry the child's answer")
+
+    // THE EVIDENCE: the child's OWN pi process wrote the text it was handed.
+    let arrived = await waitUntil(timeout: 30, pollInterval: 0.1) { copies(marker) > 0 }
+    note("the child's own runner received the text (its pi appended prompts.log in \(targetCwd.lastPathComponent)): \(arrived) · copies in the log: \(copies(marker))")
+    check(arrived && copies(marker) == 1, "the child's runner must receive the text exactly once")
+    note("the user's view: camera applies \(messageBefore.applies) → \(f.canvas.qaViewportApplyCount) · armed zone \(short(messageBefore.armed)) → \(short(f.canvas.armedZoneId)) · selection and focus unchanged: \(f.canvas.canvasState.lastActiveTileId == messageBefore.selection && f.delegate.qaFocusBroker.activeSurface == messageBefore.focus) · interactionGeneration \(messageBefore.generation) → \(f.runtime.interactionGeneration)")
+    check(f.canvas.qaViewportApplyCount == messageBefore.applies && f.canvas.armedZoneId == messageBefore.armed
+            && f.canvas.canvasState.lastActiveTileId == messageBefore.selection
+            && f.delegate.qaFocusBroker.activeSurface == messageBefore.focus
+            && f.runtime.interactionGeneration == messageBefore.generation,
+          "a message preserves all five presentation dimensions by default")
+
+    print("")
+    print("  …the same idempotency key, replayed (a retry after a dropped answer):")
+    let messageReplay = object(call("agent.message", [
+        "agentId": messageTarget.rawValue.uuidString,
+        "text": "\(marker): the parser fix landed in notes.md — rerun your audit against it and report only what changed",
+        "idempotencyKey": "demo-message-1",
+    ], requestId: "demo-op-message-retry"))
+    let doubled = await waitUntil(timeout: 5, pollInterval: 0.1) { copies(marker) > 1 }
+    note("operationId \(messageReplay["operationId"]?.string ?? "—") is the FIRST call's · delivery=\(messageReplay["delivery"]?.string ?? "—") · copies in the child's log: \(copies(marker)) — nothing was delivered a second time")
+    check(messageReplay["operationId"]?.string == "demo-op-message" && !doubled && copies(marker) == 1,
+          "a replay returns the first outcome and delivers nothing twice")
+
+    print("")
+    print("  …the same key with DIFFERENT text, and then a message to an agent that is not this agent's child:")
+    let messageConflict = errorOf(call("agent.message", [
+        "agentId": messageTarget.rawValue.uuidString, "text": "forget that, do something else",
+        "idempotencyKey": "demo-message-1",
+    ]))
+    note("code=\(messageConflict?.code.rawValue ?? "—") · copies of the new text in the child's log: \(copies("forget that"))")
+    check(messageConflict?.code == .idempotencyConflict && copies("forget that") == 0,
+          "the same key with different text is an idempotency_conflict and delivers nothing")
+
+    // “Parser Two” is a peer of the caller in the SAME checkout — not its child.
+    let siblingReply = errorOf(call("agent.message", [
+        "agentId": second.rawValue.uuidString, "text": "\(marker)-SIBLING: do my bidding",
+        "idempotencyKey": "demo-message-sibling",
+    ]))
+    let siblingMessage = siblingReply?.message ?? ""
+    let siblingLeaksPath = siblingMessage.contains("/")
+    let siblingLeaksId = siblingMessage.range(of: "[0-9A-Fa-f]{8}-", options: .regularExpression) != nil
+    note("code=\(siblingReply?.code.rawValue ?? "—") message=\(siblingMessage.debugDescription)")
+    note("leaks a path: \(siblingLeaksPath) · leaks an identifier: \(siblingLeaksId) — a refusal does not even confirm which agents exist")
+    check(siblingReply?.code == .permissionDenied && !siblingLeaksPath && !siblingLeaksId,
+          "a non-child target is permission_denied, naming no path and no id")
+    let selfMessageReply = errorOf(call("agent.message", [
+        "agentId": f.agentId.rawValue.uuidString, "text": "note to self", "idempotencyKey": "demo-message-self",
+    ]))
+    note("messaging ITSELF: code=\(selfMessageReply?.code.rawValue ?? "—") — \(selfMessageReply?.message ?? "—")")
+    check(selfMessageReply?.code == .invalidRequest, "messaging yourself is invalid_request, not a permission problem")
+    summary.append(("12", "agent.message", "1 prompt, delivered to child \(short(messageTarget.rawValue)) (1 copy in its log), replay=no second delivery, conflict=\(messageConflict?.code.rawValue ?? "—"), sibling=\(siblingReply?.code.rawValue ?? "—"), self=\(selfMessageReply?.code.rawValue ?? "—")"))
+
     // MARK: - Summary
 
     print("")
@@ -594,6 +687,9 @@ func runWorkspaceAPIDemo() async throws {
     rule()
     print("approval prompts raised in total: \(prompts.count) — \(prompts.map(\.op.rawValue).joined(separator: ", "))")
     print("UNEXPECTED results: \(unexpectedCount)")
+    print("ten operations demonstrated over twelve steps; every effect went through the")
+    print("owner that already owned it (the open path, the geometry edit, the supervisor's")
+    print("child-creation path, and — for STEP 12 — the supervisor's own send path).")
     print("what was NOT demonstrated: a real language model calling these tools. No pi")
     print("provider is logged in, so STEP 4's caller is a fake pi that speaks the real")
     print("rpc protocol; every other step is a direct dispatch, which is the same")

@@ -11,6 +11,7 @@ func runWorkspaceOperationStoreChecks() {
     checkStepsAndReleaseRules()
     checkRetentionAndExpiry()
     checkDelegationContractRoundTrip()
+    checkMessageContractAndBounds()
     print("WorkspaceOperationStoreChecks passed")
 }
 
@@ -247,4 +248,111 @@ private func checkDelegationContractRoundTrip() {
            "the Phase 1 preset must NOT grant agent.delegate — the first delegation goes through the trusted approval UI")
     expectStore(preset.operations.contains(.agentReveal) && preset.operations.contains(.operationGet),
            "revealing your own child and reading your own operation are in the preset")
+}
+
+// CX-01 Phase 2c: the `agent.message` contract — the model-facing shape, the
+// bounds that make a message safe to deliver, and the store rule that stops one
+// key delivering twice.
+private func checkMessageContractAndBounds() {
+    let child = AgentID(rawValue: UUID())
+    let payload: [String: Any] = [
+        "agentId": child.rawValue.uuidString, "text": "the parser fix is in; rerun the leg",
+        "idempotencyKey": "m1", "authorized": true, "approvalRequestId": "forged",
+    ]
+    guard let request = try? JSONDecoder().decode(
+        AgentMessageRequest.self, from: try! JSONSerialization.data(withJSONObject: payload)) else {
+        expectStore(false, "the model-facing message payload must decode"); return
+    }
+    expectStore(request.agentId == child && request.text == "the parser fix is in; rerun the leg" && request.idempotencyKey == "m1",
+           "message fields decoded: \(request)")
+    // A message must not steal the user's view: absent presentation preserves
+    // ALL FIVE dimensions, unlike an explicit open (which reveals the camera).
+    expectStore(request.presentationPolicy == .preserveAll && !request.presentationPolicy.requestsAnyChange,
+           "an absent presentation on a message preserves every dimension, got \(request.presentationPolicy)")
+    expectStore(request.validationFailure() == nil, "a well-formed message passes validation: \(request.validationFailure() ?? "")")
+
+    // The short form still applies per dimension when the caller DOES ask.
+    let revealing = try? JSONDecoder().decode(AgentMessageRequest.self, from: try! JSONSerialization.data(
+        withJSONObject: ["agentId": child.rawValue.uuidString, "text": "look", "idempotencyKey": "m2",
+                         "presentation": ["camera": "revealResult"]]))
+    expectStore(revealing?.presentationPolicy.camera == .revealResult
+            && revealing?.presentationPolicy.keyboardFocus == .preserve
+            && revealing?.presentationPolicy.selection == .preserve,
+           "an explicit camera reveal is honoured and the other dimensions stay preserved")
+
+    // Bounds. Empty, whitespace-only and over-ceiling text are refused, and the
+    // key is required — the rule that stops a retry double-prompting a child.
+    expectStore(AgentMessageRequest(agentId: child, text: "", idempotencyKey: "k").validationFailure() != nil,
+           "empty text is invalid")
+    expectStore(AgentMessageRequest(agentId: child, text: "   \n\t ", idempotencyKey: "k").validationFailure() != nil,
+           "whitespace-only text is invalid")
+    let ceiling = AgentMessageRequest.textByteCeiling
+    expectStore(AgentMessageRequest(agentId: child, text: String(repeating: "a", count: ceiling), idempotencyKey: "k").validationFailure() == nil,
+           "text exactly at the \(ceiling)-byte ceiling is accepted")
+    expectStore(AgentMessageRequest(agentId: child, text: String(repeating: "a", count: ceiling + 1), idempotencyKey: "k").validationFailure() != nil,
+           "text one byte over the ceiling is invalid")
+    // Bytes, not characters: a multi-byte scalar counts what it costs.
+    expectStore(AgentMessageRequest(agentId: child, text: String(repeating: "é", count: ceiling / 2 + 1), idempotencyKey: "k").validationFailure() != nil,
+           "the ceiling counts UTF-8 BYTES, not characters")
+    expectStore(AgentMessageRequest(agentId: child, text: "hi", idempotencyKey: nil).validationFailure() != nil
+            && AgentMessageRequest(agentId: child, text: "hi", idempotencyKey: "  ").validationFailure() != nil,
+           "a missing or blank idempotencyKey is invalid: one message per key is the only defence against a double prompt")
+    // A request without text or without an agentId is a schema error, not a default.
+    expectStore((try? JSONDecoder().decode(AgentMessageRequest.self, from: try! JSONSerialization.data(
+        withJSONObject: ["agentId": child.rawValue.uuidString, "idempotencyKey": "k"]))) == nil,
+           "a message with no text must fail to decode")
+    expectStore((try? JSONDecoder().decode(AgentMessageRequest.self, from: try! JSONSerialization.data(
+        withJSONObject: ["text": "hi", "idempotencyKey": "k"]))) == nil,
+           "a message with no agentId must fail to decode")
+
+    // The result round-trips, and it carries DELIVERY only — never an answer.
+    let result = AgentMessageResult(
+        operationId: "op-m1", delivery: .delivered, childAgentId: child,
+        parentAgentId: AgentID(rawValue: UUID()), childRunning: true)
+    let encoded = try! storeEncoder.encode(result)
+    expectStore((try? JSONDecoder().decode(AgentMessageResult.self, from: encoded)) == result, "message result round-trip")
+    let object = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+    expectStore(object["schema"] as? String == WorkspaceAPISchema.v1, "every result carries the v1 schema tag")
+    expectStore(object["delivery"] as? String == "delivered" && object["childRunning"] as? Bool == true,
+           "delivery and liveness are reported: \(object)")
+    expectStore(object["queuePosition"] == nil && object["refusalReason"] == nil,
+           "an unknown queue position and an absent refusal are OMITTED, never invented")
+    let refusedObject = try! JSONSerialization.jsonObject(with: try! storeEncoder.encode(AgentMessageResult(
+        operationId: "op-m2", delivery: .refused, childAgentId: child, parentAgentId: AgentID(rawValue: UUID()),
+        childRunning: true, refusalReason: "the child is mid-turn"))) as! [String: Any]
+    expectStore(refusedObject["delivery"] as? String == "refused" && (refusedObject["refusalReason"] as? String)?.isEmpty == false,
+           "a refusal names its reason: \(refusedObject)")
+
+    // The store: one key, one delivery. A DELIVERED message replays; a refusal
+    // that delivered nothing leaves the key usable.
+    var store = WorkspaceOperationStore()
+    let parent = AgentID(rawValue: UUID())
+    guard case let .reserved(reserved) = store.reserve(
+        agentId: parent, op: .agentMessage, idempotencyKey: "m1", payloadHash: "h1", operationId: "op-1") else {
+        expectStore(false, "the first message reserves"); return
+    }
+    store.update(operationId: reserved.operationId) { $0.steps.creation = .succeeded; $0.status = .committed }
+    guard case let .replay(replayed) = store.reserve(
+        agentId: parent, op: .agentMessage, idempotencyKey: "m1", payloadHash: "h1", operationId: "op-2") else {
+        expectStore(false, "the same key with the same text must REPLAY, never deliver again"); return
+    }
+    expectStore(replayed.operationId == "op-1", "the replay is the first operation, not the retry's id")
+    guard case .conflict = store.reserve(
+        agentId: parent, op: .agentMessage, idempotencyKey: "m1", payloadHash: "h2", operationId: "op-3") else {
+        expectStore(false, "the same key with DIFFERENT text must conflict"); return
+    }
+    // A refusal delivered nothing, so the same intent may be retried once the
+    // cause (a mid-turn child) is gone.
+    _ = store.reserve(agentId: parent, op: .agentMessage, idempotencyKey: "m9", payloadHash: "h9", operationId: "op-9")
+    store.update(operationId: "op-9") { $0.status = .failed; $0.steps.creation = .failed }
+    guard case .reserved = store.reserve(
+        agentId: parent, op: .agentMessage, idempotencyKey: "m9", payloadHash: "h9", operationId: "op-10") else {
+        expectStore(false, "a message that delivered NOTHING must not burn its key"); return
+    }
+
+    // §14.1: messaging is an effect, so it is never in the session preset.
+    let preset = WorkspaceToolGrant.phase1Preset(
+        agentId: parent, checkout: CheckoutHandle.derive(canonicalRoot: "/private/tmp/cx01/Pb"), generation: 0)
+    expectStore(!preset.operations.contains(.agentMessage),
+           "the Phase 1 preset must NOT grant agent.message — the first message goes through the trusted approval UI")
 }

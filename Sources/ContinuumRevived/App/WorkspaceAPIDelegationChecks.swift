@@ -518,5 +518,214 @@ func runWorkspaceAPIDelegationChecks() async throws {
     try expect(supervisor.children(of: parentId).count == childrenBeforeRevocation,
                "a re-denied delegation still creates nothing")
 
+    // MARK: I — agent.message: the caller messages the child IT created
+
+    // CX-01 Phase 2c. Evidence is the CHILD's own pi process: `prompts.log` in
+    // its cwd is written by the fake pi when the runner delivers a prompt, so a
+    // service that answered `delivered` without reaching the child leaves the
+    // log short and every count below goes red.
+    let msgChildCwd = URL(fileURLWithPath: supervisor.records[childId]?.cwd ?? pbRoot.path, isDirectory: true)
+    func childPromptLog() -> String {
+        (try? String(contentsOf: msgChildCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+    }
+    func occurrences(_ needle: String, in haystack: String) -> Int {
+        haystack.components(separatedBy: needle).count - 1
+    }
+    func childReceived(_ needle: String) async -> Int {
+        _ = await waitUntil(timeout: 30, pollInterval: 0.1) { occurrences(needle, in: childPromptLog()) > 0 }
+        return occurrences(needle, in: childPromptLog())
+    }
+    /// The send path refuses a child that is mid-turn, so every act waits for the
+    /// previous turn to settle rather than racing it.
+    func waitChildIdle() async throws {
+        let idle = await waitUntil(timeout: 30, pollInterval: 0.1) { !supervisor.isRunning(childId) }
+        try expect(idle, "the child must settle between messages; the fake pi answers and settles immediately")
+    }
+
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
+    // Enabled ONCE, here, before the parent's grant is minted: disabling any
+    // agent's workspace tools bumps the host's single revocation generation and
+    // would kill the parent's session grant mid-act.
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: childId, true)
+    try await waitChildIdle()
+    let marker1 = "MSG-ONE-8be21c"
+    var messagePrompts: [WorkspaceAPIService.ScopeApprovalPrompt] = []
+    api.approvalHandler = { prompt in
+        prompts.append(prompt)
+        messagePrompts.append(prompt)
+        return .allowForSession
+    }
+    let beforeMessage = baselines()
+    let logLinesBefore = childPromptLog().split(separator: "\n").count
+    let delivered = try result(
+        dispatch("agent.message", ["agentId": childIdString, "text": "\(marker1): rerun the failing leg and report the diff",
+                                   "idempotencyKey": "m1"], requestId: "op-msg-1"),
+        "message the caller's own child")
+    // Red when `agent.message` is left in the Phase 1 preset: the user is never
+    // asked before one agent writes into another agent's run.
+    try expect(messagePrompts.count == 1 && messagePrompts[0].op == .agentMessage,
+               "the first message must reach the trusted approval UI as an agent.message prompt, got \(messagePrompts.map(\.op))")
+    try expect(messagePrompts[0].targetAgentId == childId,
+               "the approval prompt names the CHILD that would be messaged, so the alert can say who: \(String(describing: messagePrompts[0].targetAgentId))")
+    try expect(delivered["delivery"]?.string == "delivered",
+               "the result reports delivery, and only delivery: \(delivered)")
+    try expect(delivered["childAgentId"]?.string == childIdString && delivered["parentAgentId"]?.string == parentId.rawValue.uuidString,
+               "the result names both ends of the delivery: \(delivered)")
+    try expect(delivered["childRunning"] != nil, "childRunning must be reported, not omitted, when the host knows")
+    try expect(delivered["operationId"]?.string == "op-msg-1", "the result carries this request's operation id")
+    // The RESULT never carries the child's answer — this op is not a wait.
+    try expect(delivered["reply"] == nil && delivered["response"] == nil && delivered["text"] == nil,
+               "a delivery result must never carry the child's answer: \(delivered)")
+    // THE EVIDENCE: the child's own pi process wrote the text.
+    let firstDelivery = await childReceived(marker1)
+    try expect(firstDelivery == 1,
+               "the child's OWN runner must receive the text exactly once (prompts.log under \(msgChildCwd.lastPathComponent) held \(firstDelivery))")
+    try expect(childPromptLog().split(separator: "\n").count == logLinesBefore + 1,
+               "exactly one new prompt reached the child")
+    // §16: a message must not steal the user's view. All five dimensions stand.
+    try expectPreserved(beforeMessage, "delivered message")
+    try expect(canvas.qaViewportApplyCount == beforeMessage.viewportApplies,
+               "a delivered message moves no camera by default")
+
+    // MARK: J — exactly one delivery per key
+
+    try await waitChildIdle()
+    let replayedMessage = try result(
+        dispatch("agent.message", ["agentId": childIdString, "text": "\(marker1): rerun the failing leg and report the diff",
+                                   "idempotencyKey": "m1"], requestId: "op-msg-1-retry"),
+        "the same key replayed")
+    // Red when the reservation happens after the send, or not at all: the child
+    // is prompted a second time for one message — the failure this rule exists
+    // to prevent. A second delivery starts a turn, so the child would be running;
+    // and the log write is asynchronous, so the count is watched for a while
+    // rather than sampled once (sampling passes through exactly this bug).
+    try expect(!supervisor.isRunning(childId),
+               "a replay must start no turn on the child")
+    let doubled = await waitUntil(timeout: 5, pollInterval: 0.1) { occurrences(marker1, in: childPromptLog()) > 1 }
+    try expect(!doubled,
+               "a replay must deliver NOTHING a second time; the child's log holds \(occurrences(marker1, in: childPromptLog())) copies")
+    try expect(replayedMessage["operationId"]?.string == "op-msg-1" && replayedMessage["delivery"]?.string == "delivered",
+               "the replay returns the FIRST delivery's outcome, not a new one: \(replayedMessage)")
+    let conflictMessage = try failure(
+        dispatch("agent.message", ["agentId": childIdString, "text": "something else entirely", "idempotencyKey": "m1"]),
+        .idempotencyConflict, "same key, different text")
+    try expect(!conflictMessage.message.contains("/"), "a conflict names no path")
+    try expect(occurrences("something else entirely", in: childPromptLog()) == 0,
+               "a conflict delivers nothing")
+
+    // MARK: K — scope: children only, and a refusal discloses nothing
+
+    // A peer of the caller in the SAME checkout (a sibling), an unrelated agent
+    // in ANOTHER checkout, the caller's own child's child, and the caller's own
+    // parent are all out of scope. `strangerId` (project Pa) is the unrelated one.
+    let siblingId = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
+                                     model: "fixture-model", thinking: "low", projectId: projectPb, projectRoot: pbRoot)
+    let grandchildId = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
+                                        model: "fixture-model", thinking: "low", projectId: projectPb,
+                                        projectRoot: pbRoot, parentAgentID: childId)
+    for (label, target) in [("a sibling", siblingId), ("an unrelated agent in another checkout", strangerId),
+                            ("the caller's own child's child", grandchildId)] {
+        let denial = try failure(
+            dispatch("agent.message", ["agentId": target.rawValue.uuidString, "text": "reach \(label)", "idempotencyKey": "m-\(target.rawValue.uuidString)"]),
+            .permissionDenied, "message \(label)")
+        try expect(!denial.message.contains("/"), "the refusal for \(label) names no path: \(denial.message)")
+        try expect(denial.message.range(of: "[0-9A-Fa-f]{8}-", options: .regularExpression) == nil,
+                   "the refusal for \(label) names no id: \(denial.message)")
+        try expect(occurrences("reach \(label)", in: childPromptLog()) == 0, "an out-of-scope message delivers nothing")
+    }
+    // Upward is out of scope too: the CHILD may not message its own parent.
+    _ = try failure(
+        api.dispatch(agentId: childId, requestId: "op-msg-upward",
+                     op: "agent.message",
+                     payload: ["agentId": parentId.rawValue.uuidString, "text": "reach my parent", "idempotencyKey": "m-up"]),
+        .permissionDenied, "a child messaging its own parent")
+    // Messaging SELF is a different mistake, and says so.
+    let selfError = try failure(
+        dispatch("agent.message", ["agentId": parentId.rawValue.uuidString, "text": "note to self", "idempotencyKey": "m-self"]),
+        .invalidRequest, "message self")
+    try expect(selfError.message.lowercased().contains("itself"),
+               "messaging yourself explains why: an agent continues its own turn instead: \(selfError.message)")
+
+    // MARK: L — bounds, and nothing delivered past them
+
+    let oversize = String(repeating: "x", count: AgentMessageRequest.textByteCeiling + 1)
+    _ = try failure(dispatch("agent.message", ["agentId": childIdString, "text": oversize, "idempotencyKey": "m-big"]),
+                    .invalidRequest, "text over the ceiling")
+    _ = try failure(dispatch("agent.message", ["agentId": childIdString, "text": "   ", "idempotencyKey": "m-blank"]),
+                    .invalidRequest, "whitespace-only text")
+    _ = try failure(dispatch("agent.message", ["agentId": childIdString, "text": "no key here"]),
+                    .invalidRequest, "no idempotencyKey")
+    try expect(occurrences("xxxxxxxxxx", in: childPromptLog()) == 0 && occurrences("no key here", in: childPromptLog()) == 0,
+               "a request refused at the bounds delivers nothing")
+
+    // MARK: M — one prompt per agent session, and a denial delivers nothing
+
+    try await waitChildIdle()
+    let marker2 = "MSG-TWO-4d19af"
+    let promptsBeforeSecond = messagePrompts.count
+    let second = try result(
+        dispatch("agent.message", ["agentId": childIdString, "text": "\(marker2): and check the appcast",
+                                   "idempotencyKey": "m2"], requestId: "op-msg-2"),
+        "a second message under the session grant")
+    // Red when the grant is minted single-use, or not minted at all: the user is
+    // asked again for every message they already approved for this session.
+    try expect(messagePrompts.count == promptsBeforeSecond,
+               "\"allow for session\" must cover later messages: \(messagePrompts.count - promptsBeforeSecond) extra prompt(s)")
+    try expect(second["delivery"]?.string == "delivered", "the second message is delivered: \(second)")
+    let secondDelivery = await childReceived(marker2)
+    try expect(secondDelivery == 1, "the second message reaches the child exactly once, got \(secondDelivery)")
+
+    // A denial. Revocation first, so the session grant is dead and the user is
+    // asked again rather than riding the old approval.
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, false)
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
+    try await waitChildIdle()
+    api.approvalHandler = { prompt in prompts.append(prompt); messagePrompts.append(prompt); return .deny }
+    let deniedMessage = try failure(
+        dispatch("agent.message", ["agentId": childIdString, "text": "MSG-DENIED-0f10: do not do this",
+                                   "idempotencyKey": "m3"]),
+        .permissionDenied, "a denied message")
+    try expect(deniedMessage.approvalRequestId != nil, "the refusal names the approval request it showed")
+    try expect(occurrences("MSG-DENIED-0f10", in: childPromptLog()) == 0, "a denied message delivers nothing")
+    try expect(!deniedMessage.message.contains("/"), "a denial names no path")
+
+    // MARK: N — policy off, and the catalogue seam
+
+    api.approvalHandler = { prompt in prompts.append(prompt); messagePrompts.append(prompt); return .allowForSession }
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, false)
+    _ = try failure(
+        dispatch("agent.message", ["agentId": childIdString, "text": "MSG-REVOKED-77: after the switch", "idempotencyKey": "m4"]),
+        .permissionDenied, "message with workspace tools off")
+    try expect(occurrences("MSG-REVOKED-77", in: childPromptLog()) == 0, "a revoked agent delivers nothing")
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
+
+    // The known seam: `AgentSupervisor.send` refuses unless the catalogue reports
+    // the harness ready AND lists the record's model. That is a structured
+    // `unsupported` with the reason — never a crash, and never a silent success.
+    try await waitChildIdle()
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .loggedOut, models: []))
+    let notReady = try failure(
+        dispatch("agent.message", ["agentId": childIdString, "text": "MSG-NOTREADY-91: while the catalogue is out",
+                                   "idempotencyKey": "m5"]),
+        .unsupported, "message while the catalogue is not ready")
+    try expect(notReady.message.lowercased().contains("logged out"),
+               "the unsupported answer carries the send path's own reason: \(notReady.message)")
+    try expect(occurrences("MSG-NOTREADY-91", in: childPromptLog()) == 0,
+               "a catalogue refusal delivers nothing")
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: ["fixture-model"],
+        displayNames: ["fixture-model": "Fixture"], contextWindows: ["fixture-model": 1]))
+    // The same key is usable again once the cause is gone: nothing was delivered
+    // under it, so it never burned.
+    try await waitChildIdle()
+    let afterRecovery = try result(
+        dispatch("agent.message", ["agentId": childIdString, "text": "MSG-NOTREADY-91: while the catalogue is out",
+                                   "idempotencyKey": "m5"], requestId: "op-msg-5-retry"),
+        "the same key after the cause is gone")
+    try expect(afterRecovery["delivery"]?.string == "delivered", "a retry after a no-op failure delivers: \(afterRecovery)")
+    let recoveredDelivery = await childReceived("MSG-NOTREADY-91")
+    try expect(recoveredDelivery == 1, "and delivers exactly once, got \(recoveredDelivery)")
+
     supervisor.stopAll()
 }

@@ -168,3 +168,47 @@ While probing for a spawn-extension check, the delegation track ran
 socket, which AGENTS.md forbids while Array may be running. It was not repeated
 and no tmux server was inspected or killed, but it is recorded here because the
 live app could have been disrupted.
+
+---
+
+# Update — a tenth op, `agent.message` (children only)
+
+| Op | Preset? | Owner route |
+|---|---|---|
+| `agent.message` | **no** — approval | `AgentSupervisor.send` (the composer's own send path) |
+
+Scope IS the feature: deliverable only when the target's `parentAgentID` is the
+caller. A sibling, the caller's own parent, another agent's child and a target
+outside the caller's checkout are all `permission_denied` with one message that
+names no path and no id (so a refusal does not even confirm which ids exist);
+SELF is `invalid_request`. Two gates enforce it — the resolve guard and a recheck
+immediately before delivery — and removing only one leaves the leg green, which
+is why the teeth test had to remove both.
+
+`agent.message` is withheld from `sessionPresetOperations`, so the first message
+per agent session goes through `presentWorkspaceToolApproval` (its own alert
+branch, naming the child); an approved DELEGATION grants nothing here.
+`workspace.context.capabilities` still lists seven, unchanged.
+
+The result reports DELIVERY only — `delivery` (`delivered | queued | refused`),
+`childAgentId`, `parentAgentId`, `childRunning`, `queuePosition`,
+`refusalReason`, `operationId`, plus the presentation pair. Never the child's
+answer; the tool guidance sends the model to `wait_agents` / `array_inspect_agent`
+for that. `queued` is vocabulary the send path does not yet produce:
+`AgentSupervisor.send` either starts the turn on the child's own runner or
+declines, so a mid-turn child is `refused` with the reason rather than
+double-prompted. The catalogue seam (`AgentSupervisor.sendRefusal`: harness
+`.ready` AND the record's model listed) surfaces as a structured `unsupported`.
+
+`idempotencyKey` is required and reuses the `agent.delegate` operation store:
+same key + same text replays the first outcome and delivers nothing; same key +
+different text is `idempotency_conflict`; a failure that delivered nothing does
+not burn the key. Text is capped at 8 KB of UTF-8 and may not be blank.
+
+Witnesses: `--workspace-api-delegation-check` acts I–N (delivery evidence is the
+child's OWN fake-pi `prompts.log`, counted, and watched for a bounded window so
+an async second write cannot sneak past a single sample), the Core section behind
+`--workspace-operation-store-check`, and STEP 12 of `--workspace-api-demo`.
+`array_message_agent` is the tenth roled-pi host tool; real pi parses the edited
+extension (`--pi-extension-load-check`). No new check leg, so `run-matrix.sh` and
+`matrix-inventory.txt` are unchanged.
