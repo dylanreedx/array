@@ -151,6 +151,42 @@ export default function continuumWorkspaceTools(pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       return asToolResult(await bridge(ctx, toolCallId, "canvas.query", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
+  pi.registerTool({
+    name: "array_canvas_apply",
+    label: "Array Canvas Apply",
+    description:
+      "Move OR resize exactly one tile of your own checkout, in world coordinates, through the same route and undo history as the user's own drag. Requires expectedRevision from array_canvas_query and returns the ACTUAL rectangle after Array's layout and minimum-size rules, which may differ from what you asked for. Every conflict applies nothing: revision_conflict (the canvas changed), target_conflict (the user is dragging), unsupported zone_unhydrated, permission_denied, invalid_request. The first use asks the user for permission. Never moves the camera, focus, selection or armed zone.",
+    promptSnippet: "Move or resize one tile on the Array canvas, in world coordinates",
+    promptGuidelines: [
+      "One tile, one op per call. Query first, pass that expectedRevision, and read actualWorldRect back — Array's layout may place the tile elsewhere.",
+      "On revision_conflict or target_conflict nothing was applied: re-query and decide again rather than retrying the same numbers.",
+      "Reuse the same idempotencyKey when retrying a call whose outcome you did not see; a different payload under a used key is idempotency_conflict.",
+      "Do not rearrange the user's canvas unasked, and never use this to hide or overlap a tile the user is working in.",
+    ],
+    parameters: Type.Object({
+      op: Type.Union([Type.Literal("move"), Type.Literal("resize")]),
+      tileId: Type.String({ description: "A tileId from array_canvas_query or an Array result." }),
+      worldFrame: Type.Optional(
+        Type.Object({ x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number() }, {
+          description: "The whole target rectangle. A move uses its origin; a resize its size (and its origin when given).",
+        }),
+      ),
+      origin: Type.Optional(Type.Object({ x: Type.Number(), y: Type.Number() }, { description: "Move shorthand." })),
+      size: Type.Optional(Type.Object({ width: Type.Number(), height: Type.Number() }, { description: "Resize shorthand; below the tile kind's minimum it is clamped up and clamped=true is returned." })),
+      expectedRevision: Type.Object(
+        { epoch: Type.String(), structure: Type.Integer() },
+        { description: "The revision object from array_canvas_query or array_workspace_context, verbatim." },
+      ),
+      idempotencyKey: Type.Optional(Type.String({ maxLength: 128 })),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "canvas.apply", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
   // MARK: delegation
   //
   // CX-01 Phase 2b (§10): visible delegation with safe retry. `array_delegate`
@@ -192,35 +228,6 @@ export default function continuumWorkspaceTools(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "array_canvas_apply",
-    label: "Array Canvas Apply",
-    description:
-      "Move OR resize exactly one tile of your own checkout, in world coordinates, through the same route and undo history as the user's own drag. Requires expectedRevision from array_canvas_query and returns the ACTUAL rectangle after Array's layout and minimum-size rules, which may differ from what you asked for. Every conflict applies nothing: revision_conflict (the canvas changed), target_conflict (the user is dragging), unsupported zone_unhydrated, permission_denied, invalid_request. The first use asks the user for permission. Never moves the camera, focus, selection or armed zone.",
-    promptSnippet: "Move or resize one tile on the Array canvas, in world coordinates",
-    promptGuidelines: [
-      "One tile, one op per call. Query first, pass that expectedRevision, and read actualWorldRect back — Array's layout may place the tile elsewhere.",
-      "On revision_conflict or target_conflict nothing was applied: re-query and decide again rather than retrying the same numbers.",
-      "Reuse the same idempotencyKey when retrying a call whose outcome you did not see; a different payload under a used key is idempotency_conflict.",
-      "Do not rearrange the user's canvas unasked, and never use this to hide or overlap a tile the user is working in.",
-    ],
-    parameters: Type.Object({
-      op: Type.Union([Type.Literal("move"), Type.Literal("resize")]),
-      tileId: Type.String({ description: "A tileId from array_canvas_query or an Array result." }),
-      worldFrame: Type.Optional(
-        Type.Object({ x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number() }, {
-          description: "The whole target rectangle. A move uses its origin; a resize its size (and its origin when given).",
-        }),
-      ),
-      origin: Type.Optional(Type.Object({ x: Type.Number(), y: Type.Number() }, { description: "Move shorthand." })),
-      size: Type.Optional(Type.Object({ width: Type.Number(), height: Type.Number() }, { description: "Resize shorthand; below the tile kind's minimum it is clamped up and clamped=true is returned." })),
-      expectedRevision: Type.Object(
-        { epoch: Type.String(), structure: Type.Integer() },
-        { description: "The revision object from array_canvas_query or array_workspace_context, verbatim." },
-      ),
-      idempotencyKey: Type.Optional(Type.String({ maxLength: 128 })),
-    }),
-    async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      return asToolResult(await bridge(ctx, toolCallId, "canvas.apply", params, signal, TOOL_TIMEOUT_MS));
     name: "array_reveal_agent",
     label: "Array Reveal Agent",
     description:
