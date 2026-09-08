@@ -1590,6 +1590,23 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // CX-01: the nine-operation walkthrough. NOT a `*-check` flag on purpose —
+        // it is a narrated demonstration, not a gate, so it stays out of the check
+        // inventory and out of the matrix. See `WorkspaceAPIDemo.swift`.
+        if CommandLine.arguments.contains("--workspace-api-demo") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDemo()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("DEMO ABORTED: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
