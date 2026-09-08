@@ -1126,6 +1126,33 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // CX-01 (`.plans/59`): the workspace API through the production mount and
+        // the production dispatch entry — open/reveal identity, draft preservation,
+        // partial relationship failure, unhydrated and duplicate refusals.
+        if CommandLine.arguments.contains("--workspace-api-open-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runOpenRevealCheck()
+                print("ContinuumRevivedWorkspaceAPIOpenChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // CX-01: grants, trusted approval, forgery, revocation, and the five
+        // presentation dimensions including concurrent user interaction.
+        if CommandLine.arguments.contains("--workspace-api-grants-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runGrantsAndPresentationCheck()
+                print("ContinuumRevivedWorkspaceAPIGrantsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
 
         if CommandLine.arguments.contains("--zone-tile-hydration-check") {
             do {
@@ -1498,6 +1525,24 @@ enum ContinuumApp {
             // Same reason as `--ui-test-support-check`: the supervisor delivers
             // events via `DispatchQueue.main.async` and the check waits on them with
             // `waitUntil`, so a live main run loop is what drains both.
+            NSApp.run()
+        }
+
+        // CX-01 (`.plans/59`, §15): the pi host tool bridge through the REAL
+        // supervisor runner factory against a fake `pi` on PATH — caller binding by
+        // runner instance, and a stale reply dropped after runner replacement.
+        if CommandLine.arguments.contains("--workspace-api-pi-bridge-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIPiBridgeChecks()
+                    print("ContinuumRevivedWorkspaceAPIPiBridgeChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
             NSApp.run()
         }
 
@@ -4026,6 +4071,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
         transcriptStore: agentTranscriptStore
+    )
+    /// CX-01 (`.plans/59`): distinguishes this host instance in every issued
+    /// revision, so a handle from a previous launch is re-resolved, not trusted.
+    let hostEpoch = UUID().uuidString
+    /// CX-01: the host-owned workspace API. Reads the mounted scene through the
+    /// same private properties the app uses; never a second store.
+    lazy var workspaceAPI = WorkspaceAPIService(
+        runtime: { [weak self] in self?.workspaceRuntime },
+        canvas: { [weak self] in self?.canvasView },
+        focusBroker: { [weak self] in self?.focusBroker },
+        supervisor: agentSupervisor,
+        registryStore: { [weak self] in self?.registryStore },
+        epoch: hostEpoch,
+        approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny }
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
@@ -7143,6 +7202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             let clickedTileId = canvas.tileId(at: pointInCanvas)
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
+            // CX-01: a click is the user's newer intent for focus and selection.
+            self.workspaceRuntime?.noteUserInteraction()
             if let clickedTileId,
                canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
                 self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
@@ -13939,6 +14000,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 throw error
             }
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            // CX-01: a committed gesture is a structural change for every issued
+            // workspace.context revision.
+            workspaceRuntime?.noteStructuralCommit()
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
@@ -14682,6 +14746,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
+    /// CX-01 (§14.1): the TRUSTED host UI that mints extra scope. Modal and
+    /// synchronous, so it fits the service's synchronous dispatch; the model can
+    /// neither answer it nor substitute a payload after it. Only this handler
+    /// (or a check's injected stand-in) ever produces a grant beyond the preset.
+    func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
+        let alert = NSAlert()
+        alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
+        var detail = "The agent asked Array to open a document outside its own checkout."
+        if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
+        detail += "\n\nOpening never edits the file. \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+        alert.informativeText = detail
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow Once")
+        alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Deny")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .allowOnce
+        case .alertSecondButtonReturn: return .allowForSession
+        default: return .deny
+        }
+    }
+
     /// Resolves a local-file link an agent authored and opens it beside that agent.
     ///
     /// The agent's CURRENT `cwd` is the only base a relative path resolves against:
@@ -15105,6 +15191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// then needs to read the supervisor's observer counts back.
     var qaAgentSupervisor: AgentSupervisor { agentSupervisor }
 
+    /// CX-01: the workspace API witnesses dispatch through the REAL service the
+    /// bridge uses, with an injected approval handler.
+    var qaWorkspaceAPI: WorkspaceAPIService { workspaceAPI }
+
     /// Minimal offline wiring so a check living in another file can drive the
     /// REAL `configureWorkspaceRuntimeHooks()` instead of substituting its own
     /// closures. `AppDelegate`'s scene properties are `private`, and file-private
@@ -15186,6 +15276,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // seven tickets passed against code the app never executed.
         canvasView.onZoneActivated = { [weak self] zoneId in
             self?.workspaceRuntime?.setActiveZone(zoneId, reason: .click)
+        }
+        // CX-01 (`.plans/59`): wired HERE for the same reason as `onZoneActivated`
+        // — the workspace API witnesses drive this mount. The user's camera bumps
+        // the interaction generation; the bridge routes bound runners' requests to
+        // the host service; a policy flip revokes the agent's grants.
+        canvasView.onUserCameraChange = { [weak self] in
+            self?.workspaceRuntime?.noteUserInteraction()
+        }
+        agentSupervisor.hostToolHandler = { [weak self] agentId, call in
+            guard let self else { call.respond(.unsupportedUnbound); return }
+            self.workspaceAPI.handle(agentId: agentId, call: call)
+        }
+        agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
+            self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)

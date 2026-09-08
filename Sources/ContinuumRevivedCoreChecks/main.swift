@@ -73,6 +73,23 @@ if CommandLine.arguments.contains("--agent-compaction-check") {
     Foundation.exit(0)
 }
 
+// CX-01 (`.plans/59`): targeted arms so the two new sections can run without the
+// process-spawning legs of the full run.
+if CommandLine.arguments.contains("--workspace-api-contract-check") {
+    runWorkspaceAPIContractChecks()
+    Foundation.exit(0)
+}
+if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
+    runPiHostToolBridgeChecks()
+    Foundation.exit(0)
+}
+// CX-01 grew the roled-pi `--tools` allowlist; this arm runs the RoleRegistry
+// section on its own because the real-tmux legs ahead of it in the full run are
+// load-sensitive and stop the run before it is reached in a headless shell.
+if CommandLine.arguments.contains("--role-registry-check") {
+    try runRoleRegistryChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--canvas-background-model-check") {
     runCanvasBackgroundChecks()
     print("CanvasBackgroundModelChecks passed")
@@ -12436,5 +12453,17 @@ runCanvasBackgroundChecks()
 
 runFileDocumentSessionChecks()
 runEditorPreferencesChecks()
+
+// CX-01 (`.plans/59`) — the frozen v1 workspace API contracts: checkout/artifact
+// handles, presentation intersection, the tolerant open-request decoder, result
+// round trips, the grant evaluator, and the pi bridge envelope parse/encode.
+runWorkspaceAPIContractChecks()
+
+// CX-01 — the pi host tool bridge driven end to end against a scripted fake
+// `pi --mode rpc`: an Array-owned `extension_ui_request` reaches the host handler
+// bound to the runner, the host's structured reply lands in the TOOL RESULT the
+// fake returns to its model, and cancellation, deadline, late replies, runner
+// replacement, concurrency and foreign dialogs behave per §15.
+runPiHostToolBridgeChecks()
 
 print("ContinuumRevivedCoreChecks passed")

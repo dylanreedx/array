@@ -162,6 +162,9 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
+check --workspace-api-grants-check
+check --workspace-api-open-check
+check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
@@ -360,6 +363,9 @@ leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
+leg run_app_check .build/debug/Array --workspace-api-grants-check
+leg run_app_check .build/debug/Array --workspace-api-open-check
+leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
@@ -426,7 +432,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 122
+count ContinuumRevivedCoreChecks 127
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

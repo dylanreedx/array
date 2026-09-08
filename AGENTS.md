@@ -251,6 +251,28 @@ frozen fallback in QA).
    agent RECORDS are channel-split, the second app mints a duplicate agent for
    every tile it finds no record for. Give each install its own root.
 
+11. **The workspace API and the pi bridge (CX-01, `.plans/59`).** Three things
+   new code must not undo. (a) `WorkspaceRuntime.openDocument` is split: the
+   click path keeps its navigation, active-controller fallback and focus entry;
+   `preflightExplicitOpen` → `ensureSpawner` → `executeOpen` is the API path and
+   must never arm a zone, switch a workspace, fall back to the active project,
+   flat-install into an unhydrated zone or pick one of two same-document tiles —
+   it returns `presentation_required` / `unsupported` instead. (b)
+   `WorkspaceRuntime.interactionGeneration` bumps ONLY at user seams
+   (`setActiveZone` for non-camera reasons, `switchWorkspace`, the tile-focus
+   click monitor, `CanvasNSView.onUserCameraChange` from the camera driver or a
+   pointer pan). A programmatic `setViewport`/`enterScope` must not bump it, or
+   the API's own reveal defers itself. (c) `PiEventTranslator` now CONSUMES
+   `extension_ui_request` frames whose `title` is an `array.workspace.v1`
+   envelope and the runner answers them with `extension_ui_response` on the pi-
+   minted id; every other dialog stays dropped. Replies are written only from
+   the runner's `bridgeQueue` — answering inside a translator hook deadlocks on
+   the transport queue. Witnesses: `--workspace-api-open-check`,
+   `--workspace-api-grants-check`, `--workspace-api-pi-bridge-check`, and the
+   CoreChecks arms `--workspace-api-contract-check` /
+   `--pi-host-tool-bridge-check`. The bundled `continuum-workspace-tools.ts` is
+   loaded by `-e` only and is never installed into `~/.pi`.
+
 ## Running the app while Dylan is using it
 
 Two installs, split by ROLE. Never by project — see hazard 9.

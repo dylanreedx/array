@@ -376,6 +376,10 @@ run_app_check .build/debug/Array --palette-duplicate-root-check
 # everything after it never runs. A witness the gate cannot reach never runs at all.
 run_app_check .build/debug/Array --strict-agent-harness-check
 run_app_check .build/debug/Array --managed-agent-model-spawn-check
+# CX-01 (.plans/59): the pi host tool bridge through the real supervisor runner
+# factory against a fake pi on PATH. Ordered here for the same reason as the two
+# legs above: a witness the gate cannot reach never runs at all.
+run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 run_app_check .build/debug/Array --agent-awareness-check
@@ -634,6 +638,13 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # drives mountWorkspaceSceneAtBoot, the method applicationDidFinishLaunching
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
+# CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
+# production dispatch entry. Same-named file in two checkouts, dirty draft
+# preserved, world frames at a non-zero zone origin, partial relationship
+# failure, unhydrated/duplicate refusals; then grants, trusted approval,
+# forgery, revocation and all five presentation dimensions under user input.
+run_app_check .build/debug/Array --workspace-api-open-check
+run_app_check .build/debug/Array --workspace-api-grants-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's
