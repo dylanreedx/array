@@ -19,6 +19,16 @@ import Foundation
 public enum PiExtensionInstaller {
     public static let extensionFileName = "continuum-spawn-agent.ts"
 
+    /// CX-01 (`.plans/59`, §15): the host tool bridge extension. NOT installed to
+    /// `~/.pi` — it is loaded by `-e <bundled path>` only, so its tools exist
+    /// solely in Array-managed pi sessions and nothing is written to the user's
+    /// global pi configuration. See `PiAgentRunner.installedExtensionPaths`.
+    public static let workspaceToolsExtensionFileName = "continuum-workspace-tools.ts"
+
+    public static func bundledWorkspaceToolsExtensionPath(fileManager: FileManager = .default) -> String? {
+        bundledExtensionURL(fileName: workspaceToolsExtensionFileName, fileManager: fileManager)?.path
+    }
+
     /// `~/.pi/agent/extensions` — see the file-level comment for the source.
     public static func defaultExtensionsDirectory(homeDirectory: String = NSHomeDirectory()) -> URL {
         URL(fileURLWithPath: homeDirectory, isDirectory: true)
@@ -102,8 +112,12 @@ public enum PiExtensionInstaller {
     }
 
     static func bundledExtensionURL(fileManager: FileManager = .default) -> URL? {
+        bundledExtensionURL(fileName: extensionFileName, fileManager: fileManager)
+    }
+
+    static func bundledExtensionURL(fileName: String, fileManager: FileManager = .default) -> URL? {
         let resourceBundleName = "continuum-revived_ContinuumRevivedCore.bundle"
-        let relativePath = "PiExtensions/\(extensionFileName)"
+        let relativePath = "PiExtensions/\(fileName)"
         var candidates: [URL] = []
         if let resourcesURL = Bundle.main.resourceURL {
             candidates.append(

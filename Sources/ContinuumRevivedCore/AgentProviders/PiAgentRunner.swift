@@ -72,7 +72,16 @@ public final class PiAgentRunner: @unchecked Sendable {
     public static func installedExtensionPaths(fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
         let path = PiExtensionInstaller.defaultExtensionsDirectory()
             .appendingPathComponent(PiExtensionInstaller.extensionFileName).path
-        return fileExists(path) ? [path] : []
+        return (fileExists(path) ? [path] : []) + workspaceToolsExtensionPaths(fileExists: fileExists)
+    }
+
+    /// CX-01: the bundled host-tool-bridge extension, by its in-bundle path. `-e`
+    /// only — nothing is installed into `~/.pi` for it. Resolves to `[]` when the
+    /// resource is absent (a checks binary built without it), never to a dangling
+    /// `-e`.
+    static func workspaceToolsExtensionPaths(fileExists: (String) -> Bool) -> [String] {
+        guard let path = PiExtensionInstaller.bundledWorkspaceToolsExtensionPath(), fileExists(path) else { return [] }
+        return [path]
     }
 
     /// The Pi args after the executable (and any `/usr/bin/env` prefix): the
@@ -201,6 +210,10 @@ public final class PiAgentRunner: @unchecked Sendable {
     public static func installedExtensionPaths() -> [String] {
         [PiExtensionInstaller.defaultExtensionsDirectory()
             .appendingPathComponent(PiExtensionInstaller.extensionFileName).path]
+            // CX-01: plus the bundled bridge extension when the resource exists.
+            // The bundle lookup is the one filesystem read here; a missing bundle
+            // contributes nothing rather than a dangling `-e`.
+            + workspaceToolsExtensionPaths(fileExists: { FileManager.default.fileExists(atPath: $0) })
     }
 
     /// Live wrapper around `resolvedCommand`: assembles the search dirs from
