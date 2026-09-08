@@ -48,6 +48,21 @@ final class WorkspaceRuntime {
     // Retains the installed ZoneLayers so the check (and T09 swap) can read back placements.
     private var installedLayers: [CanvasNSView.ZoneLayer] = []
 
+    // CX-01 (`.plans/59`, §16/§7.2): two host-observed counters.
+    //
+    // `interactionGeneration` bumps on USER-driven presentation changes only —
+    // click arming, click focus, trackpad/pointer camera, a workspace switch.
+    // Programmatic writers (a reveal the API itself performs, a restore, a
+    // check) never bump it, so a pending API request can tell "the user moved"
+    // from "I moved" and defer instead of overwriting newer intent.
+    //
+    // `structuralRevision` bumps on committed structural change (zones, tiles,
+    // links persisted). Camera motion alone never bumps it.
+    private(set) var interactionGeneration: UInt64 = 0
+    private(set) var structuralRevision: UInt64 = 0
+    func noteUserInteraction() { interactionGeneration &+= 1 }
+    func noteStructuralCommit() { structuralRevision &+= 1 }
+
     /// The controller whose project owns the active zone (`document.lastActiveZoneId`
     /// → its `projectId`). nil when the active zone is a group zone or none is active.
     /// AppDelegate reads `runtimes`, `projectStore`, `activeProject` through this.
@@ -340,6 +355,11 @@ final class WorkspaceRuntime {
     /// Returns true when the arming took.
     @discardableResult
     func setActiveZone(_ zoneId: UUID?, reason: ActiveZoneReason) -> Bool {
+        // CX-01: every arming reason but `.camera` is the user's own act. `.camera`
+        // is excluded because it also fires after a PROGRAMMATIC `setViewport`
+        // (via `canvasDidChange` → `reconcileHydration`), and the camera driver
+        // reports user camera motion itself (`CanvasNSView.onUserCameraChange`).
+        if reason != .camera { noteUserInteraction() }
         // A group zone must never arm. `activeController` returns nil for one, so
         // arming it would silently disarm creation entirely — every spawn would
         // then refuse rather than land somewhere wrong, which is a worse bug than
@@ -1140,29 +1160,27 @@ final class WorkspaceRuntime {
         case let .at(point): anchor = request.sourceTileId; worldPoint = point
         case .automatic: anchor = request.sourceTileId; worldPoint = nil
         }
-        let outcome = spawner.spawnFile(
+        // CX-01: the spawn + link half is shared with the workspace API
+        // (`executeOpen`); only this click path keeps the navigation above, the
+        // active-controller fallback, the coarse `.failure` for a failed link save,
+        // and the focus entry below.
+        let execution = executeOpen(
             location: request.location,
             title: title,
-            at: worldPoint,
-            beside: anchor,
-            targetZoneId: sourceZoneId
+            spawner: spawner,
+            zoneId: sourceZoneId,
+            anchorTileId: anchor,
+            worldPoint: worldPoint,
+            linkTo: request.sourceAgentId
         )
         let mapped: FileOpenOutcome
-        switch outcome {
-        case let .spawned(tileId): mapped = .opened(tileId: tileId)
-        case let .alreadyOpen(tileId): mapped = .revealed(tileId: tileId)
-        case .invalidPath: mapped = .failure("Couldn't open \(title): that path isn't a file Array can show.")
-        case let .failure(error): mapped = .failure("Couldn't open \(title): \(error.localizedDescription)")
+        switch execution.document {
+        case let .opened(tileId): mapped = .opened(tileId: tileId)
+        case let .existing(tileId): mapped = .revealed(tileId: tileId)
+        case let .failed(message): mapped = .failure(message)
         }
-        if let agentId = request.sourceAgentId {
-            switch mapped {
-            case let .opened(tileId), let .revealed(tileId):
-                document.linkDocument(tileId, to: agentId)
-                do { try persistWorkspaceDocument() }
-                catch { return .failure("Opened \(title), but couldn't save its agent relationship: \(error.localizedDescription)") }
-                refreshDocumentRelationships()
-            case .failure: break
-            }
+        if case let .failed(message) = execution.relationship {
+            return .failure("Opened \(title), but couldn't save its agent relationship: \(message)")
         }
         switch mapped {
         case let .opened(tileId), let .revealed(tileId):
@@ -1170,6 +1188,198 @@ final class WorkspaceRuntime {
         case .failure: break
         }
         return mapped
+    }
+
+    // MARK: - CX-01 explicit-destination open (`.plans/59`, §9 / §16)
+
+    /// A destination the workspace API resolved BEFORE any effect. Pure output of
+    /// `preflightExplicitOpen`; nothing about the canvas or document changed to
+    /// produce it.
+    struct ExplicitOpenPlan: Equatable {
+        let location: DocumentLocation
+        let projectId: UUID
+        /// The zone the tile will be installed into (or already lives in). Always
+        /// an INSTALLED layer for a new tile — the flat compatibility fallback in
+        /// `installProjectTile` is never reached from the API path.
+        let zoneId: UUID
+        let anchorTileId: UUID?
+        /// The one existing tile for this document, when the workspace has exactly
+        /// one. Reveal reuses it; the draft it owns is never touched.
+        let existingTileId: UUID?
+    }
+
+    enum ExplicitOpenPreflight: Equatable {
+        case ready(ExplicitOpenPlan)
+        /// The project's zones live in another workspace. Phase 1 never switches
+        /// on an API caller's behalf, whatever it asked for (§16: a narrow first
+        /// slice may explicitly decline that case; it must not bypass policy).
+        case presentationRequired(targetWorkspaceId: UUID)
+        /// `zone_unhydrated`, `zone_not_in_project`, `project_not_in_workspace`,
+        /// `duplicate_occurrence`, `no_canvas`.
+        case unsupported(String)
+    }
+
+    /// Decide where an explicit open would land, without arming, switching,
+    /// acquiring or installing anything. No active-controller fallback: the
+    /// project is the caller's, resolved from its checkout, never "whatever is
+    /// armed" (§9.1 — never silently use the active project's namesake).
+    func preflightExplicitOpen(
+        location: DocumentLocation,
+        projectId: UUID,
+        destinationZoneId: UUID?,
+        anchorTileId: UUID?
+    ) -> ExplicitOpenPreflight {
+        guard let canvasView else { return .unsupported("no_canvas") }
+        let projectZones = document.zonesInZOrder.filter { $0.projectId == projectId }
+
+        let canonicalPath = URL(fileURLWithPath: location.path).standardizedFileURL.resolvingSymlinksInPath().path
+        let matches = canvasView.allWorkspaceTiles().filter {
+            $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath
+        }
+        // §6.1: the tile UUID is the only occurrence identity Phase 1 supports.
+        // Two tiles for one document, or one tile id mounted in two layers, cannot
+        // be targeted precisely — refuse rather than pick.
+        if matches.count > 1 { return .unsupported("duplicate_occurrence") }
+        if let existing = matches.first {
+            if canvasView.installedZoneIds(containing: existing.id).count > 1 {
+                return .unsupported("duplicate_occurrence")
+            }
+            guard let existingZone = canvasView.zoneId(containing: existing.id) else {
+                return .unsupported("duplicate_occurrence")
+            }
+            return .ready(ExplicitOpenPlan(
+                location: location, projectId: projectId, zoneId: existingZone,
+                anchorTileId: anchorTileId, existingTileId: existing.id))
+        }
+
+        let zoneId: UUID?
+        if let destinationZoneId {
+            guard projectZones.contains(where: { $0.zoneId == destinationZoneId }) else {
+                return .unsupported("zone_not_in_project")
+            }
+            zoneId = destinationZoneId
+        } else if let anchorTileId,
+                  let anchorZone = canvasView.zoneId(containing: anchorTileId),
+                  projectZones.contains(where: { $0.zoneId == anchorZone }) {
+            zoneId = anchorZone
+        } else {
+            zoneId = projectZones.last?.zoneId
+        }
+        guard let zoneId else {
+            if let projectWorkspaceId = (try? registryStore.loadOrEmpty())?.projects
+                .first(where: { $0.id == projectId && !$0.missing })?.workspaceId,
+               projectWorkspaceId != workspaceId {
+                return .presentationRequired(targetWorkspaceId: projectWorkspaceId)
+            }
+            return .unsupported("project_not_in_workspace")
+        }
+        // A zone below the live tier has no layer. `installProjectTile` would fall
+        // through to the FLAT model and frame a zone-local tile as world; the API
+        // refuses instead of hydrating on demand (Phase 1 decision).
+        guard canvasView.installedZonePlacement(for: zoneId) != nil else {
+            return .unsupported("zone_unhydrated")
+        }
+        return .ready(ExplicitOpenPlan(
+            location: location, projectId: projectId, zoneId: zoneId,
+            anchorTileId: anchorTileId, existingTileId: nil))
+    }
+
+    /// A controller and spawner for a project WITHOUT arming it. Mirrors what
+    /// `reconcileHydration` does for a live-tier zone and what
+    /// `attachActiveControllerUI` does for every non-active live controller: a
+    /// spawner is a per-project factory and is safe to hold for any project; only
+    /// `attachUI` (session observer, tmux reaper, focus callbacks) is reserved for
+    /// the active controller, and this never calls it. `lastActiveZoneId` and
+    /// `setActiveProjectZone` are not touched — targeting a zone for placement is
+    /// separate from arming it for the user's next creation (§16).
+    func ensureSpawner(forProjectId projectId: UUID) throws -> TileSpawner {
+        guard let canvasView else { throw WorkspaceSwitchError.noCanvas }
+        let controller: ZoneRuntimeController
+        if let existing = registry.controller(for: projectId) {
+            controller = existing
+        } else {
+            controller = try registry.acquire(projectId: projectId)
+            if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
+        }
+        if let spawner = controller.tileSpawner { return spawner }
+        let spawner = makeSpawner(for: controller, canvasView: canvasView)
+        controller.attachSpawner(spawner, canvasView: canvasView)
+        return spawner
+    }
+
+    struct DocumentOpenExecution: Equatable {
+        enum Document: Equatable {
+            case opened(UUID)
+            case existing(UUID)
+            case failed(String)
+
+            var tileId: UUID? {
+                switch self {
+                case let .opened(id), let .existing(id): return id
+                case .failed: return nil
+                }
+            }
+        }
+        enum Relationship: Equatable {
+            case persisted
+            case unnecessary
+            case failed(String)
+        }
+        var document: Document
+        var relationship: Relationship
+    }
+
+    /// Spawn or reveal through `TileSpawner.spawnFile(targetZoneId:)`, then persist
+    /// the agent relationship. NO focus, NO camera, NO arming: presentation is the
+    /// caller's policy decision. The two steps report separately (§9.2): a tile
+    /// that exists while its link failed to save is a partial success, not a
+    /// failure — the click path folds that into its alert text, the API returns it.
+    func executeOpen(
+        location: DocumentLocation,
+        title: String? = nil,
+        spawner: TileSpawner,
+        zoneId: UUID?,
+        anchorTileId: UUID?,
+        worldPoint: CGPoint?,
+        linkTo agentId: AgentID?
+    ) -> DocumentOpenExecution {
+        let title = title ?? URL(fileURLWithPath: location.path).lastPathComponent
+        let outcome = spawner.spawnFile(
+            location: location,
+            title: title,
+            at: worldPoint,
+            beside: anchorTileId,
+            targetZoneId: zoneId
+        )
+        let document: DocumentOpenExecution.Document
+        switch outcome {
+        case let .spawned(tileId): document = .opened(tileId)
+        case let .alreadyOpen(tileId): document = .existing(tileId)
+        case .invalidPath: document = .failed("Couldn't open \(title): that path isn't a file Array can show.")
+        case let .failure(error): document = .failed("Couldn't open \(title): \(error.localizedDescription)")
+        }
+        if case .opened = document { noteStructuralCommit() }
+        var relationship: DocumentOpenExecution.Relationship = .unnecessary
+        if let agentId, let tileId = document.tileId {
+            do {
+                try linkDocumentTile(tileId, to: agentId)
+                relationship = .persisted
+            } catch {
+                relationship = .failed(error.localizedDescription)
+            }
+        }
+        return DocumentOpenExecution(document: document, relationship: relationship)
+    }
+
+    /// Link with rollback, mirroring `removeDocumentLinks`: a failed save leaves
+    /// the in-memory document exactly as it was, so a retry repairs the link
+    /// without a second tile.
+    func linkDocumentTile(_ tileId: UUID, to agentId: AgentID) throws {
+        let previousLinks = document.documentLinks
+        document.linkDocument(tileId, to: agentId)
+        do { try persistWorkspaceDocument() }
+        catch { document.documentLinks = previousLinks; throw error }
+        refreshDocumentRelationships()
     }
 
     /// The single route for opening a project file as an Array tile. Command
@@ -1203,6 +1413,7 @@ final class WorkspaceRuntime {
 
     private func persistWorkspaceDocument() throws {
         try saveWorkspaceDocument(document, workspaceId: workspaceId)
+        noteStructuralCommit()
     }
 
     private func loadWorkspaceDocument(workspaceId: UUID) throws -> WorkspaceDocument? {
@@ -1416,6 +1627,10 @@ final class WorkspaceRuntime {
             _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         }
         lifecycleObserver?(.switchCompleted(targetWorkspaceId))
+        // CX-01: a switch is newer intent for every pending presentation, and a
+        // structural change for every issued context.
+        noteUserInteraction()
+        noteStructuralCommit()
     }
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {

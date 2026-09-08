@@ -419,6 +419,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// canvas reports the hit and `WorkspaceRuntime.setActiveZone` decides whether
     /// it may arm (a group zone may not), so the arming policy stays in one place.
     var onZoneActivated: ((UUID) -> Void)?
+    /// CX-01: fired from `setViewport` when the writer is the user (camera driver
+    /// or pointer pan). `WorkspaceRuntime.noteUserInteraction` listens.
+    var onUserCameraChange: (() -> Void)?
 
     /// Fired after a zone is renamed (inline edit committed) so the caller can
     /// persist the new name. Carries (zoneId, newName).
@@ -3598,6 +3601,10 @@ final class CanvasNSView: NSView, TokenThemed {
         pendingFrameStartedAt = cameraStepStart
         defer { gestureStepDurationsMs.append((ProcessInfo.processInfo.systemUptime - cameraStepStart) * 1_000) }
         qaViewportApplyCount += 1
+        // CX-01: only the USER's camera (trackpad/pinch through the driver, or a
+        // pointer pan) counts as an interaction; a navigation snap, a restore, an
+        // API reveal or a check is programmatic and must not defer itself.
+        if cameraDriver.isApplying || pointerPanActive { onUserCameraChange?() }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -6654,6 +6661,14 @@ final class CanvasNSView: NSView, TokenThemed {
     func zoneId(containing tileId: UUID) -> UUID? {
         zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) })?.placement.zoneId
             ?? (flatCompatibilitySceneActive ? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId : nil)
+    }
+
+    /// Every installed layer holding a tile with this id. More than one is a
+    /// duplicate appearance (UUIDs are persistence identities, not occurrence
+    /// identities — see `applyZoneTransaction`), which the workspace API must
+    /// refuse to target rather than pick a peer. CX-01 (`.plans/59`, §6.1).
+    func installedZoneIds(containing tileId: UUID) -> [UUID] {
+        zoneLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }.map(\.placement.zoneId)
     }
 
     /// Where `installProjectTile` actually put a tile. Callers persist through the

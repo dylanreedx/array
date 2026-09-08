@@ -48,6 +48,7 @@ public enum SettingsSchema {
                 .choice(key: AgentModelConfig.modelKey, label: "Default Model", options: AgentModelConfig.modelOptions, default: AgentModelConfig.defaultModel),
                 .choice(key: AgentModelConfig.thinkingKey, label: "Default Reasoning Effort", options: AgentModelConfig.thinkingOptions, default: AgentModelConfig.defaultThinking),
                 .choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Auto-Settle After", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption),
+                .toggle(key: WorkspaceToolsConfig.newAgentsEnabledKey, label: "Workspace Tools for New Agents", default: false),
                 .agentSounds(label: "Sounds"),
             ]),
             SettingsSection(id: "editor", title: "Editor", iconSystemName: "curlybraces", fields: [
