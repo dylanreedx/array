@@ -14,7 +14,10 @@ public extension WorkspaceAPIOp {
     /// What the session preset grants without a prompt. `canvas.apply` is
     /// deliberately absent: the first apply for a checkout goes through the
     /// trusted approval UI, and "allow for session" covers the later ones.
-    static let sessionPresetOperations: Set<WorkspaceAPIOp> = [.workspaceContext, .artifactOpen, .agentFind, .agentInspect, .canvasQuery]
+    static let sessionPresetOperations: Set<WorkspaceAPIOp> = [
+        .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
+        .canvasQuery, .agentReveal, .operationGet,
+    ]
 }
 
 // MARK: - canvas.query

@@ -54,11 +54,20 @@ private func identity(
 private func checkAgentOpsAndPreset() {
     expect(WorkspaceAPIOp(rawValue: "agent.find") == .agentFind && WorkspaceAPIOp(rawValue: "agent.inspect") == .agentInspect,
            "the two Phase 2a ops must decode from their wire names")
-    expect(Array(WorkspaceAPIOp.allCases.suffix(2)) == [.agentFind, .agentInspect], "new ops are APPENDED to the enum")
+    // The wire order is pinned in full: an op may be appended, never reordered
+    // or removed, and adding one means updating this list deliberately.
+    expect(WorkspaceAPIOp.allCases == [
+        .workspaceContext, .artifactOpen,
+        .agentFind, .agentInspect,
+        .canvasQuery, .canvasApply,
+        .agentDelegate, .agentReveal, .operationGet,
+    ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
     let me = agentsID("0001")
     let preset = WorkspaceToolGrant.phase1Preset(agentId: me, checkout: ckOwn, generation: 3)
-    expect(preset.operations == [.workspaceContext, .artifactOpen, .agentFind, .agentInspect],
-           "the preset lists its ops explicitly (find + self-inspect included), got \(preset.operations)")
+    expect(preset.operations == WorkspaceAPIOp.sessionPresetOperations
+            && preset.operations.isSuperset(of: [.workspaceContext, .artifactOpen, .agentFind, .agentInspect])
+            && preset.operations.isDisjoint(with: [.canvasApply, .agentDelegate]),
+           "the preset lists its ops explicitly (find + self-inspect in, apply/delegate out), got \(preset.operations)")
     expect(preset.inspectableAgentIds == [me], "the preset lets an agent inspect only ITSELF, got \(preset.inspectableAgentIds)")
     let data = try! agentsEncoder.encode(preset)
     let back = try! agentsDecoder.decode(WorkspaceToolGrant.self, from: data)

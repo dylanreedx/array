@@ -1574,6 +1574,25 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
+        // through the production mount and dispatch — create-once under retry,
+        // idempotency conflict, child tile in the parent's zone, presentation
+        // failure repaired by agent.reveal, operation.get, cancellation truth.
+        if CommandLine.arguments.contains("--workspace-api-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDelegationChecks()
+                    print("ContinuumRevivedWorkspaceAPIDelegationChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-compaction-ui-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -4112,7 +4131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         supervisor: agentSupervisor,
         registryStore: { [weak self] in self?.registryStore },
         epoch: hostEpoch,
-        approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny }
+        approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
+        tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) }
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
@@ -14796,6 +14816,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // CX-01 Phase 2a: another agent's transcript is never in the preset (§14.1).
             alert.messageText = "Allow \(prompt.agentDisplayName) to inspect \(target)?"
             detail = "The agent asked Array for \(target)'s status and a bounded excerpt of its recent transcript (checkout: \(prompt.checkoutDisplayName)).\n\nInspecting is read-only: it never messages, interrupts or steers \(target)."
+        } else if prompt.op == .agentDelegate {
+            // CX-01 Phase 2b (§10.1 / §14.1): delegation is outside the preset.
+            alert.messageText = "Allow \(prompt.agentDisplayName) to delegate work to a new agent in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to start a child agent with its own provider and model, in the same checkout, and show it beside itself on the canvas. No worktree is created."
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.

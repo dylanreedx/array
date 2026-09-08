@@ -57,11 +57,12 @@ final class WorkspaceAPIService {
     enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession }
     typealias ApprovalHandler = (ScopeApprovalPrompt) -> ScopeApprovalDecision
 
-    // Internal, not private: `WorkspaceAPIService+Agents.swift` extends this
-    // service from another file.
+    // Internal, not private: the `+Agents`, `+Canvas` and `+Delegation`
+    // files extend this service; production callers outside it use only
+    // `dispatch`/`handle`.
     let runtimeProvider: () -> WorkspaceRuntime?
     let canvasProvider: () -> CanvasNSView?
-    private let focusBrokerProvider: () -> FocusBroker?
+    let focusBrokerProvider: () -> FocusBroker?
     let supervisor: AgentSupervisor
     let registryStoreProvider: () -> RegistryStore?
     let epoch: String
@@ -76,6 +77,19 @@ final class WorkspaceAPIService {
     /// or cancellation at the exact seam.
     var _beforeCommitHook: (() -> Void)?
     var _beforePresentationHook: (() -> Void)?
+    /// Checks-only: makes the presentation step of `agent.delegate` FAIL for the
+    /// given tile with the returned message (§10.3 partial-failure witness).
+    var _injectPresentationFailure: ((UUID) -> String?)?
+    /// Production: `AppDelegate.wireManagedAgentTile` — binds a freshly installed
+    /// managed-agent tile view to its agent (P2A.5). Checks may leave it nil; the
+    /// durable record binding (`supervisor.attach`) happens regardless.
+    var tileWiring: ((UUID, AgentID) -> Void)?
+    /// CX-01 Phase 2b (§10.3): the bounded operation store behind
+    /// `agent.delegate` / `operation.get`.
+    var operations = WorkspaceOperationStore()
+    /// Encoded `agent.delegate` results by operationId, for same-key replays;
+    /// pruned with the store's eviction.
+    var delegateReplayResults: [String: [String: AnyHashableJSON]] = [:]
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
@@ -98,7 +112,8 @@ final class WorkspaceAPIService {
         supervisor: AgentSupervisor,
         registryStore: @escaping () -> RegistryStore?,
         epoch: String,
-        approvalHandler: @escaping ApprovalHandler
+        approvalHandler: @escaping ApprovalHandler,
+        tileWiring: ((UUID, AgentID) -> Void)? = nil
     ) {
         self.runtimeProvider = runtime
         self.canvasProvider = canvas
@@ -107,6 +122,7 @@ final class WorkspaceAPIService {
         self.registryStoreProvider = registryStore
         self.epoch = epoch
         self.approvalHandler = approvalHandler
+        self.tileWiring = tileWiring
     }
 
     // MARK: - Revocation (§14.1)
@@ -208,6 +224,14 @@ final class WorkspaceAPIService {
         case .canvasApply:
             return canvasApply(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                                payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .agentDelegate:
+            return delegate(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                            payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .agentReveal:
+            return reveal(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                          payload: payload, runtime: runtime, canvas: canvas)
+        case .operationGet:
+            return operationGet(agentId: agentId, ownHandle: ownHandle, requestId: requestId, payload: payload)
         }
     }
 
@@ -586,7 +610,7 @@ final class WorkspaceAPIService {
 
     // MARK: - Presentation (§16)
 
-    private func present(
+    func present(
         tileId: UUID, policy: WorkspacePresentationPolicy, generationAtDispatch: UInt64,
         runtime: WorkspaceRuntime, canvas: CanvasNSView
     ) -> (ArtifactOpenResult.Presentation, WorkspacePresentationEffects) {
@@ -712,7 +736,7 @@ final class WorkspaceAPIService {
 
     // MARK: - Grants, cache, history
 
-    private func seedGrantsIfNeeded(agentId: AgentID, checkout: CheckoutHandle) {
+    func seedGrantsIfNeeded(agentId: AgentID, checkout: CheckoutHandle) {
         let live = (grants[agentId] ?? []).filter { $0.revocationGeneration == revocationGeneration }
         if live.contains(where: { $0.issuer == .sessionPolicy }) { return }
         grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration)]
