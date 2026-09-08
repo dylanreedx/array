@@ -84,3 +84,87 @@ installing it through `PiExtensionInstaller` gated on
 - Harden `PiRpcTransport.writeLine` behind a write queue (three writers now).
 - Interaction-generation gaps: keyboard camera jumps and palette-spawn focus.
 - Phase 2 (inspection, visible delegation) is NOT started, per the assignment.
+
+---
+
+# Update — 2026-09-08, four parallel tracks integrated
+
+Everything below is merged into `array/cx01-canvas-api` (tip `a61a0555`, base
+`98e56e11`). Not merged to integration, not pushed. Four feature branches remain
+as the reviewable units: `array/cx01-hardening`, `array/cx01-inspection`,
+`array/cx01-geometry`, `array/cx01-delegation`.
+
+## The operation surface now
+
+| Op | Preset? | Owner route |
+|---|---|---|
+| `workspace.context` | yes | host projection |
+| `artifact.open` | yes | `WorkspaceRuntime.preflightExplicitOpen` + `executeOpen` |
+| `agent.find` | yes (own checkout, metadata only) | supervisor records + pure `AgentFindRanker` |
+| `agent.inspect` | yes for SELF; other agents need approval | read-only transcript projection |
+| `canvas.query` | yes | `snapshot(...)` → `CanvasEntityIndex` |
+| `canvas.apply` | **no** — approval | the drag's own `beginGeometryEdit`/`commitGeometryEdit` path |
+| `agent.delegate` | **no** — approval | `AgentSupervisor.handleSpawnRequest` (the `spawn_agent` path) |
+| `agent.reveal` | yes | the existing reveal/present machinery |
+| `operation.get` | yes | in-memory operation store, 200 live + 2000 tombstones |
+
+The single authorization source is `WorkspaceAPIOp.sessionPresetOperations`
+(defined in `WorkspaceAPIContracts+Canvas.swift`, consumed by `phase1Preset`).
+The two withheld ops go through `presentWorkspaceToolApproval`, whose alert text
+branches per op. `workspace.context.capabilities` advertises the preset only, and
+a Core assertion pins the full wire order of `WorkspaceAPIOp`.
+
+## Hardening landed
+
+Pi stdin writes are serialized behind one queue in `PiRpcTransport`, witnessed by
+eight concurrent 200 KB frames. `noteUserInteraction()` now fires at five user
+seams (reveal-for-work, the shared zone-jump landing, fit-all, restore-previous,
+palette spawn focus), so a stale `expectedInteractionGeneration` defers
+presentation. The managed-agent tile menu carries a `Workspace Tools` checkmark
+item that revokes grants immediately.
+
+## Verified on the merged tree (Debug, isolated temp roots, tmux disabled)
+
+App legs, all PASS: `--workspace-api-open-check`, `--workspace-api-grants-check`,
+`--workspace-api-agents-check`, `--workspace-api-canvas-check`,
+`--workspace-api-delegation-check`, `--workspace-api-pi-bridge-check`, plus
+`--strict-agent-harness-check`, `--agent-supervisor-check`,
+`--workspace-scene-owner-check`, `--zone-arming-check`,
+`--agent-local-file-link-check`, `--agent-inbox-check`,
+`--managed-agent-page-zoom-check`, `--canvas-persistence-model-check`,
+`--zone-save-isolation-check`.
+
+CoreChecks arms, all PASS: `--workspace-api-contract-check`,
+`--workspace-api-agents-contract-check`, `--workspace-api-canvas-contract-check`,
+`--workspace-operation-store-check`, `--role-registry-check`,
+`--pi-host-tool-bridge-check`, `--pi-rpc-transport-check`.
+
+`matrix-inventory.txt` regenerated (450 records) and `check-matrix-inventory.sh`
+passes. Six workspace-api legs are registered in `scripts/run-matrix.sh`.
+
+## Merge decisions a reviewer should check
+
+- One preset set replaced the three tracks' separate constants; `agent.inspect`
+  is preset-granted for SELF only, enforced by `inspectableAgentIds`.
+- `WorkspaceContextResponse.encodedByteCeiling` is 1280. Capabilities are
+  authorization truth and must stay complete, so the ops spend budget and the
+  ceiling sheds `recentOperations` last.
+- The roled-pi `--tools` allowlist now carries nine host tools; the pinned argv
+  in `StrictAgentHarnessChecks` and `RoleRegistryChecks` was updated in step.
+- The append-order assertion was widened from "the last two cases" to the full
+  ordered list, so any new op must update it deliberately.
+
+## Still not done
+
+Real managed-pi acceptance for all nine tools, in a coordinator-assigned Dev
+lane, per the procedure above. The extension TypeScript has no type-check gate.
+A full matrix run from a real terminal session is still owed before merge.
+
+## Protocol note
+
+While probing for a spawn-extension check, the delegation track ran
+`.build/debug/ContinuumRevivedCoreChecks` once with no arguments and without
+`TMUX_TMPDIR` isolation. That bare run includes real-tmux coverage on the default
+socket, which AGENTS.md forbids while Array may be running. It was not repeated
+and no tmux server was inspected or killed, but it is recorded here because the
+live app could have been disrupted.
