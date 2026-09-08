@@ -1506,10 +1506,14 @@ final class TileSpawner {
         at worldPoint: CGPoint? = nil,
         launchSelection: AgentLaunchSelection? = nil,
         providerSettings: AgentModelConfig.Resolution? = nil,
-        mirrored: Bool = false
+        mirrored: Bool = false,
+        creationScope explicitScope: CreationScope? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        let creationScope = creationScopeProvider?()
+        // CX-01 Phase 2b: the workspace API targets the PARENT's zone, not the
+        // armed one — an explicit scope outranks the provider (§16: targeting a
+        // zone for placement is separate from arming it).
+        let creationScope = explicitScope ?? creationScopeProvider?()
         let now = Date()
         let tileId = UUID()
         let threadId = "managed-\(tileId.uuidString)"
@@ -1697,11 +1701,15 @@ final class TileSpawner {
     /// self-check can drive.
     func spawnManagedAgentForExistingAgent(
         _ agentID: AgentID,
-        supervisor: AgentSupervisor
+        supervisor: AgentSupervisor,
+        at worldPoint: CGPoint? = nil,
+        creationScope: CreationScope? = nil
     ) -> ManagedAgentOutcome {
         spawnManagedAgent(
+            at: worldPoint,
             launchSelection: supervisor.launchSelection(for: agentID),
-            mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false)
+            mirrored: supervisor.records[agentID]?.capabilities.locallyManaged == false,
+            creationScope: creationScope)
     }
 
     /// Deterministic witness for ⌘K's explicit-model spawn contract.

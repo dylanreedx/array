@@ -3645,6 +3645,7 @@ final class AgentSupervisor {
                     warn: warn
                 )
             }
+            lastSpawnRefusals[parentId] = nil
             let childName = records[childID]?.humanDisplayName ?? "Subagent"
             deliver(.childAgentSpawned(
                 threadId: Self.threadId(for: parentId),
@@ -3681,6 +3682,7 @@ final class AgentSupervisor {
         toolName: String = SpawnRequest.toolName
     ) -> AgentID? {
         warn("AgentSupervisor: refusing \(toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
+        lastSpawnRefusals[parentId] = refusal
         guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
@@ -3717,6 +3719,12 @@ final class AgentSupervisor {
         }
         return nil
     }
+
+    /// CX-01 Phase 2b: the reason `handleSpawnRequest` last returned nil for this
+    /// parent, so the workspace API can report it as a structured error (the
+    /// same shape as `sendRefusal(for:)`). Cleared when a spawn succeeds.
+    private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
+    func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {

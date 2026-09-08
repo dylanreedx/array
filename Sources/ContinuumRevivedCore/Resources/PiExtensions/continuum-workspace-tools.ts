@@ -129,6 +129,90 @@ export default function continuumWorkspaceTools(pi: ExtensionAPI) {
     },
   });
 
+  // MARK: delegation
+  //
+  // CX-01 Phase 2b (§10): visible delegation with safe retry. `array_delegate`
+  // wraps Array's own child-creation path — it never starts a process itself, and
+  // Array refuses a provider/model override rather than silently changing one.
+  // A delegation whose child was created but whose tile could not be presented is
+  // repaired with `array_reveal_agent`, never by delegating again.
+  pi.registerTool({
+    name: "array_delegate",
+    label: "Array Delegate To Agent",
+    description:
+      "Create a child agent in Array, inheriting your provider, model and checkout, and place its tile beside you on the canvas. Returns the real childAgentId, tileId, per-step statuses (creation, attachment, durability, presentation) and childRunning. Requires an idempotencyKey: the same key with the same payload never creates a second child. The first delegation in a session asks the user for permission (scope_approval_required if declined). Errors are structured (unsupported, permission_denied, idempotency_conflict, outcome_unknown); it never creates a worktree or changes provider/model.",
+    promptSnippet: "Delegate a task to a new child agent that appears on the Array canvas",
+    promptGuidelines: [
+      "Delegate only when the user asked for it; discussing delegation is not an instruction to spawn.",
+      "Always pass a stable idempotencyKey and reuse the SAME key when retrying — never delegate twice for one task.",
+      "If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.",
+      "On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.",
+      "Do not pass provider or model: the child inherits yours, and a different one is refused as unsupported.",
+    ],
+    parameters: Type.Object({
+      task: Type.String({ description: "The child's task — what it should do, in full. This becomes its first prompt." }),
+      title: Type.Optional(Type.String({ maxLength: 120, description: "Short human label for the child's tile." })),
+      idempotencyKey: Type.String({ maxLength: 128, description: "Stable key for this delegation. Reuse it verbatim on any retry." }),
+      placement: Type.Optional(
+        Type.Object({ nearTileId: Type.Optional(Type.String({ description: "Tile id to place the child beside; defaults to your own tile." })) }),
+      ),
+      presentation: Type.Optional(
+        Type.Object({
+          camera: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("revealResult")])),
+          keyboardFocus: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("enterResult")])),
+          selection: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("selectResult")])),
+        }),
+      ),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "agent.delegate", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
+  pi.registerTool({
+    name: "array_reveal_agent",
+    label: "Array Reveal Agent",
+    description:
+      "Present an EXISTING agent's tile on the canvas (yourself or one of your children). Creates nothing. Returns tileId, zone and world rect plus what presentation actually did. not_found when that agent has no tile; presentation_required when its tile lives in another workspace.",
+    promptSnippet: "Show an existing agent's tile on the Array canvas without creating anything",
+    promptGuidelines: [
+      "Use array_reveal_agent to repair a delegation whose presentation failed, and to point the user at a child that already exists.",
+      "It never creates an agent: if it returns not_found the child has no tile, and delegating again would create a second child.",
+    ],
+    parameters: Type.Object({
+      agentId: Type.String({ description: "The agent's id (your own, or a childAgentId array_delegate returned)." }),
+      presentation: Type.Optional(
+        Type.Object({
+          camera: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("revealResult")])),
+          keyboardFocus: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("enterResult")])),
+          selection: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("selectResult")])),
+        }),
+      ),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "agent.reveal", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
+  pi.registerTool({
+    name: "array_get_operation",
+    label: "Array Get Operation",
+    description:
+      "Recover the outcome of one of your earlier Array operations by operationId or idempotencyKey: status (accepted, partial, committed, failed, expired), per-step statuses, the child agentId and tileId when known, and childRunning (absent means unknown). status 'expired' means Array no longer holds the outcome — that request must NOT be repeated.",
+    promptSnippet: "Look up what one of your earlier Array operations actually did",
+    promptGuidelines: [
+      "Call array_get_operation after any cancelled, timed-out or outcome_unknown Array request, before repeating anything.",
+      "status 'expired' is not permission to retry: the child may exist. Ask the user instead.",
+    ],
+    parameters: Type.Object({
+      operationId: Type.Optional(Type.String({ maxLength: 128 })),
+      idempotencyKey: Type.Optional(Type.String({ maxLength: 128 })),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "operation.get", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
   // §7.1 automatic context: refreshed at every prompt boundary (rpc `prompt`
   // runs `before_agent_start` before answering), ~256 tokens, appended to the
   // system prompt. A slow or absent host appends nothing rather than stale data.

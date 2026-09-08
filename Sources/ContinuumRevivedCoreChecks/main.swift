@@ -83,6 +83,11 @@ if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
 }
+// CX-01 Phase 2b (§10.3): the pure operation store behind agent.delegate.
+if CommandLine.arguments.contains("--workspace-operation-store-check") {
+    runWorkspaceOperationStoreChecks()
+    Foundation.exit(0)
+}
 // CX-01 grew the roled-pi `--tools` allowlist; this arm runs the RoleRegistry
 // section on its own because the real-tmux legs ahead of it in the full run are
 // load-sensitive and stop the run before it is reached in a headless shell.
@@ -12465,5 +12470,10 @@ runWorkspaceAPIContractChecks()
 // fake returns to its model, and cancellation, deadline, late replies, runner
 // replacement, concurrency and foreign dialogs behave per §15.
 runPiHostToolBridgeChecks()
+
+// CX-01 Phase 2b (§10.3) — the pure operation store behind visible delegation:
+// dedupe by (caller, key), payload binding, caller scoping, bounded retention
+// and explicit expiry, plus the delegation wire contracts.
+runWorkspaceOperationStoreChecks()
 
 print("ContinuumRevivedCoreChecks passed")

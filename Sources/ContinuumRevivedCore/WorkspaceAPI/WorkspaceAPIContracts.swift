@@ -25,6 +25,11 @@ public enum WorkspaceAPISchema {
 public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case workspaceContext = "workspace.context"
     case artifactOpen = "artifact.open"
+    // CX-01 Phase 2b (§10): visible delegation with safe retry. Contracts in
+    // `WorkspaceAPIContracts+Delegation.swift`.
+    case agentDelegate = "agent.delegate"
+    case agentReveal = "agent.reveal"
+    case operationGet = "operation.get"
 }
 
 // MARK: - Identity
@@ -299,8 +304,15 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
         self.observedAt = observedAt
     }
 
-    /// The encoded ceiling the host enforces — roughly 256 tokens.
-    public static let encodedByteCeiling = 1024
+    /// The encoded ceiling the host enforces — roughly 300 tokens.
+    ///
+    /// CX-01 Phase 2b raised it from 1024: `capabilities` is authorization truth
+    /// and must be complete, so the three delegation ops spend ~60 bytes of the
+    /// budget, and the ceiling sheds `recentOperations` — the only way a caller
+    /// cancelled after a committed effect learns the identity it produced. Paying
+    /// for the new ops out of that history would have made the automatic context
+    /// quietly less useful the more operations the API grew.
+    public static let encodedByteCeiling = 1280
 }
 
 // MARK: - artifact.open
@@ -569,15 +581,18 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         self.singleUse = singleUse
     }
 
-    /// The Phase 1 preset: both ops within the agent's own concrete checkout;
-    /// presentation may reveal the camera and nothing else.
+    /// The Phase 1 preset: the read/open/reveal ops within the agent's own
+    /// concrete checkout; presentation may reveal the camera and nothing else.
+    /// Delegation (`agent.delegate`) is NOT in the preset (§14.1): the first
+    /// delegation per agent session goes through the trusted approval UI.
     public static let phase1Ceiling = WorkspacePresentationPolicy(camera: .revealResult)
+    public static let phase1Operations: Set<WorkspaceAPIOp> = [.workspaceContext, .artifactOpen, .agentReveal, .operationGet]
 
     public static func phase1Preset(agentId: AgentID, checkout: CheckoutHandle, generation: UInt64) -> WorkspaceToolGrant {
         WorkspaceToolGrant(
             agentId: agentId,
             checkoutHandles: [checkout],
-            operations: Set(WorkspaceAPIOp.allCases),
+            operations: phase1Operations,
             presentationCeiling: phase1Ceiling,
             issuer: .sessionPolicy,
             revocationGeneration: generation)

@@ -645,6 +645,11 @@ run_app_check .build/debug/Array --workspace-scene-owner-check
 # forgery, revocation and all five presentation dimensions under user input.
 run_app_check .build/debug/Array --workspace-api-open-check
 run_app_check .build/debug/Array --workspace-api-grants-check
+# CX-01 Phase 2b (.plans/59, §10): visible delegation with safe retry — create
+# once under retry, idempotency conflict, the child tile inside the parent's zone,
+# a presentation failure repaired by agent.reveal, operation.get per step, and
+# cancellation reporting the child truthfully.
+run_app_check .build/debug/Array --workspace-api-delegation-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's

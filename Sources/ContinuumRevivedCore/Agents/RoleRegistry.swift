@@ -74,7 +74,10 @@ public struct RoleRegistry: Sendable {
     /// sends no `--tools` and already has them.
     public static func hostToolNames(for harness: AgentHarness) -> [String] {
         switch harness {
-        case .pi: return ["array_workspace_context", "array_open_document"]
+        case .pi: return ["array_workspace_context", "array_open_document",
+                         // CX-01 Phase 2b: delegation is authorized per request by
+                         // the host grant table, not by withholding the tool.
+                         "array_delegate", "array_reveal_agent", "array_get_operation"]
         case .claudeCode, .codex: return []
         }
     }
