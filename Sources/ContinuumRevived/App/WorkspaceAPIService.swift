@@ -49,15 +49,20 @@ final class WorkspaceAPIService {
         let checkoutDisplayName: String
         let op: WorkspaceAPIOp
         let relativePath: String?
+        /// Phase 2a `agent.inspect` of another agent: who would be inspected.
+        var targetAgentId: AgentID? = nil
+        var targetAgentDisplayName: String? = nil
     }
 
     enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession }
     typealias ApprovalHandler = (ScopeApprovalPrompt) -> ScopeApprovalDecision
 
-    private let runtimeProvider: () -> WorkspaceRuntime?
-    private let canvasProvider: () -> CanvasNSView?
+    // Internal, not private: `WorkspaceAPIService+Agents.swift` extends this
+    // service from another file.
+    let runtimeProvider: () -> WorkspaceRuntime?
+    let canvasProvider: () -> CanvasNSView?
     private let focusBrokerProvider: () -> FocusBroker?
-    private let supervisor: AgentSupervisor
+    let supervisor: AgentSupervisor
     private let registryStoreProvider: () -> RegistryStore?
     let epoch: String
     /// Production: an NSAlert (`AppDelegate.presentWorkspaceToolApproval`). Checks
@@ -72,9 +77,9 @@ final class WorkspaceAPIService {
     var _beforeCommitHook: (() -> Void)?
     var _beforePresentationHook: (() -> Void)?
 
-    private var grants: [AgentID: [WorkspaceToolGrant]] = [:]
+    var grants: [AgentID: [WorkspaceToolGrant]] = [:]
     private(set) var revocationGeneration: UInt64 = 0
-    private(set) var approvalPromptCount = 0
+    var approvalPromptCount = 0
     private struct CachedOpen { let payloadHash: String; let result: ArtifactOpenResult }
     private var idempotency: [AgentID: [String: CachedOpen]] = [:]
     private var idempotencyOrder: [AgentID: [String]] = [:]
@@ -190,6 +195,10 @@ final class WorkspaceAPIService {
         case .artifactOpen:
             return open(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                         payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .agentFind:
+            return findAgents(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
+        case .agentInspect:
+            return inspectAgent(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, canvas: canvas)
         }
     }
 
@@ -247,7 +256,7 @@ final class WorkspaceAPIService {
 
     // MARK: - artifact.open (§9)
 
-    private struct KnownCheckout {
+    struct KnownCheckout {
         let handle: CheckoutHandle
         let root: URL
         let projectId: UUID?
@@ -256,7 +265,7 @@ final class WorkspaceAPIService {
 
     /// Registry projects ∪ agent checkout roots (`checkoutRoot`, not `cwd`) —
     /// the same two sources as `AppDelegate.resolveDocumentLocation`.
-    private func knownCheckouts() -> [CheckoutHandle: KnownCheckout] {
+    func knownCheckouts() -> [CheckoutHandle: KnownCheckout] {
         var known: [CheckoutHandle: KnownCheckout] = [:]
         if let registry = try? registryStoreProvider()?.loadOrEmpty() {
             for project in registry.projects where !project.missing {
@@ -700,7 +709,7 @@ final class WorkspaceAPIService {
         grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration)]
     }
 
-    private func mint(_ grant: WorkspaceToolGrant) {
+    func mint(_ grant: WorkspaceToolGrant) {
         grants[grant.agentId, default: []].append(grant)
     }
 
@@ -735,7 +744,7 @@ final class WorkspaceAPIService {
 
     // MARK: - Encoding helpers
 
-    private static let encoder: JSONEncoder = {
+    static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601

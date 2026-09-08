@@ -83,6 +83,11 @@ if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
 }
+// CX-01 Phase 2a: agent.find / agent.inspect contracts and the pure ranker.
+if CommandLine.arguments.contains("--workspace-api-agents-contract-check") {
+    runWorkspaceAPIAgentsContractChecks()
+    Foundation.exit(0)
+}
 // CX-01 grew the roled-pi `--tools` allowlist; this arm runs the RoleRegistry
 // section on its own because the real-tmux legs ahead of it in the full run are
 // load-sensitive and stop the run before it is reached in a headless shell.
@@ -12458,6 +12463,11 @@ runEditorPreferencesChecks()
 // handles, presentation intersection, the tolerant open-request decoder, result
 // round trips, the grant evaluator, and the pi bridge envelope parse/encode.
 runWorkspaceAPIContractChecks()
+
+// CX-01 Phase 2a — agent.find / agent.inspect DTO round trips, the pure §11
+// ranker (exact id/name first, lexical then supporting evidence, ties are
+// ambiguous), the excerpt byte bound, and the agent-scope grant evaluator.
+runWorkspaceAPIAgentsContractChecks()
 
 // CX-01 — the pi host tool bridge driven end to end against a scripted fake
 // `pi --mode rpc`: an Array-owned `extension_ui_request` reaches the host handler

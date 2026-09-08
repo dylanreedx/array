@@ -4736,6 +4736,15 @@ final class AgentSupervisor {
         runners[id] != nil
     }
 
+    /// CX-01 Phase 2a (`.plans/59` §11): the semantic transcript document this
+    /// supervisor holds for an agent — fed by `deliver` → `ingestTranscriptEvent`,
+    /// the same projection the durable snapshot is written from — or nil when no
+    /// event has reached it in this session. A READ: nothing is flushed, marked,
+    /// persisted or woken. Absence here is not evidence the agent did nothing.
+    func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
+        transcriptProjections[id]?.document
+    }
+
     /// Operational state for one tile. State comes only from explicit lifecycle
     /// and request events. Transport occupancy affects capability acceptance, not
     /// the label: a process that has emitted Ready still presents Ready.
