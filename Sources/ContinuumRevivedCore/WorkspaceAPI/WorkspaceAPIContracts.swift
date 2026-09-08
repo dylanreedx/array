@@ -29,6 +29,9 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // discovery and bounded inspection. Appended, never reordered.
     case agentFind = "agent.find"
     case agentInspect = "agent.inspect"
+    // Phase 4 (`WorkspaceAPIContracts+Canvas.swift`): validated geometry.
+    case canvasQuery = "canvas.query"
+    case canvasApply = "canvas.apply"
 }
 
 // MARK: - Identity
@@ -308,7 +311,7 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     /// fixed identity; the ceiling grew by that much so the SAME depth of
     /// `recentOperations` still fits, since history is what the ceiling is meant
     /// to bound.
-    public static let encodedByteCeiling = 1060
+    public static let encodedByteCeiling = 1080
 }
 
 // MARK: - artifact.open
@@ -511,6 +514,12 @@ public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStri
         case permissionDenied = "permission_denied"
         case idempotencyConflict = "idempotency_conflict"
         case outcomeUnknown = "outcome_unknown"
+        /// `expectedRevision` no longer matches the host's `{epoch, structure}`;
+        /// nothing was applied. Re-query before another write (§14.4).
+        case revisionConflict = "revision_conflict"
+        /// A `canvas.query` cursor minted under an older structural revision;
+        /// restart the scoped query (§14.4).
+        case cursorExpired = "cursor_expired"
     }
 
     public var code: Code
@@ -583,18 +592,19 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         self.inspectableAgentIds = inspectableAgentIds
     }
 
-    /// The Phase 1 preset: both ops within the agent's own concrete checkout;
-    /// presentation may reveal the camera and nothing else. Phase 2a adds
-    /// `agent.find` (metadata, own checkout) and `agent.inspect` of SELF only —
-    /// listed explicitly so a future op is never granted by growing the enum.
+    /// The session preset: the read ops and `artifact.open` within the agent's
+    /// own concrete checkout; presentation may reveal the camera and nothing
+    /// else. `agent.inspect` covers SELF only. `canvas.apply` is NOT in it —
+    /// the first apply goes through the trusted approval prompt. The set is
+    /// listed explicitly in `WorkspaceAPIOp.sessionPresetOperations`, so a
+    /// future op is never granted merely by growing the enum.
     public static let phase1Ceiling = WorkspacePresentationPolicy(camera: .revealResult)
-    public static let presetOperations: Set<WorkspaceAPIOp> = [.workspaceContext, .artifactOpen, .agentFind, .agentInspect]
 
     public static func phase1Preset(agentId: AgentID, checkout: CheckoutHandle, generation: UInt64) -> WorkspaceToolGrant {
         WorkspaceToolGrant(
             agentId: agentId,
             checkoutHandles: [checkout],
-            operations: presetOperations,
+            operations: WorkspaceAPIOp.sessionPresetOperations,
             presentationCeiling: phase1Ceiling,
             issuer: .sessionPolicy,
             revocationGeneration: generation,

@@ -648,6 +648,11 @@ run_app_check .build/debug/Array --workspace-api-grants-check
 # CX-01 Phase 2a: agent.find / agent.inspect — ranking, ambiguity, self-inspect
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 run_app_check .build/debug/Array --workspace-api-agents-check
+# CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through
+# the drag's own owner route — the persisted WORLD frame, untouched and
+# unhydrated tiles surviving, and every conflict (stale revision, live gesture,
+# unhydrated or foreign target) applying nothing.
+run_app_check .build/debug/Array --workspace-api-canvas-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's

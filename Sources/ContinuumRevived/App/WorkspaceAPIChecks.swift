@@ -348,8 +348,10 @@ enum WorkspaceAPIChecks {
         try expect(coverage?["complete"]?.bool == false, "coverage must not claim completeness with an unhydrated zone")
         try expect(coverage?["installedZoneIds"]?.array?.compactMap(uuid) == [f.zoneB], "installed zones = [zoneB], got \(String(describing: coverage?["installedZoneIds"]))")
         try expect(coverage?["unhydratedZoneIds"]?.array?.compactMap(uuid) == [f.zoneB2], "unhydrated zones = [zoneB2]")
-        // CX-01 Phase 2a widened the preset with the two read-only agent ops.
-        try expect((ctx["capabilities"]?.array?.compactMap(\.string) ?? []).sorted() == ["agent.find", "agent.inspect", "artifact.open", "workspace.context"],
+        // The preset covers the reads and the open; `canvas.apply` is withheld
+        // until the user approves it, so it must NOT be advertised here — a
+        // capability list is a promise, not a menu of what exists.
+        try expect((ctx["capabilities"]?.array?.compactMap(\.string) ?? []).sorted() == ["agent.find", "agent.inspect", "artifact.open", "canvas.query", "workspace.context"],
                    "capabilities from the preset grant, got \(String(describing: ctx["capabilities"]))")
         let ctxBytes = try JSONSerialization.data(withJSONObject: WorkspaceAPIService.plain(ctx)).count
         try expect(ctxBytes < WorkspaceContextResponse.encodedByteCeiling, "context must stay under the byte ceiling, got \(ctxBytes)")

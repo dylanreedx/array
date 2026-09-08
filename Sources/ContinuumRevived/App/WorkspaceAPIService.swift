@@ -63,7 +63,7 @@ final class WorkspaceAPIService {
     let canvasProvider: () -> CanvasNSView?
     private let focusBrokerProvider: () -> FocusBroker?
     let supervisor: AgentSupervisor
-    private let registryStoreProvider: () -> RegistryStore?
+    let registryStoreProvider: () -> RegistryStore?
     let epoch: String
     /// Production: an NSAlert (`AppDelegate.presentWorkspaceToolApproval`). Checks
     /// inject a deterministic decision. This is the ONLY place a grant beyond the
@@ -77,6 +77,7 @@ final class WorkspaceAPIService {
     var _beforeCommitHook: (() -> Void)?
     var _beforePresentationHook: (() -> Void)?
 
+    // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
     private(set) var revocationGeneration: UInt64 = 0
     var approvalPromptCount = 0
@@ -84,7 +85,10 @@ final class WorkspaceAPIService {
     private var idempotency: [AgentID: [String: CachedOpen]] = [:]
     private var idempotencyOrder: [AgentID: [String]] = [:]
     private var recentOperations: [AgentID: [WorkspaceRecentOperation]] = [:]
-    private static let idempotencyCapacity = 64
+    struct CachedCanvasApply { let payloadHash: String; let result: CanvasApplyResult }
+    var canvasApplyIdempotency: [AgentID: [String: CachedCanvasApply]] = [:]
+    var canvasApplyIdempotencyOrder: [AgentID: [String]] = [:]
+    static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
     init(
@@ -199,6 +203,11 @@ final class WorkspaceAPIService {
             return findAgents(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
         case .agentInspect:
             return inspectAgent(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, canvas: canvas)
+        case .canvasQuery:
+            return canvasQuery(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
+        case .canvasApply:
+            return canvasApply(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                               payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
         }
     }
 
@@ -732,7 +741,7 @@ final class WorkspaceAPIService {
         }
     }
 
-    private func remember(agentId: AgentID, _ operation: WorkspaceRecentOperation) {
+    func remember(agentId: AgentID, _ operation: WorkspaceRecentOperation) {
         recentOperations[agentId, default: []].append(operation)
         while (recentOperations[agentId]?.count ?? 0) > Self.recentOperationsCapacity {
             recentOperations[agentId]?.removeFirst()
