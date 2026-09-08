@@ -7998,6 +7998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func fitAllNavZones() {
         guard let viewport = canvasView?.fitAllToViewport() else { return }
+        workspaceRuntime?.noteUserInteraction()
         navSelectedZoneId = nil
         canvasView?.setViewport(viewport)
     }
@@ -12559,6 +12560,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
+        // CX-01: a palette spawn's focus is the user's newer intent; `.tileSpawned`
+        // never arms a zone, so nothing else records it.
+        workspaceRuntime?.noteUserInteraction()
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
@@ -13602,6 +13606,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         scopeReason: FocusRequest
     ) -> Bool {
         guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
+        // CX-01: every route here (⌘K, leader, hold-⌥ Return, previous tile) is
+        // the user's own jump — newer intent than any pending API presentation.
+        // `setViewport` cannot tell, because an API reveal drives it too.
+        workspaceRuntime?.noteUserInteraction()
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
             canvasView.setViewport(targetViewport)
@@ -13653,6 +13661,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///   nothing to strand. Where nav mode leaves scope on exit is nav mode's
     ///   own (legacy) contract, out of this plan's scope.
     private func completeZoneJump(_ zoneId: UUID, landingInputOnCanvas: Bool = true) {
+        // CX-01: the shared landing for every user zone jump (see `revealTileForWork`).
+        workspaceRuntime?.noteUserInteraction()
         if landingInputOnCanvas {
             focusBroker.enterScope(.canvas, reason: .tileSpawned)
         }
@@ -13701,6 +13711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     private func restorePreviousView() -> Bool {
         guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return false }
+        workspaceRuntime?.noteUserInteraction()
         canvasView.setViewport(snapshot.viewport)
         navSelectedZoneId = snapshot.focusedZoneId
         if let tileId = snapshot.focusedTileId, canvasView.navigationTileSnapshot(for: tileId) != nil {

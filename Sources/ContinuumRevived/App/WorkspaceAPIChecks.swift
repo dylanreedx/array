@@ -586,6 +586,43 @@ enum WorkspaceAPIChecks {
         f.canvas.onUserCameraChange = { cameraCallbackFired = true; previous?() }
         f.canvas.onUserCameraChange = previous
         _ = cameraCallbackFired
+        // (g) CX-01 hardening: a KEYBOARD camera jump and a PALETTE spawn are the
+        //     user's acts too, though neither runs through the camera driver or a
+        //     click. Hold-⌥ Return reveals the current tile through
+        //     `revealTileForWork`, the seam every ⌘K/leader tile jump shares; the
+        //     palette's New Note focuses what it made through `focusSpawnedTile`.
+        //     Each must bump the generation, and a reveal pinned to the pre-jump
+        //     generation must then defer instead of overwriting the user's move.
+        func synthesizedKey(_ type: NSEvent.EventType, _ key: String, _ keyCode: UInt16, _ mods: NSEvent.ModifierFlags) throws -> NSEvent {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil,
+                                               characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: keyCode)
+            else { throw Failure(message: "could not synthesize \(type) \(key)") }
+            return event
+        }
+        let generationBeforeKeyboard = f.runtime.interactionGeneration
+        f.canvas.setViewport(CanvasViewport(x: -4000, y: -4000, zoom: 0.5))
+        f.canvas.markActive(tileId: paTileId)
+        f.delegate.leaderDwell = 0
+        f.delegate.handleFlagsChanged(try synthesizedKey(.flagsChanged, "", 58, [.option]))
+        try expect(f.focusBroker.activeSurface == .modal(.leader), "holding ⌥ arms the leader, got \(String(describing: f.focusBroker.activeSurface))")
+        let appliesBeforeKeyboard = f.canvas.qaViewportApplyCount
+        let leaderReturn = try synthesizedKey(.keyDown, "\r", 36, [.option])
+        try expect(f.delegate.handleHotkey(leaderReturn), "leader Return is consumed")
+        f.delegate.handleFlagsChanged(try synthesizedKey(.flagsChanged, "", 58, []))
+        try expect(f.canvas.qaViewportApplyCount == appliesBeforeKeyboard + 1 && f.canvas.viewport == f.canvas.framedViewportForTileJump(paTileId),
+                   "leader Return jumped the camera to the current tile")
+        try expect(f.runtime.interactionGeneration > generationBeforeKeyboard, "a keyboard camera jump is a user interaction")
+        let staleAfterKeyboard = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue,
+                                                     "presentation": ["camera": "revealResult", "expectedInteractionGeneration": Int(generationBeforeKeyboard)]]), "stale after keyboard jump")
+        try expect(staleAfterKeyboard["presentationEffects"]?.object?["camera"]?.string == "deferred", "a reveal pinned before the keyboard jump defers")
+        let generationBeforeSpawn = f.runtime.interactionGeneration
+        let notesBeforeSpawn = f.canvas.allWorkspaceTiles().filter { $0.kind == .note }.count
+        try expect(f.delegate.qaPerformPaletteAction(.newNote), "the palette spawns a note into the armed zone")
+        try expect(f.canvas.allWorkspaceTiles().filter { $0.kind == .note }.count == notesBeforeSpawn + 1, "exactly one note tile appeared")
+        try expect(f.runtime.interactionGeneration > generationBeforeSpawn, "a palette spawn's focus is a user interaction")
+        let staleAfterSpawn = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue,
+                                                  "presentation": ["camera": "revealResult", "expectedInteractionGeneration": Int(generationBeforeSpawn)]]), "stale after palette spawn")
+        try expect(staleAfterSpawn["presentationEffects"]?.object?["camera"]?.string == "deferred", "a reveal pinned before the palette spawn defers")
 
         // W28/W20 — revocation: flipping the policy off during the approval prompt
         // denies before any effect; afterwards even context is denied without leaks.
