@@ -25,6 +25,10 @@ public enum WorkspaceAPISchema {
 public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case workspaceContext = "workspace.context"
     case artifactOpen = "artifact.open"
+    // CX-01 Phase 2a (`WorkspaceAPIContracts+Agents.swift`): read-only agent
+    // discovery and bounded inspection. Appended, never reordered.
+    case agentFind = "agent.find"
+    case agentInspect = "agent.inspect"
 }
 
 // MARK: - Identity
@@ -299,8 +303,12 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
         self.observedAt = observedAt
     }
 
-    /// The encoded ceiling the host enforces — roughly 256 tokens.
-    public static let encodedByteCeiling = 1024
+    /// The encoded ceiling the host enforces — roughly 256 tokens. Phase 2a
+    /// added two capability names (`agent.find`, `agent.inspect`), ~36 bytes of
+    /// fixed identity; the ceiling grew by that much so the SAME depth of
+    /// `recentOperations` still fits, since history is what the ceiling is meant
+    /// to bound.
+    public static let encodedByteCeiling = 1060
 }
 
 // MARK: - artifact.open
@@ -548,6 +556,10 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
     /// generation is dead.
     public var revocationGeneration: UInt64
     public var singleUse: Bool
+    /// Phase 2a: the agents whose evidence `agent.inspect` may return under this
+    /// grant. The preset names the caller itself; anything else is minted only
+    /// by the trusted approval UI (§14.1: no other-agent transcripts by default).
+    public var inspectableAgentIds: Set<AgentID>
 
     public init(
         grantId: UUID = UUID(),
@@ -557,7 +569,8 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         presentationCeiling: WorkspacePresentationPolicy,
         issuer: Issuer,
         revocationGeneration: UInt64,
-        singleUse: Bool = false
+        singleUse: Bool = false,
+        inspectableAgentIds: Set<AgentID> = []
     ) {
         self.grantId = grantId
         self.agentId = agentId
@@ -567,20 +580,25 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         self.issuer = issuer
         self.revocationGeneration = revocationGeneration
         self.singleUse = singleUse
+        self.inspectableAgentIds = inspectableAgentIds
     }
 
     /// The Phase 1 preset: both ops within the agent's own concrete checkout;
-    /// presentation may reveal the camera and nothing else.
+    /// presentation may reveal the camera and nothing else. Phase 2a adds
+    /// `agent.find` (metadata, own checkout) and `agent.inspect` of SELF only —
+    /// listed explicitly so a future op is never granted by growing the enum.
     public static let phase1Ceiling = WorkspacePresentationPolicy(camera: .revealResult)
+    public static let presetOperations: Set<WorkspaceAPIOp> = [.workspaceContext, .artifactOpen, .agentFind, .agentInspect]
 
     public static func phase1Preset(agentId: AgentID, checkout: CheckoutHandle, generation: UInt64) -> WorkspaceToolGrant {
         WorkspaceToolGrant(
             agentId: agentId,
             checkoutHandles: [checkout],
-            operations: Set(WorkspaceAPIOp.allCases),
+            operations: presetOperations,
             presentationCeiling: phase1Ceiling,
             issuer: .sessionPolicy,
-            revocationGeneration: generation)
+            revocationGeneration: generation,
+            inspectableAgentIds: [agentId])
     }
 }
 

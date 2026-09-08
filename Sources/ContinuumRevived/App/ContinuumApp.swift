@@ -1153,6 +1153,20 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // CX-01 Phase 2a: agent.find ranking/ambiguity and agent.inspect evidence,
+        // self-inspect in the preset, other-agent inspect through the trusted
+        // prompt, byte caps, and zero lifecycle/presentation side effects.
+        if CommandLine.arguments.contains("--workspace-api-agents-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIAgentsChecks.run()
+                print("ContinuumRevivedWorkspaceAPIAgentsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
 
         if CommandLine.arguments.contains("--zone-tile-hydration-check") {
             do {
@@ -14763,11 +14777,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// (or a check's injected stand-in) ever produces a grant beyond the preset.
     func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
         let alert = NSAlert()
-        alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
-        var detail = "The agent asked Array to open a document outside its own checkout."
-        if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
-        detail += "\n\nOpening never edits the file. \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
-        alert.informativeText = detail
+        if prompt.op == .agentInspect, let target = prompt.targetAgentDisplayName {
+            // CX-01 Phase 2a: another agent's transcript is never in the preset (§14.1).
+            alert.messageText = "Allow \(prompt.agentDisplayName) to inspect \(target)?"
+            alert.informativeText = "The agent asked Array for \(target)'s status and a bounded excerpt of its recent transcript (checkout: \(prompt.checkoutDisplayName)).\n\nInspecting is read-only: it never messages, interrupts or steers \(target). \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+        } else {
+            alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
+            var detail = "The agent asked Array to open a document outside its own checkout."
+            if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
+            detail += "\n\nOpening never edits the file. \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+            alert.informativeText = detail
+        }
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
         alert.addButton(withTitle: "Allow for This Agent Session")
