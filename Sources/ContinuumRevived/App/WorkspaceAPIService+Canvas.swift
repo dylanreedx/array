@@ -29,7 +29,7 @@ extension WorkspaceAPIService {
         let handle = request.checkoutHandle ?? ownHandle
         guard case .allowed = WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .canvasQuery, checkout: handle, requested: .preserveAll,
-            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration) else {
+            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not query that checkout's canvas."))
         }
         let known = knownCheckouts()
@@ -172,7 +172,7 @@ extension WorkspaceAPIService {
         var approvalRequestId: String?
         var verdict = WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .canvasApply, checkout: ownHandle, requested: .preserveAll,
-            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration)
+            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId))
         if case .allowed = verdict {} else {
             let promptId = UUID().uuidString
             approvalRequestId = promptId
@@ -191,22 +191,22 @@ extension WorkspaceAPIService {
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
-                    revocationGeneration: revocationGeneration, singleUse: true))
+                    revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
             case .allowForSession:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll, issuer: .userApprovalSession(requestId: promptId),
-                    revocationGeneration: revocationGeneration))
+                    revocationGeneration: revocationGeneration(for: agentId)))
             }
             verdict = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: .canvasApply, checkout: ownHandle, requested: .preserveAll,
-                grants: grants[agentId] ?? [], currentGeneration: revocationGeneration)
+                grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId))
             guard case .allowed = verdict else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Approval did not take.", approvalRequestId: promptId))
             }
         }
         consumeSingleUseApplyGrant(agentId: agentId, checkout: ownHandle)
-        let generationAtGrant = revocationGeneration
+        let generationAtGrant = revocationGeneration(for: agentId)
 
         // 5. Revision, gesture, constraints — before any effect.
         func preflight() -> WorkspaceAPIError? {
@@ -241,7 +241,7 @@ extension WorkspaceAPIService {
             remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .canvasApply, outcome: "cancelledBeforeEffect", tileId: request.tileId))
             return .cancelled(result: nil)
         }
-        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools were revoked before the change was applied.", approvalRequestId: approvalRequestId))
         }
         if let error = preflight() { return .error(error) }
@@ -294,7 +294,7 @@ extension WorkspaceAPIService {
     /// by the request it authorized unless a durable grant also covers it.
     private func consumeSingleUseApplyGrant(agentId: AgentID, checkout: CheckoutHandle) {
         guard var live = grants[agentId] else { return }
-        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.canvasApply) && $0.revocationGeneration == revocationGeneration }
+        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.canvasApply) && $0.revocationGeneration == revocationGeneration(for: agentId) }
         guard !durable, let index = live.firstIndex(where: { $0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.canvasApply) }) else { return }
         live.remove(at: index)
         grants[agentId] = live

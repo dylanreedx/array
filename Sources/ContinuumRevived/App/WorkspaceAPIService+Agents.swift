@@ -32,7 +32,7 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "The find request could not be decoded: \(error.localizedDescription)"))
         }
         let live = grants[agentId] ?? []
-        let discoverable = WorkspaceToolGrantEvaluator.discoverableCheckouts(agentId: agentId, grants: live, currentGeneration: revocationGeneration)
+        let discoverable = WorkspaceToolGrantEvaluator.discoverableCheckouts(agentId: agentId, grants: live, currentGeneration: revocationGeneration(for: agentId))
         guard !discoverable.isEmpty else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not discover agents."))
         }
@@ -41,8 +41,8 @@ extension WorkspaceAPIService {
             // Phase 2a approval seam.
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "agent.find is limited to the checkouts this agent may read; that checkout is not one of them."))
         }
-        let inspectable = WorkspaceToolGrantEvaluator.inspectableAgents(agentId: agentId, grants: live, currentGeneration: revocationGeneration)
-        let generationAtGrant = revocationGeneration
+        let inspectable = WorkspaceToolGrantEvaluator.inspectableAgents(agentId: agentId, grants: live, currentGeneration: revocationGeneration(for: agentId))
+        let generationAtGrant = revocationGeneration(for: agentId)
         let now = Date()
 
         let checkouts = request.checkoutHandle.map { Set([$0]) } ?? discoverable
@@ -78,7 +78,7 @@ extension WorkspaceAPIService {
             response.truncated = true
         }
         // §14.1: recheck immediately before content leaves.
-        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access was revoked before the candidates were returned."))
         }
         guard let object = Self.jsonObject(response) else {
@@ -101,7 +101,7 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "The inspect request needs an agentId: \(error.localizedDescription)"))
         }
         let live = grants[agentId] ?? []
-        guard live.contains(where: { $0.revocationGeneration == revocationGeneration && $0.operations.contains(.agentInspect) }) else {
+        guard live.contains(where: { $0.revocationGeneration == revocationGeneration(for: agentId) && $0.operations.contains(.agentInspect) }) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not inspect agents."))
         }
         guard let target = supervisor.records[request.agentId] else {
@@ -111,7 +111,7 @@ extension WorkspaceAPIService {
         // Grant on the TARGET agent. "Allow once" is spent the moment it authorizes.
         var approvalRequestId: String?
         switch WorkspaceToolGrantEvaluator.evaluateAgentInspect(
-            agentId: agentId, target: target.id, grants: live, currentGeneration: revocationGeneration) {
+            agentId: agentId, target: target.id, grants: live, currentGeneration: revocationGeneration(for: agentId)) {
         case .denied:
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not inspect agents."))
         case .scopeApprovalRequired:
@@ -136,22 +136,22 @@ extension WorkspaceAPIService {
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
-                    revocationGeneration: revocationGeneration, singleUse: true, inspectableAgentIds: [target.id]))
+                    revocationGeneration: revocationGeneration(for: agentId), singleUse: true, inspectableAgentIds: [target.id]))
             case .allowForSession:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
                     presentationCeiling: .preserveAll, issuer: .userApprovalSession(requestId: promptId),
-                    revocationGeneration: revocationGeneration, inspectableAgentIds: [target.id]))
+                    revocationGeneration: revocationGeneration(for: agentId), inspectableAgentIds: [target.id]))
             }
             guard case .allowed = WorkspaceToolGrantEvaluator.evaluateAgentInspect(
-                agentId: agentId, target: target.id, grants: grants[agentId] ?? [], currentGeneration: revocationGeneration) else {
+                agentId: agentId, target: target.id, grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Approval did not take.", approvalRequestId: promptId))
             }
         case .allowed:
             break
         }
         consumeSingleUseInspectGrant(agentId: agentId, target: target.id)
-        let generationAtGrant = revocationGeneration
+        let generationAtGrant = revocationGeneration(for: agentId)
 
         // Evidence: a projection of what this host observed. Reads only.
         let now = Date()
@@ -195,7 +195,7 @@ extension WorkspaceAPIService {
             }
         }
         // §14.1: recheck immediately before the content is returned.
-        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access was revoked before the evidence was returned.", approvalRequestId: approvalRequestId))
         }
         guard let object = Self.jsonObject(response) else {
@@ -206,7 +206,7 @@ extension WorkspaceAPIService {
 
     private func consumeSingleUseInspectGrant(agentId: AgentID, target: AgentID) {
         guard var live = grants[agentId] else { return }
-        let durable = live.contains { !$0.singleUse && $0.operations.contains(.agentInspect) && $0.inspectableAgentIds.contains(target) && $0.revocationGeneration == revocationGeneration }
+        let durable = live.contains { !$0.singleUse && $0.operations.contains(.agentInspect) && $0.inspectableAgentIds.contains(target) && $0.revocationGeneration == revocationGeneration(for: agentId) }
         guard !durable, let index = live.firstIndex(where: { $0.singleUse && $0.operations.contains(.agentInspect) && $0.inspectableAgentIds.contains(target) }) else { return }
         live.remove(at: index)
         grants[agentId] = live

@@ -543,10 +543,6 @@ func runWorkspaceAPIDelegationChecks() async throws {
     }
 
     _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
-    // Enabled ONCE, here, before the parent's grant is minted: disabling any
-    // agent's workspace tools bumps the host's single revocation generation and
-    // would kill the parent's session grant mid-act.
-    _ = supervisor.setWorkspaceToolsEnabled(agentID: childId, true)
     try await waitChildIdle()
     let marker1 = "MSG-ONE-8be21c"
     var messagePrompts: [WorkspaceAPIService.ScopeApprovalPrompt] = []
@@ -633,7 +629,11 @@ func runWorkspaceAPIDelegationChecks() async throws {
                    "the refusal for \(label) names no id: \(denial.message)")
         try expect(occurrences("reach \(label)", in: childPromptLog()) == 0, "an out-of-scope message delivers nothing")
     }
-    // Upward is out of scope too: the CHILD may not message its own parent.
+    // Upward is out of scope too: the CHILD may not message its own parent. The
+    // child needs its own policy on to be a caller at all; flipping one agent's
+    // policy leaves every other agent's live grants alone (§14.1), so this
+    // belongs here, where the child first acts, rather than hoisted out of the way.
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: childId, true)
     _ = try failure(
         api.dispatch(agentId: childId, requestId: "op-msg-upward",
                      op: "agent.message",

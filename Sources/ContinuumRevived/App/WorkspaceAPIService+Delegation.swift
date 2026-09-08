@@ -92,7 +92,7 @@ extension WorkspaceAPIService {
         switch WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .agentDelegate, checkout: ownHandle,
             requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-            currentGeneration: revocationGeneration) {
+            currentGeneration: revocationGeneration(for: agentId)) {
         case let .allowed(_, policy):
             effectivePolicy = policy
         case .denied, .scopeApprovalRequired:
@@ -114,28 +114,28 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentDelegate],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
-                    revocationGeneration: revocationGeneration, singleUse: true))
+                    revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
             case .allowForSession:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentDelegate],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalSession(requestId: promptId),
-                    revocationGeneration: revocationGeneration))
+                    revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: .agentDelegate, checkout: ownHandle,
                 requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-                currentGeneration: revocationGeneration) else {
+                currentGeneration: revocationGeneration(for: agentId)) else {
                 return fail(.permissionDenied, "Approval did not take.", approvalRequestId: promptId)
             }
             effectivePolicy = policy
         }
         consumeSingleUseGrant(agentId: agentId, checkout: ownHandle, op: .agentDelegate)
-        let generationAtGrant = revocationGeneration
+        let generationAtGrant = revocationGeneration(for: agentId)
 
         // 5. Recheck immediately before the effect; cancellation before it means
         //    nothing happens and the key stays free.
-        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId)
         }
         if isCancelled() {
@@ -222,7 +222,7 @@ extension WorkspaceAPIService {
         if let tileId = result.tileId {
             _beforePresentationHook?()
             let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
-                && revocationGeneration == generationAtGrant
+                && revocationGeneration(for: agentId) == generationAtGrant
             if !stillAllowed {
                 result.presentation = .unavailable
                 result.steps.presentation = .skipped
@@ -381,7 +381,7 @@ extension WorkspaceAPIService {
         let generationAtDispatch = runtime.interactionGeneration
         guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .agentReveal, checkout: ownHandle, requested: request.presentationPolicy,
-            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration) else {
+            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not reveal agents."))
         }
         // Own children (and itself) only. Anything else is refused without
@@ -529,7 +529,7 @@ extension WorkspaceAPIService {
         switch WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .agentMessage, checkout: ownHandle,
             requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-            currentGeneration: revocationGeneration) {
+            currentGeneration: revocationGeneration(for: agentId)) {
         case let .allowed(_, policy):
             effectivePolicy = policy
         case .denied, .scopeApprovalRequired:
@@ -552,28 +552,28 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
-                    revocationGeneration: revocationGeneration, singleUse: true))
+                    revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
             case .allowForSession:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalSession(requestId: promptId),
-                    revocationGeneration: revocationGeneration))
+                    revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: .agentMessage, checkout: ownHandle,
                 requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-                currentGeneration: revocationGeneration) else {
+                currentGeneration: revocationGeneration(for: agentId)) else {
                 return failNothingDelivered(.permissionDenied, "Approval did not take.", approvalRequestId: promptId)
             }
             effectivePolicy = policy
         }
         consumeSingleUseGrant(agentId: agentId, checkout: ownHandle, op: .agentMessage)
-        let generationAtGrant = revocationGeneration
+        let generationAtGrant = revocationGeneration(for: agentId)
 
         // 5. Recheck the grant generation immediately before delivery, so a
         //    revocation that landed while the alert was up still wins.
-        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return failNothingDelivered(.permissionDenied, "Access was revoked before the message was delivered.", approvalRequestId: approvalRequestId)
         }
         // The target must still be this agent's child at the moment of delivery.
@@ -631,7 +631,7 @@ extension WorkspaceAPIService {
         if let tileId = supervisor.records[childId]?.tileId, canvas.zoneId(containing: tileId) != nil {
             _beforePresentationHook?()
             let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
-                && revocationGeneration == generationAtGrant
+                && revocationGeneration(for: agentId) == generationAtGrant
             if stillAllowed {
                 let (presentation, effects) = present(
                     tileId: tileId, policy: effectivePolicy, generationAtDispatch: generationAtDispatch,
@@ -670,7 +670,7 @@ extension WorkspaceAPIService {
         }
         guard case .allowed = WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .operationGet, checkout: ownHandle, requested: .preserveAll,
-            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration) else {
+            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not read operations."))
         }
         let lookup: WorkspaceOperationStore.Lookup
@@ -727,7 +727,7 @@ extension WorkspaceAPIService {
     /// Op-aware twin of the open path's `consumeSingleUseGrant`.
     private func consumeSingleUseGrant(agentId: AgentID, checkout: CheckoutHandle, op: WorkspaceAPIOp) {
         guard var live = grants[agentId] else { return }
-        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(op) && $0.revocationGeneration == revocationGeneration }
+        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(op) && $0.revocationGeneration == revocationGeneration(for: agentId) }
         guard !durable, let index = live.firstIndex(where: { $0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(op) }) else { return }
         live.remove(at: index)
         grants[agentId] = live

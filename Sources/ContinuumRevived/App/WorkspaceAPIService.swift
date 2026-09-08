@@ -96,7 +96,7 @@ final class WorkspaceAPIService {
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
-    private(set) var revocationGeneration: UInt64 = 0
+    private var revocationGenerations: [AgentID: UInt64] = [:]
     var approvalPromptCount = 0
     private struct CachedOpen { let payloadHash: String; let result: ArtifactOpenResult }
     private var idempotency: [AgentID: [String: CachedOpen]] = [:]
@@ -130,11 +130,20 @@ final class WorkspaceAPIService {
 
     // MARK: - Revocation (§14.1)
 
-    /// Drops every minted grant for the agent and bumps the generation, so a
-    /// request already past its grant check fails its recheck before any effect.
+    /// The revocation generation of ONE principal. Every authorization check
+    /// compares a grant's stamp against its own agent's generation, so revoking
+    /// one agent cannot invalidate another agent's live approvals. Zero until
+    /// that agent has been revoked at least once.
+    func revocationGeneration(for agentId: AgentID) -> UInt64 {
+        revocationGenerations[agentId] ?? 0
+    }
+
+    /// Drops every minted grant for the agent and bumps THAT agent's generation,
+    /// so a request already past its grant check fails its recheck before any
+    /// effect — and no other agent's grants are touched.
     func revoke(agentId: AgentID) {
         grants[agentId] = nil
-        revocationGeneration &+= 1
+        revocationGenerations[agentId] = revocationGeneration(for: agentId) &+ 1
     }
 
     func policyChanged(agentId: AgentID, enabled: Bool) {
@@ -249,7 +258,7 @@ final class WorkspaceAPIService {
     ) -> Reply {
         let verdict = WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .workspaceContext, checkout: ownHandle, requested: .preserveAll,
-            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration)
+            grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId))
         guard case .allowed = verdict else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not read workspace context."))
         }
@@ -264,7 +273,7 @@ final class WorkspaceAPIService {
         let capabilities = WorkspaceAPIOp.allCases.filter { op in
             if case .allowed = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: op, checkout: ownHandle, requested: .preserveAll,
-                grants: grants[agentId] ?? [], currentGeneration: revocationGeneration) { return true }
+                grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) { return true }
             return false
         }
         var response = WorkspaceContextResponse(
@@ -410,7 +419,7 @@ final class WorkspaceAPIService {
         switch WorkspaceToolGrantEvaluator.evaluate(
             agentId: agentId, op: .artifactOpen, checkout: target.handle,
             requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-            currentGeneration: revocationGeneration) {
+            currentGeneration: revocationGeneration(for: agentId)) {
         case .denied:
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not open documents."))
         case .scopeApprovalRequired:
@@ -433,18 +442,18 @@ final class WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [target.handle], operations: [.artifactOpen],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
-                    revocationGeneration: revocationGeneration, singleUse: true))
+                    revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
             case .allowForSession:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [target.handle], operations: [.artifactOpen],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalSession(requestId: promptId),
-                    revocationGeneration: revocationGeneration))
+                    revocationGeneration: revocationGeneration(for: agentId)))
             }
             guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: .artifactOpen, checkout: target.handle,
                 requested: request.presentationPolicy, grants: grants[agentId] ?? [],
-                currentGeneration: revocationGeneration) else {
+                currentGeneration: revocationGeneration(for: agentId)) else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Approval did not take.", approvalRequestId: promptId))
             }
             effectivePolicy = policy
@@ -452,7 +461,7 @@ final class WorkspaceAPIService {
             effectivePolicy = policy
         }
         consumeSingleUseGrant(agentId: agentId, checkout: target.handle)
-        let generationAtGrant = revocationGeneration
+        let generationAtGrant = revocationGeneration(for: agentId)
 
         // 5. Resolve the path inside the target checkout with the existing
         //    resolver: canonical, symlink-aware, component containment, regular file.
@@ -502,7 +511,7 @@ final class WorkspaceAPIService {
         // 7. Recheck authorization immediately before the effect (§14.1): the
         //    policy flag and the revocation generation the grant was checked under.
         guard supervisor.records[agentId]?.workspaceToolsEnabled == true,
-              revocationGeneration == generationAtGrant else {
+              revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access was revoked before the document was opened.", approvalRequestId: approvalRequestId))
         }
 
@@ -592,7 +601,7 @@ final class WorkspaceAPIService {
         if let tileId = execution.document.tileId {
             _beforePresentationHook?()
             let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
-                && revocationGeneration == generationAtGrant
+                && revocationGeneration(for: agentId) == generationAtGrant
             if stillAllowed {
                 let (presentation, effects) = present(
                     tileId: tileId, policy: effectivePolicy, generationAtDispatch: generationAtDispatch,
@@ -743,9 +752,9 @@ final class WorkspaceAPIService {
     // MARK: - Grants, cache, history
 
     func seedGrantsIfNeeded(agentId: AgentID, checkout: CheckoutHandle) {
-        let live = (grants[agentId] ?? []).filter { $0.revocationGeneration == revocationGeneration }
+        let live = (grants[agentId] ?? []).filter { $0.revocationGeneration == revocationGeneration(for: agentId) }
         if live.contains(where: { $0.issuer == .sessionPolicy }) { return }
-        grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration)]
+        grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration(for: agentId))]
     }
 
     func mint(_ grant: WorkspaceToolGrant) {
@@ -756,7 +765,7 @@ final class WorkspaceAPIService {
         guard var live = grants[agentId] else { return }
         // Only when no durable grant also covers the checkout: a session grant
         // must not be shadowed away by spending a once-grant beside it.
-        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.artifactOpen) && $0.revocationGeneration == revocationGeneration }
+        let durable = live.contains { !$0.singleUse && $0.checkoutHandles.contains(checkout) && $0.operations.contains(.artifactOpen) && $0.revocationGeneration == revocationGeneration(for: agentId) }
         guard !durable, let index = live.firstIndex(where: { $0.singleUse && $0.checkoutHandles.contains(checkout) }) else { return }
         live.remove(at: index)
         grants[agentId] = live

@@ -212,3 +212,45 @@ an async second write cannot sneak past a single sample), the Core section behin
 `array_message_agent` is the tenth roled-pi host tool; real pi parses the edited
 extension (`--pi-extension-load-check`). No new check leg, so `run-matrix.sh` and
 `matrix-inventory.txt` are unchanged.
+
+---
+
+# Update — revocation is per agent (fixed)
+
+`WorkspaceAPIService` used to hold ONE host-wide `revocationGeneration`, bumped
+by `revoke(agentId:)`. Since every grant records the generation it was minted at
+and every authorization check compared that stamp against the single counter,
+turning Workspace Tools off for ONE agent invalidated every OTHER agent's live
+grants: an approved `allowForSession` scope silently evaporated and the other
+agent was re-prompted or denied for scope the user had already granted. It
+failed closed, so it was never a hole — but it read as Array forgetting
+permissions at random, and it is why `--workspace-api-delegation-check` used to
+hoist the child's policy enable out of act K with a comment about the counter.
+
+**Fixed.** The counter is now `revocationGenerations: [AgentID: UInt64]` behind
+`revocationGeneration(for:)` (0 until that agent is first revoked), and
+`revoke(agentId:)` bumps only that agent's entry while still dropping only that
+agent's grants. All 49 reads across `WorkspaceAPIService.swift`,
+`+Agents.swift`, `+Canvas.swift` and `+Delegation.swift` pass the CALLER's
+generation — the principal already in scope at every one of those sites. The
+`Core` grant type and the pure evaluators are unchanged: they already took
+`currentGeneration`.
+
+Nothing was widened. A single-use grant is still consumed at authorization, the
+`generationAtGrant` recheck before a mutation and before presentation still
+refuses when the CALLER's own generation moved, and `policyChanged` still
+revokes on disable.
+
+**Witness:** the tail of `--workspace-api-grants-check` (leg 2 of
+`WorkspaceAPIChecks`). Two agents, both with Workspace Tools on, both earn a
+durable session grant for the out-of-preset checkout Pa. The user then disables
+the policy for B alone, and the leg asserts: A's next Pa open succeeds and
+raises NO new prompt; B's is `permission_denied`; re-enabling B resurrects
+nothing (B is asked again, its own checkout preset re-seeds); and revoking A
+itself still kills A's grant and re-prompts. Against the unfixed service that
+leg is RED with
+`FAIL: A's session grant survives another agent's revocation: expected a result,
+got error(permission_denied: The user declined access to that checkout.)`
+
+The delegation leg's workaround is gone: the child's policy is enabled where the
+child first acts as a caller (act K, messaging upward), not hoisted.
