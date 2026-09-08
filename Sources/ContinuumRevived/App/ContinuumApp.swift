@@ -1182,6 +1182,22 @@ enum ContinuumApp {
             }
         }
 
+        // CX-01: the bundled pi extensions, through the REAL pi's own parser.
+        // Deliberately BEFORE `NSApplication.shared` — this leg only spawns pi
+        // subprocesses and must not need AppKit.
+        if CommandLine.arguments.contains("--pi-extension-load-check") {
+            do {
+                let verified = try PiExtensionLoadChecks.run()
+                print(verified
+                    ? "ContinuumRevivedPiExtensionLoadChecks passed"
+                    : "ContinuumRevivedPiExtensionLoadChecks SKIPPED — nothing was verified (see the SKIP lines above)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-tile-hydration-check") {
             do {
                 _ = NSApplication.shared

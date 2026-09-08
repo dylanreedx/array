@@ -658,6 +658,12 @@ run_app_check .build/debug/Array --workspace-api-canvas-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+# CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
+# in the repo ever asks pi to PARSE these files, which is how a merge-spliced
+# syntax error in continuum-workspace-tools.ts reached the branch with every leg
+# green. Carries a positive control (a deliberately broken copy must be
+# rejected); SKIPS loudly, exit 0, when pi is not on PATH.
+run_app_check .build/debug/Array --pi-extension-load-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's

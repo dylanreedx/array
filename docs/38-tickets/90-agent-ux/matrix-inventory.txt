@@ -108,6 +108,7 @@ check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
+check --pi-extension-load-check
 check --project-file-operation-check
 check --project-lock-check
 check --project-picker-resolution-check
@@ -312,6 +313,7 @@ leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
+leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --project-file-operation-check
 leg run_app_check .build/debug/Array --project-lock-check
 leg run_app_check .build/debug/Array --project-picker-resolution-check

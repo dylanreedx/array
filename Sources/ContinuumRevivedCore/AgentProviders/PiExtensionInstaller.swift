@@ -111,11 +111,18 @@ public enum PiExtensionInstaller {
         return try? Data(contentsOf: url)
     }
 
-    static func bundledExtensionURL(fileManager: FileManager = .default) -> URL? {
+    /// Every extension file shipped in the Core resource bundle. The load gate
+    /// (`--pi-extension-load-check`) enumerates this and asks the real `pi` to
+    /// parse each one, so a new bundled extension is covered by adding it here.
+    public static let bundledExtensionFileNames: [String] = [
+        extensionFileName, workspaceToolsExtensionFileName,
+    ]
+
+    public static func bundledExtensionURL(fileManager: FileManager = .default) -> URL? {
         bundledExtensionURL(fileName: extensionFileName, fileManager: fileManager)
     }
 
-    static func bundledExtensionURL(fileName: String, fileManager: FileManager = .default) -> URL? {
+    public static func bundledExtensionURL(fileName: String, fileManager: FileManager = .default) -> URL? {
         let resourceBundleName = "continuum-revived_ContinuumRevivedCore.bundle"
         let relativePath = "PiExtensions/\(fileName)"
         var candidates: [URL] = []
