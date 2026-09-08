@@ -57,8 +57,8 @@ final class WorkspaceAPIService {
     private let runtimeProvider: () -> WorkspaceRuntime?
     private let canvasProvider: () -> CanvasNSView?
     private let focusBrokerProvider: () -> FocusBroker?
-    private let supervisor: AgentSupervisor
-    private let registryStoreProvider: () -> RegistryStore?
+    let supervisor: AgentSupervisor
+    let registryStoreProvider: () -> RegistryStore?
     let epoch: String
     /// Production: an NSAlert (`AppDelegate.presentWorkspaceToolApproval`). Checks
     /// inject a deterministic decision. This is the ONLY place a grant beyond the
@@ -72,14 +72,18 @@ final class WorkspaceAPIService {
     var _beforeCommitHook: (() -> Void)?
     var _beforePresentationHook: (() -> Void)?
 
-    private var grants: [AgentID: [WorkspaceToolGrant]] = [:]
+    // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
+    var grants: [AgentID: [WorkspaceToolGrant]] = [:]
     private(set) var revocationGeneration: UInt64 = 0
-    private(set) var approvalPromptCount = 0
+    var approvalPromptCount = 0
     private struct CachedOpen { let payloadHash: String; let result: ArtifactOpenResult }
     private var idempotency: [AgentID: [String: CachedOpen]] = [:]
     private var idempotencyOrder: [AgentID: [String]] = [:]
     private var recentOperations: [AgentID: [WorkspaceRecentOperation]] = [:]
-    private static let idempotencyCapacity = 64
+    struct CachedCanvasApply { let payloadHash: String; let result: CanvasApplyResult }
+    var canvasApplyIdempotency: [AgentID: [String: CachedCanvasApply]] = [:]
+    var canvasApplyIdempotencyOrder: [AgentID: [String]] = [:]
+    static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
     init(
@@ -190,6 +194,11 @@ final class WorkspaceAPIService {
         case .artifactOpen:
             return open(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                         payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .canvasQuery:
+            return canvasQuery(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
+        case .canvasApply:
+            return canvasApply(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                               payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
         }
     }
 
@@ -247,7 +256,7 @@ final class WorkspaceAPIService {
 
     // MARK: - artifact.open (§9)
 
-    private struct KnownCheckout {
+    struct KnownCheckout {
         let handle: CheckoutHandle
         let root: URL
         let projectId: UUID?
@@ -256,7 +265,7 @@ final class WorkspaceAPIService {
 
     /// Registry projects ∪ agent checkout roots (`checkoutRoot`, not `cwd`) —
     /// the same two sources as `AppDelegate.resolveDocumentLocation`.
-    private func knownCheckouts() -> [CheckoutHandle: KnownCheckout] {
+    func knownCheckouts() -> [CheckoutHandle: KnownCheckout] {
         var known: [CheckoutHandle: KnownCheckout] = [:]
         if let registry = try? registryStoreProvider()?.loadOrEmpty() {
             for project in registry.projects where !project.missing {
@@ -700,7 +709,7 @@ final class WorkspaceAPIService {
         grants[agentId] = live + [WorkspaceToolGrant.phase1Preset(agentId: agentId, checkout: checkout, generation: revocationGeneration)]
     }
 
-    private func mint(_ grant: WorkspaceToolGrant) {
+    func mint(_ grant: WorkspaceToolGrant) {
         grants[grant.agentId, default: []].append(grant)
     }
 
@@ -723,7 +732,7 @@ final class WorkspaceAPIService {
         }
     }
 
-    private func remember(agentId: AgentID, _ operation: WorkspaceRecentOperation) {
+    func remember(agentId: AgentID, _ operation: WorkspaceRecentOperation) {
         recentOperations[agentId, default: []].append(operation)
         while (recentOperations[agentId]?.count ?? 0) > Self.recentOperationsCapacity {
             recentOperations[agentId]?.removeFirst()
@@ -735,7 +744,7 @@ final class WorkspaceAPIService {
 
     // MARK: - Encoding helpers
 
-    private static let encoder: JSONEncoder = {
+    static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601

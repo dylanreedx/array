@@ -96,7 +96,7 @@ func runStrictAgentHarnessChecks() throws {
     // what it cannot have — better than refusing after the fact.
     for depth in [0, 1] {
         let args = AgentSupervisor.runnerConfig(for: roled, spawnDepth: depth).extraArgs
-        try expect(args == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document"],
+        try expect(args == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_canvas_query, array_canvas_apply"],
                    "a roled pi agent at depth \(depth) must be offered the complete delegation set "
                    + "(Array's spawn_agent + wait_agents collection pair and the third-party delegate_agent) "
                    + "plus the CX-01 host bridge tools — got \(args)")
@@ -104,7 +104,7 @@ func runStrictAgentHarnessChecks() throws {
     // At the cap, withheld — Array's own limit, enforced by omission.
     let cappedArgs = AgentSupervisor.runnerConfig(
         for: roled, spawnDepth: AgentSupervisor.maxSpawnDepth).extraArgs
-    try expect(cappedArgs == ["--tools", "read, grep, array_workspace_context, array_open_document"],
+    try expect(cappedArgs == ["--tools", "read, grep, array_workspace_context, array_open_document, array_canvas_query, array_canvas_apply"],
                "a roled pi agent AT the spawn depth cap must not be offered a spawn verb (host bridge tools are not depth-gated), got \(cappedArgs)")
 
     // A roleless agent is unrestricted and must stay that way: passing --tools at

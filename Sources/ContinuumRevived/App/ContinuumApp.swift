@@ -1140,6 +1140,20 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // CX-01 Phase 4: canvas.query paging/coverage and validated canvas.apply
+        // geometry — the owner route, the persistence barrier, and every conflict
+        // applying nothing.
+        if CommandLine.arguments.contains("--workspace-api-canvas-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPICanvasChecks.run()
+                print("ContinuumRevivedWorkspaceAPICanvasChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // CX-01: grants, trusted approval, forgery, revocation, and the five
         // presentation dimensions including concurrent user interaction.
         if CommandLine.arguments.contains("--workspace-api-grants-check") {
@@ -14752,10 +14766,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// (or a check's injected stand-in) ever produces a grant beyond the preset.
     func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
         let alert = NSAlert()
-        alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
-        var detail = "The agent asked Array to open a document outside its own checkout."
-        if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
-        detail += "\n\nOpening never edits the file. \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+        var detail: String
+        if prompt.op == .canvasApply {
+            // CX-01 Phase 4: geometry is never in the session preset, so the first
+            // move/resize of the agent's OWN checkout lands here.
+            alert.messageText = "Allow \(prompt.agentDisplayName) to move and resize tiles in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to change tile geometry on the canvas. Each change is one move or resize of one tile, goes through the same undo history as a drag, and never touches the camera, focus or selection."
+        } else {
+            alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to open a document outside its own checkout."
+            if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
+            detail += "\n\nOpening never edits the file."
+        }
+        detail += " \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
         alert.informativeText = detail
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")

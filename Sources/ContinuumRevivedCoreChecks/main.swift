@@ -79,6 +79,10 @@ if CommandLine.arguments.contains("--workspace-api-contract-check") {
     runWorkspaceAPIContractChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--workspace-api-canvas-contract-check") {
+    runWorkspaceAPICanvasContractChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
@@ -12458,6 +12462,11 @@ runEditorPreferencesChecks()
 // handles, presentation intersection, the tolerant open-request decoder, result
 // round trips, the grant evaluator, and the pi bridge envelope parse/encode.
 runWorkspaceAPIContractChecks()
+
+// CX-01 Phase 4 — the pure geometry surface: the paging cursor and its expiry,
+// the byte-bounded page, the move/resize constraint planner, the revision
+// compare, and the grant preset that deliberately excludes canvas.apply.
+runWorkspaceAPICanvasContractChecks()
 
 // CX-01 — the pi host tool bridge driven end to end against a scripted fake
 // `pi --mode rpc`: an Array-owned `extension_ui_request` reaches the host handler

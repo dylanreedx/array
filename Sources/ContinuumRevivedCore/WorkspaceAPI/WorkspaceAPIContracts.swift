@@ -25,6 +25,9 @@ public enum WorkspaceAPISchema {
 public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case workspaceContext = "workspace.context"
     case artifactOpen = "artifact.open"
+    // Phase 4 (`WorkspaceAPIContracts+Canvas.swift`): validated geometry.
+    case canvasQuery = "canvas.query"
+    case canvasApply = "canvas.apply"
 }
 
 // MARK: - Identity
@@ -503,6 +506,12 @@ public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStri
         case permissionDenied = "permission_denied"
         case idempotencyConflict = "idempotency_conflict"
         case outcomeUnknown = "outcome_unknown"
+        /// `expectedRevision` no longer matches the host's `{epoch, structure}`;
+        /// nothing was applied. Re-query before another write (§14.4).
+        case revisionConflict = "revision_conflict"
+        /// A `canvas.query` cursor minted under an older structural revision;
+        /// restart the scoped query (§14.4).
+        case cursorExpired = "cursor_expired"
     }
 
     public var code: Code
@@ -569,15 +578,17 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         self.singleUse = singleUse
     }
 
-    /// The Phase 1 preset: both ops within the agent's own concrete checkout;
-    /// presentation may reveal the camera and nothing else.
+    /// The session preset: the read ops and `artifact.open` within the agent's
+    /// own concrete checkout; presentation may reveal the camera and nothing
+    /// else. `canvas.apply` is NOT in it — the first apply goes through the
+    /// trusted approval prompt (`WorkspaceAPIOp.sessionPresetOperations`).
     public static let phase1Ceiling = WorkspacePresentationPolicy(camera: .revealResult)
 
     public static func phase1Preset(agentId: AgentID, checkout: CheckoutHandle, generation: UInt64) -> WorkspaceToolGrant {
         WorkspaceToolGrant(
             agentId: agentId,
             checkoutHandles: [checkout],
-            operations: Set(WorkspaceAPIOp.allCases),
+            operations: WorkspaceAPIOp.sessionPresetOperations,
             presentationCeiling: phase1Ceiling,
             issuer: .sessionPolicy,
             revocationGeneration: generation)

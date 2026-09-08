@@ -129,6 +129,63 @@ export default function continuumWorkspaceTools(pi: ExtensionAPI) {
     },
   });
 
+  // MARK: canvas geometry
+
+  pi.registerTool({
+    name: "array_canvas_query",
+    label: "Array Canvas Query",
+    description:
+      "List the zones and tiles of your own checkout's canvas with their WORLD rectangles, plus the structural revision and hydration coverage. Zones marked hydrated=false hold no tiles in this answer: an empty tile list NEVER proves such a zone is empty. Paginated (limit up to 50, cursor); a cursor stops working once the canvas changes structurally (cursor_expired). Read-only.",
+    promptSnippet: "List the zones and tiles on the Array canvas with their world rectangles",
+    promptGuidelines: [
+      "Call array_canvas_query for the revision and the tile's current world rect immediately before array_canvas_apply; a move computed from an older answer is refused as revision_conflict.",
+      "Never conclude a zone is empty when its hydrated flag is false — ask the user to open it instead.",
+      "Rectangles are world canvas units, not screen pixels: they do not change with zoom or panning.",
+    ],
+    parameters: Type.Object({
+      zoneId: Type.Optional(Type.String({ description: "Restrict the answer to one zone of your project." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+      cursor: Type.Optional(Type.String({ description: "The nextCursor from a previous page." })),
+      checkoutHandle: Type.Optional(Type.String({ description: "Another checkout handle you have been granted; your Home checkout when omitted." })),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "canvas.query", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
+  pi.registerTool({
+    name: "array_canvas_apply",
+    label: "Array Canvas Apply",
+    description:
+      "Move OR resize exactly one tile of your own checkout, in world coordinates, through the same route and undo history as the user's own drag. Requires expectedRevision from array_canvas_query and returns the ACTUAL rectangle after Array's layout and minimum-size rules, which may differ from what you asked for. Every conflict applies nothing: revision_conflict (the canvas changed), target_conflict (the user is dragging), unsupported zone_unhydrated, permission_denied, invalid_request. The first use asks the user for permission. Never moves the camera, focus, selection or armed zone.",
+    promptSnippet: "Move or resize one tile on the Array canvas, in world coordinates",
+    promptGuidelines: [
+      "One tile, one op per call. Query first, pass that expectedRevision, and read actualWorldRect back — Array's layout may place the tile elsewhere.",
+      "On revision_conflict or target_conflict nothing was applied: re-query and decide again rather than retrying the same numbers.",
+      "Reuse the same idempotencyKey when retrying a call whose outcome you did not see; a different payload under a used key is idempotency_conflict.",
+      "Do not rearrange the user's canvas unasked, and never use this to hide or overlap a tile the user is working in.",
+    ],
+    parameters: Type.Object({
+      op: Type.Union([Type.Literal("move"), Type.Literal("resize")]),
+      tileId: Type.String({ description: "A tileId from array_canvas_query or an Array result." }),
+      worldFrame: Type.Optional(
+        Type.Object({ x: Type.Number(), y: Type.Number(), width: Type.Number(), height: Type.Number() }, {
+          description: "The whole target rectangle. A move uses its origin; a resize its size (and its origin when given).",
+        }),
+      ),
+      origin: Type.Optional(Type.Object({ x: Type.Number(), y: Type.Number() }, { description: "Move shorthand." })),
+      size: Type.Optional(Type.Object({ width: Type.Number(), height: Type.Number() }, { description: "Resize shorthand; below the tile kind's minimum it is clamped up and clamped=true is returned." })),
+      expectedRevision: Type.Object(
+        { epoch: Type.String(), structure: Type.Integer() },
+        { description: "The revision object from array_canvas_query or array_workspace_context, verbatim." },
+      ),
+      idempotencyKey: Type.Optional(Type.String({ maxLength: 128 })),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "canvas.apply", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+
   // §7.1 automatic context: refreshed at every prompt boundary (rpc `prompt`
   // runs `before_agent_start` before answering), ~256 tokens, appended to the
   // system prompt. A slow or absent host appends nothing rather than stale data.
