@@ -624,6 +624,32 @@ enum WorkspaceAPIChecks {
                                                   "presentation": ["camera": "revealResult", "expectedInteractionGeneration": Int(generationBeforeSpawn)]]), "stale after palette spawn")
         try expect(staleAfterSpawn["presentationEffects"]?.object?["camera"]?.string == "deferred", "a reveal pinned before the palette spawn defers")
 
+        // (h) CX-01 hardening: the per-agent Workspace Tools item on the agent's own
+        //     tile menu. Driven through the REAL NSMenuItem — its target and action —
+        //     so the witness covers the wiring a user's click uses, not a copy of the
+        //     toggle. Unchecking must deny the next dispatch; re-checking must restore
+        //     it. A tile with no agent behind it offers no item at all.
+        let agentTile = ManagedAgentTileNSView(tile: Tile(
+            id: f.agentTileB, kind: .managedAgent, title: "workspace-tools-menu",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 420), zPosition: .fromLegacyRank(1),
+            runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+        try expect(agentTile.qaWorkspaceToolsMenuEntry() == nil, "a tile with no agent offers no Workspace Tools item")
+        agentTile.attach(agentID: f.agentId, supervisor: supervisor, projectName: "Pb")
+        let armed = agentTile.qaWorkspaceToolsMenuEntry()
+        try expect(armed?.title == "Workspace Tools" && armed?.isOn == true,
+                   "the item reads the record: enabled shows a checkmark, got \(String(describing: armed))")
+        try expect(agentTile.qaInvokeWorkspaceToolsMenuItem(), "the menu item is invocable")
+        try expect(supervisor.records[f.agentId]?.workspaceToolsEnabled == false && agentTile.qaWorkspaceToolsMenuEntry()?.isOn == false,
+                   "unchecking clears the record and the checkmark")
+        _ = try error(context(f), .permissionDenied, "context after the menu revoked")
+        _ = try error(open(f, ["relativePath": "notes.md", "presentation": ["camera": "preserve"]]), .permissionDenied, "open after the menu revoked")
+        try expect(f.api.qaGrants(for: f.agentId).isEmpty, "the menu's revocation dropped every minted grant")
+        try expect(agentTile.qaInvokeWorkspaceToolsMenuItem(), "the menu item is invocable again")
+        try expect(supervisor.records[f.agentId]?.workspaceToolsEnabled == true && agentTile.qaWorkspaceToolsMenuEntry()?.isOn == true,
+                   "re-checking restores the record and the checkmark")
+        _ = try result(context(f), "context after the menu restored access")
+        agentTile.detach()
+
         // W28/W20 — revocation: flipping the policy off during the approval prompt
         // denies before any effect; afterwards even context is denied without leaks.
         let tilesBeforeRevoke = f.canvas.allWorkspaceTiles().count
