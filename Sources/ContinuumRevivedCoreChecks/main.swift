@@ -83,6 +83,12 @@ if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
 }
+// CX-01 hardening: the transport's write serialisation, runnable without the
+// load-sensitive legs ahead of it in the full run.
+if CommandLine.arguments.contains("--pi-rpc-transport-check") {
+    runPiRpcTransportChecks()
+    Foundation.exit(0)
+}
 // CX-01 grew the roled-pi `--tools` allowlist; this arm runs the RoleRegistry
 // section on its own because the real-tmux legs ahead of it in the full run are
 // load-sensitive and stop the run before it is reached in a headless shell.
