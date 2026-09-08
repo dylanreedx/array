@@ -74,6 +74,7 @@ function asToolResult(reply: Reply) {
 
 export default function continuumWorkspaceTools(pi: ExtensionAPI) {
   registerAgentInspectionTools(pi);
+  registerAgentMessageTools(pi);
   pi.registerTool({
     name: "array_workspace_context",
     label: "Array Workspace Context",
@@ -337,6 +338,48 @@ export function registerAgentInspectionTools(pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       return asToolResult(await bridge(ctx, toolCallId, "agent.inspect", params, signal, TOOL_TIMEOUT_MS));
+    },
+  });
+}
+
+// MARK: messaging your own children
+//
+// CX-01 Phase 2c (§10): ONE text message into an agent this agent created — the
+// child of an `array_delegate` (or `spawn_agent`) call. Array delivers it
+// through its own send path, the same one the user's composer drives, and
+// answers with DELIVERY ONLY. The child's reply is never in this result: it is
+// collected the existing way, with `wait_agents` or `array_inspect_agent`.
+// Scope is children only: a sibling, this agent's own parent and any unrelated
+// agent are `permission_denied`, and messaging yourself is `invalid_request`.
+export function registerAgentMessageTools(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "array_message_agent",
+    label: "Array Message Child Agent",
+    description:
+      "Send one text message (a new user turn) to an agent YOU created with array_delegate or spawn_agent. Requires an idempotencyKey: the same key never delivers twice. Returns delivery ('delivered', 'queued' or 'refused'), childAgentId, parentAgentId, childRunning and, when the send path exposes one, queuePosition — plus refusalReason when it declined (a child that is mid-turn is refused, never double-prompted). The child's ANSWER is NOT in this result. Errors are structured: permission_denied (not your child, another checkout, or the user declined), invalid_request (yourself, empty text, over 8 KB, or no key), idempotency_conflict (that key with different text), unsupported (the child's harness or model is not ready to run). It never interrupts a turn and never moves the user's view unless you ask it to.",
+    promptSnippet: "Send a follow-up message to a child agent you created in Array",
+    promptGuidelines: [
+      "Only your OWN children: an agent you created with array_delegate or spawn_agent. A sibling, your parent or any other agent is permission_denied — do not try another route to it.",
+      "Always pass a stable idempotencyKey, and reuse the SAME key verbatim on any retry: one message per key, so a dropped answer can never prompt the child twice.",
+      "The child's reply is NOT in this result. Collect it the normal way — wait_agents, or array_inspect_agent — and never message again to check on it.",
+      "Do not use this to poll. Repeated messages are new user turns; they interrupt nothing and only pile work on the child.",
+      "If delivery is 'refused' because the child is mid-turn, wait for that turn (wait_agents) and then send with a NEW key. If it is 'unsupported', report the reason to the user rather than retrying.",
+      "Text you send becomes the child's user turn verbatim. Say what it should do; it cannot see your conversation.",
+    ],
+    parameters: Type.Object({
+      agentId: Type.String({ description: "The childAgentId array_delegate returned (or the id of an agent you spawned)." }),
+      text: Type.String({ maxLength: 8192, description: "The message, delivered verbatim as the child's next user turn. Max 8 KB of UTF-8." }),
+      idempotencyKey: Type.String({ maxLength: 128, description: "Stable key for THIS message. Reuse it verbatim on any retry; a new message needs a new key." }),
+      presentation: Type.Optional(
+        Type.Object({
+          camera: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("revealResult")])),
+          keyboardFocus: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("enterResult")])),
+          selection: Type.Optional(Type.Union([Type.Literal("preserve"), Type.Literal("selectResult")])),
+        }, { description: "Absent means preserve everything: a message must not steal the user's view. Ask to reveal only when the user wants to watch the child." }),
+      ),
+    }),
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      return asToolResult(await bridge(ctx, toolCallId, "agent.message", params, signal, TOOL_TIMEOUT_MS));
     },
   });
 }

@@ -234,6 +234,130 @@ public struct AgentRevealResult: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - agent.message
+
+/// What the HOST OBSERVED of the delivery, and nothing more. `delivered` — the
+/// child's own send path took the text and started a turn with it; `queued` —
+/// the send path held it for a turn that has not finished (reserved: today's
+/// `AgentSupervisor.send` either delivers into the child's runner or declines);
+/// `refused` — the send path declined and the child was never prompted. It is
+/// never the child's ANSWER: that is collected the existing way.
+public enum AgentMessageDelivery: String, Codable, Sendable {
+    case delivered, queued, refused
+}
+
+public struct AgentMessageRequest: Codable, Equatable, Sendable {
+    /// The child to message. Children of the caller only — a sibling, the
+    /// caller's own parent and an unrelated agent are all refused.
+    public var agentId: AgentID
+    /// Model-authored text, delivered verbatim as the child's user turn. The
+    /// host never interprets it.
+    public var text: String
+    /// A message must not steal the user's view, so the default preserves all
+    /// five dimensions (unlike an explicit open).
+    public var presentationPolicy: WorkspacePresentationPolicy
+    /// REQUIRED: without it a retry after a dropped answer double-prompts a
+    /// running agent.
+    public var idempotencyKey: String?
+
+    /// 8 KB of UTF-8. A brief longer than this belongs in a fresh delegation,
+    /// not in a turn the child has to read in one go.
+    public static let textByteCeiling = 8 * 1024
+
+    public init(
+        agentId: AgentID,
+        text: String,
+        presentationPolicy: WorkspacePresentationPolicy = .preserveAll,
+        idempotencyKey: String? = nil
+    ) {
+        self.agentId = agentId
+        self.text = text
+        self.presentationPolicy = presentationPolicy
+        self.idempotencyKey = idempotencyKey
+    }
+
+    /// Pure bounds, shared by the host and the checks: nil when the request is
+    /// well formed, otherwise the `invalid_request` message.
+    public func validationFailure() -> String? {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "text is required: an empty message would start a turn with nothing in it."
+        }
+        let bytes = text.utf8.count
+        if bytes > Self.textByteCeiling {
+            return "text is \(bytes) bytes of UTF-8; the ceiling is \(Self.textByteCeiling). Send a shorter message, or delegate a new child with the full brief."
+        }
+        let key = idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if key.isEmpty {
+            return "idempotencyKey is required for agent.message: a retry without one would prompt the child twice."
+        }
+        return nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agentId, text, presentationPolicy, presentation, idempotencyKey
+    }
+
+    /// Tolerant of the model-facing shape (`presentation`, any subset of
+    /// dimensions). Unknown keys are ignored, so nothing in the payload can
+    /// widen the caller's own grant.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        agentId = try c.decode(AgentID.self, forKey: .agentId)
+        text = try c.decode(String.self, forKey: .text)
+        presentationPolicy = try WorkspacePresentationPolicy.decodeCanonicalOrShort(
+            from: c, canonical: .presentationPolicy, short: .presentation, base: .preserveAll)
+        idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(agentId, forKey: .agentId)
+        try c.encode(text, forKey: .text)
+        try c.encode(presentationPolicy, forKey: .presentationPolicy)
+        try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
+    }
+}
+
+/// Delivery only. There is deliberately no field for the child's reply: the
+/// caller collects that the existing way (`wait_agents`, or `agent.inspect`).
+public struct AgentMessageResult: Codable, Equatable, Sendable {
+    public var schema: String = WorkspaceAPISchema.v1
+    public var operationId: String
+    public var delivery: AgentMessageDelivery
+    public var childAgentId: AgentID
+    public var parentAgentId: AgentID
+    /// nil = unknown (the host cannot tell).
+    public var childRunning: Bool?
+    /// Present only when the send path exposes a queue position for the child.
+    public var queuePosition: Int?
+    /// Why the send path declined, when `delivery == .refused`.
+    public var refusalReason: String?
+    public var presentation: ArtifactOpenResult.Presentation
+    public var presentationEffects: WorkspacePresentationEffects
+
+    public init(
+        operationId: String,
+        delivery: AgentMessageDelivery,
+        childAgentId: AgentID,
+        parentAgentId: AgentID,
+        childRunning: Bool?,
+        queuePosition: Int? = nil,
+        refusalReason: String? = nil,
+        presentation: ArtifactOpenResult.Presentation = .deferred,
+        presentationEffects: WorkspacePresentationEffects = .allPreserved
+    ) {
+        self.operationId = operationId
+        self.delivery = delivery
+        self.childAgentId = childAgentId
+        self.parentAgentId = parentAgentId
+        self.childRunning = childRunning
+        self.queuePosition = queuePosition
+        self.refusalReason = refusalReason
+        self.presentation = presentation
+        self.presentationEffects = presentationEffects
+    }
+}
+
 // MARK: - operation.get
 
 public struct OperationGetRequest: Codable, Equatable, Sendable {
@@ -473,9 +597,8 @@ extension WorkspacePresentationPolicy {
         var armedZone: ArmedZone?
         var expectedInteractionGeneration: UInt64?
 
-        var policy: WorkspacePresentationPolicy {
-            let base = WorkspacePresentationPolicy.defaultExplicitOpen
-            return WorkspacePresentationPolicy(
+        func policy(base: WorkspacePresentationPolicy) -> WorkspacePresentationPolicy {
+            WorkspacePresentationPolicy(
                 workspace: workspace ?? base.workspace,
                 armedZone: armedZone ?? base.armedZone,
                 selection: selection ?? base.selection,
@@ -485,11 +608,15 @@ extension WorkspacePresentationPolicy {
         }
     }
 
+    /// `base` is what an ABSENT dimension means for this operation: revealing
+    /// for an explicit open, preserving for a message that must not steal the
+    /// user's view.
     static func decodeCanonicalOrShort<K: CodingKey>(
-        from container: KeyedDecodingContainer<K>, canonical: K, short: K
+        from container: KeyedDecodingContainer<K>, canonical: K, short: K,
+        base: WorkspacePresentationPolicy = .defaultExplicitOpen
     ) throws -> WorkspacePresentationPolicy {
         if let policy = try container.decodeIfPresent(WorkspacePresentationPolicy.self, forKey: canonical) { return policy }
-        if let shortForm = try container.decodeIfPresent(Short.self, forKey: short) { return shortForm.policy }
-        return .defaultExplicitOpen
+        if let shortForm = try container.decodeIfPresent(Short.self, forKey: short) { return shortForm.policy(base: base) }
+        return base
     }
 }

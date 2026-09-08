@@ -61,7 +61,11 @@ private func checkAgentOpsAndPreset() {
         .agentFind, .agentInspect,
         .canvasQuery, .canvasApply,
         .agentDelegate, .agentReveal, .operationGet,
+        .agentMessage,
     ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
+    expect(WorkspaceAPIOp(rawValue: "agent.message") == .agentMessage
+            && !WorkspaceAPIOp.sessionPresetOperations.contains(.agentMessage),
+           "agent.message decodes from its wire name and is withheld from the session preset")
     let me = agentsID("0001")
     let preset = WorkspaceToolGrant.phase1Preset(agentId: me, checkout: ckOwn, generation: 3)
     expect(preset.operations == WorkspaceAPIOp.sessionPresetOperations

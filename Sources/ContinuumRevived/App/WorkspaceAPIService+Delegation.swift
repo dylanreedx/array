@@ -424,6 +424,240 @@ extension WorkspaceAPIService {
         return .result(object)
     }
 
+    // MARK: - agent.message (§10, children only)
+
+    /// One text message into a child THIS agent created, delivered through the
+    /// supervisor's own send path (`AgentSupervisor.send` — the function the
+    /// composer's Send button drives). Nothing here writes to a provider, and
+    /// nothing here waits for an answer: the result reports DELIVERY only, and
+    /// the caller collects the reply the existing way (`wait_agents`, or
+    /// `agent.inspect`).
+    ///
+    /// Scope is the whole feature: the target's `parentAgentID` must be the
+    /// caller. A sibling, the caller's own parent, an unrelated agent and an
+    /// agent in another checkout are all `permission_denied` with a message that
+    /// names no id and no path — so a refusal never even confirms which ids
+    /// exist. Messaging SELF is `invalid_request`, because an agent continues
+    /// its own turn instead.
+    ///
+    /// `agent.message` is deliberately NOT in `sessionPresetOperations`: writing
+    /// into another agent's run is an effect, so the first message per agent
+    /// session goes through the trusted approval UI, and an approved DELEGATION
+    /// grants nothing here.
+    func message(
+        agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle, requestId: String,
+        payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView,
+        isCancelled: () -> Bool
+    ) -> Reply {
+        // 1. Schema and pure bounds (the 8 KB text ceiling, the required key).
+        let request: AgentMessageRequest
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            request = try JSONDecoder().decode(AgentMessageRequest.self, from: data)
+        } catch {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "The message request could not be decoded: \(error.localizedDescription)"))
+        }
+        if let failure = request.validationFailure() {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: failure))
+        }
+        guard let idempotencyKey = request.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !idempotencyKey.isEmpty else {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.message: a retry without one would prompt the child twice."))
+        }
+        let text = request.text
+        let generationAtDispatch = runtime.interactionGeneration
+
+        // 2. Scope, BEFORE the operation store and before the user is asked:
+        //    nobody is prompted about a target that was never messageable.
+        guard request.agentId != agentId else {
+            return .error(WorkspaceAPIError(
+                code: .invalidRequest,
+                message: "An agent cannot message itself: continue your own turn instead of starting a second one."))
+        }
+        // One message for "not yours" and for "does not exist", so a refusal
+        // discloses no identity (§14.4).
+        let notYours = WorkspaceAPIError(
+            code: .permissionDenied,
+            message: "This agent may only message the children it created. A sibling, its own parent, another agent's child and an agent in another checkout are all out of scope.")
+        guard let target = supervisor.records[request.agentId], target.parentAgentID == agentId else {
+            return .error(notYours)
+        }
+        guard Self.ownCheckoutHandle(target) == ownHandle else { return .error(notYours) }
+        let childId = target.id
+
+        // 3. Reserve BEFORE any effect (§10.2). EXACTLY ONE DELIVERY PER KEY:
+        //    the same key with the same text replays the first outcome and sends
+        //    nothing; the same key with different text is a conflict.
+        let payloadHash = Self.messagePayloadHash(request)
+        switch operations.reserve(
+            agentId: agentId, op: .agentMessage, idempotencyKey: idempotencyKey,
+            payloadHash: payloadHash, operationId: requestId) {
+        case let .replay(existing):
+            if let cached = messageReplayResults[existing.operationId] { return .result(cached) }
+            let replay = AgentMessageResult(
+                operationId: existing.operationId,
+                delivery: existing.steps.creation == .succeeded ? .delivered : .refused,
+                childAgentId: existing.childAgentId ?? childId, parentAgentId: agentId,
+                childRunning: supervisor.records[childId] != nil ? supervisor.isRunning(childId) : nil,
+                refusalReason: existing.failureMessage)
+            return .result(Self.jsonObject(replay) ?? [:])
+        case .conflict:
+            return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This idempotencyKey was already used for a different message. New text needs a new key; reusing one is what stops a retry from prompting the child twice."))
+        case let .expired(tombstone):
+            return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "This idempotencyKey belongs to an expired operation (\(tombstone.operationId)); Array no longer holds its outcome and will not repeat the delivery. Call operation.get, or ask the user."))
+        case .reserved:
+            break
+        }
+        /// A failure that delivered NOTHING keeps the key usable: `reserve`
+        /// re-opens a `failed` record whose creation step never succeeded, so a
+        /// retry after the cause is gone still cannot double-deliver.
+        func failNothingDelivered(_ code: WorkspaceAPIError.Code, _ message: String, approvalRequestId: String? = nil) -> Reply {
+            operations.update(operationId: requestId) { op in
+                op.status = .failed
+                op.steps.creation = .failed
+                op.childAgentId = childId
+                op.failureCode = code.rawValue
+                op.failureMessage = message
+            }
+            remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentMessage, outcome: "error:\(code.rawValue)"))
+            return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
+        }
+
+        // 4. Grant (§14.1). Outside the preset, so the first message per agent
+        //    session reaches the trusted approval UI; the alert names the child.
+        let effectivePolicy: WorkspacePresentationPolicy
+        var approvalRequestId: String?
+        switch WorkspaceToolGrantEvaluator.evaluate(
+            agentId: agentId, op: .agentMessage, checkout: ownHandle,
+            requested: request.presentationPolicy, grants: grants[agentId] ?? [],
+            currentGeneration: revocationGeneration) {
+        case let .allowed(_, policy):
+            effectivePolicy = policy
+        case .denied, .scopeApprovalRequired:
+            let promptId = UUID().uuidString
+            approvalRequestId = promptId
+            approvalPromptCount += 1
+            let decision = approvalHandler(ScopeApprovalPrompt(
+                requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
+                checkout: ownHandle, checkoutDisplayName: URL(fileURLWithPath: record.checkoutRoot).lastPathComponent,
+                op: .agentMessage, relativePath: nil,
+                targetAgentId: childId, targetAgentDisplayName: target.displayName))
+            guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
+                return failNothingDelivered(.permissionDenied, "Workspace tools were disabled for this agent.", approvalRequestId: promptId)
+            }
+            switch decision {
+            case .deny:
+                return failNothingDelivered(.permissionDenied, "The user declined to let this agent message that child.", approvalRequestId: promptId)
+            case .allowOnce:
+                mint(WorkspaceToolGrant(
+                    agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
+                    presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
+                    issuer: .userApprovalOnce(requestId: promptId),
+                    revocationGeneration: revocationGeneration, singleUse: true))
+            case .allowForSession:
+                mint(WorkspaceToolGrant(
+                    agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
+                    presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
+                    issuer: .userApprovalSession(requestId: promptId),
+                    revocationGeneration: revocationGeneration))
+            }
+            guard case let .allowed(_, policy) = WorkspaceToolGrantEvaluator.evaluate(
+                agentId: agentId, op: .agentMessage, checkout: ownHandle,
+                requested: request.presentationPolicy, grants: grants[agentId] ?? [],
+                currentGeneration: revocationGeneration) else {
+                return failNothingDelivered(.permissionDenied, "Approval did not take.", approvalRequestId: promptId)
+            }
+            effectivePolicy = policy
+        }
+        consumeSingleUseGrant(agentId: agentId, checkout: ownHandle, op: .agentMessage)
+        let generationAtGrant = revocationGeneration
+
+        // 5. Recheck the grant generation immediately before delivery, so a
+        //    revocation that landed while the alert was up still wins.
+        guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration == generationAtGrant else {
+            return failNothingDelivered(.permissionDenied, "Access was revoked before the message was delivered.", approvalRequestId: approvalRequestId)
+        }
+        // The target must still be this agent's child at the moment of delivery.
+        guard supervisor.records[childId]?.parentAgentID == agentId else { return .error(notYours) }
+        if isCancelled() {
+            operations.release(operationId: requestId)
+            remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentMessage, outcome: "cancelledBeforeEffect"))
+            return .cancelled(result: nil)
+        }
+        _beforeCommitHook?()
+
+        // 6. The known seam (`AgentSupervisor.sendRefusal`): the send path
+        //    refuses unless the catalogue reports the child's harness ready AND
+        //    lists its model. That is a host condition, not the model's fault
+        //    and not a silent success — it is a structured `unsupported`, and
+        //    nothing was delivered.
+        if let refusal = supervisor.sendRefusal(for: childId) {
+            return failNothingDelivered(.unsupported, "Array did not deliver the message: \(refusal)", approvalRequestId: approvalRequestId)
+        }
+
+        // 7. Delivery, through the composer's own path. `send` starts the turn on
+        //    the child's OWN runner; it never queues, so a child that is mid-turn
+        //    declines rather than being double-prompted.
+        var result = AgentMessageResult(
+            operationId: requestId, delivery: .refused, childAgentId: childId, parentAgentId: agentId,
+            childRunning: supervisor.isRunning(childId))
+        let childWasRunning = supervisor.isRunning(childId)
+        if supervisor.send(text, to: childId) {
+            result.delivery = .delivered
+            result.childRunning = supervisor.isRunning(childId)
+            operations.update(operationId: requestId) { op in
+                op.status = .committed
+                op.steps.creation = .succeeded
+                op.childAgentId = childId
+            }
+        } else {
+            let reason = supervisor.sendRefusal(for: childId)
+                ?? (childWasRunning
+                    ? "the child is mid-turn, and Array never interrupts or double-prompts a running agent. Collect its current answer first (wait_agents, or agent.inspect), then message it again with a NEW idempotencyKey."
+                    : "the child's send path declined the message.")
+            result.refusalReason = reason
+            result.childRunning = supervisor.isRunning(childId)
+            operations.update(operationId: requestId) { op in
+                op.status = .failed
+                op.steps.creation = .failed
+                op.childAgentId = childId
+                op.failureCode = "delivery_refused"
+                op.failureMessage = reason
+            }
+        }
+
+        // 8. Presentation: preserve-all by default (a message must not steal the
+        //    user's view); only what the effective policy permits, and only while
+        //    still authorized.
+        if let tileId = supervisor.records[childId]?.tileId, canvas.zoneId(containing: tileId) != nil {
+            _beforePresentationHook?()
+            let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
+                && revocationGeneration == generationAtGrant
+            if stillAllowed {
+                let (presentation, effects) = present(
+                    tileId: tileId, policy: effectivePolicy, generationAtDispatch: generationAtDispatch,
+                    runtime: runtime, canvas: canvas)
+                result.presentation = presentation
+                result.presentationEffects = effects
+            } else {
+                result.presentation = .unavailable
+            }
+        } else {
+            result.presentation = .unavailable
+        }
+
+        guard let object = Self.jsonObject(result) else {
+            return .error(WorkspaceAPIError(code: .unsupported, message: "Result could not be encoded."))
+        }
+        if result.delivery != .refused {
+            messageReplayResults[requestId] = object
+            messageReplayResults = messageReplayResults.filter { operations.record(operationId: $0.key) != nil }
+        }
+        remember(agentId: agentId, WorkspaceRecentOperation(
+            requestId: requestId, op: .agentMessage,
+            outcome: result.delivery == .refused ? "refused" : result.delivery.rawValue))
+        return .result(object)
+    }
+
     // MARK: - operation.get (§10.3)
 
     func operationGet(agentId: AgentID, ownHandle: CheckoutHandle, requestId: String, payload: [String: Any]) -> Reply {
@@ -472,6 +706,16 @@ extension WorkspaceAPIService {
     }
 
     // MARK: - Helpers
+
+    /// The key binds the TEXT: the same key with different text is a conflict,
+    /// never a second delivery. The presentation policy is deliberately part of
+    /// the normalized payload for the same reason the delegate hash is.
+    private static func messagePayloadHash(_ request: AgentMessageRequest) -> String {
+        var normalized = request
+        normalized.idempotencyKey = nil
+        guard let data = try? encoder.encode(normalized) else { return UUID().uuidString }
+        return String(decoding: data, as: UTF8.self)
+    }
 
     private static func payloadHash(_ request: AgentDelegateRequest) -> String {
         var normalized = request

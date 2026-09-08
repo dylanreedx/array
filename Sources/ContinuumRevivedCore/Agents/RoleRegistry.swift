@@ -79,7 +79,10 @@ public struct RoleRegistry: Sendable {
                           "array_canvas_query", "array_canvas_apply",
                           // Delegation is authorized per request by the host grant
                           // table, not by withholding the tool.
-                          "array_delegate", "array_reveal_agent", "array_get_operation"]
+                          "array_delegate", "array_reveal_agent", "array_get_operation",
+                          // Messaging is scoped to the caller's OWN children and
+                          // authorized per request, like delegation.
+                          "array_message_agent"]
         case .claudeCode, .codex: return []
         }
     }

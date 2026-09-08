@@ -37,6 +37,9 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case agentDelegate = "agent.delegate"
     case agentReveal = "agent.reveal"
     case operationGet = "operation.get"
+    // CX-01 Phase 2c (§10): one text message into a child the caller created.
+    // Contracts in `WorkspaceAPIContracts+Delegation.swift`. Appended last.
+    case agentMessage = "agent.message"
 }
 
 // MARK: - Identity

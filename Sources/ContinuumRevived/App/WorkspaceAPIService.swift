@@ -90,6 +90,9 @@ final class WorkspaceAPIService {
     /// Encoded `agent.delegate` results by operationId, for same-key replays;
     /// pruned with the store's eviction.
     var delegateReplayResults: [String: [String: AnyHashableJSON]] = [:]
+    /// Encoded `agent.message` results by operationId, for same-key replays.
+    /// One delivery per key: a replay is answered from here and sends nothing.
+    var messageReplayResults: [String: [String: AnyHashableJSON]] = [:]
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
@@ -232,6 +235,9 @@ final class WorkspaceAPIService {
                           payload: payload, runtime: runtime, canvas: canvas)
         case .operationGet:
             return operationGet(agentId: agentId, ownHandle: ownHandle, requestId: requestId, payload: payload)
+        case .agentMessage:
+            return message(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                           payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
         }
     }
 

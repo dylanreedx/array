@@ -1590,7 +1590,7 @@ enum ContinuumApp {
             NSApp.run()
         }
 
-        // CX-01: the nine-operation walkthrough. NOT a `*-check` flag on purpose —
+        // CX-01: the ten-operation walkthrough. NOT a `*-check` flag on purpose —
         // it is a narrated demonstration, not a gate, so it stays out of the check
         // inventory and out of the matrix. See `WorkspaceAPIDemo.swift`.
         if CommandLine.arguments.contains("--workspace-api-demo") {
@@ -14853,6 +14853,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // CX-01 Phase 2b (§10.1 / §14.1): delegation is outside the preset.
             alert.messageText = "Allow \(prompt.agentDisplayName) to delegate work to a new agent in \(prompt.checkoutDisplayName)?"
             detail = "The agent asked Array to start a child agent with its own provider and model, in the same checkout, and show it beside itself on the canvas. No worktree is created."
+        } else if prompt.op == .agentMessage {
+            // CX-01 Phase 2c: writing into another agent's run is an effect, so
+            // it is never in the preset — and an approved DELEGATION does not
+            // imply it.
+            let child = prompt.targetAgentDisplayName ?? "a child agent"
+            alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(child)?"
+            detail = "The agent asked Array to start a new turn on \(child) — a child agent it created in \(prompt.checkoutDisplayName) — using text the agent wrote.\n\nIt can reach only the children it created: never a sibling, never its own parent, never any other agent."
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
