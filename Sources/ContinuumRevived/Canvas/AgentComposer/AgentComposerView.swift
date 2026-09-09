@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
@@ -75,7 +76,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private let fileReferenceRailHeightConstraint: NSLayoutConstraint
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
-    private var replyOptions: [String] = []
+    private var replyOptions: [AgentReplyOption] = []
     /// B4 — Array's own follow-up queue, rendered as chips above the composer.
     private let queuedMessageRail: ComposerQueuedMessageRailView
     private let queuedMessageRailHeightConstraint: NSLayoutConstraint
@@ -1367,7 +1368,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// `AgentReplyOptionDetector`. The owner recomputes this per document
     /// version; the composer decides whether to SHOW them, because only it knows
     /// whether the user has already started writing.
-    func setReplyOptions(_ options: [String]) {
+    func setReplyOptions(_ options: [AgentReplyOption]) {
         guard replyOptions != options else { return }
         replyOptions = options
         updateReplyOptionRail()
@@ -1458,6 +1459,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     // Deterministic AppKit probes; not a tile integration seam.
     var qaReplyOptionChipTitles: [String] { replyOptionRail.qaChipTitles }
     var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
+    var qaReplyOptionChipAccessibilityLabels: [String] { replyOptionRail.qaChipAccessibilityLabels }
     var qaDraftText: String { draft.text }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {

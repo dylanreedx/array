@@ -29,9 +29,16 @@ private func parseAssistantEntry(
     )
 }
 
-private func options(_ markdown: String, lifecycle: AgentEntryLifecycle = .finished) -> [String] {
+private func detected(
+    _ markdown: String, lifecycle: AgentEntryLifecycle = .finished
+) -> [AgentReplyOption] {
     let entry = parseAssistantEntry(markdown, lifecycle: lifecycle)
     return AgentReplyOptionDetector.options(in: AgentDocument(version: 1, entries: [entry]))
+}
+
+/// Labels only, for the assertions that are about WHICH options were found.
+private func options(_ markdown: String, lifecycle: AgentEntryLifecycle = .finished) -> [String] {
+    detected(markdown, lifecycle: lifecycle).map(\.label)
 }
 
 /// Dylan's ask: "handle some parsing of the response like selecting options
@@ -129,11 +136,31 @@ func runReplyOptionChecks() {
         - Three
         - Four
         - Five
+        - Six
+        - Seven
         """
     )
     expect(tooMany.isEmpty,
            "a list longer than \(AgentReplyOptionDetector.maximumOptions) is a document, not a "
            + "choice; offered \(tooMany)")
+
+    // And the cap itself is REACHABLE. A planning reply routinely lays out five
+    // or six approaches; the old cap of four rejected the whole set rather than
+    // trimming it, so the replies that most needed the affordance never got it.
+    let atTheCap = options(
+        """
+        Which one?
+
+        - One
+        - Two
+        - Three
+        - Four
+        - Five
+        - Six
+        """
+    )
+    expect(atTheCap.count == AgentReplyOptionDetector.maximumOptions,
+           "a list at exactly the cap must be offered whole; offered \(atTheCap)")
 
     let single = options(
         """
@@ -167,6 +194,109 @@ func runReplyOptionChecks() {
     expect(duplicated.isEmpty,
            "two items that chip to the SAME label cannot be told apart once clicked; offered "
            + "\(duplicated)")
+
+    // 2b. The planning shapes. Measured against the detector before this
+    //     change, five of seven realistic planning replies were rejected — and
+    //     planning is exactly when Dylan wants the affordance. Each case below
+    //     names the rule that used to reject it.
+
+    // The question sits BELOW the options. Rejected before: the list had to be
+    // the last block with the question immediately above it.
+    let questionLast = options(
+        """
+        Two approaches:
+
+        - **Incremental migration** — ship behind a flag, migrate callers over three
+          releases. Lower risk, more code for longer.
+        - **Big-bang cutover** — one release, all callers. Higher risk, less carrying cost.
+
+        I'd lean incremental. Your call?
+        """
+    )
+    expect(questionLast == ["Incremental migration", "Big-bang cutover"],
+           "options laid out before the question must still be offered; got \(questionLast)")
+
+    // A closing note after the list. Rejected before: the list was no longer last.
+    let trailingNote = options(
+        """
+        Which do you want?
+
+        - Rewrite the resolver
+        - Patch the call sites
+
+        Either way I'll add the witness first.
+        """
+    )
+    expect(trailingNote == ["Rewrite the resolver", "Patch the call sites"],
+           "a closing note after the list must not withdraw the offer; got \(trailingNote)")
+
+    // Asking and recommending in one breath. Rejected before: the paragraph had
+    // to END with the question mark.
+    let askedAndRecommended = options(
+        """
+        Which do you want? I'd lean toward the first.
+
+        - Rewrite the resolver
+        - Patch the call sites
+        """
+    )
+    expect(askedAndRecommended == ["Rewrite the resolver", "Patch the call sites"],
+           "a question followed by a recommendation is still a question; got \(askedAndRecommended)")
+
+    // 2c. The false positives the LIBERALISATION could have introduced.
+
+    // The one that matters: a summary list followed by an unrelated question.
+    // Accepting a question below a list without requiring it to refer BACK to a
+    // set would turn every "here is what I did … shall I continue?" into chips.
+    let summaryThenUnrelatedQuestion = options(
+        """
+        Done. Here is what changed:
+
+        1. The resolver now caches by path
+        2. The duplicated call site is gone
+
+        Want me to run the matrix?
+        """
+    )
+    expect(summaryThenUnrelatedQuestion.isEmpty,
+           "a question BELOW a list must refer back to it; a summary followed by an unrelated "
+           + "question is not a choice. Offered \(summaryThenUnrelatedQuestion)")
+
+    // Two lists is a document — a summary and a plan, say. Picking either as
+    // "the choices" would be a guess.
+    let twoLists = options(
+        """
+        Which do you want?
+
+        - Rewrite the resolver
+        - Patch the call sites
+
+        Here is what I already did:
+
+        - Added the witness
+        - Ran the matrix
+        """
+    )
+    expect(twoLists.isEmpty,
+           "a reply carrying two lists is a document, not a choice; offered \(twoLists)")
+
+    // 2d. The reasoning is KEPT. Dropping the trailing clause is what made this
+    //     a typing shortcut instead of a decision aid: when the question is
+    //     "which approach", the tradeoff after the dash is the half you decide on.
+    let withDetail = detected(
+        """
+        Which do you want?
+
+        - **Rewrite the resolver** — keeps the API, drops the cache
+        - Patch the call sites
+        """
+    )
+    expect(withDetail.map(\.label) == ["Rewrite the resolver", "Patch the call sites"],
+           "detail parsing changed the labels; got \(withDetail.map(\.label))")
+    expect(withDetail.first?.detail == "keeps the API, drops the cache",
+           "the reasoning after the separator must be kept; got \(String(describing: withDetail.first?.detail))")
+    expect(withDetail.last?.detail == nil,
+           "a bare label must carry no fabricated detail; got \(String(describing: withDetail.last?.detail))")
 
     // 3. A turn still being written offers nothing: the list grows item by item
     //    as the stream lands, and a strip that appeared mid-stream would flicker
@@ -213,7 +343,11 @@ func runReplyOptionChecks() {
 
     print(
         "Reply-option checks passed: a settled assistant turn that asks and lists offers its "
-        + "choices, and summaries, mid-stream turns, over-long items, single items, "
-        + "ambiguous labels and already-answered questions offer nothing"
+        + "choices — including the planning shapes (question below the options, a closing note "
+        + "after them, asking and recommending in one breath, and up to "
+        + "\(AgentReplyOptionDetector.maximumOptions) of them) — each keeping the reasoning "
+        + "after its label; and summaries, a summary followed by an unrelated question, two "
+        + "lists, mid-stream turns, over-long items, single items, ambiguous labels and "
+        + "already-answered questions offer nothing"
     )
 }
