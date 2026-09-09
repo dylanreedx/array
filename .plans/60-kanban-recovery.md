@@ -384,6 +384,4 @@ Verification:
   `/tmp/kb01-preview/Array Dev.app`. The isolated preview was rebuilt and relaunched
   with `/Users/dylan/kb01-scratch` and `/tmp/kb01-preview/support`.
 - The new board API leg is registered in `scripts/run-matrix.sh`.
-- `git diff --check` passes. No staging, commit, merge, push, global provider
-  configuration change, production app change, or production project change was
-  made.
+- `git diff --check` passes. Shipped in Array 0.7.19/build 70.
