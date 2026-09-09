@@ -335,6 +335,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # precision semantics. Standalone so unrelated long-running CoreChecks failures
 # cannot prevent this contract from running.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+# ST-01. Standalone for the same reason as the compaction leg above: the bare
+# CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
+# and a witness only counts if the gate reports IT rather than the first red
+# thing ahead of it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check

@@ -578,6 +578,10 @@ final class ManagedAgentTileNSView: TileNSView {
         runtimeObservationObserverToken = supervisor.addRuntimeObservationObserver(for: agentID) { [weak self] observation in
             self?.transcriptCollectionFixture?.captureRuntimeObservation(observation)
             self?.updateLiveToolVerb(for: observation)
+            // ST-01 — an account quota reading changes a row element without
+            // producing any runtime EVENT, so nothing else in this tile would
+            // repaint it.
+            if case .accountQuota = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
@@ -1618,7 +1622,9 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: compactContextWindow)
+                contextWindow: compactContextWindow,
+                accountQuota: currentAccountQuota(),
+                enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
@@ -1628,7 +1634,10 @@ final class ManagedAgentTileNSView: TileNSView {
         compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
-            context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
+            context: AgentRadialContextMeterPresenter.present(compactContextWindow),
+            quotas: currentQuotaPresentations(at: now),
+            cost: currentCostPresentation(),
+            enabledElements: AgentStatusElementConfig.visibleElements())))
         transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
         syncCompactStatusTick(for: activity)
     }
@@ -1683,7 +1692,10 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(snapshot, detail: detail),
                 activity: unknownCompactActivity(),
-                context: AgentRadialContextMeterPresenter.present(nil))))
+                context: AgentRadialContextMeterPresenter.present(nil),
+                quotas: currentQuotaPresentations(at: now),
+                cost: currentCostPresentation(),
+                enabledElements: AgentStatusElementConfig.visibleElements())))
         } else {
             applyUnknownCompactStatus()
         }
@@ -1700,7 +1712,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 detailText: "Location unavailable",
                 isExternal: false),
             activity: unknownCompactActivity(),
-            context: AgentRadialContextMeterPresenter.present(nil))))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // Even a fully-unknown row keeps the enabled set and the account
+            // reading: the quota belongs to the harness, not to whatever this
+            // tile currently knows about its own location.
+            quotas: currentQuotaPresentations(at: Date()),
+            cost: currentCostPresentation(),
+            enabledElements: AgentStatusElementConfig.visibleElements())))
     }
 
     /// Splits the activity by KIND between the tile's two status surfaces.
@@ -1715,11 +1733,17 @@ final class ManagedAgentTileNSView: TileNSView {
         _ presentation: AgentCompactStatusPresentation
     ) -> AgentCompactStatusPresentation {
         let activity = presentation.activity
+        // Only the ACTIVITY is being rewritten here. Everything else must be
+        // carried across verbatim: this helper sits on every production repaint,
+        // so a field it forgets is a field the row never shows.
         guard !activity.isSilent, Self.footerRetainsPhase(activity.phase) else {
             return AgentCompactStatusPresentation(
                 location: presentation.location,
                 activity: .silent(detailText: activity.detailText),
-                context: presentation.context)
+                context: presentation.context,
+                quotas: presentation.quotas,
+                cost: presentation.cost,
+                enabledElements: presentation.enabledElements)
         }
         return AgentCompactStatusPresentation(
             location: presentation.location,
@@ -1731,7 +1755,10 @@ final class ManagedAgentTileNSView: TileNSView {
                 accessibilityLabel: activity.accessibilityLabel,
                 detailText: activity.detailText,
                 showsThinkingIndicator: false),
-            context: presentation.context)
+            context: presentation.context,
+            quotas: presentation.quotas,
+            cost: presentation.cost,
+            enabledElements: presentation.enabledElements)
     }
 
     /// Attention states only. These occur precisely when the gyro is NOT shown
@@ -1809,10 +1836,16 @@ final class ManagedAgentTileNSView: TileNSView {
     /// QA uses the same tile composition seam to feed deterministic facts. This
     /// is intentionally a view probe, not an adapter-only assertion: the call
     /// resolves the adapter and paints the installed row in the real hierarchy.
+    /// `accountQuota` is an injection seam, not a second source of truth: nil
+    /// falls through to `currentAccountQuota()`, exactly what production reads.
+    /// A probe needs it because the geometry harness builds a tile with no
+    /// supervisor to deliver an observation through.
     func qaApplyCompactStatusFacts(
         _ facts: AgentCompactStatusPhaseFacts,
         location: AgentLocationSnapshot,
         contextWindow: AgentContextWindowSnapshot? = nil,
+        accountQuota: AgentAccountQuotaSnapshot? = nil,
+        enabledElements: [AgentStatusElement]? = nil,
         now: Date
     ) {
         compactStatusSession = facts.session
@@ -1830,9 +1863,17 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: contextWindow)
+                contextWindow: contextWindow,
+                accountQuota: accountQuota ?? currentAccountQuota(),
+                // An explicit set keeps a probe deterministic. Reading live
+                // defaults here would make the witness depend on whichever
+                // toggles the developer happens to have set.
+                enabledElements: enabledElements ?? AgentStatusElementConfig.visibleElements())
             // Same split as production: footer filter, then the gyro's words.
             // A probe that skipped either would witness a surface no user sees.
+            // The rebuild is exactly where the account chips were being dropped,
+            // so a witness MUST come through here rather than calling
+            // `compactStatusRow.apply` with a presentation of its own.
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
@@ -1845,7 +1886,13 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(location, detail: detail),
                 activity: activity,
-                context: AgentRadialContextMeterPresenter.present(contextWindow))))
+                context: AgentRadialContextMeterPresenter.present(contextWindow),
+                quotas: AgentStatusElementConfig.visibleElements()
+                    .filter(\.isAccountScoped)
+                    .compactMap { AgentAccountQuotaPresenter.present(
+                        accountQuota ?? currentAccountQuota(), element: $0, now: now) },
+                cost: currentCostPresentation(),
+                enabledElements: AgentStatusElementConfig.visibleElements())))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: activity)
         }
@@ -1858,6 +1905,26 @@ final class ManagedAgentTileNSView: TileNSView {
     /// transcript to this tile the way the supervisor does.
     /// (`qaTranscriptForChecks` and `qaDocumentForChecks` already exist below.)
     var qaThreadIdForChecks: String { threadId }
+
+    /// This agent's harness-wide account quota, or nil when the provider reports
+    /// none. Read live rather than cached on the tile: one reading serves every
+    /// agent on the login, so the supervisor is its only owner.
+    private func currentAccountQuota() -> AgentAccountQuotaSnapshot? {
+        guard let id = projectedAgentID else { return nil }
+        return agentSource?.accountQuota(for: id)
+    }
+
+    private func currentQuotaPresentations(at now: Date) -> [AgentQuotaElementPresentation] {
+        let quota = currentAccountQuota()
+        return AgentStatusElementConfig.visibleElements()
+            .filter(\.isAccountScoped)
+            .compactMap { AgentAccountQuotaPresenter.present(quota, element: $0, now: now) }
+    }
+
+    private func currentCostPresentation() -> AgentCostElementPresentation? {
+        guard AgentStatusElementConfig.isVisible(.cost) else { return nil }
+        return AgentAccountQuotaPresenter.presentCost(compactContextWindow)
+    }
 
     /// Fills a per-turn usage snapshot with an occupancy reading so the radial
     /// meter can show a real percentage: the prompt tokens the provider reported
@@ -3167,7 +3234,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 accessibilityLabel: presentation.whatAccessibilityValue,
                 detailText: presentation.detailText,
                 showsThinkingIndicator: false),
-            context: AgentRadialContextMeterPresenter.present(nil)))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // Preview seam with no supervisor: there is no account reading to
+            // show, and inventing one for a screenshot is how a fabricated
+            // number ends up in a design review.
+            quotas: [],
+            cost: nil,
+            enabledElements: [.location, .activity, .contextMeter]))
     }
 
     // These location accessors retain the semantic presenter witness for the

@@ -276,6 +276,11 @@ if CommandLine.arguments.contains("--agent-context-occupancy-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-account-quota-check") {
+    runAgentAccountQuotaChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-agent-backend-check") {
     runCodexAgentBackendChecks()
     Foundation.exit(0)
@@ -11504,6 +11509,11 @@ runPiExtensionInstallerChecks()
 runAgentPromptImageContractChecks()
 runAgentPromptFileReferenceContractChecks()
 runAgentContextOccupancyChecks()
+
+// ST-01 — ACCOUNT quota telemetry (claude rate_limit_event, codex
+// account/rateLimits/updated) and the compact-status element toggles. Replayed
+// from committed sanitized fixtures; no credentials, no live provider.
+runAgentAccountQuotaChecks()
 
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()

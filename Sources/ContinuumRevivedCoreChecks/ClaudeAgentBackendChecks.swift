@@ -94,6 +94,12 @@ private func runClaudeTranslatorMappingChecks() {
             cacheWriteTokens: 1200,
             totalProcessedTokens: 24446,
             totalCostUsd: 0.014992,
+            // ST-01 — claude's `total_cost_usd` is a client-side LIST-PRICE
+            // estimate, and under the CLI subscription login Array requires
+            // nothing is billed per token at all. Pinned here so the figure can
+            // never be rendered as a bill, and so it stays distinguishable from
+            // pi's `.providerMetered` charge.
+            costBasis: .listPriceEstimate,
             automaticCompaction: nil,
             observedAt: observedAt,
             source: .claudeAssistantUsage,

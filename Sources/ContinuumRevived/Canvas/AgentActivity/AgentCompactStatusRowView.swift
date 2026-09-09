@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 typealias AgentThinkingIndicatorFactory = () -> (NSView & AgentThinkingIndicatorAnimating)?
 
@@ -50,6 +51,19 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let contextMeter = AgentRadialContextMeterView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
     private let contextLabel = NSTextField(labelWithString: "")
+    /// Absorbs the row's leftover width.
+    ///
+    /// Without it `locationGroup` was the only low-hugging view, so it swallowed
+    /// every spare point — 721pt of a 1200pt row for a 61pt name — and the
+    /// activity label was left 44.0pt for a 45.0pt word. One point short is all
+    /// it takes: AppKit drew "Waiti…" on a row with 600pt of empty space. Slack
+    /// belongs in a view that does not render.
+    private let flexibleSpacer = NSView()
+    /// ST-01 — one reusable pill per account-scoped element, plus cost. Created
+    /// once and reused; an element the user disabled is hidden, never rebuilt,
+    /// so toggling one costs no view churn.
+    private var quotaPills: [AgentStatusElement: AgentStatusPillView] = [:]
+    private let quotaGroup: NSStackView
     private let thinkingIndicator: (NSView & AgentThinkingIndicatorAnimating)?
     private let thinkingSlot = NSView()
     private let locationGroup: NSStackView
@@ -79,7 +93,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         self.thinkingIndicator = thinkingIndicatorFactory?()
         locationGroup = NSStackView(views: [locationIcon, locationLabel, actionButton])
         activityGroup = NSStackView(views: [])
+        // The context ring is NOT a pill. It is already a shape carrying its own
+        // reading, and wrapping a circle in a capsule reads as two nested
+        // containers for one number. The pills exist to group a label with a
+        // value; the ring has no label to group.
         contextGroup = NSStackView(views: [contextMeter, contextLabel])
+        quotaGroup = NSStackView(views: [])
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
 
@@ -98,11 +117,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         configureIcon(activityIcon)
         configureLabel(locationLabel, role: .label)
         configureLabel(activityLabel, role: .label)
-        configureLabel(elapsedLabel, role: .captionMono)
         configureLabel(contextLabel, role: .captionMono)
+        configureLabel(elapsedLabel, role: .captionMono)
 
         locationLabel.lineBreakMode = .byTruncatingMiddle
-        locationLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // Hugs its content rather than stretching. It is still the compression
+        // SINK (resistance 1 below), which is what makes a long path truncate
+        // first; being greedy about spare width was a separate and unhelpful
+        // behaviour that starved the phase label by a rounding point.
+        locationLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         locationLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         // Preserve a drawable sliver for the location label in the production
         // tile (including the 320pt Component Lab card); deterministic geometry
@@ -129,6 +152,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextLabel.lineBreakMode = .byClipping
         contextLabel.setContentHuggingPriority(.required, for: .horizontal)
         contextLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
 
         // The meter is a fixed-size glyph, so pin it rather than leaving its
         // width to intrinsic size and priority arbitration. Once the activity
@@ -168,10 +192,19 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             ])
         }
 
+        // The spacer is the greedy view now, so every rendering view gets its
+        // fitting width and the rounding error lands in empty space.
+        flexibleSpacer.translatesAutoresizingMaskIntoConstraints = false
+        flexibleSpacer.setContentHuggingPriority(
+            NSLayoutConstraint.Priority(1), for: .horizontal)
+        flexibleSpacer.setContentCompressionResistancePriority(
+            NSLayoutConstraint.Priority(1), for: .horizontal)
+        flexibleSpacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 0).isActive = true
+
         locationGroup.orientation = .horizontal
         locationGroup.alignment = .centerY
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
-        locationGroup.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        locationGroup.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         locationGroup.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(10), for: .horizontal)
         actionButton.target = self
         actionButton.action = #selector(showActions(_:))
@@ -192,6 +225,25 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextGroup.setContentHuggingPriority(.required, for: .horizontal)
         contextGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        // The account/cost chips. `detachesHiddenViews` is what makes hiding one
+        // actually reclaim its width instead of leaving a gap the reader reads
+        // as a missing value.
+        quotaGroup.orientation = .horizontal
+        quotaGroup.alignment = .centerY
+        // Space.m between pills, not xs: the capsules are what separate the
+        // readings now, and crowding them undoes the grouping they exist for.
+        quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
+        quotaGroup.detachesHiddenViews = true
+        quotaGroup.setContentHuggingPriority(.required, for: .horizontal)
+        quotaGroup.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for element in AgentStatusElement.presentationOrder
+        where element.isAccountScoped || element == .cost {
+            let pill = AgentStatusPillView()
+            pill.isHidden = true
+            quotaPills[element] = pill
+            quotaGroup.addArrangedSubview(pill)
+        }
+
         rootStack.orientation = .horizontal
         rootStack.alignment = .centerY
         rootStack.spacing = CGFloat(pageZoom.scaled(Space.m))
@@ -199,7 +251,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         rootStack.translatesAutoresizingMaskIntoConstraints = false
         rootStack.addArrangedSubview(locationGroup)
         rootStack.addArrangedSubview(activityGroup)
+        rootStack.addArrangedSubview(flexibleSpacer)
         rootStack.addArrangedSubview(contextGroup)
+        rootStack.addArrangedSubview(quotaGroup)
+        // The metrics read as a cluster on the right: the spacer above holds
+        // them apart from identity and phase, and a minimum gap survives even
+        // when the spacer has collapsed to nothing in a narrow tile.
+        rootStack.setCustomSpacing(CGFloat(pageZoom.scaled(Space.l)), after: flexibleSpacer)
         addSubview(rootStack)
 
         NSLayoutConstraint.activate([
@@ -218,7 +276,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         apply(AgentCompactStatusPresentation(
             location: .init(symbolName: "house", text: "—", accessibilityLabel: "Home and Where: unknown.", detailText: "Location unavailable", isExternal: false),
             activity: .init(phase: .ready, symbolName: "checkmark.circle", text: "Ready", elapsedText: nil, accessibilityLabel: "Activity: ready.", detailText: "Activity phase: ready.", showsThinkingIndicator: false),
-            context: AgentRadialContextMeterPresenter.present(nil)))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // The row's own placeholder, before any caller has applied a real
+            // presentation: nothing is enabled beyond the three original
+            // elements and there is no reading of any kind yet.
+            quotas: [],
+            cost: nil,
+            enabledElements: [.location, .activity, .contextMeter]))
         applyTokens()
     }
 
@@ -290,18 +354,144 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         contextLabel.stringValue = next.context.label
         contextLabel.toolTip = next.context.detailText
         contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
+        applyQuotaElements(next)
         actionButton.toolTip = next.location.detailText + "\nLocation actions"
-        toolTip = [next.location.detailText, next.activity.detailText, next.context.detailText]
+        // Everything the row can drop under width pressure survives here, so a
+        // dropped element is never unreachable — only unshown.
+        toolTip = ([next.location.detailText, next.activity.detailText, next.context.detailText]
+            + next.quotas.map(\.detailText)
+            + [next.cost?.detailText].compactMap { $0 })
             .joined(separator: "\n\n")
         // A silent activity contributes nothing to speech either — VoiceOver must
         // not announce a phase the row is deliberately not showing.
         let spokenActivity = next.activity.isSilent ? "" : " \(next.activity.accessibilityLabel)"
-        setAccessibilityLabel("Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity) \(next.context.accessibilityLabel)")
+        // Account-scoped phrases are spoken in full even when their chip was
+        // dropped: losing width is a display constraint, not a reason to stop
+        // reporting a number to a screen reader.
+        let spokenContext = next.enabledElements.contains(.contextMeter)
+            ? " \(next.context.accessibilityLabel)" : ""
+        let spokenQuotas = next.quotas.map { " \($0.accessibilityLabel)" }.joined()
+        let spokenCost = next.cost.map { " \($0.accessibilityLabel)" } ?? ""
+        setAccessibilityLabel(
+            "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenContext)\(spokenQuotas)\(spokenCost)")
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only the single location-action control is separately reachable.
         setAccessibilityChildren([actionButton])
         updateThinkingLifecycle()
+        applyTokens()
+    }
+
+    /// Fills the account/cost chips, hides the ones the user disabled, then runs
+    /// the width pass.
+    ///
+    /// A DISABLED element and a DROPPED element look identical on screen and are
+    /// not the same thing: disabled means the user turned it off and it stays
+    /// out of the tooltip's promise; dropped means it did not fit right now and
+    /// its value is still in the tooltip and the accessibility label. Only the
+    /// latter comes back when the tile widens.
+    private func applyQuotaElements(_ next: AgentCompactStatusPresentation) {
+        let enabled = Set(next.enabledElements)
+        for (element, pill) in quotaPills {
+            guard enabled.contains(element) else {
+                pill.isHidden = true
+                continue
+            }
+            if element == .cost {
+                if let cost = next.cost {
+                    pill.apply(cost: cost)
+                    pill.isHidden = false
+                } else {
+                    // Enabled but nothing reported yet. Silence rather than a
+                    // "$0.00" that would claim a free session.
+                    pill.isHidden = true
+                }
+                continue
+            }
+            guard let quota = next.quotas.first(where: { $0.element == element }) else {
+                pill.isHidden = true
+                continue
+            }
+            pill.apply(quota)
+            pill.isHidden = false
+        }
+        // Whole groups follow their own toggles.
+        locationGroup.isHidden = !enabled.contains(.location)
+        contextGroup.isHidden = !enabled.contains(.contextMeter)
+        if !enabled.contains(.activity) { activityGroup.isHidden = true }
+        droppedElements = []
+        applyOverflow()
+        // An empty group must leave the layout entirely, not sit in it at 0x0.
+        // A zero-size visible view is what `--ui-geometry-check` flags, and it is
+        // right to: a stack view with no visible arranged subview still claims a
+        // slot and its spacing, so the row gains a phantom gap at exactly the
+        // narrow widths where every chip has been dropped.
+        quotaGroup.isHidden = quotaPills.values.allSatisfy(\.isHidden)
+        invalidateIntrinsicContentSize()
+        rootStack.needsLayout = true
+        needsLayout = true
+    }
+
+    /// Hides the elements that do not fit, lowest priority first.
+    ///
+    /// Bounded and O(elements) — seven chips, each already sized by AppKit, with
+    /// no text measurement of its own. This is deliberately not done inside
+    /// `layout()`: measurement in a layout pass is how the Markdown tile froze
+    /// the app (`docs/internals/performance.md`), and there is no reason to
+    /// recompute on every pass when the inputs only change on `apply` and on a
+    /// width change.
+    private func applyOverflow() {
+        guard let presentation else { return }
+        let available = bounds.width - Self.rootInsets(zoom: pageZoom).left
+            - Self.rootInsets(zoom: pageZoom).right
+        guard available > 0 else { return }
+
+        var widths: [AgentStatusElement: CGFloat] = [:]
+        for element in presentation.enabledElements {
+            switch element {
+            case .location:
+                widths[element] = locationGroup.fittingSize.width
+            case .activity:
+                widths[element] = presentation.activity.isSilent ? 0 : activityGroup.fittingSize.width
+            case .contextMeter:
+                widths[element] = contextGroup.fittingSize.width
+            case .quotaFiveHour, .quotaSevenDay, .quotaSpendLimit, .cost:
+                let pill = quotaPills[element]
+                widths[element] = (pill?.isHidden ?? true) ? 0 : (pill?.fittingSize.width ?? 0)
+            }
+        }
+
+        let kept = AgentStatusOverflowPolicy.fitting(
+            presentation.enabledElements,
+            widths: widths,
+            available: available,
+            spacing: rootStack.spacing,
+            locationFloor: CGFloat(pageZoom.scaled(48)))
+        let dropped = Set(presentation.enabledElements).subtracting(kept)
+        droppedElements = dropped
+
+        for element in dropped {
+            switch element {
+            case .activity: activityGroup.isHidden = true
+            case .contextMeter: contextGroup.isHidden = true
+            case .location: break  // never dropped; it truncates instead
+            default: quotaPills[element]?.isHidden = true
+            }
+        }
+    }
+
+    /// Elements the width pass removed on the current bounds. Distinct from the
+    /// disabled set, and reported to QA so a witness can assert the drop ORDER
+    /// rather than merely that something vanished.
+    private(set) var droppedElements: Set<AgentStatusElement> = []
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changedWidth = abs(newSize.width - frame.width) > 0.5
+        super.setFrameSize(newSize)
+        guard changedWidth, let presentation else { return }
+        // Re-apply from the presentation so an element the last, narrower pass
+        // dropped can come back when the tile widens.
+        applyQuotaElements(presentation)
         applyTokens()
     }
 
@@ -317,8 +507,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         activityIcon.contentTintColor = activityColor
         activityLabel.textColor = activityColor
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
-        contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         contextMeter.applyTokens()
+        // Each pill owns its own fill and value tint; the row only has to ask.
+        contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
+        for pill in quotaPills.values { pill.applyTokens() }
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -333,10 +525,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         activityLabel.font = .token(.label, zoom: pageZoom)
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
         contextLabel.font = .token(.captionMono, zoom: pageZoom)
+        for pill in quotaPills.values { pill.applyPageZoom(pageZoom) }
+        quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         contextGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         rootStack.spacing = CGFloat(pageZoom.scaled(Space.m))
+        rootStack.setCustomSpacing(CGFloat(pageZoom.scaled(Space.l)), after: flexibleSpacer)
         rootStack.edgeInsets = Self.rootInsets(zoom: pageZoom)
         actionButtonWidth?.constant = CGFloat(pageZoom.scaled(18))
         locationLabelMinimumWidth?.constant = CGFloat(pageZoom.scaled(6))
@@ -483,6 +678,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
     }
 
+
+    /// Account chips reuse the context meter's colour ladder so one row does not
+    /// teach two colour languages. `expired` is deliberately the same subdued
+    /// treatment as `unknown` — both mean "no number you can trust right now" —
+    /// while the tooltip keeps them distinct in words.
     private func contextLabelColor(for state: AgentRadialContextMeterState, theme: TokenTheme) -> NSColor {
         switch state {
         case .known:
@@ -507,6 +707,28 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaActivitySymbolName: String { presentation?.activity.symbolName ?? "" }
     var qaElapsedText: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
     var qaContextText: String { contextLabel.stringValue }
+    /// ST-01 QA surface: what each account/cost chip is currently drawing, the
+    /// elements the width pass dropped, and which elements are enabled at all.
+    func qaQuotaText(_ element: AgentStatusElement) -> String {
+        guard let pill = quotaPills[element], !pill.isHidden else { return "" }
+        let label = pill.qaLabelText
+        let value = pill.qaValueText
+        return label.isEmpty ? value : "\(label) \(value)"
+    }
+    /// The pill itself, for the geometry witness: a chip that lost its fill, its
+    /// glyph or its capsule radius is a chip that stopped grouping anything.
+    func qaQuotaPill(_ element: AgentStatusElement) -> AgentStatusPillView? {
+        quotaPills[element].flatMap { $0.isHidden ? nil : $0 }
+    }
+    func qaQuotaState(_ element: AgentStatusElement) -> AgentQuotaElementState? {
+        presentation?.quotas.first(where: { $0.element == element })?.state
+    }
+    func qaQuotaFrame(_ element: AgentStatusElement) -> NSRect? {
+        quotaPills[element].flatMap { $0.isHidden ? nil : frame(of: $0) }
+    }
+    var qaDroppedElements: Set<AgentStatusElement> { droppedElements }
+    var qaEnabledElements: [AgentStatusElement] { presentation?.enabledElements ?? [] }
+    var qaToolTip: String { toolTip ?? "" }
     var qaContextState: AgentRadialContextMeterState { contextMeter.qaState }
     var qaContextFraction: Double? { contextMeter.qaFraction }
     var qaContextDetail: String { contextMeter.qaDetail }
@@ -525,6 +747,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaLocationLabelFrame: NSRect? { frame(of: locationLabel) }
     var qaActivityLabelFrame: NSRect? { frame(of: activityLabel) }
     var qaContextLabelFrame: NSRect? { frame(of: contextLabel) }
+    /// What the phase label NEEDS, against what the row gave it. The gap
+    /// between those two numbers was one point, and one point is a visible
+    /// ellipsis.
+    var qaActivityLabelFittingWidth: CGFloat { activityLabel.fittingSize.width }
     var qaLocationIconFrame: NSRect? { frame(of: locationIcon) }
     var qaActivityIconFrame: NSRect? { frame(of: activityIcon) }
     var qaContextMeterFrame: NSRect? { frame(of: contextMeter) }

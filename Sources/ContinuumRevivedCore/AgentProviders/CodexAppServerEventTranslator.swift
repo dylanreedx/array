@@ -136,11 +136,24 @@ public struct CodexAppServerEventTranslator {
             return translateTokenUsage(params)
         case "turn/completed":
             return translateTurnCompleted(params)
+        // ST-01 — ACCOUNT quota. Not a timeline item: it leaves on the
+        // host-local observation channel and produces no `AgentRuntimeEvent`,
+        // because the allowance belongs to the codex login rather than to this
+        // thread. This is the live production path — app-server is the default
+        // transport (`CodexCLIBackend.transportOverride()`), so this frame
+        // arrives on every turn and used to fall through `default:`.
+        case "account/rateLimits/updated":
+            if let limits = params["rateLimits"] as? [String: Any],
+               let snapshot = AgentAccountQuota.codexSnapshot(
+                    rateLimits: limits, observedAt: now()) {
+                onRuntimeObservation?(.accountQuota(snapshot))
+            }
+            return []
         default:
             // thread/status/changed, mcpServer/startupStatus/updated,
-            // account/rateLimits/updated, turn/diff/updated,
-            // remoteControl/status/changed, and any method a newer app-server
-            // adds. None of these are part of the normalized timeline.
+            // turn/diff/updated, remoteControl/status/changed, and any method a
+            // newer app-server adds. None of these are part of the normalized
+            // timeline.
             return []
         }
     }

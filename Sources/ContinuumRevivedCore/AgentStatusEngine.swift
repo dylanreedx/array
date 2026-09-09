@@ -630,6 +630,9 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public var cacheWriteTokens: Int?
     public var totalProcessedTokens: Int?
     public var totalCostUsd: Double?
+    /// What `totalCostUsd` is: a metered charge or a list-price estimate.
+    /// Optional because a snapshot carrying no cost carries no basis either.
+    public var costBasis: AgentCostBasis?
     public var automaticCompaction: Bool?
     public var contextEpoch: UInt64?
     public var automaticCompactionPolicy: AgentAutomaticCompactionPolicy?
@@ -646,6 +649,7 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         cacheWriteTokens: Int? = nil,
         totalProcessedTokens: Int? = nil,
         totalCostUsd: Double? = nil,
+        costBasis: AgentCostBasis? = nil,
         automaticCompaction: Bool? = nil,
         contextEpoch: UInt64? = nil,
         automaticCompactionPolicy: AgentAutomaticCompactionPolicy? = nil,
@@ -661,6 +665,7 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         self.cacheWriteTokens = cacheWriteTokens
         self.totalProcessedTokens = totalProcessedTokens
         self.totalCostUsd = totalCostUsd
+        self.costBasis = costBasis
         self.automaticCompaction = automaticCompaction
         self.contextEpoch = contextEpoch
         self.automaticCompactionPolicy = automaticCompactionPolicy

@@ -71,6 +71,22 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// `AgentRuntimeEvent`. It is also not Codable state and must never cross
     /// the I5 sync boundary. Not a location fact: the projector ignores it.
     case advertisedCommands([String])
+    /// ST-01 — an ACCOUNT-scoped provider quota reading (claude's
+    /// `rate_limit_event`, codex's `account/rateLimits/updated`).
+    ///
+    /// It rides this host-local side channel for the same reason as
+    /// `resolvedModel` and `providerSessionId`: the supervisor rebinds every
+    /// `AgentRuntimeEvent`'s threadId before delivery, so a value captured here
+    /// could not survive on an event. But it also must not become an event for
+    /// a second, stronger reason — an account quota is not thread state at all.
+    /// It belongs to the signed-in account, is shared by every agent on that
+    /// harness across every project, and putting it on the per-agent event log
+    /// (the I5 sync boundary) would both mislabel it and leak account facts into
+    /// a per-agent payload.
+    ///
+    /// The supervisor stores it keyed by HARNESS, never on an `AgentRecord`.
+    /// Not a location fact: the projector ignores it.
+    case accountQuota(AgentAccountQuotaSnapshot)
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -431,6 +447,12 @@ public struct AgentLocationProjector: Sendable {
             // The harness's own slash-command list, feeding the command
             // classifier. Host-local capability state, not a Home / Where /
             // What fact.
+            break
+
+        case .accountQuota:
+            // An account-scoped quota reading is not a Home / Where / What fact,
+            // and it is not this agent's state at all — the supervisor files it
+            // by harness. Same shape as `.threadId`.
             break
         }
     }

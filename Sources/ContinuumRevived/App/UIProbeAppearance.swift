@@ -427,7 +427,24 @@ enum UIProbeAppearance {
                         observedAt: now,
                         source: .providerSessionStats,
                         freshness: .live),
-                    contextPolicy: AgentRadialContextMeterPolicy.thresholds(warning: 0.75, critical: 0.90)))
+                    contextPolicy: AgentRadialContextMeterPolicy.thresholds(warning: 0.75, critical: 0.90),
+                    // ST-01: the sweep must carry a real account reading, or the
+                    // pills draw nothing and `AgentStatusPillView` is an adopted
+                    // owner that painted no colour — which this gate reports, and
+                    // rightly: a surface that never paints is never checked.
+                    accountQuota: AgentAccountQuotaSnapshot(
+                        harness: .claudeCode,
+                        windows: [
+                            AgentQuotaWindow(
+                                kind: .fiveHour, utilization: 0.18,
+                                resetsAt: now.addingTimeInterval(3_600)),
+                            AgentQuotaWindow(
+                                kind: .sevenDay, utilization: 0.94,
+                                resetsAt: now.addingTimeInterval(86_400)),
+                        ],
+                        observedAt: now,
+                        source: .claudeRateLimitEvent),
+                    enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour, .quotaSevenDay]))
                 return row
             }),
             // 91/P4.7: the reusable control is intentionally isolated until P4.8
@@ -817,6 +834,11 @@ enum UIProbeAppearance {
         // Queue 91 live managed-agent composition: the compact row owns the
         // single visible Home/Where/What surface and paints its tile-chrome fill.
         "AgentCompactStatusRowView",
+        // ST-01: each metric in the compact row is a capsule — a `cardMessage`
+        // fill one step off the row's own `tileChrome`, so a label-value pair
+        // reads as one object. A pill with no reading paints `nil`, never
+        // `.clear`, so an absent metric contributes no slot at all.
+        "AgentStatusPillView",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
         // paint the composer shell on every managed-agent surface, so the composer
@@ -1443,6 +1465,34 @@ enum UIProbeAppearance {
                     tile.ingest(.requestOpened(
                         threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
                     ))
+                    // ST-01: hazard 8 wants a new TokenThemed view painting in an
+                    // ADOPTED surface as well as the appearance sweep, and the Lab
+                    // tile has no supervisor to deliver a quota observation. Drive
+                    // the same seam production repaints through, so the account
+                    // pills are real painted colour here rather than hidden views
+                    // the census silently covers less of.
+                    let quotaNow = Date(timeIntervalSince1970: 1_000)
+                    let quotaRoot = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+                    tile.qaApplyCompactStatusFacts(
+                        .init(interaction: .pending(startedAt: quotaNow.addingTimeInterval(-5))),
+                        location: AgentLocationSnapshot(
+                            home: AgentHome(
+                                projectId: nil, projectRoot: quotaRoot, checkoutRoot: quotaRoot),
+                            whereDirectory: quotaRoot),
+                        contextWindow: AgentContextWindowSnapshot(
+                            usedTokens: 96_000, maxTokens: 128_000,
+                            observedAt: quotaNow, source: .providerSessionStats, freshness: .live),
+                        accountQuota: AgentAccountQuotaSnapshot(
+                            harness: .claudeCode,
+                            windows: [
+                                AgentQuotaWindow(
+                                    kind: .fiveHour, utilization: 0.18,
+                                    resetsAt: quotaNow.addingTimeInterval(3_600)),
+                            ],
+                            observedAt: quotaNow,
+                            source: .claudeRateLimitEvent),
+                        enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
+                        now: quotaNow)
                     tile.layoutSubtreeIfNeeded()
                 }
             ),

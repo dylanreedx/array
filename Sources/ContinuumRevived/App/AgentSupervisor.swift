@@ -1008,6 +1008,24 @@ final class AgentSupervisor {
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
+    ///
+    /// Deliberately not a field on `AgentRecord`. A record is per-agent and
+    /// persisted per-agent, so storing an account allowance there would mint one
+    /// racing copy per agent, write N files for one provider notification, and
+    /// resurrect whichever stale copy happened to load first on relaunch. One
+    /// login has one allowance; this dictionary is that shape.
+    ///
+    /// Persisted per harness and validated on restore against each window's own
+    /// `resets_at`, so a relaunch shows the last real percentages instead of a
+    /// row of em dashes. See `AgentAccountQuotaStore` for why checking the reset
+    /// is the right answer rather than discarding the reading.
+    private var accountQuotas: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
+    private lazy var accountQuotaStore: AgentAccountQuotaStore? = {
+        guard let directory = AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
+        else { return nil }
+        return AgentAccountQuotaStore(applicationSupportDirectory: directory)
+    }()
     /// Live views of an agent's identity. Names are record state rather than
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
@@ -1667,6 +1685,17 @@ final class AgentSupervisor {
             advertisedCommandNames[id] = Set(names)
             return
         }
+        // An account quota belongs to the signed-in harness, not to this agent:
+        // file it by harness so every agent on the same login reads one value,
+        // then still fan the observation out so their tiles repaint.
+        if case let .accountQuota(snapshot) = observation {
+            accountQuotas[snapshot.harness] = snapshot
+            accountQuotaStore?.save(accountQuotas)
+            runtimeObservationObservers.values.forEach { observers in
+                observers.values.forEach { $0(observation) }
+            }
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -1680,6 +1709,35 @@ final class AgentSupervisor {
     /// Claude harness offers aliases (`anthropic/opus`) that are not catalogue
     /// keys, so without this a claude agent has no window and an empty ring.
     func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
+
+    /// The account quota for THIS agent's harness, or nil when the provider has
+    /// reported none. Pi reports no account windows at all, so nil there is
+    /// "unsupported" rather than "not yet observed" — the presenter says so
+    /// either way, because both are unknown and neither is zero.
+    func accountQuota(for id: AgentID) -> AgentAccountQuotaSnapshot? {
+        guard let harness = records[id]?.harness else { return nil }
+        restoreAccountQuotasIfNeeded()
+        return accountQuotas[harness]
+    }
+
+    /// Loads the persisted readings once per process, on first ask rather than
+    /// at boot: an empty row is only a problem when something is looking at it,
+    /// and this keeps a disk read off the launch path.
+    private var didRestoreAccountQuotas = false
+    private func restoreAccountQuotasIfNeeded() {
+        guard !didRestoreAccountQuotas else { return }
+        didRestoreAccountQuotas = true
+        guard let restored = accountQuotaStore?.restore(now: Date()), !restored.isEmpty else { return }
+        // A live reading observed this session always wins over a restored one.
+        for (harness, snapshot) in restored where accountQuotas[harness] == nil {
+            accountQuotas[harness] = snapshot
+        }
+    }
+
+    /// QA seam: deliver a quota observation without a live provider.
+    func qaDeliverAccountQuota(_ snapshot: AgentAccountQuotaSnapshot) {
+        accountQuotas[snapshot.harness] = snapshot
+    }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;
