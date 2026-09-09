@@ -11514,6 +11514,10 @@ runCodexAgentBackendChecks()
 // Plan: .plans/03-transcript-rehydration.md (transcript rehydration on resume)
 runTranscriptRehydrationChecks()
 
+// TR-01 — measured-or-absent line counts, the codex `changes[]` reader shared by
+// both transports, and the per-operation file projection behind the change card.
+runAgentFileCardChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
 runAgentModelCatalogChecks()
@@ -12328,6 +12332,8 @@ runSpawnRequestChecks()
 // and a spawn's role decides what it runs with.
 try runItemKindLenientDecodingChecks()
 try runAgentCommandExecutionPlannerChecks()
+try runAgentCommandSurfaceTruthChecks()
+try runAgentCommandDiscoveryChecks()
 runClaudeSubagentSupplyChecks()
 runPiDelegateSupplyChecks()
 try runRoleRegistryChecks()

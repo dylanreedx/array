@@ -56,6 +56,13 @@ protocol AgentRunning: AnyObject, Sendable {
     /// Codable runtime and companion activity streams.
     func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
+    /// TR-04 — what THIS runner can do with a `/command`. A REQUIREMENT, not an
+    /// extension-only member: the supervisor holds an `AgentRunning` existential,
+    /// and a member that exists only in a protocol extension dispatches
+    /// statically — every concrete runner's override would be dead code and the
+    /// default would answer for all three. `--agent-supervisor-check` caught
+    /// exactly that.
+    var commandCapabilities: AgentSessionCommandCapabilities { get }
     /// A provider session which remains useful after `run` returns can be
     /// retained by the supervisor and rebound to the next prompt.
     var keepsSessionAliveBetweenTurns: Bool { get }
@@ -110,6 +117,44 @@ protocol AgentCompactionRunning: AgentRunning {
     ) throws
 }
 
+extension AgentRunning {
+    /// The conservative floor, and deliberately the floor: a runner that has not
+    /// said otherwise hands a leading slash to the model, which spends a real
+    /// paid turn answering conversationally about a command that means nothing
+    /// to it in that mode. Opting in is per runner, below.
+    ///
+    /// This replaces a `switch records[id]?.harness` in
+    /// `sessionCommandCapabilities(for:)` — the stored provider NAME, which is
+    /// the one thing a capability may never be derived from. It lies for the
+    /// whole of a transport migration: `.pi` returned the one-shot answer
+    /// unconditionally while production had been binding `PiRpcAgentRunner`,
+    /// whose vocabulary includes `compact`, `fork`, `set_model` and
+    /// `set_session_name`, since before this comment existed.
+    var commandCapabilities: AgentSessionCommandCapabilities { .oneShotProse }
+}
+
+/// TR-06 — the response transport for a request a provider OPENED and is
+/// holding. A REFINEMENT of `AgentRunning`, for the same reason
+/// `AgentSessionRunning` is one: only some transports can carry a response back.
+///
+/// Deliberately NOT `AgentAdapter`. That protocol already declares
+/// `respondToRequest`/`respondToUserInput`, and has had exactly one conformer
+/// since it was written — `ProbeAdapter`, inside CoreChecks. Reviving it is a
+/// program (tickets 67/69/70, all `[gaps]`); this is the seam the runners Array
+/// actually spawns can implement.
+///
+/// **A conformer must acknowledge, not assume.** `respond` returns only after
+/// the provider has accepted the response frame; a transport error throws. The
+/// caller turns that into a visible failed state rather than a silent no-op,
+/// because the failure mode this whole ticket exists to kill is a control that
+/// looks like it worked.
+protocol AgentRequestResponding: AgentRunning {
+    /// True only while a response could actually be delivered — the process is
+    /// alive and its transport is open. Read per-snapshot, never cached.
+    var canRespondToRequests: Bool { get }
+    func respond(requestID: String, decision: ApprovalDecision) throws
+}
+
 extension PiAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentSessionRunning {}
@@ -117,9 +162,25 @@ extension PiRpcAgentRunner: AgentCompactionRunning {}
 extension PiRpcAgentRunner {
     var keepsSessionAliveBetweenTurns: Bool { true }
     var canAcceptAnotherTurn: Bool { isSessionRunning }
+    /// A live rpc session carries a command AS a command over its own transport,
+    /// so it never depends on the CLI interpreting a leading slash.
+    /// `advertisedCommandNames` is pi's `get_commands` answer, nil until this
+    /// session has given a parseable one.
+    var commandCapabilities: AgentSessionCommandCapabilities {
+        AgentSessionCommandCapabilities(
+            interpretsLeadingSlash: false,
+            canDelegateCommands: true,
+            advertisedNames: advertisedCommandNames)
+    }
 }
 extension ClaudeAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentCompactionRunning {}
+extension ClaudeAgentRunner {
+    /// Measured 2026-08-24: `claude -p` answers `/help`, `/status` and
+    /// `/compact` itself with `model: "<synthetic>"`, zero tokens and zero cost,
+    /// and "Unknown command: …" for one it does not have.
+    var commandCapabilities: AgentSessionCommandCapabilities { .claudeOneShot }
+}
 extension CodexAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentCompactionRunning {}
 
@@ -1225,6 +1286,21 @@ final class AgentSupervisor {
     /// after a streaming turn floods it, so a tile that attaches later seeds
     /// from this instead (`contextWindowSnapshot(for:)`).
     private var contextWindowSnapshots: [AgentID: AgentContextWindowSnapshot] = [:]
+    /// TR-04 — the slash commands each harness has told us THIS session has,
+    /// or no entry when it has not said yet.
+    ///
+    /// In-memory and per launch on purpose. It is a fact about a live CLI
+    /// binary, and the classifier's refusal branch reads it: a list persisted
+    /// across a `claude`/`pi` upgrade would refuse commands the new binary
+    /// gained. Absent means "answer from the baseline catalogue", which is
+    /// exactly what a pre-init agent needs.
+    private var advertisedCommandNames: [AgentID: Set<String>] = [:]
+    /// TR-04 — how many Array-owned notices this agent has been given, so each
+    /// one gets a distinct transcript entry id. `appendNotice` de-dupes by id
+    /// (correctly — it protects replay), and the id used to be a constant per
+    /// command: a second `/status` in one transcript printed nothing at all,
+    /// and a second `/clear` ran its whole transaction and left no boundary.
+    private var arrayOwnedNoticeCounts: [AgentID: Int] = [:]
     /// Restore-time Codex rollout lookup. Injected in checks so repair is
     /// deterministic and never depends on a developer's real ~/.codex tree.
     private let codexRestoredContextSnapshot: @Sendable (AgentRecord) -> AgentContextWindowSnapshot?
@@ -1582,6 +1658,13 @@ final class AgentSupervisor {
             updated.resolvedModelId = value
             records[id] = updated
             persist(updated)
+            return
+        }
+        // TR-04 — the harness's own command list. In-memory only and per
+        // launch: it is a fact about THIS session, and a stale list persisted
+        // across a CLI upgrade would refuse commands the new binary has.
+        if case let .advertisedCommands(names) = observation {
+            advertisedCommandNames[id] = Set(names)
             return
         }
         ensureLocationProjector(for: record)
@@ -4099,6 +4182,8 @@ final class AgentSupervisor {
         locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
         contextWindowSnapshots.removeValue(forKey: id)
+        advertisedCommandNames.removeValue(forKey: id)
+        arrayOwnedNoticeCounts.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
@@ -4742,6 +4827,11 @@ final class AgentSupervisor {
         // runner. That is honest for every harness with an occupied runner,
         // one-shot or session-backed alike — there is no RPC to gate on.
         let queueable = occupied && !mirrored
+        // TR-06 — same sourcing rule as `steerable`: asked of the BOUND RUNNER.
+        // A mirrored agent has no runner here at all, so it can never respond;
+        // that is the same reason it gets no composer and no Stop.
+        let responder = mirrored ? nil : (runners[id] as? AgentRequestResponding)
+        let canRespond = responder?.canRespondToRequests ?? false
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
@@ -4753,7 +4843,12 @@ final class AgentSupervisor {
                 // "Unavailable" on the composer.
                 canStop: !mirrored && occupied && record.capabilities.canStop,
                 canSteer: steerable && occupied,
-                canQueue: queueable && occupied
+                canQueue: queueable && occupied,
+                // NOT gated on `occupied`. A held request is exactly the state
+                // where the provider is waiting on the user and the runner may
+                // read as idle; requiring occupancy would hide the buttons on
+                // the only request that matters.
+                canRespondToRequests: canRespond
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
@@ -4762,6 +4857,46 @@ final class AgentSupervisor {
             submittedAt: facts.submittedAt,
             isMirrored: mirrored
         )
+    }
+
+    /// TR-06 — carries a user's decision back to a request the provider OPENED.
+    ///
+    /// Returns whether the response was ACCEPTED FOR DISPATCH, synchronously, on
+    /// the same main-actor turn as the press — the same contract as `accept`, and
+    /// for the same reason: a control must not be told "yes" by one check and
+    /// "no" by another hidden further down.
+    ///
+    /// It deliberately does NOT report delivery. The transport blocks on a
+    /// provider round trip (`CodexAppServerTransport.sendRequest` waits on a
+    /// semaphore), so it runs off the main thread and reports a failure through
+    /// `onDispatchFailure`. And it never resolves anything: a delivered response
+    /// leaves the request open until the provider's own
+    /// `requestResolved`/`userInputResolved` event arrives. Array does not get to
+    /// decide that the provider agreed.
+    @discardableResult
+    func respondToRequest(
+        agentID: AgentID,
+        requestID: String,
+        decision: ApprovalDecision,
+        onDispatchFailure: @escaping @MainActor (String) -> Void = { _ in }
+    ) -> Bool {
+        guard records[agentID] != nil else { return false }
+        // The request must be one this supervisor is actually holding open. A
+        // press against a request already resolved (or never opened) is a stale
+        // callback, and forwarding it would put a second answer on the wire.
+        guard turnFacts[agentID]?.pendingRequests[requestID] != nil else { return false }
+        guard let responder = runners[agentID] as? AgentRequestResponding,
+              responder.canRespondToRequests else { return false }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try responder.respond(requestID: requestID, decision: decision)
+            } catch {
+                let message = SecretRedactor.redactLocalDiagnostics("\(error)")
+                DispatchQueue.main.async { MainActor.assumeIsolated { onDispatchFailure(message) } }
+            }
+        }
+        return true
     }
 
     /// One action owner for the v2 composer. Validation and mutation happen on the
@@ -4819,24 +4954,42 @@ final class AgentSupervisor {
             stop(agentID)
             return .accepted
         case .providerCommand(let invocation):
-            if invocation.name == "compact" {
+            // ONE set for the picker and for dispatch. This used to look the
+            // descriptor up in `AgentCommandCatalog.allBaselines()` while the
+            // menu offered `allBaselines() + discovered + manifests` — so every
+            // discovered skill, prompt template and `.array/commands` manifest
+            // was an ENABLED row whose dispatch fell straight through to
+            // "unsupported", and every availability verdict the user could read
+            // (`Requires Codex`, the CLI-surface refusal) was recomputed from a
+            // pristine descriptor the picker had never shown.
+            let offered = await offeredCommandDescriptors(for: agentID)
+            // Provider-resource discovery touches the filesystem, so re-read the
+            // turn state after it: an agent that was idle when the row was
+            // clicked can be mid-turn by the time the scan returns.
+            guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
+            guard let descriptor = offered.first(where: { $0.id == invocation.descriptorID })
+                    ?? AgentCommandCatalog.allBaselines()
+                        .first(where: { $0.id == invocation.descriptorID }) else {
+                return .refused(.unsupported)
+            }
+            // `/compact` is an Array-owned typed operation on every harness, and
+            // it is matched by descriptor ID rather than by NAME. Name-matching
+            // meant any invocation called "compact" — including a project's own
+            // `.claude/commands/compact.md`, which dispatch can now resolve —
+            // seized the native compaction route.
+            if descriptor.id == "array:compact" {
                 let focus = invocation.arguments.joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return await accept(
                     .compact(AgentCompactionRequest(focus: focus.isEmpty ? nil : focus)),
                     for: agentID)
             }
-            guard invocation.surface != .cli else { return .refused(.unsupported) }
             // B5 — routed through the classifier instead of unconditionally
             // serializing and sending. `AgentCommandExecutionPlanner` decides per
             // invocation whether Array performs it, the harness does, it expands
             // into an ordinary prompt, or it cannot run here at all — never
             // derived from `record.harness`, always from the BOUND runner (the
             // same rule `turnSnapshot` already follows for steer/queue).
-            guard let descriptor = AgentCommandCatalog.allBaselines()
-                .first(where: { $0.id == invocation.descriptorID }) else {
-                return .refused(.unsupported)
-            }
             switch AgentCommandExecutionPlanner.resolve(
                 descriptor, capabilities: sessionCommandCapabilities(for: agentID)
             ) {
@@ -4844,30 +4997,42 @@ final class AgentSupervisor {
                 // Array performs it and authors the reply itself as a `.system`
                 // notice — it never reaches the CLI as text, so no runtime event
                 // is invented and no turn is spent.
-                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard snapshot.capabilities.canSend else {
+                    appendCommandRefusalNotice(descriptor, reason: Self.busyRefusalReason, for: agentID)
+                    return .refused(.turnNotReady)
+                }
                 if descriptor.name == "clear" {
                     // B7.2 — `/clear` is not just a notice: it is one transaction
                     // over session rotation, the stale context meter, naming, and
                     // subagent chips, or it is worse than doing nothing.
                     performClearCommand(descriptor, for: agentID)
                 } else {
-                    appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                    appendArrayOwnedCommandNotice(descriptor, for: agentID, offered: offered)
                 }
                 return .accepted
             case .harnessDelegated, .skillTemplate:
                 let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !native.isEmpty else { return .refused(.emptyDraft) }
-                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard snapshot.capabilities.canSend else {
+                    appendCommandRefusalNotice(descriptor, reason: Self.busyRefusalReason, for: agentID)
+                    return .refused(.turnNotReady)
+                }
                 guard sendPrepared(
                     PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
                     to: agentID
                 ) else { return .refused(.invalidAttachment) }
                 return .accepted
-            case .unavailable:
+            case let .unavailable(reason):
                 // Disabled with a reason, never degraded into prose: codex and pi
                 // hand a leading slash straight to the model, spending a real paid
                 // turn answering conversationally about a command that means
-                // nothing to them in this mode.
+                // nothing to them in that mode.
+                //
+                // And the reason is now SAID. `IntentRefusal` stays opaque — that
+                // is an attachment-privacy rule and this is not an attachment —
+                // so the words go where the user is already looking, as a local
+                // notice beside the command they just ran.
+                appendCommandRefusalNotice(descriptor, reason: reason, for: agentID)
                 return .refused(.unsupported)
             }
         case .compact(let request):
@@ -5540,34 +5705,33 @@ final class AgentSupervisor {
 
     // MARK: - B5 command classifier
 
-    /// Capability facts for `AgentCommandExecutionPlanner`.
+    /// Capability facts for `AgentCommandExecutionPlanner`, from the BOUND
+    /// RUNNER.
     ///
-    /// **This comment used to describe something the body does not do**, and the
-    /// difference is a live defect rather than a documentation nicety. It claimed
-    /// the facts came "from the BOUND runner's harness rather than a stored
-    /// preference — the same rule `turnSnapshot` already follows", and that
-    /// "every compiled runner today is one-shot". Both were false by 2026-08-25:
-    /// the body switches on `records[id]?.harness`, which IS the stored record and
-    /// not the bound runner, and `PiRpcAgentRunner`/`PiRpcTransport` ship a
-    /// session runner with `steer`, `interrupt` and a generic `command`.
+    /// This used to `switch records[id]?.harness` and return `.oneShotProse` for
+    /// `.pi` unconditionally, and its own doc comment said so and said it was a
+    /// live defect. Production binds `PiRpcAgentRunner`
+    /// (`piSessionTransportEnabled()` is default-on), whose transport carries a
+    /// command AS a command — so every pi slash command was refused with "this
+    /// agent's CLI doesn't run slash commands outside its own terminal", about a
+    /// CLI that does.
     ///
-    /// The consequence is `.plans/49` §3.4: a pi agent whose rpc runner is bound
-    /// and can genuinely take `/compact` is told it cannot, because this returns
-    /// `.oneShotProse` for `.pi` unconditionally. Fixing that means consulting the
-    /// bound runner the way `AgentSessionRunning.sessionCapabilities` already does
-    /// for steer — deliberately NOT done here, because it changes what the
-    /// composer offers and belongs with the rest of the advertise-then-refuse
-    /// work, not smuggled in behind a comment correction.
-    ///
-    /// Measured 2026-08-24: `claude -p` interprets `/help`, `/status`,
-    /// `/compact` itself (synthetic zero-token replies); `codex exec --json`
-    /// and `pi -p --mode json` both hand the literal text to the model, which
-    /// spends a real paid turn answering conversationally.
+    /// The runner is resolved the way `accept(.compact)` already resolves one:
+    /// bound, else the idle session, else the runner the NEXT turn would create.
+    /// That last rung matters — a command is usually typed at an idle agent, and
+    /// construction spawns nothing (`run()` does).
     private func sessionCommandCapabilities(for id: AgentID) -> AgentSessionCommandCapabilities {
-        switch records[id]?.harness {
-        case .claudeCode: return .claudeOneShot
-        case .codex, .pi, nil: return .oneShotProse
+        guard let record = records[id] else { return .oneShotProse }
+        let runner = runners[id] ?? idleSessionRunners[id]
+            ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+        var capabilities = runner.commandCapabilities
+        // The runner answers for the transport; the supervisor answers for what
+        // the harness has ADVERTISED, because a one-shot claude process is
+        // rebuilt every turn and cannot carry the list from the last one.
+        if let advertised = advertisedCommandNames[id] {
+            capabilities.advertisedNames = advertised
         }
+        return capabilities
     }
 
     /// B7.2 — `/clear`, in one transaction. `/clear` alone used to be
@@ -5628,22 +5792,85 @@ final class AgentSupervisor {
         appendArrayOwnedCommandNotice(descriptor, for: id)
     }
 
+    /// Every command Array would offer this agent, with the menu's own
+    /// availability verdicts already applied — resolved OFF the main actor,
+    /// because it enumerates provider resource directories.
+    ///
+    /// One set for the picker and for dispatch (`AgentCommandCatalog`), so a row
+    /// the user can click can no longer be a row the supervisor cannot find.
+    private func offeredCommandDescriptors(for id: AgentID) async -> [AgentCommandDescriptor] {
+        let context = completionContext(for: id)
+        return await Task.detached(priority: .userInitiated) {
+            AgentCommandCatalog.offeredDescriptors(context: context)
+        }.value
+    }
+
     /// Tier A of the classifier: Array performs the command itself and authors
     /// the reply as a `.system` notice, never as text sent to the CLI. No new
     /// runtime event, no I5 pressure — `AgentTranscriptProjection.appendNotice`
     /// is already idempotent and already carries `provenance: .localNotice`.
-    private func appendArrayOwnedCommandNotice(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+    private func appendArrayOwnedCommandNotice(
+        _ descriptor: AgentCommandDescriptor,
+        for id: AgentID,
+        offered: [AgentCommandDescriptor] = []
+    ) {
         guard transcriptStore != nil else { return }
-        let (title, body) = Self.arrayOwnedCommandNoticeText(descriptor, record: records[id])
+        let (title, body) = Self.arrayOwnedCommandNoticeText(
+            descriptor, record: records[id], offered: offered)
+        appendLocalNotice(id: id, key: "array-command-\(descriptor.id)", title: title, body: body)
+    }
+
+    /// One Array-authored `.system` notice, with an id no earlier notice can
+    /// collide with.
+    ///
+    /// `appendNotice` returns without doing anything when the transcript
+    /// already holds an entry with that id — correct, because that is what
+    /// makes REPLAY idempotent. The id here used to be
+    /// `"array-command-<descriptorID>"`, a constant per command, so the
+    /// de-dupe meant to protect replay silently ate the second `/status` and
+    /// left the second `/clear` with no boundary marker at all, while `accept`
+    /// still returned `.accepted` and the composer still cleared the draft.
+    private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
+        guard transcriptStore != nil else { return }
+        let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
+        arrayOwnedNoticeCounts[id] = ordinal
         var projection = transcriptProjections[id]
             ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
-        projection.appendNotice(id: "array-command-\(descriptor.id)", title: title, text: body)
+        projection.appendNotice(id: "\(key)#\(ordinal)", title: title, text: body)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
     }
 
+    /// The reason a command could not run, in the user's transcript.
+    ///
+    /// A refusal used to be `.refused(.unsupported)` and nothing else:
+    /// `IntentRefusal` carries no reason (deliberately — that opacity is an
+    /// attachment-privacy rule), the composer painted an optimistic bubble from
+    /// `nativeSlashText` and rolled it straight back, and the descriptor's own
+    /// `disabledReason` — already computed, already shown on the menu row — was
+    /// dropped on the floor. The user saw a bubble flash and vanish.
+    private func appendCommandRefusalNotice(
+        _ descriptor: AgentCommandDescriptor,
+        reason: String,
+        for id: AgentID
+    ) {
+        appendLocalNotice(
+            id: id,
+            key: "array-command-refused-\(descriptor.id)",
+            title: "/\(descriptor.name) didn\u{2019}t run",
+            body: reason)
+    }
+
+    /// Why a command was refused mid-turn. Commands are not queueable — Array's
+    /// follow-up queue holds PROMPTS, and replaying a command later would make
+    /// `/clear` or `/model` land against a conversation the user was not looking
+    /// at when they asked for it.
+    static let busyRefusalReason = "This agent is busy. Wait for the current turn to finish, or stop it first."
+
     private static func arrayOwnedCommandNoticeText(
-        _ descriptor: AgentCommandDescriptor, record: AgentRecord?
+        _ descriptor: AgentCommandDescriptor,
+        record: AgentRecord?,
+        offered: [AgentCommandDescriptor] = []
     ) -> (title: String, body: String) {
         switch descriptor.name {
         case "clear":
@@ -5656,10 +5883,39 @@ final class AgentSupervisor {
             let model = record?.model ?? "default"
             return ("Agent status", "Harness: \(harness) · Model: \(model)")
         case "help":
-            let names = AgentCommandCatalog.arrayCommands().map { "/\($0.name)" }.joined(separator: ", ")
+            let names = AgentCommandCatalog.arrayCommands()
+                .filter { $0.isEnabled }
+                .map { "/\($0.name)" }
+                .joined(separator: ", ")
             return ("Array commands", names)
+        case "commands":
+            // Real content, from the same set the picker offers. `/commands`
+            // used to answer with its own one-line description — "Browse all
+            // provider commands" — and browse nothing.
+            let runnable = offered.filter { $0.isEnabled }
+                .map { "/\($0.name)" }
+            let names = Set(runnable).sorted().joined(separator: ", ")
+            let blocked = offered.filter { !$0.isEnabled }.count
+            let body = names.isEmpty
+                ? "No commands are available for this agent right now."
+                : names + (blocked > 0 ? "\n\n\(blocked) more are listed but unavailable here." : "")
+            return ("Available commands", body)
+        case "skills":
+            let skills = offered
+                .filter { $0.surface == .skill || $0.surface == .promptTemplate }
+                .map { "/\($0.name)" }
+            let names = Set(skills).sorted().joined(separator: ", ")
+            return (
+                "Discovered skills",
+                names.isEmpty ? "No skills or prompt templates were found for this agent." : names
+            )
         default:
-            return (descriptor.name.capitalized, descriptor.detail ?? "Handled by Array.")
+            // Unreachable while `AgentCommandCatalog.implementedArrayCommandNames`
+            // and this switch agree — the catalogue marks everything outside that
+            // set unavailable, so the classifier refuses it before it gets here.
+            // If the two ever drift, say so rather than echoing the command's own
+            // description back as though something had happened.
+            return (descriptor.name.capitalized, AgentCommandCatalog.unimplementedArrayReason)
         }
     }
 
@@ -8469,6 +8725,10 @@ func runAgentSupervisorChecks() async throws {
 
     let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 22b · TR-04 — command dispatch tells the truth about what can run
+
+    let commandDispatchReport = try await checkCommandDispatchTruth(config: config, cwd: cwd, fail: fail)
+
     // MARK: 23 · a runner that dies without a result still ends the turn
 
     // D1 (2026-08-26): the translators mint `.turnCompleted` only from a provider
@@ -8588,7 +8848,7 @@ func runAgentSupervisorChecks() async throws {
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(commandDispatchReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
 }
 
 /// A callback queued by a runner that Stop has already retired must not reopen
@@ -8777,6 +9037,181 @@ private func checkTranscriptSnapshotAndTailBeyondReplayCap(
         throw fail("snapshot-tail: closing the replacement tile leaked its observer")
     }
     return "full semantic snapshot + tail preserved an open 552-delta response beyond replayCap with zero loss/duplication and zero leaked observers"
+}
+
+/// TR-04 — a runner that CAN take a command is not told it cannot, a command
+/// that runs twice is visible twice, and a refusal says why.
+///
+/// Driven through `AgentSupervisor.accept(.providerCommand(…))`, the real
+/// production dispatch. That matters more than usual here: the pure
+/// classifier's own checks (`AgentCommandExecutionPlannerChecks`) were green for
+/// the entire period during which production derived its capability facts from
+/// `records[id]?.harness` and never populated `advertisedNames` at all. A
+/// witness over hand-built capability structs cannot see either defect.
+@MainActor
+func checkCommandDispatchTruth(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    /// A bound runner that carries commands over its own session transport --
+    /// the shape `PiRpcAgentRunner` has in production, which
+    /// `sessionCommandCapabilities` used to answer for by reading the stored
+    /// harness NAME and returning the one-shot verdict regardless.
+    final class SessionCommandRunner: AgentRunning, @unchecked Sendable {
+        private let advertised: Set<String>?
+        init(advertised: Set<String>? = nil) { self.advertised = advertised }
+        var commandCapabilities: AgentSessionCommandCapabilities {
+            AgentSessionCommandCapabilities(
+                interpretsLeadingSlash: false,
+                canDelegateCommands: true,
+                advertisedNames: advertised)
+        }
+        private let lock = NSLock()
+        private var promptsStorage: [String] = []
+        var prompts: [String] { lock.withLock { promptsStorage } }
+        func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            lock.withLock { promptsStorage.append(prompt.text) }
+        }
+        func stop() {}
+        func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+        func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-command-dispatch-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // `sendPrepared` consults `AgentModelCatalog` readiness, so a delegated
+    // command reaching the transport needs a ready pi harness that owns this
+    // model. Offline and deterministic — no probe runs.
+    let previousPi = AgentModelCatalog.shared.snapshot(for: .pi)
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: [config.model],
+        displayNames: [:], refreshedAt: Date()))
+    defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPi) }
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("agent-transcripts", isDirectory: true))
+
+    /// Persistence is debounced, so poll for AT LEAST the expected count rather
+    /// than reading once the file exists — a helper that returns on the first
+    /// non-empty read would report 1 for a transcript about to hold 2 and make
+    /// the de-dupe assertion below meaningless.
+    func notices(for id: AgentID, atLeast expected: Int) async throws -> [AgentEntry] {
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        let deadline = Date().addingTimeInterval(5)
+        var found: [AgentEntry] = []
+        while Date() < deadline {
+            if let document = try await transcriptStore.load(agentID: id, sessionID: sessionID) {
+                found = document.entries.filter {
+                    if case .localNotice = $0.provenance { return true }
+                    return false
+                }
+                if found.count >= expected { return found }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return found
+    }
+
+    func makeSupervisor(
+        _ runner: @escaping (AgentRunnerLaunch) -> AgentRunning
+    ) -> (AgentSupervisor, AgentID) {
+        let store = AgentStore(
+            applicationSupportDirectory: root.appendingPathComponent(UUID().uuidString, isDirectory: true))
+        let id = AgentID(rawValue: UUID())
+        let record = AgentRecord(
+            id: id,
+            displayName: "dispatch",
+            harness: .pi,
+            model: config.model,
+            thinking: config.thinking,
+            cwd: cwd.path,
+            createdAt: Date(),
+            lastActivityAt: Date())
+        try? store.upsert(record)
+        let supervisor = AgentSupervisor(
+            store: store, makeRunner: runner, transcriptStore: transcriptStore)
+        supervisor.restore()
+        return (supervisor, id)
+    }
+
+    // MARK: 1 · a pi agent whose bound runner takes commands is not refused
+
+    // `/session` is a pi provider-slash command. Before TR-04 this returned
+    // `.refused(.unsupported)` for EVERY pi agent, because the capability came
+    // from the harness name and pi's name mapped to `.oneShotProse` — while
+    // production has bound `PiRpcAgentRunner` by default the whole time.
+    let (delegating, delegatingID) = makeSupervisor { _ in SessionCommandRunner() }
+    let session = AgentCommandInvocation(
+        descriptorID: "pi:session", name: "session", harness: .pi, surface: .providerSlash)
+    let delegated = await delegating.accept(.providerCommand(session), for: delegatingID)
+    guard case .accepted = delegated else {
+        throw fail("a pi agent bound to a command-carrying session runner refused /session: \(delegated)")
+    }
+
+    // MARK: 2 · and the same command IS refused on a runner that cannot
+
+    // The default `AgentRunning.commandCapabilities` floor: a leading slash goes
+    // to the model, so the command is disabled with a reason rather than
+    // serialized into a real paid turn.
+    let (oneShot, oneShotID) = makeSupervisor { _ in ScriptedAgentRunner(script: []) }
+    let refused = await oneShot.accept(.providerCommand(session), for: oneShotID)
+    guard case .refused(.unsupported) = refused else {
+        throw fail("a one-shot runner must refuse a provider slash rather than send it as prose, got \(refused)")
+    }
+    // …and the refusal SAYS why, where the user is already looking. The reason
+    // used to be computed for the menu row and dropped at dispatch.
+    let refusalNotices = try await notices(for: oneShotID, atLeast: 1)
+    guard !refusalNotices.isEmpty else {
+        throw fail("a refused command left no explanation in the transcript")
+    }
+
+    // MARK: 3 · discovery narrows, through production
+
+    let (narrow, narrowID) = makeSupervisor { _ in
+        SessionCommandRunner(advertised: ["compact", "fork"])
+    }
+    let narrowed = await narrow.accept(.providerCommand(session), for: narrowID)
+    guard case .refused(.unsupported) = narrowed else {
+        throw fail("a command the harness did not advertise must be refused once the list exists, got \(narrowed)")
+    }
+    let fork = AgentCommandInvocation(
+        descriptorID: "pi:fork", name: "fork", harness: .pi, surface: .providerSlash)
+    guard case .accepted = await narrow.accept(.providerCommand(fork), for: narrowID) else {
+        throw fail("an advertised command must still run")
+    }
+
+    // MARK: 4 · an Array-owned command run twice is visible twice
+
+    // `appendNotice` de-dupes by entry id -- correct, it is what makes replay
+    // idempotent -- and the id was a constant per command. The second `/status`
+    // returned `.accepted`, cleared the composer draft, and printed nothing.
+    let (repeated, repeatedID) = makeSupervisor { _ in ScriptedAgentRunner(script: []) }
+    let status = AgentCommandInvocation(
+        descriptorID: "array:status", name: "status", surface: .array)
+    for attempt in 1...2 {
+        guard case .accepted = await repeated.accept(.providerCommand(status), for: repeatedID) else {
+            throw fail("/status was refused on attempt \(attempt)")
+        }
+    }
+    let statusNotices = try await notices(for: repeatedID, atLeast: 2)
+    guard statusNotices.count == 2 else {
+        throw fail("/status twice produced \(statusNotices.count) notice(s); the second was swallowed by the replay de-dupe")
+    }
+
+    // MARK: 5 · an Array command with no implementation is not offered
+
+    // `/model` presented as an enabled row, accepted, and answered with its own
+    // one-line description -- "Choose the active model" -- having changed no
+    // model. Nine of the thirteen behaved that way.
+    let model = AgentCommandInvocation(
+        descriptorID: "array:model", name: "model", surface: .array)
+    let unimplemented = await repeated.accept(.providerCommand(model), for: repeatedID)
+    guard case .refused(.unsupported) = unimplemented else {
+        throw fail("/model has no implementation and must not be accepted, got \(unimplemented)")
+    }
+
+    return "TR-04 command dispatch: a command-carrying bound runner accepted where the harness NAME said refuse, a one-shot runner refused with a written reason instead of paid prose, harness-advertised discovery narrowing through production, a repeated Array command visible every time, and an unimplemented Array command refused instead of echoing its own description"
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real

@@ -96,11 +96,54 @@ func runAgentCommandExecutionPlannerChecks() throws {
         capabilities: discovered) == .harnessDelegated,
         "B5: an alias the harness advertises must resolve the command")
 
-    // A skill is a genuine user turn and is unchanged by any of this.
+    // TR-04 — a skill is a genuine user turn, and it is now GATED like one.
+    //
+    // This block used to assert `.skillTemplate` for `.oneShotProse`, i.e. that a
+    // skill expands on a CLI that hands a leading slash straight to the model.
+    // That was survivable only because dispatch could not resolve a discovered
+    // skill at all: `AgentSupervisor.accept` looked descriptors up in
+    // `allBaselines()` while the menu offered discovered resources too, so a
+    // `.codex/skills/foo` row refused for the wrong reason and the hole never
+    // opened. Making those rows dispatchable — which TR-04 does, because
+    // offering a row that cannot dispatch is the defect — turns this exact path
+    // into a literal `/foo` sent to a codex or pi model for a real paid turn.
     for surface in [AgentCommandSurface.skill, .promptTemplate] {
         expect(AgentCommandExecutionPlanner.resolve(
-            descriptor("plan", surface: surface), capabilities: .oneShotProse) == .skillTemplate,
-            "B5: a \(surface.rawValue) expands into a prompt and is sent as a real turn")
+            descriptor("plan", surface: surface), capabilities: .claudeOneShot) == .skillTemplate,
+            "B5: a \(surface.rawValue) expands into a prompt on a CLI that reads a leading slash")
+        let refusedSkill = AgentCommandExecutionPlanner.resolve(
+            descriptor("plan", surface: surface), capabilities: .oneShotProse)
+        if case .unavailable = refusedSkill {} else {
+            expect(false, "TR-04: a \(surface.rawValue) on a CLI that sends a slash to the MODEL must be disabled, got \(refusedSkill)")
+        }
+        // Discovery narrows a skill exactly as it narrows a provider slash: a
+        // custom command claude has not published is a command claude will
+        // answer "Unknown command" to.
+        expect(AgentCommandExecutionPlanner.resolve(
+            descriptor("definitelynotaskill", surface: surface), capabilities: discovered)
+            == .unavailable(reason: "This agent doesn't have that command."),
+            "TR-04: an unadvertised \(surface.rawValue) must be disabled, not expanded")
+    }
+
+    // TR-04 — `.requiresTrust` is a refusal, not a fall-through.
+    //
+    // An untrusted `.ts`/`.js` extension is disabled in the picker
+    // (`isEnabled` is false for every non-`.available` case), so nothing could
+    // reach it by clicking — but the classifier is also the answer for a
+    // persisted invocation, and it said "delegate this" for a resource whose
+    // entire availability story is "do not load this until the user trusts it".
+    let untrusted = AgentCommandExecutionPlanner.resolve(
+        descriptor("ext", surface: .extensionCommand,
+                   availability: .requiresTrust("Trust this extension before loading executable code")),
+        capabilities: .claudeOneShot)
+    expect(untrusted == .unavailable(reason: "Trust this extension before loading executable code"),
+           "TR-04: a requiresTrust descriptor must refuse and keep its own reason, got \(untrusted)")
+
+    let unknownAvailability = AgentCommandExecutionPlanner.resolve(
+        descriptor("mystery", surface: .providerSlash, availability: .unknown),
+        capabilities: .claudeOneShot)
+    if case .unavailable = unknownAvailability {} else {
+        expect(false, "TR-04: an unknown availability must refuse, got \(unknownAvailability)")
     }
 
     // A shell command stays refused, which is the one thing today's code got
@@ -118,5 +161,5 @@ func runAgentCommandExecutionPlannerChecks() throws {
     expect(declared == .unavailable(reason: "advertised with nothing behind it"),
            "B5: a declared unavailability must keep its own reason, got \(declared)")
 
-    print("Agent command execution planner checks passed: Array-owned on every harness, claude delegated, codex/pi disabled with a reason instead of serialized into prose, session RPC outranking slash interpretation, and discovery narrowing only once it has happened")
+    print("Agent command execution planner checks passed: Array-owned on every harness, claude delegated, codex/pi disabled with a reason instead of serialized into prose, session RPC outranking slash interpretation, discovery narrowing only once it has happened, skills gated by the same transport fact as slashes, and requiresTrust/unknown refusing instead of falling through")
 }

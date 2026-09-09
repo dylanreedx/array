@@ -108,6 +108,19 @@ extension AgentItemStatus {
         }
     }
 
+    /// Whether the row has stopped: a duration is a fact about a finished span,
+    /// and a receded row is one the reader no longer has to watch. `.pending`
+    /// counts as unfinished even though the projection never actually opens a
+    /// tool row in that state.
+    var agentToolIsTerminal: Bool {
+        switch self {
+        case .pending, .inProgress:
+            return false
+        case .completed, .failed, .cancelled, .interrupted:
+            return true
+        }
+    }
+
     var agentToolStatusPresentation: (glyph: String, label: String) {
         switch self {
         case .pending: return ("○", "Pending")

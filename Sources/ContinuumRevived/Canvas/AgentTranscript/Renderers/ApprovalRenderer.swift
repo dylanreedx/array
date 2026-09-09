@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedCore
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
@@ -15,7 +16,7 @@ final class ApprovalRenderer: AgentBlockRendering {
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         guard case let .approval(payload) = block.payload else { return 0 }
-        return AgentRequestView.measuredHeight(payload: payload, width: width, zoom: context.pageZoom)
+        return AgentRequestView.measuredHeight(payload: payload, width: width, context: context)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -67,6 +68,30 @@ final class AgentRequestView: NSView, TokenThemed {
     private var generation: UInt64 = 0
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
     private var status: AgentItemStatus = .pending
+    /// TR-06 — the LOCAL delivery state of this machine's response. Kept beside
+    /// `status` rather than folded into it, because they answer different
+    /// questions: `status` is what the PROVIDER says about the request,
+    /// `responseState` is what ARRAY did with the user's press.
+    private var responseState: AgentRequestResponseState = .idle
+
+    /// The one status string, so the visible label and the accessibility label
+    /// cannot drift apart.
+    ///
+    /// Local delivery state wins the line while the request is still open,
+    /// because that is the half the user just acted on and the half that can be
+    /// wrong. A resolved request goes back to the provider's own word — by then
+    /// the local state is history.
+    static func statusText(payload: AgentRequestPayload) -> String {
+        let presentation = payload.status.agentToolStatusPresentation
+        guard [.pending, .inProgress].contains(payload.status) else {
+            return "\(presentation.glyph) \(presentation.label)"
+        }
+        switch payload.responseState {
+        case .idle: return "\(presentation.glyph) \(presentation.label)"
+        case .submitting: return "→ Sending"
+        case .failed: return "! Not sent"
+        }
+    }
 
     /// The page zoom of the last `apply`. Every metric below reads it, so a
     /// recycled dock re-derives rather than keeping the zoom it was built at.
@@ -111,8 +136,8 @@ final class AgentRequestView: NSView, TokenThemed {
         status = payload.status
         requestID = payload.requestID
         titleLabel.stringValue = mode == .approval ? "Approval requested" : "Question"
-        let presentation = payload.status.agentToolStatusPresentation
-        statusLabel.stringValue = "\(presentation.glyph) \(presentation.label)"
+        responseState = payload.responseState
+        statusLabel.stringValue = Self.statusText(payload: payload)
         promptLabel.stringValue = agentPlainText(payload.prompt)
         rebuildChoices(payload: payload)
         identifier = NSUserInterfaceItemIdentifier(
@@ -126,7 +151,10 @@ final class AgentRequestView: NSView, TokenThemed {
 
     func applyAccessibility(payload: AgentRequestPayload) {
         let kind = mode == .approval ? "Approval requested" : "Question"
-        setAccessibilityLabel("\(kind), \(payload.status.agentToolStatusPresentation.label)")
+        // Reads the same derivation the sighted label does. A separate string
+        // here is how the two drift, and "Sending"/"Not sent" is precisely the
+        // state a screen-reader user cannot infer from anything else.
+        setAccessibilityLabel("\(kind), \(Self.statusText(payload: payload))")
         setAccessibilityChildren([titleLabel, statusLabel, promptLabel] + choiceButtons)
     }
 
@@ -170,18 +198,22 @@ final class AgentRequestView: NSView, TokenThemed {
         layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: theme)
         titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         promptLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
-        statusLabel.textColor = status == .failed
+        // A response that did not reach the provider is an attention state for
+        // the same reason a failed request is: the user believes they answered.
+        statusLabel.textColor = (status == .failed || responseState == .failed)
             ? AgentLineRole.attention.color.nsColor(for: theme)
             : context.tokens.secondaryText.color.nsColor(for: theme)
         choiceButtons.forEach { $0.applyTokens(theme: theme) }
     }
 
+    /// Takes the whole CONTEXT, not just the zoom: whether an action row exists
+    /// now depends on the live response capability, and a height that disagreed
+    /// with `rebuildChoices` would clip the buttons or reserve a dead strip.
     static func measuredHeight(
-        payload: AgentRequestPayload, width: CGFloat, zoom: AgentPageZoom = .default
+        payload: AgentRequestPayload, width: CGFloat, context: AgentRenderContext
     ) -> CGFloat {
-        let actionable = payload.requestID != nil
-            && [.pending, .inProgress].contains(payload.status)
-            && !payload.choices.isEmpty
+        let zoom = context.pageZoom
+        let actionable = isActionable(payload: payload, context: context)
         return headerHeight(zoom: zoom)
             + promptHeight(agentPlainText(payload.prompt), width: width, zoom: zoom)
             + (actionable ? CGFloat(zoom.scaled(Space.m)) + actionHeight(zoom: zoom) : 0)
@@ -191,18 +223,39 @@ final class AgentRequestView: NSView, TokenThemed {
     private func rebuildChoices(payload: AgentRequestPayload) {
         choiceButtons.forEach { $0.removeFromSuperview() }
         choiceButtons = []
-        guard let requestID = payload.requestID,
-              [.pending, .inProgress].contains(payload.status) else { return }
+        guard Self.isActionable(payload: payload, context: context),
+              let requestID = payload.requestID else { return }
         for choice in payload.choices.prefix(Self.maximumChoices) {
-            let button = AgentRequestChoiceButton(title: safeSingleLine(choice, fallback: "Respond"))
+            let button = AgentRequestChoiceButton(
+                title: ApprovalDecision.displayTitle(forChoice: choice))
             button.target = self
             button.action = #selector(submitChoice(_:))
             button.actionToken = ChoiceToken(
                 generation: generation, requestID: requestID, value: choice
             )
+            // TR-06 — a response already on the wire must not be sent twice. The
+            // press is also refused at the tile and at the supervisor; this is
+            // the one the user can SEE, which is what stops them pressing again.
+            button.isEnabled = payload.responseState != .submitting
             addSubview(button)
             choiceButtons.append(button)
         }
+    }
+
+    /// Whether this request may offer controls at all — one predicate, shared by
+    /// `rebuildChoices` and `measuredHeight`, so the reserved height and the
+    /// buttons can never disagree about whether an action row exists.
+    ///
+    /// `canRespondToRequests` is the load-bearing clause: without a transport
+    /// there is nothing a press could do, so the request renders as readable
+    /// history instead of as a live control that resolves nothing.
+    private static func isActionable(
+        payload: AgentRequestPayload, context: AgentRenderContext
+    ) -> Bool {
+        payload.requestID != nil
+            && [.pending, .inProgress].contains(payload.status)
+            && !payload.choices.isEmpty
+            && context.canRespondToRequests
     }
 
     @objc private func submitChoice(_ sender: AgentRequestChoiceButton) {

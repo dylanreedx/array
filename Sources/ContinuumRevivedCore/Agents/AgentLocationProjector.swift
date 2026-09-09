@@ -55,6 +55,22 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// row rendered as `search` / `searching` / `Completed` and nothing else.
     /// The location projector ignores this case: it is not a location fact.
     case toolDetail(itemId: String, detail: AgentToolDetailObservation)
+    /// TR-04 — the slash commands the harness itself says this session has.
+    ///
+    /// claude publishes `slash_commands` on `system/init` and Array threw it
+    /// away, so `AgentSessionCommandCapabilities.advertisedNames` was nil in
+    /// every production code path that ever existed. The classifier's "the
+    /// harness did not advertise this, refuse it" branch was therefore
+    /// unreachable, and every one of the 34 baseline claude commands — including
+    /// the ones that only mean anything inside claude's own TUI — was serialized
+    /// and sent as an ordinary prompt.
+    ///
+    /// It rides this host-local side channel for exactly the reason
+    /// `providerSessionId` does: the supervisor rebinds every event's threadId
+    /// before delivery, so a fact captured mid-stream cannot survive on an
+    /// `AgentRuntimeEvent`. It is also not Codable state and must never cross
+    /// the I5 sync boundary. Not a location fact: the projector ignores it.
+    case advertisedCommands([String])
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -258,12 +274,41 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         public let path: String
         public let renamePath: String?
         public let diffPreview: String?
-        public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
+        /// TR-01 — per-operation line counts, when the provider's own event
+        /// supplied enough to measure them (claude's `old_string`/`new_string`,
+        /// a codex `changes[].diff` that really is a unified diff). Each is
+        /// independently optional: a whole-file write knows its additions and
+        /// cannot know what it replaced.
+        ///
+        /// NUMBERS, not content. This is the same boundary `AgentDiffSource`
+        /// draws — counts are safe to carry where a path or a diff body is not
+        /// — so a translator may compute these from raw input it must not, and
+        /// does not, forward.
+        public let addedLines: UInt?
+        public let removedLines: UInt?
+        /// The counts were measured from a preview that had already been cut to
+        /// a byte/line bound, so they are a floor rather than a total.
+        public let countsAreLowerBound: Bool
+
+        public init(
+            action: FileAction,
+            path: String,
+            renamePath: String? = nil,
+            diffPreview: String? = nil,
+            addedLines: UInt? = nil,
+            removedLines: UInt? = nil,
+            countsAreLowerBound: Bool = false
+        ) {
             self.action = action
             self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
             self.renamePath = renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
             self.diffPreview = AgentToolDetailDisplaySanitizer.diffPreview(diffPreview, maxBytes: Self.maxDiffCharacters, maxLines: 80)
+            self.addedLines = addedLines
+            self.removedLines = removedLines
+            self.countsAreLowerBound = countsAreLowerBound
         }
+
+        public var hasAnyMeasuredCount: Bool { addedLines != nil || removedLines != nil }
     }
     public enum Phase: Equatable, Sendable {
         case started
@@ -380,6 +425,12 @@ public struct AgentLocationProjector: Sendable {
             // Argument/output detail for `AgentToolDetailStore`, not a Home /
             // Where / What fact. The host consumes it; the projector ignores it
             // (same shape as `.threadId`).
+            break
+
+        case .advertisedCommands:
+            // The harness's own slash-command list, feeding the command
+            // classifier. Host-local capability state, not a Home / Where /
+            // What fact.
             break
         }
     }

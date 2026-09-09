@@ -1,0 +1,4 @@
+{"type":"tool_execution_start","toolCallId":"call_FiteYRHPatyV9fTiPWXDYEp4","toolName":"edit","args":{"path":"notes.txt","edits":[{"oldText":"alpha\nbeta\ndelta\n","newText":"ALPHA\nbeta\ndelta\ngamma\n"}]}}
+{"type":"tool_execution_start","toolCallId":"call_XQgbm2TJAVshCfES5h211pCm","toolName":"write","args":{"path":"extra.txt","content":"hello\n"}}
+{"type":"tool_execution_end","toolCallId":"call_XQgbm2TJAVshCfES5h211pCm","toolName":"write","result":{"content":[{"type":"text","text":"Successfully wrote to extra.txt"}]},"isError":false}
+{"type":"tool_execution_end","toolCallId":"call_FiteYRHPatyV9fTiPWXDYEp4","toolName":"edit","result":{"content":[{"type":"text","text":"Successfully replaced 1 block(s) in notes.txt."}],"details":{"diff":"-1 alpha\n+1 ALPHA\n 2 beta\n 3 delta\n+4 gamma","patch":"--- notes.txt\n+++ notes.txt\n@@ -1,3 +1,4 @@\n-alpha\n+ALPHA\n beta\n delta\n+gamma\n","firstChangedLine":1}},"isError":false}

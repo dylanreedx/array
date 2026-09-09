@@ -195,6 +195,22 @@ enum AgentFirstPaintChecks {
             )
         }
 
+        // TR-06 — a REGRESSION GUARD, not the witness for a fix.
+        //
+        // Measured, not assumed: `NSControl` already returns `isEnabled` here, so
+        // these chips are keyboard-reachable today without an override, and
+        // adding one would have been decoration. What this pins is that they stay
+        // that way — `refusesFirstResponder`, an unconditional `false`, or a chip
+        // built disabled would all silently make an advertised choice
+        // mouse-only, and the rail's accessibility help explicitly promises a
+        // selectable control.
+        guard tile.qaReplyOptionChipsAcceptFocus else {
+            throw fail(
+                "reply options: the chips left the key view loop — keyboard and "
+                + "Full Keyboard Access users cannot take an offer the rail advertises to them"
+            )
+        }
+
         guard tile.qaPressReplyOptionChip(titled: "Patch the call sites") else {
             throw fail("reply options: the chip was not a pressable control")
         }
@@ -220,6 +236,49 @@ enum AgentFirstPaintChecks {
             throw fail(
                 "reply options: the chips stayed up over a non-empty draft "
                 + "(\(tile.qaReplyOptionChipTitles)) — pressing one would replace the user's text"
+            )
+        }
+
+        // TR-06 — the offer must also withdraw on every non-idle turn state, not
+        // just `.working`.
+        //
+        // `.starting` and `.working` self-corrected through the document (the
+        // optimistic user echo becomes the last entry, and the detector only reads
+        // assistant turns), which is exactly why the gap survived: the ONE state
+        // that appends no entry is `.queued`. A queued answer left the chips
+        // standing over a question the user had already answered.
+        //
+        // Cleared back to an empty draft first, so this measures the state rule
+        // and not the draft rule that just fired above.
+        tile.qaSetComposerDraftForChecks("")
+        guard !tile.qaReplyOptionChipTitles.isEmpty else {
+            throw fail(
+                "reply options: clearing the draft did not bring the offer back, so the "
+                + "state assertions below would pass vacuously"
+            )
+        }
+        let idleCapabilities = AgentTurnCapabilities(canSend: true, canStop: false)
+        for state in AgentTileOperationalState.qaNonIdleStatesForChecks {
+            tile.qaApplyTurnSnapshotForChecks(AgentTileTurnSnapshot(
+                state: state, capabilities: idleCapabilities, turnStartedAt: nil))
+            guard tile.qaReplyOptionChipTitles.isEmpty else {
+                throw fail(
+                    "reply options: the chips survived \(state.qaLabel) "
+                    + "(\(tile.qaReplyOptionChipTitles)) — the turn has moved on from the "
+                    + "question they belong to, and taking one now would overwrite or "
+                    + "duplicate the answer already on its way"
+                )
+            }
+        }
+        // Positive control: back to idle, the offer returns. Without it, a change
+        // that simply killed the rail outright would pass every assertion above.
+        tile.qaApplyTurnSnapshotForChecks(AgentTileTurnSnapshot(
+            state: .ready, capabilities: idleCapabilities, turnStartedAt: nil))
+        guard tile.qaReplyOptionChipTitles == offered else {
+            throw fail(
+                "reply options: returning to idle did not restore the offer "
+                + "(\(tile.qaReplyOptionChipTitles)) — the state rule is withdrawing the chips "
+                + "permanently rather than deferring them"
             )
         }
     }
@@ -366,13 +425,20 @@ enum AgentFirstPaintChecks {
             turnStartedAt: nil
         ))
 
+        // The REAL catalogue id. This fixture used to say "array.compact", an id
+        // `AgentCommandCatalog` has never minted — and it passed anyway, because
+        // both the composer and the supervisor recognised `/compact` by NAME.
+        // Name-matching is what let any command called "compact" (a project's own
+        // `.claude/commands/compact.md`, now that dispatch can resolve one) seize
+        // the native compaction route, so both sites match on the id instead, and
+        // a witness driving an invocation production cannot mint proves nothing.
         let invocation = AgentCommandInvocation(
-            descriptorID: "array.compact",
+            descriptorID: "array:compact",
             name: "compact",
             surface: .array
         )
         let completion = AgentCompletion(
-            id: "array.compact",
+            id: "array:compact",
             title: "compact",
             insertionText: "/compact",
             payload: .command(invocation)

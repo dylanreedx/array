@@ -135,6 +135,36 @@ public struct AgentCommandDescriptor: Codable, Equatable, Sendable, Identifiable
     }
 
     public var invocationNames: [String] { [name] + aliases }
+
+    /// The same descriptor with a different availability verdict.
+    ///
+    /// Exists so the MENU transform and the DISPATCH transform are one piece of
+    /// code. They were two: the completion provider re-built a descriptor field
+    /// by field to mark a row unavailable, and the supervisor then looked the
+    /// pristine descriptor up again from the baseline — so every availability
+    /// mark the user could see was cosmetic, and dispatch answered from a
+    /// descriptor the picker had never shown.
+    public func withAvailability(_ availability: AgentCommandAvailability) -> AgentCommandDescriptor {
+        AgentCommandDescriptor(
+            id: id,
+            name: name,
+            aliases: aliases,
+            detail: detail,
+            argumentHint: argumentHint,
+            harness: harness,
+            scope: scope,
+            sourceIdentifier: sourceIdentifier,
+            surface: surface,
+            capabilities: capabilities,
+            availability: availability,
+            supportsArguments: supportsArguments,
+            supportsQueueing: supportsQueueing,
+            runsImmediately: runsImmediately,
+            userInvocable: userInvocable,
+            modelInvocable: modelInvocable,
+            contextFork: contextFork
+        )
+    }
 }
 
 /// Structured command acceptance. `arguments` contains only user-entered
@@ -267,6 +297,53 @@ public enum AgentCommandCatalog {
 
     public static func arrayCommands() -> [AgentCommandDescriptor] { arrayBaseline }
 
+    /// Every command Array knows about for one agent's context, with the
+    /// availability verdict the MENU will show already applied.
+    ///
+    /// This is the single set behind both halves of the surface. It used to be
+    /// two sets: `AgentCommandCompletionProvider` offered
+    /// `allBaselines() + discovered + manifests`, and `AgentSupervisor.accept`
+    /// resolved out of `allBaselines()` alone — so every discovered skill,
+    /// prompt template, extension and `.array/commands` manifest was an enabled
+    /// row whose dispatch ended in a bare "unsupported" refusal, and every
+    /// availability mark the user could read was thrown away before the
+    /// classifier ever saw it.
+    ///
+    /// Filesystem discovery runs here, so callers on the main actor must hop off
+    /// it (`AgentSupervisor.descriptor(for:)`).
+    public static func offeredDescriptors(context: AgentCompletionContext?) -> [AgentCommandDescriptor] {
+        let active = context?.backend
+        let discovered = AgentCommandResourceDiscovery.discover(context: context)
+        let manifests = AgentHarnessCommandManifestDiscovery.discover(context: context)
+        return (allBaselines() + discovered + manifests).map { offered($0, activeHarness: active) }
+    }
+
+    /// One descriptor by id, carrying the same verdict the menu showed.
+    public static func resolve(
+        descriptorID: String,
+        context: AgentCompletionContext?
+    ) -> AgentCommandDescriptor? {
+        offeredDescriptors(context: context).first { $0.id == descriptorID }
+    }
+
+    /// The menu transform, applied identically wherever a descriptor is read.
+    static func offered(
+        _ descriptor: AgentCommandDescriptor,
+        activeHarness: AgentHarness?
+    ) -> AgentCommandDescriptor {
+        var copy = descriptor
+        if descriptor.surface == .cli {
+            // A CLI/manifest action is not a slash command and Array has no
+            // route that runs one. Saying so is the whole of the fix here; the
+            // route itself is a separate piece of work.
+            copy = copy.withAvailability(.unavailable(cliSurfaceReason))
+        }
+        if let harness = descriptor.harness, harness != activeHarness {
+            copy = copy.withAvailability(.unavailable("Requires \(harness.rawValue)"))
+        }
+        return copy
+    }
+
     private static func descriptor(
         _ harness: AgentHarness,
         _ name: String,
@@ -296,25 +373,84 @@ public enum AgentCommandCatalog {
         )
     }
 
+    /// Array-owned commands Array actually performs.
+    ///
+    /// Every other `.array` descriptor used to present as an enabled row, accept
+    /// the invocation, and then fall through `arrayOwnedCommandNoticeText`'s
+    /// `default:` arm — which echoes the descriptor's own one-line DESCRIPTION
+    /// back as a system notice. `/model` answered "Choose the active model" and
+    /// changed no model. Nine of the thirteen behaved that way.
+    ///
+    /// This set is the single source of that truth: `arrayBaseline` marks
+    /// everything outside it unavailable, and the supervisor asserts against the
+    /// same set, so a command cannot be offered without an implementation or
+    /// implemented without being offered.
+    ///
+    /// `compact` is in the set and is NOT notice-backed: it is intercepted by
+    /// descriptor id before the classifier runs and routed to the real
+    /// per-runner compaction path.
+    public static let implementedArrayCommandNames: Set<String> = [
+        "clear", "status", "help", "commands", "skills", "compact",
+    ]
+
+    /// The reason an Array-owned command that has no implementation gives.
+    public static let unimplementedArrayReason = "Array doesn't run this command yet."
+
+    /// The reason a `.cli`-surface row gives.
+    ///
+    /// This used to read "Run from Array Command Center". There is no such
+    /// route: `AgentHarnessCommandManifestDiscovery.invoke` and
+    /// `AgentHarnessCommandRunner.run` have no production callers at all, so the
+    /// string sent the user looking for a surface that does not exist.
+    public static let cliSurfaceReason = "Array can't run this command yet."
+
+    private static func arrayDescriptor(
+        id: String,
+        name: String,
+        aliases: [String] = [],
+        detail: String,
+        argumentHint: String? = nil,
+        surface: AgentCommandSurface = .array,
+        capabilities: Set<AgentCommandCapability>,
+        supportsArguments: Bool = false,
+        runsImmediately: Bool = false
+    ) -> AgentCommandDescriptor {
+        AgentCommandDescriptor(
+            id: id,
+            name: name,
+            aliases: aliases,
+            detail: detail,
+            argumentHint: argumentHint,
+            sourceIdentifier: "array.builtin",
+            surface: surface,
+            capabilities: capabilities,
+            availability: surface == .array && !implementedArrayCommandNames.contains(name)
+                ? .unavailable(unimplementedArrayReason)
+                : .available,
+            supportsArguments: supportsArguments,
+            runsImmediately: runsImmediately
+        )
+    }
+
     private static let arrayBaseline: [AgentCommandDescriptor] = [
-        AgentCommandDescriptor(id: "array:help", name: "help", detail: "Show Array commands", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:clear", name: "clear", aliases: ["new", "reset"], detail: "Start a fresh conversation", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:plan", name: "plan", detail: "Switch to planning mode", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.promptOnly]),
-        AgentCommandDescriptor(id: "array:status", name: "status", detail: "Show agent and session status", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:model", name: "model", detail: "Choose the active model", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:compact", name: "compact", detail: "Compact the current conversation", argumentHint: "optional focus", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
-        AgentCommandDescriptor(id: "array:resume", name: "resume", detail: "Resume a saved agent session", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:fork", name: "fork", detail: "Fork the current conversation", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.localWrite], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:diff", name: "diff", detail: "Inspect the current working-tree diff", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:review", name: "review", detail: "Review the current working tree", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly]),
-        AgentCommandDescriptor(id: "array:verify", name: "verify", detail: "Run the project verification contract", sourceIdentifier: "array.builtin", surface: .cli, capabilities: [.localWrite, .processControl], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:run", name: "run", detail: "Run a declared harness action", argumentHint: "arguments", sourceIdentifier: "array.builtin", surface: .cli, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
-        AgentCommandDescriptor(id: "array:goal", name: "goal", detail: "Set or inspect a persistent goal", argumentHint: "arguments", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.localWrite], supportsArguments: true, runsImmediately: true),
-        AgentCommandDescriptor(id: "array:skills", name: "skills", detail: "Browse discovered skills", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:commands", name: "commands", detail: "Browse all provider commands", sourceIdentifier: "array.builtin", surface: .array, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:harness", name: "harness", detail: "Inspect harness capabilities and jobs", argumentHint: "arguments", sourceIdentifier: "array.builtin", surface: .cli, capabilities: [.readOnly], supportsArguments: true, runsImmediately: true),
-        AgentCommandDescriptor(id: "array:doctor", name: "doctor", detail: "Diagnose provider and project setup", sourceIdentifier: "array.builtin", surface: .cli, capabilities: [.readOnly], runsImmediately: true),
-        AgentCommandDescriptor(id: "array:qa", name: "qa", detail: "Run an artifact-backed QA check", argumentHint: "arguments", sourceIdentifier: "array.builtin", surface: .cli, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
+        arrayDescriptor(id: "array:help", name: "help", detail: "Show Array commands", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:clear", name: "clear", aliases: ["new", "reset"], detail: "Start a fresh conversation", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:plan", name: "plan", detail: "Switch to planning mode", capabilities: [.promptOnly]),
+        arrayDescriptor(id: "array:status", name: "status", detail: "Show agent and session status", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:model", name: "model", detail: "Choose the active model", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:compact", name: "compact", detail: "Compact the current conversation", argumentHint: "optional focus", capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
+        arrayDescriptor(id: "array:resume", name: "resume", detail: "Resume a saved agent session", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:fork", name: "fork", detail: "Fork the current conversation", capabilities: [.localWrite], runsImmediately: true),
+        arrayDescriptor(id: "array:diff", name: "diff", detail: "Inspect the current working-tree diff", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:review", name: "review", detail: "Review the current working tree", capabilities: [.readOnly]),
+        arrayDescriptor(id: "array:verify", name: "verify", detail: "Run the project verification contract", surface: .cli, capabilities: [.localWrite, .processControl], runsImmediately: true),
+        arrayDescriptor(id: "array:run", name: "run", detail: "Run a declared harness action", argumentHint: "arguments", surface: .cli, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
+        arrayDescriptor(id: "array:goal", name: "goal", detail: "Set or inspect a persistent goal", argumentHint: "arguments", capabilities: [.localWrite], supportsArguments: true, runsImmediately: true),
+        arrayDescriptor(id: "array:skills", name: "skills", detail: "Browse discovered skills", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:commands", name: "commands", detail: "Browse all provider commands", capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:harness", name: "harness", detail: "Inspect harness capabilities and jobs", argumentHint: "arguments", surface: .cli, capabilities: [.readOnly], supportsArguments: true, runsImmediately: true),
+        arrayDescriptor(id: "array:doctor", name: "doctor", detail: "Diagnose provider and project setup", surface: .cli, capabilities: [.readOnly], runsImmediately: true),
+        arrayDescriptor(id: "array:qa", name: "qa", detail: "Run an artifact-backed QA check", argumentHint: "arguments", surface: .cli, capabilities: [.processControl], supportsArguments: true, runsImmediately: true),
     ]
 
     private static let claudeBaseline: [AgentCommandDescriptor] = [
@@ -455,58 +591,12 @@ public struct AgentCommandCompletionProvider: AgentCompletionProvider {
     public func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
         guard !Task.isCancelled else { return [] }
         let active = query.context?.backend
-        let discovered = AgentCommandResourceDiscovery.discover(context: query.context)
-        let manifests = AgentHarnessCommandManifestDiscovery.discover(context: query.context)
-        let descriptors = (AgentCommandCatalog.allBaselines() + discovered + manifests).map { descriptor in
-            var copy = descriptor
-            if descriptor.surface == .cli {
-                // CLI and harness actions are discoverable from the slash menu,
-                // but their approval/result-card path belongs to Command Center.
-                // Keeping them disabled here prevents a row click from silently
-                // degrading into prompt text or an unapproved subprocess.
-                copy = AgentCommandDescriptor(
-                    id: descriptor.id,
-                    name: descriptor.name,
-                    aliases: descriptor.aliases,
-                    detail: descriptor.detail,
-                    argumentHint: descriptor.argumentHint,
-                    harness: descriptor.harness,
-                    scope: descriptor.scope,
-                    sourceIdentifier: descriptor.sourceIdentifier,
-                    surface: descriptor.surface,
-                    capabilities: descriptor.capabilities,
-                    availability: .unavailable("Run from Array Command Center"),
-                    supportsArguments: descriptor.supportsArguments,
-                    supportsQueueing: descriptor.supportsQueueing,
-                    runsImmediately: descriptor.runsImmediately,
-                    userInvocable: descriptor.userInvocable,
-                    modelInvocable: descriptor.modelInvocable,
-                    contextFork: descriptor.contextFork
-                )
-            }
-            if let harness = descriptor.harness, harness != active {
-                copy = AgentCommandDescriptor(
-                    id: descriptor.id,
-                    name: descriptor.name,
-                    aliases: descriptor.aliases,
-                    detail: descriptor.detail,
-                    argumentHint: descriptor.argumentHint,
-                    harness: descriptor.harness,
-                    scope: descriptor.scope,
-                    sourceIdentifier: descriptor.sourceIdentifier,
-                    surface: descriptor.surface,
-                    capabilities: descriptor.capabilities,
-                    availability: .unavailable("Requires \(harness.rawValue)"),
-                    supportsArguments: descriptor.supportsArguments,
-                    supportsQueueing: descriptor.supportsQueueing,
-                    runsImmediately: descriptor.runsImmediately,
-                    userInvocable: descriptor.userInvocable,
-                    modelInvocable: descriptor.modelInvocable,
-                    contextFork: descriptor.contextFork
-                )
-            }
-            return copy
-        }
+        // ONE set, ONE availability transform, shared verbatim with
+        // `AgentSupervisor.accept` through `AgentCommandCatalog.resolve`. The
+        // provider used to build its own union here and re-construct each
+        // descriptor field by field to mark it unavailable; dispatch then looked
+        // the pristine descriptor up somewhere else entirely.
+        let descriptors = AgentCommandCatalog.offeredDescriptors(context: query.context)
         let needle = canonical(query.text)
         let arrayNames = Set(AgentCommandCatalog.arrayCommands().flatMap { [$0.name] + $0.aliases })
         return descriptors.compactMap { descriptor in

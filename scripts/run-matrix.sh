@@ -441,6 +441,13 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+# TR-04: the completion/dispatch seam driven through the REAL composer, popover
+# and synthetic key events — a typed payload (command, file, directory) must
+# never degrade into literal text in the draft. This check has existed since it
+# was written and was invoked by nothing; `.plans/44` recorded it as unregistered
+# on 2026-08-21 and it was still unregistered at 0.7.15. Offline and
+# display-independent, so it belongs in the gate like any other app leg.
+run_app_check .build/debug/Array --agent-completion-semantic-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
@@ -562,6 +569,14 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# TR-06: responding to a request the provider is HOLDING. Drives the real
+# `wireManagedAgentTile` and asserts the response transport is bound by
+# production — the seam sat declared-and-unbound through every release of the
+# request system, and the one check that touched it bound the closure itself.
+# Also gates the rules that keep a press honest: a runner with no transport
+# offers no controls at all, a press dispatches exactly once, dispatching is
+# never resolving, and a failed delivery leaves the request open and answerable.
+run_app_check .build/debug/Array --provider-request-response-check
 # WS5: per-managed-agent-tile page zoom. Six discrete rungs reflowing REAL AppKit
 # geometry — the tile's composition constraints, the transcript's measurement
 # identity and prepared layout, the composer and every rail — while the tile's
@@ -718,6 +733,21 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
 run_app_check .build/debug/Array --transcript-provider-parity-check
+# TR-01 — the change card's file list and counts. Drives the RESTORE path
+# (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
+# stay two cards, and pins that no card prints a count it did not measure.
+run_app_check .build/debug/Array --file-card-check
+# The host-local tool-detail supply: immutable scope, expiry, and the real
+# translator sequences (claude search + delegation, pi delegation, codex exit
+# code) driven through the host's own capture path.
+#
+# This leg has existed since `.plans/45` and was registered NOWHERE — called out
+# in `.plans/44`, and found independently by TR-01 (which leans on the store for
+# its file counts) and TR-03 (whose tool rows are entirely fed by it) while they
+# were running in parallel. Two tickets tripping over the same hole is the
+# clearest evidence there is that a witness the gate does not report is not a
+# witness (CLAUDE.md, non-negotiable #2).
+run_app_check .build/debug/Array --tool-detail-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check

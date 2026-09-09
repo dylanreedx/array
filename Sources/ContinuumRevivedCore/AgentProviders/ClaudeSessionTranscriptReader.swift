@@ -29,10 +29,12 @@ public enum ClaudeSessionTranscriptReader {
         lines: [String],
         threadId: String,
         truncated: Bool = false,
-        limits: RehydrationLimits = RehydrationLimits()
+        limits: RehydrationLimits = RehydrationLimits(),
+        now: () -> Date = Date.init
     ) -> RehydratedTranscript {
         ManagedTranscriptRehydrator.assemble(
-            normalize(lines: lines), threadId: threadId, truncated: truncated, limits: limits)
+            normalize(lines: lines), threadId: threadId, truncated: truncated, limits: limits,
+            now: now)
     }
 
     static func normalize(lines: [String]) -> [NormalizedTranscriptMessage] {
@@ -124,9 +126,21 @@ public enum ClaudeSessionTranscriptReader {
                     // on-disk session, never re-synced — see ManagedTranscriptRehydrator's
                     // header), so unlike the live translator it MAY surface the
                     // command for context instead of a bare "Bash" card.
+                    let input = block["input"] as? [String: Any]
+                    // TR-01 — the session file holds the SAME `input` the live
+                    // stream carries, so a restored edit can be described
+                    // exactly as a live one is: same extractor, same counting,
+                    // same privacy boundary. Reading it here is what stopped
+                    // "0 files · line counts unavailable" from being every
+                    // restored card's verdict.
                     toolCalls.append(.init(
                         id: id, name: name,
-                        detail: Self.toolDetail(from: block["input"] as? [String: Any])))
+                        detail: Self.toolDetail(from: input),
+                        fileChanges: ClaudeEventTranslator.fileDetails(
+                            toolName: name, input: input ?? [:]),
+                        absolutePath: (input?["file_path"] as? String)
+                            ?? (input?["notebook_path"] as? String)
+                            ?? (input?["path"] as? String)))
                 }
             default:
                 continue

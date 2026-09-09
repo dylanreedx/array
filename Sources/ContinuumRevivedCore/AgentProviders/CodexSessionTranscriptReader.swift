@@ -12,10 +12,12 @@ public enum CodexSessionTranscriptReader {
         lines: [String],
         threadId: String,
         truncated: Bool = false,
-        limits: RehydrationLimits = RehydrationLimits()
+        limits: RehydrationLimits = RehydrationLimits(),
+        now: () -> Date = Date.init
     ) -> RehydratedTranscript {
         ManagedTranscriptRehydrator.assemble(
-            normalize(lines: lines), threadId: threadId, truncated: truncated, limits: limits)
+            normalize(lines: lines), threadId: threadId, truncated: truncated,
+            limits: limits, now: now)
     }
 
     static func normalize(lines: [String]) -> [NormalizedTranscriptMessage] {
@@ -54,9 +56,27 @@ public enum CodexSessionTranscriptReader {
                  ("response_item", "custom_tool_call"):
                 guard let id = payload["call_id"] as? String ?? payload["id"] as? String,
                       let name = payload["name"] as? String, !name.isEmpty else { continue }
+                // TR-01 — `arguments` stays unrestored (it is a command body for
+                // `exec_command`, and that is the sensitive payload). The one
+                // exception is the patch itself: `apply_patch` states which
+                // files changed and how, and captured live it arrives as
+                // `input` on a `custom_tool_call`. Only the resulting paths,
+                // actions and COUNTS are carried, on the host-local channel —
+                // never the patch text, and never into the document.
+                let envelope = name.lowercased() == "apply_patch"
+                    ? ((payload["input"] as? String) ?? (payload["arguments"] as? String) ?? "")
+                    : ""
+                let changes = envelope.isEmpty
+                    ? []
+                    : CodexFileChangeReader.fileChanges(applyPatchEnvelope: envelope)
                 out.append(.init(
                     role: .assistant,
-                    toolCalls: [.init(id: id, name: name)],
+                    toolCalls: [.init(
+                        id: id, name: name,
+                        fileChanges: changes,
+                        absolutePath: changes.isEmpty
+                            ? nil
+                            : CodexFileChangeReader.firstEnvelopePath(envelope))],
                     countsAsMessage: false))
             case ("response_item", "function_call_output"),
                  ("response_item", "custom_tool_call_output"):

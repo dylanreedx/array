@@ -156,6 +156,24 @@ public struct ClaudeEventTranslator {
                 workingDirectory = directory
                 onRuntimeObservation?(.workingDirectory(directory, observedAt: now()))
             }
+            // TR-04 — the command list claude itself publishes here. Parsed and
+            // then DROPPED before this: `AgentSessionCommandCapabilities`
+            // documented `advertisedNames` as coming from `slash_commands` on
+            // `system/init`, the classifier had a branch that refuses anything
+            // outside it, and nothing in the app had ever read the key — so the
+            // list was permanently nil and the branch permanently unreachable.
+            //
+            // Entries arrive bare (`"compact"`) and sometimes plugin-scoped
+            // (`"some-plugin:review"`); normalization to the descriptor's own
+            // form is `AgentCommandExecutionPlanner.bareName`'s job, not this
+            // translator's. Empty is reported as empty, which is a real answer
+            // ("this session has no commands"), distinct from never having asked.
+            if let advertised = object["slash_commands"] as? [Any] {
+                let names = advertised.compactMap { $0 as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                onRuntimeObservation?(.advertisedCommands(names))
+            }
             // One `claude -p` process is exactly one turn, so init is claude's
             // session + agent_start + turn_start rolled into one line.
             turnCounter += 1
@@ -680,14 +698,64 @@ public struct ClaudeEventTranslator {
         return fields
     }
 
-    private static func fileDetails(toolName: String, input: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
+    /// Internal, not private: `ClaudeSessionTranscriptReader` describes a
+    /// RESTORED tool call with the very same extractor the live stream uses, so
+    /// a rehydrated card and a live card cannot disagree about one operation.
+    static func fileDetails(toolName: String, input: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
         guard let path = (input["file_path"] as? String) ?? (input["path"] as? String) else { return [] }
         let name = toolName.lowercased()
         let action: AgentToolDetailObservation.FileAction
         if name == "write" { action = .write }
         else if name.contains("edit") || name.contains("patch") { action = .edit }
         else { return [] }
-        return [.init(action: action, path: path)]
+        let counts = editCounts(toolName: name, input: input)
+        return [.init(action: action, path: path,
+                      addedLines: counts.added, removedLines: counts.removed)]
+    }
+
+    /// TR-01 — claude is the one provider that hands over enough to MEASURE a
+    /// file change: `Edit` carries the exact old and new text, `Write` carries
+    /// what it wrote. Those strings are I5-sensitive and stay here; only the
+    /// two integers leave, on the same host-local channel the path already
+    /// rides. (`AgentDiffSource` draws this line explicitly: counts are safe
+    /// where paths and bodies are not.)
+    ///
+    /// Unknown is a real answer. `replace_all` edits every occurrence and the
+    /// stream never says how many there were, so multiplying one hunk by an
+    /// unknown factor would be a guess; a notebook edit's cell text is not file
+    /// lines; and a `Write` cannot know what it replaced without reading the
+    /// file it overwrote, which this translator must never do.
+    private static func editCounts(
+        toolName: String, input: [String: Any]
+    ) -> (added: UInt?, removed: UInt?) {
+        func text(_ key: String) -> String? { input[key] as? String }
+        switch toolName {
+        case "edit":
+            guard input["replace_all"] as? Bool != true,
+                  let old = text("old_string"), let new = text("new_string"),
+                  let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+            else { return (nil, nil) }
+            return (counts.added, counts.removed)
+        case "multiedit":
+            guard let edits = input["edits"] as? [[String: Any]], !edits.isEmpty else { return (nil, nil) }
+            var added: UInt = 0
+            var removed: UInt = 0
+            for edit in edits {
+                guard edit["replace_all"] as? Bool != true,
+                      let old = edit["old_string"] as? String,
+                      let new = edit["new_string"] as? String,
+                      let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+                else { return (nil, nil) }
+                added += counts.added
+                removed += counts.removed
+            }
+            return (added, removed)
+        case "write":
+            guard let content = text("content") else { return (nil, nil) }
+            return (AgentFileChangeCounting.lineCount(content), nil)
+        default:
+            return (nil, nil)
+        }
     }
 
     /// A bounded plain-text preview of a `tool_result`'s content: the string

@@ -68,37 +68,66 @@ public enum AgentCommandExecutionPlanner {
         _ descriptor: AgentCommandDescriptor,
         capabilities: AgentSessionCommandCapabilities
     ) -> AgentCommandExecution {
-        // A command that has already declared itself unavailable stays
-        // unavailable, and keeps its own words for why.
-        if case let .unavailable(reason) = descriptor.availability {
+        // A descriptor that is anything other than plainly available stays
+        // unavailable and keeps its OWN words for why.
+        //
+        // `.requiresTrust` used to fall through to the delegation branch. An
+        // untrusted `.ts`/`.js` extension is disabled in the picker
+        // (`descriptor.isEnabled` is false for every non-`.available` case), so
+        // nothing could reach it by clicking — but the classifier is also the
+        // answer the supervisor gives for a persisted invocation, and it said
+        // "delegate this" for a resource whose whole availability story is
+        // "do not load this until the user trusts it".
+        switch descriptor.availability {
+        case .available:
+            break
+        case let .unavailable(reason), let .requiresTrust(reason):
             return .unavailable(reason: reason)
+        case .unknown:
+            return .unavailable(reason: "Array can't tell whether this agent has that command.")
         }
         switch descriptor.surface {
         case .array:
             return .arrayOwned
-        case .skill, .promptTemplate:
-            return .skillTemplate
         case .cli:
             // Already refused today, and correctly: a shell command is not a
             // slash command and Array does not run one on the user's behalf here.
             return .unavailable(reason: "This is a shell command, not something this agent can run.")
-        case .providerSlash, .extensionCommand:
-            if capabilities.canDelegateCommands { return .harnessDelegated }
-            guard capabilities.interpretsLeadingSlash else {
+        case .skill, .promptTemplate, .providerSlash, .extensionCommand:
+            // ONE gate for all four, because they share one transport fact: the
+            // text leaves Array with a leading slash and something on the other
+            // side has to be the thing that reads it.
+            //
+            // `.skill`/`.promptTemplate` used to return `.skillTemplate` from
+            // above this gate, unconditionally. That was only ever safe because
+            // dispatch could not resolve a discovered skill at all — the
+            // supervisor looked descriptors up in `allBaselines()`, so a
+            // `.codex/skills/foo` or `.pi/prompts/foo` row refused for the wrong
+            // reason. Making those rows dispatchable (which they must be) turns
+            // that same path into a literal `/foo` handed to a codex or pi model,
+            // which is the paid-prose regression this whole classifier exists to
+            // prevent. A skill spending a real turn is correct; a skill spending
+            // a real turn on a CLI that will not expand it is not.
+            let expands = capabilities.canDelegateCommands || capabilities.interpretsLeadingSlash
+            guard expands else {
                 return .unavailable(
                     reason: "This agent's CLI doesn't run slash commands outside its own terminal.")
             }
-            guard let advertised = capabilities.advertisedNames else {
-                // Nothing discovered yet. The baseline catalogue is the best
-                // answer available and refusing on a missing list would disable
-                // every command until the first turn had run.
+            if let advertised = capabilities.advertisedNames {
+                let names = [descriptor.name] + descriptor.aliases
+                guard names.contains(where: { advertised.contains(Self.bareName($0)) }) else {
+                    return .unavailable(reason: "This agent doesn't have that command.")
+                }
+            }
+            // else: nothing discovered yet. The baseline catalogue is the best
+            // answer available and refusing on a missing list would disable every
+            // command until the first turn had run.
+            switch descriptor.surface {
+            case .skill, .promptTemplate:
+                return .skillTemplate
+            default:
                 return .harnessDelegated
             }
-            let names = [descriptor.name] + descriptor.aliases
-            guard names.contains(where: { advertised.contains(Self.bareName($0)) }) else {
-                return .unavailable(reason: "This agent doesn't have that command.")
-            }
-            return .harnessDelegated
         }
     }
 

@@ -34,8 +34,24 @@ extension UIProbeGeometry {
             blocks: [block]
         )
         let document = AgentDocument(version: 1, entries: [entry])
+        // TR-03 — this record used to carry a tool name and NOTHING else, and
+        // the assertion below pinned the string "Read file": a sentence the
+        // presenter invented because the name looked like a read. It says
+        // nothing the title "Read" does not, and the same invention titled every
+        // `TodoWrite` "Edited file". A real read names a file, so this fixture
+        // now does too — and the check goes back to witnessing what it is for,
+        // which is that only a complete immutable binding may disclose.
+        //
+        // It names the file through an ARGUMENT, not `affectedFiles`: this is
+        // the provider-closure path, and `sanitizedProviderRecord` drops every
+        // provider-supplied URL on purpose, because a closure cannot attest that
+        // a path was sanitized. The whitelist already sends the basename as an
+        // argument for exactly this reason.
         let record = AgentToolDetailRecord(
-            identity: currentIdentity, toolName: "read", status: .completed,
+            identity: currentIdentity, toolName: "read",
+            arguments: [AgentToolDetailArgument(
+                key: "file", value: AgentToolDetailBoundedText(text: "Notes.swift"))],
+            status: .completed,
             updatedAt: Date(timeIntervalSinceReferenceDate: 4_000)
         )
 
@@ -61,7 +77,7 @@ extension UIProbeGeometry {
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
-        guard boundList.qaPresentedToolSummary(for: blockID)?.contains("Read file") == true else {
+        guard boundList.qaPresentedToolSummary(for: blockID)?.contains("Read Notes.swift") == true else {
             throw GeometryError(message: "explicit immutable tool identity did not disclose the completed detail")
         }
 
@@ -145,7 +161,10 @@ extension UIProbeGeometry {
         // Hostile witness: an explicitly TTL-bound provider has no actor store,
         // but must still use the injected clock and refresh the rendered snapshot.
         let noStoreRecord = AgentToolDetailRecord(
-            identity: currentIdentity, toolName: "read", status: .completed,
+            identity: currentIdentity, toolName: "read",
+            arguments: [AgentToolDetailArgument(
+                key: "file", value: AgentToolDetailBoundedText(text: "Notes.swift"))],
+            status: .completed,
             updatedAt: clock.now()
         )
         let noStoreExpiringList = AgentTranscriptListView(
@@ -158,7 +177,7 @@ extension UIProbeGeometry {
             document: document,
             patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: [blockID])
         )
-        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID)?.contains("Read file") == true else {
+        guard noStoreExpiringList.qaPresentedToolSummary(for: blockID)?.contains("Read Notes.swift") == true else {
             throw GeometryError(message: "fresh no-store TTL-bound provider detail was not presentable")
         }
         clock.advance(11)
@@ -503,7 +522,154 @@ extension UIProbeGeometry {
         }
 
         try await runRealTranslatorSupplyChecks()
-        return 24
+        try await runDelegationSupplyChecks()
+        try await runPiDelegationSupplyChecks()
+        return 28
+    }
+
+    /// TR-03 — a delegation row must be able to say WHAT it delegated.
+    ///
+    /// `ClaudeEventTranslator`'s whitelist has always forwarded `description`
+    /// and `subagent_type` for a `Task`/`Agent` call, and the presenter has
+    /// always known what to do with a `description`. In between,
+    /// `isToolDetailKind` excluded `.subagent`: the identity was never
+    /// registered, so the observation parked in `pendingRuntimeObservations`
+    /// until the next turn dropped it, and the row rendered the raw identifier
+    /// "Agent". Every piece worked; the chain did not.
+    ///
+    /// Driven end to end over the committed subagent capture, through the same
+    /// host capture path production uses — the only shape that could have caught
+    /// this, since both ends were individually correct.
+    private static func runDelegationSupplyChecks() async throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()          // App
+            .deletingLastPathComponent()          // ContinuumRevived
+            .deletingLastPathComponent()          // Sources
+            .appendingPathComponent(
+                "ContinuumRevivedCoreChecks/Fixtures/claude-subagent-turn.jsonl",
+                isDirectory: false
+            )
+        guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8), !text.isEmpty else {
+            throw GeometryError(message: "the committed claude subagent capture is missing at \(fixtureURL.path)")
+        }
+        let store = AgentToolDetailStore()
+        let list = AgentTranscriptListView(toolDetailStore: store)
+        list.bindToolDetailAgent(AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000000AD")!))
+        var translator = ClaudeEventTranslator(runToken: "probe")
+        translator.onRuntimeObservation = { observation in
+            MainActor.assumeIsolated { list.captureRuntimeObservation(observation) }
+        }
+        var delegationIdentity: AgentToolDetailKey?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            for event in translator.translate(line: String(line)) {
+                let identity = list.captureRuntimeEvent(event)
+                if case let .itemStarted(_, _, kind, _) = event, kind == .subagent, let identity {
+                    delegationIdentity = identity
+                }
+            }
+        }
+        guard let delegationIdentity else {
+            throw GeometryError(
+                message: "the real claude capture produced no delegation detail identity — a "
+                    + "`Task`/`Agent` item's whitelisted description is being collected and dropped"
+            )
+        }
+        await list.qaWaitForToolDetailRefresh()
+        for _ in 0..<100 {
+            if await store.detail(for: delegationIdentity) != nil { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard let detail = await store.detail(for: delegationIdentity) else {
+            throw GeometryError(message: "the delegation detail never reached the store from the real translator sequence")
+        }
+        let collapsed = AgentToolDetailPresenter.collapsed(detail)
+        // The exact string the committed capture carries.
+        guard collapsed.actionLine == "Read notes.txt contents" else {
+            throw GeometryError(
+                message: "a delegation row must read its own description; got \(collapsed.actionLine)"
+            )
+        }
+        // And the model-authored PROMPT — a command body — must not have ridden
+        // along with it (I5). This is the guard that makes widening the kind
+        // list safe.
+        let disclosure = AgentToolDetailPresenter.observableDisclosureText(detail)
+        for text in [collapsed.actionLine, disclosure] {
+            guard !text.contains("/tmp/fixture/notes.txt"), !text.lowercased().contains("verbatim") else {
+                throw GeometryError(
+                    message: "a delegation row leaked the child's prompt body across the I5 boundary: \(text)"
+                )
+            }
+        }
+    }
+
+    /// TR-03 — the same delegation guarantee, over pi, whose two delegation
+    /// verbs carry a ROLE and a prompt BODY side by side in the same args
+    /// object. The role must reach the row; the body must not, ever.
+    ///
+    /// Driven over both committed pi captures because the two verbs spell the
+    /// role differently (`delegate_agent.agent`, `spawn_agent.role`) and a
+    /// whitelist that caught one and missed the other would look fixed.
+    private static func runPiDelegationSupplyChecks() async throws {
+        let fixtures: [(file: String, role: String, forbidden: [String])] = [
+            ("pi-delegate-agent-turn.jsonl", "code-scout", ["Survey the recipe column"]),
+            ("spawn-agent-tool-call.jsonl", "code-scout", ["Find every call site"]),
+        ]
+        for fixture in fixtures {
+            let fixtureURL = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/\(fixture.file)", isDirectory: false)
+            guard let text = try? String(contentsOf: fixtureURL, encoding: .utf8), !text.isEmpty else {
+                throw GeometryError(message: "the committed pi capture is missing at \(fixtureURL.path)")
+            }
+            let store = AgentToolDetailStore()
+            let list = AgentTranscriptListView(toolDetailStore: store)
+            list.bindToolDetailAgent(AgentID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-0000000000AE")!))
+            var translator = PiEventTranslator()
+            translator.onRuntimeObservation = { observation in
+                MainActor.assumeIsolated { list.captureRuntimeObservation(observation) }
+            }
+            var identity: AgentToolDetailKey?
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                for event in translator.translate(line: String(line)) {
+                    if let captured = list.captureRuntimeEvent(event),
+                       case let .itemStarted(_, _, kind, _) = event, kind == .subagent {
+                        identity = captured
+                    }
+                }
+            }
+            guard let identity else {
+                throw GeometryError(
+                    message: "\(fixture.file): pi's delegation produced no detail identity"
+                )
+            }
+            await list.qaWaitForToolDetailRefresh()
+            for _ in 0..<100 {
+                if await store.detail(for: identity) != nil { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            guard let detail = await store.detail(for: identity) else {
+                throw GeometryError(message: "\(fixture.file): pi's delegation detail never reached the store")
+            }
+            let collapsed = AgentToolDetailPresenter.collapsed(detail)
+            guard collapsed.actionLine == "Delegated to \(fixture.role)" else {
+                throw GeometryError(
+                    message: "\(fixture.file): a pi delegation row must name the role it delegated to; "
+                        + "got \(collapsed.actionLine)"
+                )
+            }
+            // The I5 wall. `task`/`prompt` is the child's command body and sits
+            // in the SAME args object the role came out of.
+            let disclosure = AgentToolDetailPresenter.observableDisclosureText(detail)
+            for forbidden in fixture.forbidden {
+                for text in [collapsed.actionLine, disclosure] where text.contains(forbidden) {
+                    throw GeometryError(
+                        message: "\(fixture.file): the delegated prompt body crossed into the row: \(text)"
+                    )
+                }
+            }
+        }
     }
 
     /// `.plans/45` S3 (ledger 1b.6) — the store fed by a REAL translator

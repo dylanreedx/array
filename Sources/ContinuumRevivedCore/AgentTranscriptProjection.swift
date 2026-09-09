@@ -323,6 +323,60 @@ public struct AgentTranscriptProjection: Sendable {
         requestEntries[requestID]
     }
 
+    /// TR-06 — records what ARRAY did with a user's press on an open request.
+    ///
+    /// This is the second input channel to the request block, alongside provider
+    /// events, and it is deliberately narrow: it writes `responseState` and
+    /// nothing else. It cannot change `status`, so no local action can make a
+    /// request look resolved — only `requestResolved`/`userInputResolved` does
+    /// that, and it still arrives through `ingest` like every other provider fact.
+    ///
+    /// Refuses on a request this projection never opened, and on one the provider
+    /// has already resolved: a late press against a settled request is a stale
+    /// callback, and repainting it "submitting" would reopen, on screen, a
+    /// question that is closed.
+    ///
+    /// Returns false when nothing was written, so a caller can tell a real
+    /// dispatch from a no-op instead of assuming.
+    @discardableResult
+    public mutating func markRequestResponseState(
+        requestID: String,
+        _ state: AgentRequestResponseState
+    ) -> Bool {
+        guard let entryID = requestEntries[requestID],
+              let blockID = requestBlocks[requestID],
+              let block = document.entries
+                  .first(where: { $0.id == entryID })?
+                  .blocks.first(where: { $0.id == blockID })
+        else { return false }
+
+        let payload: AgentRequestPayload
+        let rewrap: (AgentRequestPayload) -> AgentBlockPayload
+        switch block.payload {
+        case .approval(let existing):
+            payload = existing
+            rewrap = AgentBlockPayload.approval
+        case .question(let existing):
+            payload = existing
+            rewrap = AgentBlockPayload.question
+        default:
+            return false
+        }
+        // Provider truth first: a resolved request takes no further local state.
+        guard [.pending, .inProgress].contains(payload.status) else { return false }
+        guard payload.responseState != state else { return false }
+
+        var next = payload
+        next.responseState = state
+        apply([.upsertStructured(entryID: entryID, block: AgentBlock(
+            id: block.id,
+            kind: block.kind,
+            payload: rewrap(next),
+            children: block.children
+        ))])
+        return true
+    }
+
     /// What the reducer has touched since a consumer last drained it.
     ///
     /// A renderer coalescing many mutations into one presentation needs to know
@@ -817,6 +871,39 @@ public extension ApprovalDecision {
         ApprovalDecision.decline.rawValue,
         ApprovalDecision.cancel.rawValue,
     ]
+
+    /// What a button for this decision SAYS.
+    ///
+    /// The wire value stays the rawValue; this is display only. Without it the
+    /// compiled vocabulary reached the user verbatim and a real approval offered
+    /// a button labelled `acceptForSession` — the renderer's `safeSingleLine`
+    /// sanitises newlines but does not translate. The fixture surfaces passed
+    /// their own prose ("Approve", "Deny"), so nothing caught it.
+    var displayTitle: String {
+        switch self {
+        case .accept: return "Allow"
+        case .acceptForSession: return "Allow for session"
+        case .decline: return "Decline"
+        case .cancel: return "Cancel"
+        }
+    }
+
+    /// The title for one advertised choice string.
+    ///
+    /// A choice Array does not recognise is passed through rather than replaced:
+    /// a provider that one day advertises its own vocabulary must not have it
+    /// silently relabelled, and an empty string still falls back to "Respond"
+    /// rather than rendering a nameless button.
+    static func displayTitle(forChoice choice: String) -> String {
+        ApprovalDecision(rawValue: choice)?.displayTitle
+            ?? safeSingleLineChoice(choice, fallback: "Respond")
+    }
+
+    private static func safeSingleLineChoice(_ value: String, fallback: String) -> String {
+        let line = value.split(whereSeparator: { $0.isNewline }).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return line.isEmpty ? fallback : line
+    }
 }
 
 private extension Array where Element == AgentDocumentMutation {
