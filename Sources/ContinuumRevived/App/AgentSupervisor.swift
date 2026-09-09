@@ -1046,6 +1046,17 @@ final class AgentSupervisor {
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
     private(set) var records: [AgentID: AgentRecord] = [:]
+
+    /// CX-01 (`.plans/59`, §15): where a bound runner's host tool request goes.
+    /// Called on the main actor with the SUPERVISOR's `AgentID` for the runner
+    /// instance that received the frame — the caller binding. The envelope carries
+    /// no identity and could not be trusted if it did. nil (checks, or before the
+    /// app wires its service) answers every request `unsupported`.
+    var hostToolHandler: ((AgentID, PiHostToolCall) -> Void)?
+
+    /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
+    /// the host grant table can revoke (or start honouring) the agent's policy.
+    var onWorkspaceToolsChanged: ((AgentID, Bool) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
@@ -2211,6 +2222,12 @@ final class AgentSupervisor {
                 return id
             }
             records[id] = child
+            if WorkspaceToolsConfig.enabledForNewAgents(), !child.workspaceToolsEnabled {
+                var enabled = child
+                enabled.workspaceToolsEnabled = true
+                records[id] = enabled
+                persist(enabled)
+            }
         } else {
             var record = AgentRecord(
                 id: id,
@@ -2248,6 +2265,8 @@ final class AgentSupervisor {
                 record.displayName = proposal.name
                 record.displayNameSource = proposal.source
             }
+            // CX-01 (§14.1): the Settings default seeds NEW agents only.
+            record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents()
             records[id] = record
             persist(record)
         }
@@ -2665,6 +2684,28 @@ final class AgentSupervisor {
                       self.runnerGenerationTokens[id] == runnerGeneration,
                       self.runners[id] === runner else { return }
                 self.ingestRuntimeObservation(observation, for: id)
+            }
+        }
+        // CX-01 (`.plans/59`, §15): the host tool bridge. Same generation guard as
+        // the spawn side channel — a reply for a retired runner is answered
+        // `outcome_unknown` on ITS transport and never re-routed to a newer one.
+        // Asked for as a capability so the one-shot and scripted runners stay
+        // untouched.
+        if let bridging = runner as? HostToolBridging {
+            bridging.observeHostToolRequests { [weak self] call in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runnerGenerationTokens[id] == runnerGeneration,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else {
+                        call.respond(.error("outcome_unknown", "The agent session that made this request has been replaced."))
+                        return
+                    }
+                    guard let handler = self.hostToolHandler else {
+                        call.respond(.unsupportedUnbound)
+                        return
+                    }
+                    handler(id, call)
+                }
             }
         }
         // C7: a claude subagent's own work, routed to the CHILD rather than the
@@ -3745,6 +3786,7 @@ final class AgentSupervisor {
                     warn: warn
                 )
             }
+            lastSpawnRefusals[parentId] = nil
             let childName = records[childID]?.humanDisplayName ?? "Subagent"
             deliver(.childAgentSpawned(
                 threadId: Self.threadId(for: parentId),
@@ -3781,6 +3823,7 @@ final class AgentSupervisor {
         toolName: String = SpawnRequest.toolName
     ) -> AgentID? {
         warn("AgentSupervisor: refusing \(toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
+        lastSpawnRefusals[parentId] = refusal
         guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
@@ -3817,6 +3860,12 @@ final class AgentSupervisor {
         }
         return nil
     }
+
+    /// CX-01 Phase 2b: the reason `handleSpawnRequest` last returned nil for this
+    /// parent, so the workspace API can report it as a structured error (the
+    /// same shape as `sendRefusal(for:)`). Cleared when a spawn succeeds.
+    private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
+    func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {
@@ -4515,6 +4564,24 @@ final class AgentSupervisor {
         return true
     }
 
+    /// CX-01 (§14.1): the persisted per-agent workspace-tools POLICY. The host
+    /// grant table reads it on every dispatch and again before every effect, so
+    /// flipping it off revokes; `onWorkspaceToolsChanged` lets the table drop its
+    /// minted grants immediately. Returns true when the record changed.
+    @discardableResult
+    func setWorkspaceToolsEnabled(agentID id: AgentID, _ enabled: Bool) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.setWorkspaceToolsEnabled: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.workspaceToolsEnabled != enabled else { return false }
+        record.workspaceToolsEnabled = enabled
+        records[id] = record
+        persist(record)
+        onWorkspaceToolsChanged?(id, enabled)
+        return true
+    }
+
     /// Start an automatic name proposal without doing any provider work. The
     /// caller keeps the returned token and must hand it back to
     /// `applyGeneratedName` after its best-effort work finishes.
@@ -4818,6 +4885,15 @@ final class AgentSupervisor {
     /// which must know whether detaching a view leaves work running.
     func isRunning(_ id: AgentID) -> Bool {
         runners[id] != nil
+    }
+
+    /// CX-01 Phase 2a (`.plans/59` §11): the semantic transcript document this
+    /// supervisor holds for an agent — fed by `deliver` → `ingestTranscriptEvent`,
+    /// the same projection the durable snapshot is written from — or nil when no
+    /// event has reached it in this session. A READ: nothing is flushed, marked,
+    /// persisted or woken. Absence here is not evidence the agent did nothing.
+    func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
+        transcriptProjections[id]?.document
     }
 
     /// Operational state for one tile. State comes only from explicit lifecycle
@@ -14492,7 +14568,9 @@ private func checkSpawnFromToolCall(
         throw fail("the child's depth is \(childDepth), which is not below the cap — this act no longer tests what it says")
     }
     let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
-    let expectedChildTools = "\(scoutTools), " + RoleRegistry.spawnToolNames(for: .pi).joined(separator: ", ")
+    // CX-01: Array's host bridge tools follow every roled pi agent, at any depth.
+    let expectedChildTools = "\(scoutTools), "
+        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi)).joined(separator: ", ")
     guard childRunnerArgs == ["--tools", expectedChildTools] else {
         throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }

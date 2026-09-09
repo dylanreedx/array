@@ -274,6 +274,14 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// decode-tolerant — the `snoozedAt`/`sourceItemId` convention, no schema
     /// bump.
     public var spawnResultHandle: String? = nil
+    /// CX-01 (§14.1): whether this agent may use Array's workspace tools
+    /// (bounded self context, open/reveal within its own checkout). Persisted
+    /// POLICY, read by the host grant table; the model can neither read nor
+    /// assert it. Legacy records decode `false` — nothing migrates silently.
+    /// Lives on the record, not on `AgentCapabilities`: that struct falls back
+    /// to `.managed` on ANY decode failure, so a new field there would reset
+    /// legacy capabilities.
+    public var workspaceToolsEnabled: Bool = false
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -769,7 +777,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
-        case spawnResultHandle
+        case spawnResultHandle, workspaceToolsEnabled
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -837,6 +845,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
         spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
+        workspaceToolsEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .workspaceToolsEnabled)) ?? false
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
@@ -927,6 +936,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
         try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
+        if workspaceToolsEnabled { try container.encode(true, forKey: .workspaceToolsEnabled) }
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)

@@ -812,7 +812,39 @@ final class ManagedAgentTileNSView: TileNSView {
             menu.addItem(item)
         }
         root.submenu = menu
-        return makePageZoomMenuItems() + [root]
+        return makePageZoomMenuItems() + [root] + makeWorkspaceToolsMenuItems()
+    }
+
+    /// CX-01 (`.plans/59` §14.1): the per-agent workspace-tools policy, offered on
+    /// the tile the agent lives in. A checkmark, not a submenu — it is one boolean.
+    ///
+    /// It reads `AgentRecord.workspaceToolsEnabled` and writes it through
+    /// `AgentSupervisor.setWorkspaceToolsEnabled`, whose `onWorkspaceToolsChanged`
+    /// makes the host service drop every grant it had minted for this agent, so
+    /// unchecking it revokes rather than only affecting the next dispatch. ABSENT
+    /// (not disabled) for a tile with no agent behind it: there is no record to
+    /// toggle, and the policy belongs to the agent, never to the tile.
+    private func makeWorkspaceToolsMenuItems() -> [NSMenuItem] {
+        guard let agentID = attachedAgentID,
+              let record = agentSource?.records[agentID] else { return [] }
+        let item = NSMenuItem(
+            title: "Workspace Tools",
+            action: #selector(toggleWorkspaceToolsMenuItem(_:)),
+            keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.workspaceTools.toggle")
+        item.state = record.workspaceToolsEnabled ? .on : .off
+        return [item]
+    }
+
+    @objc private func toggleWorkspaceToolsMenuItem(_ sender: NSMenuItem) {
+        // Re-read the record rather than trusting the item's painted state: the
+        // menu can have been built before another surface (Settings, a revoking
+        // API deny) moved the flag.
+        guard let agentID = attachedAgentID,
+              let supervisor = agentSource,
+              let record = supervisor.records[agentID] else { return }
+        _ = supervisor.setWorkspaceToolsEnabled(agentID: agentID, !record.workspaceToolsEnabled)
     }
 
     private func soundOverrideItem(title: String, kind: AgentSignalKind, value: String) -> NSMenuItem {
@@ -3038,6 +3070,24 @@ final class ManagedAgentTileNSView: TileNSView {
             return (id: id, title: item.title, enabled: item.isEnabled)
         }
     }
+    /// The workspace-tools item as the menu offers it, or nil when it is absent.
+    func qaWorkspaceToolsMenuEntry() -> (title: String, isOn: Bool)? {
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.workspaceTools.toggle" })
+        else { return nil }
+        return (title: item.title, isOn: item.state == .on)
+    }
+
+    /// Invoke the workspace-tools item exactly as AppKit would, target and all.
+    @discardableResult
+    func qaInvokeWorkspaceToolsMenuItem() -> Bool {
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.workspaceTools.toggle" }),
+            let action = item.action, let target = item.target else { return false }
+        _ = target.perform(action, with: item)
+        return true
+    }
+
     /// Invoke a zoom menu item exactly as AppKit would, target and all.
     @discardableResult
     func qaInvokePageZoomMenuItem(_ identifier: String) -> Bool {

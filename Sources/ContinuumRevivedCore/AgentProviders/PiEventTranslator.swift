@@ -86,6 +86,18 @@ public struct PiEventTranslator {
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
 
+    /// CX-01 (`.plans/59`, §15) — an Array-owned request the pi extension made
+    /// through `ctx.ui.input`, arriving as an `extension_ui_request` frame. Local-
+    /// only and non-Codable for the same I5 reason as `onSpawnRequest`: the
+    /// payload is model-authored. Foreign UI requests (another extension's
+    /// dialog) never reach this hook and stay dropped as before.
+    public var onHostToolRequest: (@Sendable (PiHostToolRequest) -> Void)?
+
+    /// CX-01 — the tool call id of every `tool_execution_end`, so the bridge knows
+    /// a call already returned (aborted or timed out on pi's side) and a late
+    /// host reply must not be written.
+    public var onToolExecutionEnded: (@Sendable (String) -> Void)?
+
     /// Recover assistant prose from COMPLETED messages instead of from deltas.
     ///
     /// Off for the live path, which must stay byte-identical: pi streams assistant
@@ -273,6 +285,7 @@ public struct PiEventTranslator {
         case "tool_execution_end":
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
+            onToolExecutionEnded?(toolCallId)
             let isError = (object["isError"] as? Bool) ?? false
             // The `runId` that names the child's transcript on disk. Measured on
             // the wire: `result.details.runId`, alongside `details.task` — which
@@ -332,7 +345,17 @@ public struct PiEventTranslator {
         // `extension_ui_request` is a UI prompt pi's own extension host
         // answers. Explicit here (rather than relying on `default:`) so the
         // ignore is a decision, not an accident of the fallthrough.
-        case "response", "extension_ui_request":
+        case "extension_ui_request":
+            // CX-01: Array's own extension asks the HOST through this frame. Only
+            // an envelope carrying our schema is ours; the parse rejects everything
+            // else and the frame is dropped exactly as it always was. Still zero
+            // events either way -- the request is not part of the turn transcript.
+            if let onHostToolRequest, let request = PiHostToolRequest.parse(object, now: now()) {
+                onHostToolRequest(request)
+            }
+            return []
+
+        case "response":
             return []
 
         default:
