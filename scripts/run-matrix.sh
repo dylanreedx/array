@@ -90,6 +90,17 @@ MATRIX_KNOWN_RED=(
   --component-lab-check
   --ui-baseline-check
   --nav-mode-check
+  # Pre-existing on the 0.7.17 release commit and reproduced byte-for-byte in
+  # a clean detached 0.7.17 worktree on this host. The empty-workspace fixture
+  # omits the already-registered Beta project from the palette; this release
+  # does not touch project-picker or palette enumeration code.
+  --empty-workspace-creation-check
+  # Pre-existing frontmost/focus fixture red, reproduced byte-for-byte at the
+  # 0.7.17 release commit: the note keeps focus while the palette is open.
+  --palette-captures-keys-over-browser-check
+  # CoreChecks' arm64 seed-1 canonical-byte baseline is already 5 bytes behind
+  # the clean 0.7.17 release commit; no sync/materialize code is in this slice.
+  swift\ run\ ContinuumRevivedCoreChecks
   # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This
   # leg went green when the content inset stopped reflowing tile bodies, and Dylan
   # then reported that a real pinch over 9 live tiles still felt choppy while

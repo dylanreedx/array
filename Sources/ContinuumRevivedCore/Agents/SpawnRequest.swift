@@ -257,10 +257,12 @@ public struct AgentRunnerLaunch: Sendable {
     public let record: AgentRecord
     /// Links from this agent up to a root. 0 for a user-created agent.
     public let spawnDepth: Int
+    public let workspaceMCP: WorkspaceMCPConfiguration?
 
-    public init(record: AgentRecord, spawnDepth: Int) {
+    public init(record: AgentRecord, spawnDepth: Int, workspaceMCP: WorkspaceMCPConfiguration? = nil) {
         self.record = record
         self.spawnDepth = spawnDepth
+        self.workspaceMCP = workspaceMCP
     }
 }
 

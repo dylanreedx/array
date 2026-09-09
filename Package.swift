@@ -230,6 +230,10 @@ let package = Package(
             dependencies: ["ContinuumRevivedCore"]
         ),
         .executableTarget(
+            name: "array-workspace-mcp",
+            dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
             dependencies: ["ContinuumRevivedCore"]
         ),

@@ -107,7 +107,8 @@ public enum CodexCLIBackend {
         threadId: String?,
         cwdPath: String,
         extraArgs: [String],
-        prompt: AgentPrompt
+        prompt: AgentPrompt,
+        workspaceMCP: WorkspaceMCPConfiguration? = nil
     ) -> [String] {
         var args: [String]
         switch sessionMode {
@@ -130,6 +131,9 @@ public enum CodexCLIBackend {
             args += ["-C", cwdPath]
         }
         args += extraArgs
+        if let workspaceMCP {
+            for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
+        }
         args += [promptArgument(prompt)]
         return args
     }
@@ -152,12 +156,15 @@ public enum CodexCLIBackend {
     /// never sets it — that field only carries pi's role `--tools` args) but
     /// is threaded through for the same reason `processArguments` threads it:
     /// a slot for a future per-agent override, not a currently-used one.
-    public static func appServerArguments(extraArgs: [String]) -> [String] {
+    public static func appServerArguments(extraArgs: [String], workspaceMCP: WorkspaceMCPConfiguration? = nil) -> [String] {
         var args = [
             "-c", "approval_policy=never",
             "-c", "sandbox_mode=\(sandboxMode)",
-            "app-server",
         ]
+        if let workspaceMCP {
+            for override in workspaceMCP.codexConfigOverrides { args += ["-c", override] }
+        }
+        args += ["app-server"]
         args += extraArgs
         return args
     }
@@ -198,18 +205,21 @@ public final class CodexAgentRunner: @unchecked Sendable {
         public var threadId: String?
         /// Extra args before the prompt.
         public var extraArgs: [String]
+        public var workspaceMCP: WorkspaceMCPConfiguration?
         public init(
             model: String,
             effort: String? = nil,
             cwd: URL,
             threadId: String? = nil,
-            extraArgs: [String] = []
+            extraArgs: [String] = [],
+            workspaceMCP: WorkspaceMCPConfiguration? = nil
         ) {
             self.model = model
             self.effort = effort
             self.cwd = cwd
             self.threadId = threadId
             self.extraArgs = extraArgs
+            self.workspaceMCP = workspaceMCP
         }
     }
 
@@ -385,13 +395,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
 
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP)
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
                 executable: command.executable,
                 arguments: arguments,
-                environment: PiAgentRunner.childEnvironment(),
+                environment: childEnvironment(),
                 currentDirectory: config.cwd,
                 standardInput: .pipe)
         } catch {
@@ -535,7 +545,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP)
 
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
@@ -561,7 +571,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             spawned = try ProcessGroupChild.spawn(
                 executable: command.executable,
                 arguments: arguments,
-                environment: PiAgentRunner.childEnvironment(),
+                environment: childEnvironment(),
                 currentDirectory: config.cwd,
                 standardInput: .pipe)
         } catch {
@@ -813,7 +823,8 @@ public final class CodexAgentRunner: @unchecked Sendable {
             threadId: threadId,
             cwdPath: config.cwd.path,
             extraArgs: config.extraArgs,
-            prompt: prompt
+            prompt: prompt,
+            workspaceMCP: config.workspaceMCP
         )
 
         queue.sync {
@@ -833,7 +844,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 // codex is a node script whose shebang needs node on PATH. HOME and the
                 // codex config dir stay untouched — overriding HOME relocates the login
                 // lookup and the CLI stops finding its own auth.
-                environment: PiAgentRunner.childEnvironment(),
+                environment: childEnvironment(),
                 // Set the cwd on BOTH paths: resume can't take `-C`, and it is harmless
                 // on fresh (which also passes `-C`).
                 currentDirectory: config.cwd,
@@ -954,6 +965,12 @@ public final class CodexAgentRunner: @unchecked Sendable {
               let params = object["params"] as? [String: Any]
         else { return nil }
         return params["threadId"] as? String
+    }
+
+    private func childEnvironment() -> [String: String] {
+        var environment = PiAgentRunner.childEnvironment()
+        if let workspaceMCP = config.workspaceMCP { environment.merge(workspaceMCP.environment) { _, new in new } }
+        return environment
     }
 }
 

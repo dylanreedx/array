@@ -815,6 +815,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-mcp-host-check") {
+            do {
+                _ = NSApplication.shared
+                try runWorkspaceMCPHostCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--canvas-undo-check") {
             do {
                 _ = NSApplication.shared
@@ -4240,6 +4250,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
         tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) }
     )
+    lazy var workspaceMCPHost = WorkspaceMCPHost()
+
+    private func workspaceMCPExecutablePath() -> String? {
+        let candidates = [
+            ProcessInfo.processInfo.environment["CONTINUUM_WORKSPACE_MCP_BINARY"],
+            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("array-workspace-mcp").path,
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/array-workspace-mcp").path
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func handleWorkspaceMCP(_ request: [String: Any]) -> [String: Any] {
+        guard let agentText = request["agentId"] as? String,
+              let agentUUID = UUID(uuidString: agentText),
+              let record = agentSupervisor.records[AgentID(rawValue: agentUUID)],
+              let op = request["op"] as? String,
+              let requestID = request["requestId"] as? String,
+              let payload = request["payload"] as? [String: Any] else {
+            return ["schema": WorkspaceAPISchema.v1, "status": "error",
+                    "error": ["code": "invalid_request", "message": "Malformed workspace request"]]
+        }
+        let reply = workspaceAPI.dispatch(agentId: record.id, requestId: requestID, op: op, payload: payload)
+        let encoded = WorkspaceAPIService.transportResponse(for: reply).encodedValue(requestId: requestID)
+        return (try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??
+            ["schema": WorkspaceAPISchema.v1, "status": "error",
+             "error": ["code": "outcome_unknown", "message": "Array produced an unreadable reply"]]
+    }
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
     private lazy var agentComposerDraftStore = AgentComposerDraftStore(
@@ -15640,6 +15677,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.hostToolHandler = { [weak self] agentId, call in
             guard let self else { call.respond(.unsupportedUnbound); return }
             self.workspaceAPI.handle(agentId: agentId, call: call)
+        }
+        workspaceMCPHost.setHandler { [weak self] request in
+            guard let self else {
+                return ["schema": WorkspaceAPISchema.v1, "status": "error",
+                        "error": ["code": "unsupported", "message": "Array host unavailable"]]
+            }
+            return self.handleWorkspaceMCP(request)
+        }
+        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
+            guard harness == .claudeCode || harness == .codex,
+                  let self,
+                  let executable = self.workspaceMCPExecutablePath() else { return nil }
+            return self.workspaceMCPHost.configuration(for: agentID, serverExecutable: executable)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)

@@ -89,6 +89,7 @@ fi
 
 PLIST="$BUNDLE_PATH/Contents/Info.plist"
 EXE="$BUNDLE_PATH/Contents/MacOS/Array"
+MCP_EXE="$BUNDLE_PATH/Contents/MacOS/array-workspace-mcp"
 RESOURCES="$BUNDLE_PATH/Contents/Resources"
 FILE_LOG="$OUTPUT_DIR/file.txt"
 OTOOL_LOG="$OUTPUT_DIR/otool-L.txt"
@@ -114,6 +115,7 @@ assert_eq() {
 [[ -d "$RESOURCES" ]] || { echo "FAIL: missing Contents/Resources" >&2; exit 1; }
 [[ -f "$PLIST" ]] || { echo "FAIL: missing Info.plist" >&2; exit 1; }
 [[ -x "$EXE" ]] || { echo "FAIL: missing executable $EXE" >&2; exit 1; }
+[[ -x "$MCP_EXE" ]] || { echo "FAIL: missing workspace MCP executable $MCP_EXE" >&2; exit 1; }
 plutil -lint "$PLIST" >/dev/null
 
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")

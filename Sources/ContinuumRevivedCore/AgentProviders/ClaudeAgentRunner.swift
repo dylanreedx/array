@@ -162,6 +162,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// the resume/start ordering entirely: `run` makes exactly one
         /// `--fork-session` attempt with no retry.
         public var forkSession: Bool
+        public var workspaceMCP: WorkspaceMCPConfiguration?
 
         public init(
             model: String,
@@ -170,7 +171,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             sessionId: String,
             extraArgs: [String] = [],
             conversationMayExist: Bool = true,
-            forkSession: Bool = false
+            forkSession: Bool = false,
+            workspaceMCP: WorkspaceMCPConfiguration? = nil
         ) {
             self.model = model
             self.effort = effort
@@ -179,6 +181,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             self.extraArgs = extraArgs
             self.conversationMayExist = conversationMayExist
             self.forkSession = forkSession
+            self.workspaceMCP = workspaceMCP
         }
     }
 
@@ -198,7 +201,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         sessionMode: SessionMode,
         sessionId: String,
         extraArgs: [String],
-        prompt: AgentPrompt
+        prompt: AgentPrompt,
+        workspaceMCP: WorkspaceMCPConfiguration? = nil
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -213,14 +217,17 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // CLAUDE_CODE_FORWARD_SUBAGENT_TEXT; verified present in `claude --help`
         // on the installed 2.1.241, where it also states it only works with
         // --print and --output-format=stream-json, which is exactly this argv.
-        return ["-p", "--output-format", "stream-json", "--verbose",
+        var args = ["-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages", "--include-hook-events",
                 "--forward-subagent-text"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
             + sessionArgs
             + extraArgs
-            + [promptArgument(prompt)]
+        if let workspaceMCP {
+            args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigJSON]
+        }
+        return args + [promptArgument(prompt)]
     }
 
     /// Claude takes ONE positional prompt (pi takes segments). The visible
@@ -441,7 +448,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             sessionMode: mode,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
-            prompt: prompt
+            prompt: prompt,
+            workspaceMCP: config.workspaceMCP
         )
 
         queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
@@ -456,7 +464,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 // doesn't, but augmenting is harmless there.) HOME and
                 // CLAUDE_CONFIG_DIR stay untouched — overriding HOME relocates the
                 // keychain lookup and the CLI stops finding its own login.
-                environment: PiAgentRunner.childEnvironment(),
+                environment: Self.childEnvironment(workspaceMCP: config.workspaceMCP),
                 currentDirectory: config.cwd,
                 standardInput: .inherit
             )
@@ -500,6 +508,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             return text
         }
         return (exitCode, errText)
+    }
+
+    private static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
+        var environment = PiAgentRunner.childEnvironment()
+        if let workspaceMCP { environment.merge(workspaceMCP.environment) { _, new in new } }
+        return environment
     }
 
     // MARK: - queue-confined line assembly

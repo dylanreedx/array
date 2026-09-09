@@ -87,6 +87,10 @@ if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--workspace-mcp-check") {
+    runWorkspaceMCPChecks()
+    Foundation.exit(0)
+}
 // CX-01 hardening: the transport's write serialisation, runnable without the
 // load-sensitive legs ahead of it in the full run.
 if CommandLine.arguments.contains("--pi-rpc-transport-check") {

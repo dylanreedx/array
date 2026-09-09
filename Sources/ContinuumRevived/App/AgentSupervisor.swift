@@ -1054,6 +1054,10 @@ final class AgentSupervisor {
     /// app wires its service) answers every request `unsupported`.
     var hostToolHandler: ((AgentID, PiHostToolCall) -> Void)?
 
+    /// Native Claude/Codex MCP launch material. The app wires this to its
+    /// per-agent host listener; nil keeps checks and unmanaged runners inert.
+    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness) -> WorkspaceMCPConfiguration?)?
+
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
     var onWorkspaceToolsChanged: ((AgentID, Bool) -> Void)?
@@ -1438,8 +1442,8 @@ final class AgentSupervisor {
     nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
         let record = launch.record
         switch record.harness {
-        case .claudeCode: return claudeRunner(for: record)
-        case .codex: return codexRunner(for: record)
+        case .claudeCode: return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP)
+        case .codex: return codexRunner(for: record, workspaceMCP: launch.workspaceMCP)
         case .pi: return piRunner(for: launch)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
@@ -1476,8 +1480,8 @@ final class AgentSupervisor {
 
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
     /// `piRunner(for:)` so the same ownership scan can hold for both.
-    nonisolated static func claudeRunner(for record: AgentRecord) -> AgentRunning {
-        ClaudeAgentRunner(config: claudeRunnerConfig(for: record))
+    nonisolated static func claudeRunner(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> AgentRunning {
+        ClaudeAgentRunner(config: claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP))
     }
 
     /// What a claude-backed runner is built with. The catalogue's provider
@@ -1509,7 +1513,7 @@ final class AgentSupervisor {
         (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
     }
 
-    nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
+    nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
         // (`record.pendingSessionForkFrom`) instead of continuing on
@@ -1522,7 +1526,8 @@ final class AgentSupervisor {
                 effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
-                forkSession: true
+                forkSession: true,
+                workspaceMCP: workspaceMCP
             )
         }
         let location = claudeSessionLocation(for: record)
@@ -1535,14 +1540,15 @@ final class AgentSupervisor {
             // resume, so resume-first would spawn a CLI process purely to be told
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
             // makes it the durable answer across relaunches.
-            conversationMayExist: record.latestTurnAt != nil
+            conversationMayExist: record.latestTurnAt != nil,
+            workspaceMCP: workspaceMCP
         )
     }
 
     /// The only `CodexAgentRunner(` construction in the app, mirroring
     /// `claudeRunner(for:)` so the same ownership scan holds for all three.
-    nonisolated static func codexRunner(for record: AgentRecord) -> AgentRunning {
-        CodexAgentRunner(config: codexRunnerConfig(for: record))
+    nonisolated static func codexRunner(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> AgentRunning {
+        CodexAgentRunner(config: codexRunnerConfig(for: record, workspaceMCP: workspaceMCP))
     }
 
     /// What a codex-backed runner is built with. The catalogue prefix is
@@ -1550,12 +1556,13 @@ final class AgentSupervisor {
     /// `model_reasoning_effort` only on exact match, and — the one difference
     /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
     /// is read back so a later turn resumes the same codex thread.
-    nonisolated static func codexRunnerConfig(for record: AgentRecord) -> CodexAgentRunner.Config {
+    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
-            threadId: record.codexThreadId
+            threadId: record.codexThreadId,
+            workspaceMCP: workspaceMCP
         )
     }
 
@@ -2683,10 +2690,10 @@ final class AgentSupervisor {
                 runner = idle
             } else {
                 idle.stop()
-                runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+                runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
             }
         } else {
-            runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+            runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
         }
         let runnerGeneration = RunnerGenerationToken()
         runnerGenerationTokens[id] = runnerGeneration

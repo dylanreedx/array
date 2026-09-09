@@ -62,9 +62,11 @@ esac
 
 cd "$ROOT_DIR"
 swift build -c "$CONFIGURATION" --product Array
+swift build -c "$CONFIGURATION" --product array-workspace-mcp
 
 BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"
+MCP_EXECUTABLE="$BUILD_DIR/array-workspace-mcp"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/AppIcon.icns"
 BRAND_MARK_SOURCE="$ROOT_DIR/docs/38-tickets/96-agent-sidebar-product-redesign/brand-marks"
@@ -99,6 +101,7 @@ APP_RESOURCE_BUNDLE="continuum-revived_ContinuumRevived.bundle"
 APP_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$APP_RESOURCE_BUNDLE"
 
 [[ -x "$EXECUTABLE" ]] || { echo "built executable not found: $EXECUTABLE" >&2; exit 1; }
+[[ -x "$MCP_EXECUTABLE" ]] || { echo "built MCP executable not found: $MCP_EXECUTABLE" >&2; exit 1; }
 [[ -f "$PLIST_SOURCE" ]] || { echo "Info.plist source not found: $PLIST_SOURCE" >&2; exit 1; }
 [[ -f "$ICON_SOURCE" ]] || { echo "icon source not found: $ICON_SOURCE" >&2; exit 1; }
 [[ -d "$BRAND_MARK_SOURCE" ]] || { echo "brand marks not found: $BRAND_MARK_SOURCE" >&2; exit 1; }
@@ -113,6 +116,8 @@ rm -rf "$OUTPUT"
 mkdir -p "$OUTPUT/Contents/MacOS" "$OUTPUT/Contents/Resources" "$OUTPUT/Contents/Frameworks"
 cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Array"
 chmod 0755 "$OUTPUT/Contents/MacOS/Array"
+cp "$MCP_EXECUTABLE" "$OUTPUT/Contents/MacOS/array-workspace-mcp"
+chmod 0755 "$OUTPUT/Contents/MacOS/array-workspace-mcp"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 ditto "$CORE_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CORE_RESOURCE_BUNDLE"
@@ -146,10 +151,15 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$OUTPUT/Contents/
 # to run unsigned binaries; re-sign ad hoc (release-app.sh re-signs with
 # Developer ID over this).
 codesign --force --sign - "$OUTPUT/Contents/MacOS/Array"
+codesign --force --sign - "$OUTPUT/Contents/MacOS/array-workspace-mcp"
 
 # GhosttyKit itself is linked statically by SwiftPM, so the xcframework is not
 # copied. Its data resources above are nevertheless required at runtime.
 plutil -lint "$OUTPUT/Contents/Info.plist" >/dev/null
+# The MCP helper is executable code inside the app bundle. Seal the outer
+# bundle after copying/signing it so `codesign --verify --deep` does not treat
+# the provider bridge as modified nested code.
+codesign --force --deep --sign - "$OUTPUT"
 
 printf 'Assembled %s (channel: %s)\n' "$OUTPUT" "$CHANNEL"
 printf 'CloudKit proof: no (unsigned/unprovisioned). Use scripts/provisioned-cloudkit-app.sh with a matching identity/profile.\n'
