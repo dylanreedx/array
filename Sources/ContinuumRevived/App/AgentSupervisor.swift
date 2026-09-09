@@ -1091,6 +1091,15 @@ final class AgentSupervisor {
     private var activeNameGenerations = 0
     private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
     private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
+    /// Agents whose harness title has already been polled for the current turn
+    /// count, so a burst of completions cannot start a file read per event.
+    private var harnessTitleTasks: Set<AgentID> = []
+    /// How many times the AUTOMATIC generated-name path has been tried per agent.
+    /// Bounded, because naming is best-effort and retrying a provider that is
+    /// simply not installed on every subsequent turn is how a convenience
+    /// becomes a tax. The explicit action is never limited by this.
+    private var automaticNamingAttempts: [AgentID: Int] = [:]
+    private static let maximumAutomaticNamingAttempts = 3
     /// Recovery operations are serialized per agent. Completion and teardown
     /// events can arrive back-to-back; ordering them prevents a late restore from
     /// racing a successful confirmation and makes replay/rebind idempotent.
@@ -1482,6 +1491,24 @@ final class AgentSupervisor {
     /// claude itself has reported since (captured from `system/init`), which
     /// is authoritative once `--fork-session` (B7.2) has minted an id Array
     /// could not have predicted.
+    /// WHERE this agent's claude conversation lives — the working directory
+    /// claude will encode into `~/.claude/projects/<encoded>/`, and the session
+    /// id that names the file inside it.
+    ///
+    /// One function because it has two callers that must never disagree: the
+    /// runner that SPAWNS the conversation, and the title reader that opens the
+    /// file that conversation writes. They are a matched pair, and a mismatch is
+    /// silent — a title read against the wrong directory finds no file, returns
+    /// nil, and simply never names anything. That is exactly the bug this
+    /// function exists to make impossible: `cwd` is the agent's project root,
+    /// but claude is spawned in `lastObservedWhere`, and those differ the moment
+    /// an agent is working anywhere but the root.
+    nonisolated static func claudeSessionLocation(
+        for record: AgentRecord
+    ) -> (cwd: String, sessionId: String) {
+        (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
+    }
+
     nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
@@ -1498,11 +1525,12 @@ final class AgentSupervisor {
                 forkSession: true
             )
         }
+        let location = claudeSessionLocation(for: record)
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
-            cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
-            sessionId: record.providerSessionId ?? claudeSessionId(for: record.id),
+            cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
+            sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
             // resume, so resume-first would spawn a CLI process purely to be told
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
@@ -4510,7 +4538,9 @@ final class AgentSupervisor {
     /// one truncating line and it crosses to the phone inside
     /// `AgentInventory.safeSummary`, where anything over 512 characters is a
     /// `transcriptBody` taint (`SyncPayloadTaintScanner`).
-    static let maximumDisplayNameLength = AgentName.maximumLength
+    /// The cap on what a RECORD may hold. Painting is capped separately and more
+    /// tightly by `AgentName.displayTitle`.
+    static let maximumDisplayNameLength = AgentName.storageLimit
 
     /// User text, made into a label. Whitespace and newlines collapse to single
     /// spaces, the result is capped, and an ABSOLUTE PATH keeps only its last
@@ -4581,6 +4611,105 @@ final class AgentSupervisor {
         onWorkspaceToolsChanged?(id, enabled)
         return true
     }
+
+    // MARK: - Derived name refresh (harness title, then generated fallback)
+
+    /// Give one agent the best title currently available to it. Called on every
+    /// turn completion.
+    ///
+    /// The ladder is authority-ordered and stops at the first rung that can
+    /// speak: a person's rename ends it outright; otherwise claude's own
+    /// conversation title wins when the harness has one; and only a harness with
+    /// no native title at all reaches the provider one-shot, which costs a
+    /// process and so runs once per agent.
+    ///
+    /// Everything here is best-effort and silent. A naming path that can make a
+    /// turn fail, block, or warn at the user is worse than a bad name.
+    private func refreshDerivedName(for id: AgentID) {
+        guard let record = records[id] else { return }
+        // A person has decided. Nothing automatic runs again, ever.
+        guard !record.displayNameSource.isManual else { return }
+        // An observed child is already named by the label the parent model wrote
+        // for its own call (`SpawnRequest.displayLabel`) — a 3-to-5 word summary
+        // of the delegated task, which is exactly the shape everything below is
+        // trying to reconstruct. It also has no session file and no process of
+        // Array's, so there is nothing here that could improve on it.
+        guard record.capabilities != .observedReadOnly else { return }
+
+        switch record.harness {
+        case .claudeCode:
+            refreshClaudeHarnessTitle(for: id, record: record)
+        case .codex, .pi:
+            requestAutomaticGeneratedName(for: id, record: record)
+        case nil:
+            return
+        }
+    }
+
+    /// Poll claude's own `ai-title` for this agent's conversation and adopt it.
+    ///
+    /// The file read is off the main actor: a session `.jsonl` is on the order of
+    /// megabytes, and the tail scan is bounded but not free. The record is
+    /// re-fetched after the hop because a rename can land while the read is in
+    /// flight — `adoptAutomaticName` refuses on `.manual` regardless, but
+    /// re-reading keeps this from persisting a stale copy of the rest of the
+    /// record.
+    private func refreshClaudeHarnessTitle(for id: AgentID, record: AgentRecord) {
+        guard record.acceptsAutomaticName(from: .harness) else { return }
+        guard harnessTitleTasks.insert(id).inserted else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        // The SAME derivation the runner used to spawn this conversation. See
+        // `claudeSessionLocation` for why reading `record.cwd` here is a silent
+        // no-op rather than an error.
+        let (cwd, sessionId) = Self.claudeSessionLocation(for: record)
+        Task.detached(priority: .utility) { [weak self] in
+            let title = ClaudeSessionTitleReader.title(
+                homeURL: home, cwd: cwd, sessionId: sessionId)
+            await MainActor.run {
+                self?.finishHarnessTitle(title, for: id)
+            }
+        }
+    }
+
+    private func finishHarnessTitle(_ title: String?, for id: AgentID) {
+        harnessTitleTasks.remove(id)
+        guard let title, var record = records[id] else { return }
+        guard record.adoptAutomaticName(title, source: .harness) else { return }
+        records[id] = record
+        persist(record)
+    }
+
+    /// The fallback for a harness that does not name its own conversations —
+    /// codex and pi. One attempt per agent per app session, and only while the
+    /// existing title is still no better than a truncated prompt.
+    private func requestAutomaticGeneratedName(for id: AgentID, record: AgentRecord) {
+        guard Self.automaticGeneratedNamingEnabled else { return }
+        guard record.acceptsAutomaticName(from: .generated) else { return }
+        // A BOUNDED number of attempts, not one.
+        //
+        // `requestGeneratedName` refuses for two very different reasons and
+        // returns the same `false` for both: a permanent one (no pi capability
+        // on this machine) and a transient one (the concurrency cap, which a
+        // restore storm makes likely precisely when many agents finish at once).
+        // Marking the agent done on the first refusal loses every capped agent's
+        // only chance; never marking it retries a missing binary on every turn
+        // forever. A small counter covers both without having to tell them apart.
+        let attempts = automaticNamingAttempts[id] ?? 0
+        guard attempts < Self.maximumAutomaticNamingAttempts else { return }
+        automaticNamingAttempts[id] = attempts + 1
+        // `requestGeneratedName` owns every remaining guard: the manual check,
+        // the concurrency cap, capability resolution, and the CAS. A refusal
+        // here is silent on purpose — this path was not asked for by anyone.
+        _ = requestGeneratedName(agentID: id)
+    }
+
+    /// The single switch for the automatic half of generated naming. The explicit
+    /// "Generate Name" action is unaffected by it.
+    ///
+    /// It exists because this is the only rung that spends a provider process
+    /// without a person asking. If it ever proves noisy or expensive, this is the
+    /// line to flip — not a redesign of the ladder above it.
+    static let automaticGeneratedNamingEnabled = true
 
     /// Start an automatic name proposal without doing any provider work. The
     /// caller keeps the returned token and must hand it back to
@@ -4729,8 +4858,12 @@ final class AgentSupervisor {
         // so cancellation failure cannot clobber a newer request.
         nameGenerationTasks[id]?.cancel()
         guard let request = beginNameGeneration(agentID: id) else { return false }
-        let source = firstPromptByAgent[id]
-            ?? "No source prompt is available. Propose a concise name from the current agent title: \(record.humanDisplayName)"
+        // `firstPromptByAgent` is memory-only, so it is empty for every agent
+        // that predates this app session. The fallback is the record's STORED
+        // name — the full seed, not the 60-character painted one. Before the
+        // storage/display split those were the same string, which meant a
+        // relaunched agent was asking a model to summarize a summary.
+        let source = firstPromptByAgent[id] ?? record.storedDisplayName
         let prompt = Self.generatedNamePrompt(source)
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         let timeout = nameGenerationTimeout
@@ -4775,7 +4908,17 @@ final class AgentSupervisor {
 
     private static func generatedNamePrompt(_ source: String) -> String {
         let bounded = String(source.prefix(AgentNameOneShot.maximumPromptLength))
-        return "Name the agent from this user request. Return one short name only, with no explanation or metadata.\n\nUser request:\n\(bounded)"
+        // "Summarize, do not restate" is the entire instruction that matters.
+        // Without it a model hands back the opening clause of the request, which
+        // is the truncation this whole path exists to replace.
+        return """
+        Name the agent from this user request. Summarize what the request is \
+        ABOUT; do not restate its opening words. Return one short name only, \
+        with no explanation or metadata.
+
+        User request:
+        \(bounded)
+        """
     }
 
     private func finishGeneratedName(
@@ -6554,6 +6697,12 @@ final class AgentSupervisor {
             completedFanOutItems.insert(itemId)
             onFanOutItemCompleted?(itemId, id)
         }
+
+        // A finished turn is when this agent's identity is most likely to have
+        // improved: claude has had a chance to write its own title for the
+        // conversation, and the transcript now says what the work turned out to
+        // be. Last, after the record and every subscriber are consistent.
+        if case .turnCompleted = event { refreshDerivedName(for: id) }
     }
 
     /// The child half of the `spawn_agent` result-file channel. No-op for any
@@ -8104,6 +8253,7 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+    let automaticRefreshReport = try await checkAutomaticNameRefresh(fail: fail)
 
     func managedImageAttachment(
         _ store: AgentComposerAttachmentStore,
@@ -8277,7 +8427,7 @@ func runAgentSupervisorChecks() async throws {
         throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
     }
     let mixedName = mixedSupervisor.records[mixedAgent]?.displayName ?? ""
-    guard mixedName.count <= AgentName.maximumLength,
+    guard mixedName.count <= AgentName.storageLimit,
           !mixedName.contains("/"),
           !mixedName.contains("@"),
           !mixedName.contains("name-leak"),
@@ -8983,6 +9133,7 @@ func runAgentSupervisorChecks() async throws {
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
     print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(commandDispatchReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(automaticRefreshReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
 }
 
 /// A callback queued by a runner that Stop has already retired must not reopen
@@ -9812,7 +9963,10 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         supervisor.qaActiveNameGenerationCount == 0
     }), let generated = supervisor.records[generatedID],
           generated.displayName == "Ship It",
-          generated.displayNameSource == .prompt,
+          // `.generated`, not `.prompt`: a model wrote this text, and the source
+          // has to say so both for the sync boundary and for the authority
+          // ladder that keeps the next harness poll from undoing it.
+          generated.displayNameSource == .generated,
           generated.namingRequest == nil,
           try store.load(id: generatedID)?.displayName == "Ship It" else {
         throw fail("the production request did not land the sanitized name through its CAS path")
@@ -10283,7 +10437,7 @@ private func checkAgentNameContract<Failure: Error>(
           generatedRequest.expectedName == AgentRecord.defaultAgentName,
           supervisor.applyGeneratedName("Generated title", for: generatedRequest, agentID: generatedID),
           supervisor.records[generatedID]?.displayName == "Generated title",
-          supervisor.records[generatedID]?.displayNameSource == .prompt,
+          supervisor.records[generatedID]?.displayNameSource == .generated,
           supervisor.records[generatedID]?.namingRequest == nil else {
         throw fail("a current generated name did not pass the marker CAS and persist")
     }
@@ -10698,17 +10852,48 @@ private func checkAgentNameContract<Failure: Error>(
             throw fail("prompt naming edge case \(prompt.debugDescription) produced \(String(describing: AgentName.fromPrompt(prompt))), expected \(String(describing: expected))")
         }
     }
-    let longPrompt = String(repeating: "long words ", count: 20)
+    // TWO caps, and the split is the point. A stored name keeps the user's words
+    // so a later namer has real source material; a PAINTED name is 60 characters.
+    // Collapsing these back into one number is what made the generated-name
+    // fallback summarize an already-truncated string.
+    let longPrompt = String(repeating: "long words ", count: 40)
     guard let longName = AgentName.fromPrompt(longPrompt),
-          longName.count == AgentName.maximumLength,
+          longName.count <= AgentName.storageLimit,
+          longName.count > AgentName.maximumLength,
           longName.hasSuffix(AgentName.ellipsis),
-          AgentSupervisor.maximumDisplayNameLength == AgentName.maximumLength else {
-        throw fail("prompt naming did not apply one \(AgentName.maximumLength)-character cap with one ellipsis rule")
+          AgentSupervisor.maximumDisplayNameLength == AgentName.storageLimit else {
+        throw fail("prompt naming did not apply the \(AgentName.storageLimit)-character STORAGE cap")
+    }
+    guard let paintedLong = AgentName.displayLabel(longPrompt),
+          paintedLong.count <= AgentName.maximumLength,
+          paintedLong.hasSuffix(AgentName.ellipsis) else {
+        throw fail("display naming did not apply the \(AgentName.maximumLength)-character DISPLAY cap")
+    }
+    // A word-boundary cut, not a grapheme one: the old hard prefix is what
+    // produced titles that ended mid-word.
+    let boundaryPrompt = "investigate and propose a plan to handle identifying which agent is doing which"
+    guard let boundaryName = AgentName.displayLabel(boundaryPrompt),
+          boundaryName.hasSuffix(AgentName.ellipsis),
+          !boundaryName.dropLast(AgentName.ellipsis.count).hasSuffix(" "),
+          boundaryPrompt.hasPrefix(String(boundaryName.dropLast(AgentName.ellipsis.count))),
+          boundaryName.dropLast(AgentName.ellipsis.count).split(separator: " ").allSatisfy({ word in
+              boundaryPrompt.split(separator: " ").contains(word)
+          }) else {
+        throw fail("display truncation cut mid-word instead of at a word boundary: \(String(describing: AgentName.displayLabel(boundaryPrompt)))")
+    }
+    // A single unbroken token has no useful boundary, so the hard cut must
+    // still apply rather than collapsing the title to nothing.
+    let unbroken = String(repeating: "x", count: 200)
+    guard let unbrokenName = AgentName.displayLabel(unbroken),
+          unbrokenName.count == AgentName.maximumLength else {
+        throw fail("a boundary-less token did not fall back to the hard display cut")
     }
     guard AgentRecord.defaultAgentName == AgentName.defaultName,
           AgentInboxRow.untitled == AgentName.defaultName else {
         throw fail("the sentinel has divergent record and row definitions")
     }
+    try checkAgentNameAuthorityLadder(fail: fail, config: config, cwd: cwd)
+    try checkClaudeHarnessTitleReader(fail: fail)
     let sourceReport = try checkAgentNameSentinelSourceContract(fail: fail)
 
     // P4.1 migration: old disk records with model, role, and UUID titles are
@@ -10817,7 +11002,378 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("prompt-derived display text crossed the companion payload")
     }
 
-    return "agent naming: sentinel-only spawn, P4.4 explicit→prompt→source→parent ordinal funnels across headless/role-based children with deletion/restore stability, prompt/source/parent I5 scrubbing, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+    return "agent naming: sentinel-only spawn, P4.4 explicit→prompt→source→parent ordinal funnels across headless/role-based children with deletion/restore stability, prompt/source/parent I5 scrubbing, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), split \(AgentName.storageLimit)-character storage / \(AgentName.maximumLength)-character display caps with word-boundary truncation, authority ladder (harness title upgrades a truncated prompt, manual is never overwritten, a weaker source cannot undo a stronger one, an unchanged title is not a write, both new sources stay redacted at the sync boundary), claude ai-title reader (newest wins, absent/blank/impostor/unparseable rejected), model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+}
+
+/// The authority ladder: a better name may arrive LATE, and a human's name is
+/// never replaced. Before the ladder, `.prompt` was terminal — the funnel
+/// demanded the sentinel, so the first thing that named an agent was also the
+/// last. Every assertion here is a way that used to be impossible.
+private func checkAgentNameAuthorityLadder<Failure: Error>(
+    fail: (String) -> Failure,
+    config: AgentModelConfig.Resolution,
+    cwd: URL
+) throws {
+    let stamp = Date(timeIntervalSinceReferenceDate: 807_000_000)
+    func record(_ name: String, _ source: AgentDisplayNameSource) -> AgentRecord {
+        var value = AgentRecord(
+            id: AgentID(rawValue: UUID()), displayName: name, model: config.model,
+            thinking: config.thinking, cwd: cwd.path, createdAt: stamp, lastActivityAt: stamp)
+        value.displayNameSource = source
+        return value
+    }
+
+    // THE HEADLINE. A truncated first prompt is replaced by the harness's own
+    // title for the same conversation.
+    var promptNamed = record("this isn't specific to the prompts we wrote i want you…", .prompt)
+    guard promptNamed.adoptAutomaticName("Agent tile naming redesign", source: .harness),
+          promptNamed.displayName == "Agent tile naming redesign",
+          promptNamed.displayNameSource == .harness else {
+        throw fail("a harness title did not upgrade a truncated prompt name")
+    }
+
+    // A person's name is absolute, against every automatic source.
+    for source in [AgentDisplayNameSource.harness, .generated, .prompt, .sourceItem, .parent] {
+        var manual = record("Dylan's own words", .manual)
+        guard !manual.adoptAutomaticName("Something Else", source: source),
+              manual.displayName == "Dylan's own words",
+              manual.displayNameSource == .manual else {
+            throw fail("automatic source \(source.rawValue) overwrote a manual name")
+        }
+    }
+
+    // A weaker source cannot undo a stronger one: the next harness poll must not
+    // wipe out a name the user explicitly asked a model to generate.
+    var generated = record("Canvas zoom unification", .generated)
+    guard !generated.adoptAutomaticName("Some harness title", source: .harness),
+          generated.displayName == "Canvas zoom unification" else {
+        throw fail("a harness title overwrote an explicitly generated name")
+    }
+
+    // Equal authority DOES replace — a harness title tracks a conversation that
+    // is still moving, and that is the whole reason to re-read it every turn.
+    var harnessNamed = record("Old subject", .harness)
+    guard harnessNamed.adoptAutomaticName("New subject", source: .harness),
+          harnessNamed.displayName == "New subject" else {
+        throw fail("a revised harness title did not replace the earlier one")
+    }
+
+    // Re-reading the SAME title is not a write. This runs on every turn
+    // completion; a record that persisted each time would rewrite the store for
+    // nothing.
+    var unchanged = record("Steady subject", .harness)
+    guard !unchanged.adoptAutomaticName("Steady subject", source: .harness) else {
+        throw fail("an unchanged harness title reported a record mutation")
+    }
+
+    // A title that lands while a generated-name proposal is in flight must
+    // consume the marker. That proposal's `expectedName` is the title just
+    // replaced, so its CAS can never succeed — leaving it armed strands the
+    // record with a request nothing can ever complete.
+    var midFlight = record("truncated prompt words", .prompt)
+    let stranded = midFlight.beginNamingRequest()
+    guard midFlight.adoptAutomaticName("Harness title arrived first", source: .harness),
+          midFlight.namingRequest == nil,
+          !midFlight.applyGeneratedName("late generated title", for: stranded),
+          midFlight.displayName == "Harness title arrived first" else {
+        throw fail("a harness title landing mid-generation left a stranded naming request or lost the race")
+    }
+
+    // An identifier is never a name, on this path as on every other.
+    var identifierTarget = record("prompt words", .prompt)
+    guard !identifierTarget.adoptAutomaticName(config.model, source: .harness),
+          identifierTarget.displayName == "prompt words" else {
+        throw fail("a model id was adopted as a harness title")
+    }
+
+    // The sync boundary stays closed for both new sources. If this ever flips it
+    // must be a deliberate decision, not a case someone added to a switch.
+    for source in [AgentDisplayNameSource.harness, .generated] {
+        let published = record("A real conversation subject", source)
+        guard published.syncDisplayName == AgentRecord.defaultAgentName else {
+            throw fail("source \(source.rawValue) published an automatic title across the sync boundary")
+        }
+    }
+
+    // A ticket id is a deliberate identifier, not a guess at a subject. An
+    // overnight queue agent named from its source item keeps that name: the id
+    // is the only key tying the row back to the queue, and no automatic namer
+    // may trade it for prettier prose.
+    for source in [AgentDisplayNameSource.harness, .generated, .prompt, .parent] {
+        var ticketNamed = record("P4.5-generated-name-oneshot", .sourceItem)
+        guard !ticketNamed.adoptAutomaticName("Generated name one-shot work", source: source),
+              ticketNamed.displayName == "P4.5-generated-name-oneshot" else {
+            throw fail("automatic source \(source.rawValue) overwrote a ticket id taken from a source item")
+        }
+    }
+
+    // Authority is a total order with `.manual` on top; a tie anywhere below it
+    // would make two sources able to flap against each other forever.
+    let ranked: [AgentDisplayNameSource] = [.sentinel, .parent, .prompt, .harness, .generated, .sourceItem]
+    guard Set(ranked.map(\.authority)).count == ranked.count,
+          zip(ranked, ranked.dropFirst()).allSatisfy({ $0.authority < $1.authority }),
+          ranked.allSatisfy({ $0.authority < AgentDisplayNameSource.manual.authority }) else {
+        throw fail("the display-name authority ladder is not a strict order below .manual")
+    }
+}
+
+/// The claude harness title reader, over the exact line shape claude writes.
+/// Captured from claude's own store on 2026-09-05, including from Array's own
+/// headless probe roots — this is not an interactive-only affordance.
+private func checkClaudeHarnessTitleReader<Failure: Error>(
+    fail: (String) -> Failure
+) throws {
+    let lines = [
+        #"{"type":"user","message":{"role":"user","content":"look into the zscaler thing"}}"#,
+        #"{"type":"ai-title","aiTitle":"First guess at the subject","sessionId":"35c834ed"}"#,
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"…"}]}}"#,
+        #"{"type":"ai-title","aiTitle":"Andable Zscaler connection investigation","sessionId":"35c834ed"}"#,
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"…"}]}}"#,
+    ]
+    // LAST wins: claude revises the title as the conversation develops, and the
+    // revision is the point.
+    guard ClaudeSessionTitleReader.title(inLines: lines) == "Andable Zscaler connection investigation" else {
+        throw fail("the claude title reader did not take the newest ai-title: \(String(describing: ClaudeSessionTitleReader.title(inLines: lines)))")
+    }
+    // A session with no title line yet is an ordinary state, not an error: claude
+    // writes the title after the first exchange.
+    guard ClaudeSessionTitleReader.title(inLines: [lines[0], lines[2]]) == nil else {
+        throw fail("the claude title reader invented a title for a session that has none")
+    }
+    // The substring prefilter must not be the whole test — a frame that merely
+    // MENTIONS the string is not a title line.
+    let impostor = [
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"grep for \"ai-title\" in the store"}]}}"#
+    ]
+    guard ClaudeSessionTitleReader.title(inLines: impostor) == nil else {
+        throw fail("the claude title reader accepted a frame that only mentioned ai-title")
+    }
+    guard ClaudeSessionTitleReader.title(inLines: [#"{"type":"ai-title","aiTitle":"   "}"#]) == nil,
+          ClaudeSessionTitleReader.title(inLines: [#"{"type":"ai-title"}"#]) == nil,
+          ClaudeSessionTitleReader.title(inLines: ["not json at all"]) == nil else {
+        throw fail("the claude title reader accepted a blank, absent, or unparseable title")
+    }
+    // The snake-case spelling, matching `ClaudeAgentStateReader.decodeEvent`.
+    guard ClaudeSessionTitleReader.title(
+        inLines: [#"{"type":"ai-title","ai_title":"Snake case title"}"#]) == "Snake case title" else {
+        throw fail("the claude title reader did not accept the ai_title spelling")
+    }
+
+    // THE LOCATION PAIR. The reader must open the file the runner's own
+    // conversation writes. A mismatch here does not crash and does not warn — it
+    // finds no file, returns nil, and the feature simply never happens. The
+    // record below is deliberately shaped so the two candidate directories
+    // DIFFER, which is the only configuration that can catch the confusion.
+    let stamp = Date(timeIntervalSinceReferenceDate: 807_100_000)
+    var located = AgentRecord(
+        id: AgentID(rawValue: UUID(uuidString: "A11CE000-0000-4000-8000-000000000001")!),
+        displayName: AgentRecord.defaultAgentName,
+        model: "anthropic/claude-opus-4-6", thinking: "high",
+        cwd: "/tmp/array-title-root", createdAt: stamp, lastActivityAt: stamp)
+    located.lastObservedWhere = "/tmp/array-title-root/packages/server"
+    guard located.cwd != located.lastObservedWhere else {
+        throw fail("the location witness is vacuous: its two candidate directories are equal")
+    }
+    let readerLocation = AgentSupervisor.claudeSessionLocation(for: located)
+    let runnerConfig = AgentSupervisor.claudeRunnerConfig(for: located)
+    guard readerLocation.cwd == runnerConfig.cwd.path,
+          readerLocation.sessionId == runnerConfig.sessionId else {
+        throw fail("the claude title reader's location disagrees with the runner's: reader \(readerLocation) vs runner (\(runnerConfig.cwd.path), \(runnerConfig.sessionId))")
+    }
+    // Agreement alone is not enough: if BOTH drift to `cwd` they still agree,
+    // and the feature is still dead. Pin the absolute fact too — claude is
+    // spawned in, and therefore encodes, `lastObservedWhere`.
+    guard readerLocation.cwd == located.lastObservedWhere else {
+        throw fail("the claude session location is not the directory the runner spawns in: \(readerLocation.cwd)")
+    }
+    // And once claude has reported an id of its own, both follow it.
+    located.providerSessionId = "9f1d0c44-0000-4000-8000-00000000abcd"
+    guard AgentSupervisor.claudeSessionLocation(for: located).sessionId == located.providerSessionId,
+          AgentSupervisor.claudeRunnerConfig(for: located).sessionId == located.providerSessionId else {
+        throw fail("an adopted provider session id did not reach both the reader and the runner")
+    }
+}
+
+/// Witnesses the SUPERVISOR wiring that `checkAgentNameContract`'s pure
+/// AgentRecord/reader assertions cannot reach: `refreshDerivedName` actually
+/// fires from a real `.turnCompleted` event rather than only from the
+/// explicit "Generate Name" menu action, codex/pi's automatic fallback is
+/// bounded per agent rather than retried forever, claude's own harness never
+/// falls through to the pi one-shot, and a manual rename shuts every
+/// automatic path off before the next turn arrives.
+@MainActor
+private func checkAutomaticNameRefresh<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-automatic-name-refresh-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+    // A fake pi that appends one line per invocation to a counter file, so a
+    // test can count how many times the provider actually ran. `succeed`
+    // picks between a usable name (encoding which invocation it was, so a
+    // second turn's title can be told apart from the first) and output that
+    // never sanitises to a candidate at all.
+    func makeCapability(name: String, counter: URL, succeed: Bool) throws -> AgentNameGenerationCapability {
+        let executable = root.appendingPathComponent("fake-pi-\(name)", isDirectory: false)
+        let tally = """
+        count=0
+        if [ -f "\(counter.path)" ]; then count=$(wc -l < "\(counter.path)" | tr -d ' '); fi
+        n=$((count + 1))
+        echo "$n" >> "\(counter.path)"
+        """
+        let body = succeed
+            ? "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf '{\"name\":\"Attempt %s\"}\\n' \"$n\"\n"
+            : "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf 'not a json name at all\\n'\n"
+        try body.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let configDirectory = root.appendingPathComponent("config-\(name)", isDirectory: true)
+        try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        return AgentNameGenerationCapability(
+            executable: executable.path, configDirectory: configDirectory, loginShellPath: "/bin:/usr/bin")
+    }
+
+    func lineCount(_ url: URL) -> Int {
+        (try? String(contentsOf: url, encoding: .utf8)).map {
+            $0.split(separator: "\n", omittingEmptySubsequences: true).count
+        } ?? 0
+    }
+
+    // -- 1 & 2. codex: refreshDerivedName fires from .turnCompleted alone (no
+    // explicit "Generate Name" call anywhere in this test), and a SECOND
+    // turn's title supersedes the first — equal authority replaces, now
+    // proven through the live wiring rather than the record in isolation. --
+    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let fireCounter = root.appendingPathComponent("fire-counter.txt")
+    let fireCapability = try makeCapability(name: "fire", counter: fireCounter, succeed: true)
+    let fireStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("fire-support", isDirectory: true))
+    let fireRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let fireSupervisor = AgentSupervisor(
+        store: fireStore, makeRunner: { _ in fireRunner },
+        nameGenerationCapabilityProvider: { fireCapability }, nameGenerationTimeout: 2)
+    let fireID = fireSupervisor.spawn(
+        role: nil, prompt: "investigate the flaky build", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { fireRunner.runCount > 0 }) else {
+        throw fail("the codex fixture agent's runner never started")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner had no live handler to accept a turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayNameSource == .generated
+    }) else {
+        throw fail("a codex agent's turnCompleted did not trigger the automatic generated-name fallback: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
+        throw fail("the automatic fallback did not land the provider's own name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner refused a second turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayName == "Attempt 2"
+    }) else {
+        throw fail("a second harness turn did not replace the first automatic name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    fireRunner.releaseRunAfterStop()
+
+    // -- 3. codex: the automatic path is BOUNDED. A provider that never
+    // produces a usable name must not be retried forever — three attempts,
+    // then silence, across five completed turns. --
+    let boundCounter = root.appendingPathComponent("bound-counter.txt")
+    let boundCapability = try makeCapability(name: "bound", counter: boundCounter, succeed: false)
+    let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support", isDirectory: true))
+    let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let boundSupervisor = AgentSupervisor(
+        store: boundStore, makeRunner: { _ in boundRunner },
+        nameGenerationCapabilityProvider: { boundCapability }, nameGenerationTimeout: 2)
+    let boundID = boundSupervisor.spawn(
+        role: nil, prompt: "a prompt that never gets named", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
+        throw fail("the bounded-retry fixture agent's runner never started")
+    }
+    for turn in 1...5 {
+        guard boundRunner.emit(.turnCompleted(threadId: "t", turnId: "t\(turn)", outcome: .completed, errorMessage: nil)) else {
+            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+    }
+    guard lineCount(boundCounter) == 3 else {
+        throw fail("a provider that never produces a name was invoked \(lineCount(boundCounter)) time(s) across 5 completed turns, not bounded to 3")
+    }
+    boundRunner.releaseRunAfterStop()
+
+    // -- 4. codex: a MANUAL rename shuts the automatic path off before the
+    // next turn — the automatic fallback must never even ask the provider. --
+    let manualCounter = root.appendingPathComponent("manual-counter.txt")
+    let manualCapability = try makeCapability(name: "manual", counter: manualCounter, succeed: true)
+    let manualStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("manual-support", isDirectory: true))
+    let manualRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let manualSupervisor = AgentSupervisor(
+        store: manualStore, makeRunner: { _ in manualRunner },
+        nameGenerationCapabilityProvider: { manualCapability }, nameGenerationTimeout: 2)
+    let manualID = manualSupervisor.spawn(
+        role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
+        throw fail("the manual-rename fixture agent's runner never started")
+    }
+    guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
+        throw fail("the manual rename fixture call itself was refused")
+    }
+    guard manualRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the manual-rename fixture runner had no live handler")
+    }
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
+          manualSupervisor.records[manualID]?.displayNameSource == .manual,
+          lineCount(manualCounter) == 0 else {
+        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(lineCount(manualCounter))")
+    }
+    manualRunner.releaseRunAfterStop()
+
+    // -- 5. claude: the harness that DOES name its own conversations must
+    // never fall through to the pi one-shot, and a turn with no session file
+    // on disk yet must not crash or invent a title. --
+    let claudeConfig = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode)
+    let claudeCalled = LockedFlag()
+    let claudeStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("claude-support", isDirectory: true))
+    let claudeRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let claudeSupervisor = AgentSupervisor(
+        store: claudeStore, makeRunner: { _ in claudeRunner },
+        nameGenerationCapabilityProvider: { claudeCalled.set(); return nil },
+        nameGenerationTimeout: 2)
+    let claudeID = claudeSupervisor.spawn(
+        role: nil, prompt: "a claude agent with no session file on disk", cwd: root, harness: .claudeCode,
+        model: claudeConfig.model, thinking: claudeConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { claudeRunner.runCount > 0 }) else {
+        throw fail("the claude fixture agent's runner never started")
+    }
+    let claudeNameBefore = claudeSupervisor.records[claudeID]?.displayName
+    guard claudeRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the claude fixture runner had no live handler")
+    }
+    // No session file exists at this cwd, so there is nothing to read; this
+    // must resolve to "no title yet", not a crash and not an invented one.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard claudeSupervisor.records[claudeID]?.displayName == claudeNameBefore,
+          !claudeCalled.wasSet else {
+        throw fail("a claude agent with no session file fell through to the pi one-shot fallback (called=\(claudeCalled.wasSet)) or changed its name without a title to read")
+    }
+    claudeRunner.releaseRunAfterStop()
+
+    return "automatic name refresh: codex/pi fallback fires from turnCompleted with no explicit action, a later harness turn supersedes an earlier automatic name, the automatic path is bounded to 3 attempts against a provider that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and claude's own harness never falls through to the pi one-shot on a session-less turn"
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var wasSet: Bool { lock.withLock { flag } }
 }
 
 private struct AgentNameSentinelSourceMatch {
