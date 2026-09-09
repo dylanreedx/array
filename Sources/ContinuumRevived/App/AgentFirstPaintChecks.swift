@@ -163,11 +163,18 @@ enum AgentFirstPaintChecks {
             throw fail("reply options: an untouched tile already offered \(tile.qaReplyOptionChipTitles)")
         }
 
+        // A PLANNING-shaped reply: the options are laid out first and the
+        // question closes. Deliberately the shape the detector used to reject —
+        // it required the list to be last with the question immediately above —
+        // so this leg now proves the shape Dylan actually gets while planning
+        // reaches the composer, not just the textbook one.
         let reply = """
-            Two ways to do this. Which do you want?
+            Two ways to do this.
 
             - Rewrite the resolver — keeps the API
             - Patch the call sites — smaller diff
+
+            Which do you want?
             """
         tile.ingest(.turnStarted(threadId: thread, turnId: "turn-1"))
         tile.ingest(.contentDelta(
@@ -192,6 +199,22 @@ enum AgentFirstPaintChecks {
             throw fail(
                 "reply options: a settled turn that asked and listed offered \(offered) — the "
                 + "reader still has to type the answer to a question the reply already enumerated"
+            )
+        }
+
+        // TR-06 — the reasoning reaches the CONTROL, not just the detector.
+        //
+        // The chip says "Rewrite the resolver"; the tradeoff that decides it
+        // ("keeps the API") was parsed and then thrown away, so the one surface
+        // a reader consults while choosing showed the half that does not help
+        // them choose. It now rides the accessibility label and the tooltip.
+        let axLabels = tile.qaReplyOptionChipAccessibilityLabels
+        guard axLabels.contains(where: { $0.contains("keeps the API") }),
+              axLabels.contains(where: { $0.contains("smaller diff") }) else {
+            throw fail(
+                "reply options: the chips dropped the reasoning the reply gave for each option "
+                + "(\(axLabels)) — a chooser that shows only labels has hidden the half you "
+                + "decide on"
             )
         }
 

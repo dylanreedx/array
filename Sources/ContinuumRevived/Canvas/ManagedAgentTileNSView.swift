@@ -3016,6 +3016,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// through the real button. Read from the installed composer, never from a
     /// tile-side copy of the detector's answer.
     var qaReplyOptionChipTitles: [String] { v2Composer?.qaReplyOptionChipTitles ?? [] }
+    var qaReplyOptionChipAccessibilityLabels: [String] {
+        v2Composer?.qaReplyOptionChipAccessibilityLabels ?? []
+    }
     var qaComposerDraftText: String { v2Composer?.qaDraftText ?? "" }
     /// Drives the composer's real draft-apply path, so clearing a draft in a
     /// check runs the same observer production runs.
