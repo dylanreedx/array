@@ -10,6 +10,7 @@ struct AgentComposerDraft: Equatable {
     var revision: UInt64
     var imageAttachments: [AgentPromptImageAttachment] = []
     var fileReferences: [AgentPromptFileReference] = []
+    var taskContext: BoardTaskContext? = nil
 
     static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0, imageAttachments: [], fileReferences: [])
 }
@@ -69,6 +70,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     let textView: ComposerTextView
     private(set) var scrollView: NSScrollView
     private let placeholderLabel = NSTextField(labelWithString: "")
+    private let taskContextButton = NSButton(title: "", target: nil, action: nil)
+    private var taskContextHeight: NSLayoutConstraint!
     private let attachmentRail: ComposerImageAttachmentRailView
     private let attachmentRailHeightConstraint: NSLayoutConstraint
     private let fileReferenceRail: ComposerFileReferenceRailView
@@ -121,6 +124,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private weak var actionSink: (any AgentTileActionSink)?
     private var turnSnapshot: AgentTileTurnSnapshot?
     private var actionTask: Task<Void, Never>?
+    private var isPreparingTask = false
     private var restoreTask: Task<Void, Never>?
     private var submissionLease: AgentComposerSubmissionLease?
     private var submissionReleaseTask: Task<Void, Never>?
@@ -223,6 +227,18 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         queuedMessageRail.onClearAll = { [weak self] in
             self?.onClearQueuedMessages?()
         }
+        taskContextButton.translatesAutoresizingMaskIntoConstraints = false
+        taskContextButton.isBordered = false
+        taskContextButton.alignment = .left
+        taskContextButton.target = self
+        taskContextButton.action = #selector(removeTaskContext)
+        taskContextButton.isHidden = true
+        addSubview(taskContextButton)
+        taskContextHeight = taskContextButton.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([taskContextHeight,
+            taskContextButton.topAnchor.constraint(equalTo: topAnchor),
+            taskContextButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            taskContextButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)])
         addSubview(replyOptionRail)
         addSubview(fileReferenceRail)
         addSubview(attachmentRail)
@@ -255,7 +271,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         ]
         NSLayoutConstraint.activate([
             replyOptionRailHeightConstraint,
-            replyOptionRail.topAnchor.constraint(equalTo: topAnchor),
+            replyOptionRail.topAnchor.constraint(equalTo: taskContextButton.bottomAnchor),
             fileReferenceRailHeightConstraint,
             fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
@@ -311,7 +327,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         let queuedRailHeight = queuedMessageRail.isHidden ? 0 : ComposerQueuedMessageRailView.railHeight(zoom: pageZoom)
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
+            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
         )
     }
 
@@ -437,7 +453,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 ),
                 revision: 0,
                 imageAttachments: resolved,
-                fileReferences: resolvedFileReferences
+                fileReferences: resolvedFileReferences,
+                taskContext: stored.taskContext
             ))
         }
     }
@@ -534,8 +551,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             selection: safeSelection,
             revision: newDraft.revision,
             imageAttachments: importedAttachments,
-            fileReferences: importedFileReferences
+            fileReferences: importedFileReferences,
+            taskContext: newDraft.taskContext
         )
+        updateTaskContextRail()
         if newDraft.text.isEmpty
             || selectedDraftCommand.map({ !newDraft.text.contains($0.token) }) == true {
             selectedDraftCommand = nil
@@ -717,19 +736,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool {
-        !importedAttachments.isEmpty || !importedFileReferences.isEmpty
+        !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty else { return }
+        guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
             let resolver = AgentComposerIntentState(
                 executionState: snapshot.executionState,
                 capabilities: snapshot.capabilities
             )
             let intent: AgentComposerIntent?
-            if importedAttachments.isEmpty, importedFileReferences.isEmpty,
+            if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty,
                let invocation = resolvedSelectedCommand(in: prompt) {
                 if invocation.name == "compact" {
                     let focus = invocation.arguments.joined(separator: " ")
@@ -740,9 +759,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     intent = snapshot.executionState == .ready && snapshot.capabilities.canSend
                         ? .providerCommand(invocation) : nil
                 }
-            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty {
+            } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil {
                 let attachedPrompt = AgentPrompt(
-                    text: prompt,
+                    text: draft.taskContext?.promptText(additionalInstructions: prompt) ?? prompt,
                     imageAttachments: importedAttachments,
                     fileReferences: importedFileReferences
                 )
@@ -1018,7 +1037,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             selection: textView.selectedRange(),
             revision: textChanged ? draft.revision &+ 1 : draft.revision,
             imageAttachments: importedAttachments,
-            fileReferences: importedFileReferences
+            fileReferences: importedFileReferences,
+            taskContext: draft.taskContext
         )
         onDraftChange?(draft)
         if let draftStore, let draftAgentID {
@@ -1027,7 +1047,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 selection: draft.selection.location..<(draft.selection.location + draft.selection.length),
                 updatedAt: Date(),
                 imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
-                fileReferences: persistedFileReferences()
+                fileReferences: persistedFileReferences(),
+                taskContext: draft.taskContext
             )
             Task { await draftStore.save(persisted, for: draftAgentID) }
         }
@@ -1221,7 +1242,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             selection: draft.selection.location..<(draft.selection.location + draft.selection.length),
             updatedAt: Date(),
             imageAttachments: importedAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
-            fileReferences: persistedFileReferences()
+            fileReferences: persistedFileReferences(),
+                taskContext: draft.taskContext
         )
     }
 
@@ -1266,7 +1288,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             selection: NSRange(location: persisted.selection.lowerBound, length: persisted.selection.count),
             revision: draft.revision &+ 1,
             imageAttachments: resolved,
-            fileReferences: resolvedFileReferences
+            fileReferences: resolvedFileReferences,
+            taskContext: persisted.taskContext
         ))
     }
 
@@ -1346,6 +1369,98 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             Task { await draftStore.resolveSendIntent(for: draftAgentID, accepted: true) }
         }
         apply(.empty)
+    }
+
+    private func updateTaskContextRail() {
+        let context = draft.taskContext
+        taskContextButton.isHidden = context == nil
+        taskContextHeight.constant = context == nil ? 0 : 44
+        taskContextButton.title = context.map { "▣  " + $0.title + "  ·  Task context  ×" } ?? ""
+        taskContextButton.toolTip = context.map { $0.body + "\n\nClick to remove task context. Your instructions stay here." }
+        taskContextButton.setAccessibilityLabel(context.map { "Remove task context: " + $0.title } ?? "Task context")
+        invalidateIntrinsicContentSize()
+    }
+    @objc private func removeTaskContext() {
+        guard let context = draft.taskContext else { return }
+        importedAttachments.removeAll { context.imageAttachmentIDs.contains($0.metadata.id) }
+        draft.taskContext = nil; draft.revision &+= 1
+        updateTaskContextRail(); updateAttachmentRail(); publishDraftChange()
+    }
+    /// Import a frozen task snapshot without changing the user's independent draft.
+    func prepareBoardTask(
+        boardID: UUID,
+        card: BoardCard,
+        revision: UInt64,
+        store: BoardAttachmentStore,
+        focusComposer: Bool = true,
+        confirmReplacement: Bool = true
+    ) async throws {
+        guard !isPreparingTask else { throw NSError(domain: "BoardTask", code: 5, userInfo: [NSLocalizedDescriptionKey: "A task is already being prepared."]) }
+        isPreparingTask = true
+        defer { isPreparingTask = false }
+        await restoreTask?.value
+        guard let agentID = draftAgentID, let attachmentStore else {
+            throw NSError(domain: "BoardTask", code: 1, userInfo: [NSLocalizedDescriptionKey: "This agent's composer is not ready."])
+        }
+        guard pendingSubmittedLease == nil, actionTask == nil else {
+            throw NSError(domain: "BoardTask", code: 2, userInfo: [NSLocalizedDescriptionKey: "Wait for the current prompt submission to finish."])
+        }
+        if confirmReplacement, let previous = draft.taskContext, previous.cardID != card.id || previous.boardID != boardID {
+            let alert = NSAlert(); alert.messageText = "Replace the attached task?"
+            alert.informativeText = "The composer already contains “" + previous.title + "”. Your own instructions and images will stay."
+            alert.addButton(withTitle: "Replace task"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                throw NSError(domain: "BoardTask", code: 3, userInfo: [NSLocalizedDescriptionKey: "Task preparation cancelled."])
+            }
+        }
+        if let previous = draft.taskContext {
+            importedAttachments.removeAll { previous.imageAttachmentIDs.contains($0.metadata.id) }
+        }
+        draft.taskContext = BoardTaskContext(
+            boardID: boardID,
+            card: card,
+            revision: revision,
+            imageAttachmentIDs: []
+        )
+        draft.revision &+= 1
+        updateTaskContextRail()
+        updateAttachmentRail()
+        publishDraftChange()
+        let generation = bindingGeneration
+        var copied: [AgentPromptImageAttachment] = []
+        for image in card.attachments {
+            let data = try await store.read(boardID: boardID, attachmentID: image.id)
+            let validation = try AgentComposerImageValidation(validatedContentType: image.contentType, pixelWidth: image.pixelWidth, pixelHeight: image.pixelHeight, byteCount: UInt64(data.count))
+            let stored = try await attachmentStore.importValidatedPastedImage(data, displayName: image.filename, validation: validation, forDraftOf: agentID)
+            copied.append(stored.promptAttachment)
+        }
+        guard isCurrentBinding(agentID: agentID, generation: generation), pendingSubmittedLease == nil, actionTask == nil else {
+            throw NSError(domain: "BoardTask", code: 4, userInfo: [NSLocalizedDescriptionKey: "The composer changed while importing. Try preparing again."])
+        }
+        importedAttachments.append(contentsOf: copied)
+        draft.taskContext = BoardTaskContext(boardID: boardID, card: card, revision: revision, imageAttachmentIDs: copied.map { $0.metadata.id })
+        draft.revision &+= 1
+        updateTaskContextRail(); updateAttachmentRail(); publishDraftChange()
+        if let draftStore { await draftStore.save(currentPersistedDraft(), for: agentID); try await draftStore.flushReportingFailure(agentID: agentID) }
+        if focusComposer { window?.makeFirstResponder(textView) }
+    }
+
+    /// Assignment owns the task chip. Moving or clearing a card must remove only
+    /// that task's context while preserving the agent's own text and attachments.
+    func clearBoardTask(boardID: UUID, cardID: UUID) async {
+        await restoreTask?.value
+        guard let context = draft.taskContext,
+              context.boardID == boardID, context.cardID == cardID else { return }
+        importedAttachments.removeAll { context.imageAttachmentIDs.contains($0.metadata.id) }
+        draft.taskContext = nil
+        draft.revision &+= 1
+        updateTaskContextRail()
+        updateAttachmentRail()
+        publishDraftChange()
+        if let draftStore, let agentID = draftAgentID {
+            await draftStore.save(currentPersistedDraft(), for: agentID)
+            try? await draftStore.flushReportingFailure(agentID: agentID)
+        }
     }
 
     private func updateAttachmentRail() {

@@ -39,6 +39,7 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
     public var selection: Range<Int>
     public var updatedAt: Date
     public var imageAttachments: [AgentComposerDraftImageAttachment]
+    public var taskContext: BoardTaskContext?
     public var fileReferences: [AgentComposerDraftFileReference]
 
     public init(
@@ -46,21 +47,24 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
         selection: Range<Int>,
         updatedAt: Date,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
-        fileReferences: [AgentComposerDraftFileReference] = []
+        fileReferences: [AgentComposerDraftFileReference] = [],
+        taskContext: BoardTaskContext? = nil
     ) {
         self.text = text
         self.selection = selection
         self.updatedAt = updatedAt
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
+        self.taskContext = taskContext
     }
 
     private enum CodingKeys: String, CodingKey {
-        case text, selection, updatedAt, imageAttachments, fileReferences
+        case text, selection, updatedAt, imageAttachments, fileReferences, taskContext
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        taskContext = try values.decodeIfPresent(BoardTaskContext.self, forKey: .taskContext)
         text = try values.decode(String.self, forKey: .text)
         selection = try values.decode(Range<Int>.self, forKey: .selection)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
@@ -70,6 +74,7 @@ public struct AgentComposerDraft: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(taskContext, forKey: .taskContext)
         try values.encode(text, forKey: .text)
         try values.encode(selection, forKey: .selection)
         try values.encode(updatedAt, forKey: .updatedAt)
@@ -430,6 +435,15 @@ public actor AgentComposerDraftStore {
             pending[agentID] = draft
             warn("AgentComposerDraftStore.save: could not persist draft for agent \(agentID.rawValue)")
         }
+    }
+
+    /// Explicit preparation must report disk errors instead of closing its source editor.
+    public func flushReportingFailure(agentID: AgentID) throws {
+        scheduledWrites[agentID]?.cancel()
+        scheduledWrites[agentID] = nil
+        guard let draft = pending[agentID] else { return }
+        try persistDraft(draft, for: agentID)
+        pending[agentID] = nil
     }
 
     public func flushAll() {

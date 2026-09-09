@@ -69,7 +69,7 @@ extension BoardTransaction {
     var actionName: String {
         switch command {
         case .createCard: return "Add Card"
-        case .editCard: return "Edit Card"
+        case .editCard, .editTask: return "Edit Card"
         case .moveCard: return "Move Card"
         case .deleteCard, .restoreCard: return "Delete Card"
         case .setCardLinks: return "Change Card Links"

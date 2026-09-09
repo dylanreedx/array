@@ -16,6 +16,7 @@ import Foundation
 public enum BoardCommand: Equatable, Sendable {
     case createCard(id: UUID, columnId: UUID, title: String, after: UUID?, before: UUID?)
     case editCard(id: UUID, title: String?, body: String?)
+    case editTask(id: UUID, expected: BoardTaskContent, content: BoardTaskContent)
     case moveCard(id: UUID, toColumn: UUID, after: UUID?, before: UUID?)
     case deleteCard(id: UUID)
     /// Undo's inverse of `deleteCard`. Restores the card verbatim, including its
@@ -52,6 +53,7 @@ public enum BoardCommandError: Error, Equatable, Sendable, CustomStringConvertib
     /// `deleteColumn` was asked to reassign into a column that does not exist,
     /// or into itself.
     case invalidReassignment
+    case contentConflict
 
     public var description: String {
         switch self {
@@ -61,6 +63,7 @@ public enum BoardCommandError: Error, Equatable, Sendable, CustomStringConvertib
         case .duplicateColumn(let id): return "column \(id.uuidString) already exists"
         case .anchorsUnavailable: return "the neighbouring cards this move was anchored to are gone"
         case .lastColumn: return "a board needs at least one column"
+        case .contentConflict: return "This task changed elsewhere. Review your changes before saving."
         case .invalidReassignment: return "cards must be reassigned to another existing column"
         }
     }
@@ -94,6 +97,7 @@ public enum BoardEngine {
         transactionId: UUID = UUID()
     ) -> Result<BoardTransaction, BoardCommandError> {
         var next = board
+        next.schemaVersion = Board.currentSchemaVersion
         var rebased = false
         let inverse: BoardCommand
 
@@ -121,6 +125,20 @@ public enum BoardEngine {
             if let title { next.cards[index].title = title }
             if let body { next.cards[index].body = body }
             next.cards[index].updatedAt = now
+
+        case let .editTask(id, expected, content):
+            guard let index = next.cards.firstIndex(where: { $0.id == id }) else { return .failure(.unknownCard(id)) }
+            let before = BoardTaskContent(card: next.cards[index])
+            let changesTitle = expected.title != content.title
+            let changesBody = expected.body != content.body || expected.attachments != content.attachments
+            guard (!changesTitle || before.title == expected.title),
+                  (!changesBody || (before.body == expected.body && before.attachments == expected.attachments)) else {
+                return .failure(.contentConflict)
+            }
+            if changesTitle { next.cards[index].title = content.title }
+            if changesBody { next.cards[index].body = content.body; next.cards[index].attachments = content.attachments }
+            next.cards[index].updatedAt = now
+            inverse = .editTask(id: id, expected: BoardTaskContent(card: next.cards[index]), content: before)
 
         case let .moveCard(id, toColumn, after, before):
             guard let existing = board.card(id) else { return .failure(.unknownCard(id)) }
@@ -257,6 +275,7 @@ public enum BoardEngine {
             next.title = title
         }
 
+        next.schemaVersion = Board.currentSchemaVersion
         next.revision = board.revision &+ 1
         return .success(BoardTransaction(
             id: transactionId, command: command, inverse: inverse,

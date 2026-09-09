@@ -29,7 +29,85 @@ func runBoardChecks() {
     runBoardDragColumnCrossingCheck()
     runBoardPersistenceCheck()
     runBoardAssignmentCheck()
-    print("Board (KB-01) checks: B1-B10 passed")
+    runBoardAttachmentWireCheck()
+    runBoardTaskContentCheck()
+    runBoardSurfaceChecks()
+    runBoardLargeDragPerformanceCheck()
+    print("Board checks: B1-B13, CX-01, and board.large-drag passed")
+}
+
+func runBoardSurfaceChecks() {
+    let (board, columns, cards) = makeFixture()
+    let now = boardNow
+    var service = BoardSurfaceCommandService(board: board)
+    let initial = service.snapshot
+    expect(initial.boardID == board.id && initial.revision == board.revision,
+           "CX-01: snapshot must carry the board identity and revision")
+    expect(initial.columns.map(\.id) == board.orderedColumns.map(\.id),
+           "CX-01: columns must use board order")
+    expect(initial.columns[0].cardIDs == cards,
+           "CX-01: cards must use deterministic column order")
+
+    let command = BoardCommand.renameColumn(id: columns[0], name: "Backlog")
+    switch service.apply(command, expectedRevision: initial.revision, now: now,
+                         transactionID: UUID(uuidString: "00000000-0000-4000-8000-0000000000C1")!) {
+    case .failure(let error):
+        fputs("FAIL: CX-01 command service rejected valid command: \(error)\n", stderr)
+        Foundation.exit(1)
+    case .success(let result):
+        expect(result.snapshot.revision == initial.revision + 1,
+               "CX-01: applied command must advance the surface revision")
+        expect(result.snapshot.columns[0].name == "Backlog",
+               "CX-01: result snapshot must reflect the reducer output")
+        expect(result.transaction.inverse == .renameColumn(id: columns[0], name: "To Do"),
+               "CX-01: surface result must expose the reducer inverse")
+    }
+
+    switch service.apply(.renameBoard(title: "stale"), expectedRevision: initial.revision, now: now) {
+    case .success:
+        fputs("FAIL: CX-01 stale revision must be rejected\n", stderr)
+        Foundation.exit(1)
+    case .failure(.staleRevision(let expected, let actual)):
+        expect(expected == initial.revision && actual == initial.revision + 1,
+               "CX-01: stale rejection must report both revision tokens")
+    case .failure(let error):
+        fputs("FAIL: CX-01 returned the wrong stale-revision error: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+    print("Board surface checks: CX-01 passed")
+}
+
+func runBoardLargeDragPerformanceCheck() {
+    let columnIDs = (0..<5).map { _ in UUID() }
+    var slots: [BoardSlot] = []
+    var cardIDs: [[UUID]] = Array(repeating: [], count: columnIDs.count)
+    for columnIndex in columnIDs.indices {
+        let ids = (0..<200).map { _ in UUID() }
+        cardIDs[columnIndex] = ids
+        let centers = ids.indices.map { Double($0 * 44 + 22) }
+        let tops = ids.indices.map { Double($0 * 44) }
+        let bottoms = ids.indices.map { Double($0 * 44 + 44) }
+        slots += BoardDragResolver.slots(
+            columnId: columnIDs[columnIndex], cardIds: ids, cardCenters: centers,
+            cardTops: tops, cardBottoms: bottoms, emptyCenterY: 22,
+            columnMinX: Double(columnIndex * 260), columnMaxX: Double(columnIndex * 260 + 240))
+    }
+
+    var previous: BoardDragTarget?
+    var samples: [Double] = []
+    for step in 0..<120 {
+        let started = ContinuousClock.now
+        previous = BoardDragResolver.resolve(
+            freePoint: CGPoint(x: Double((step * 37) % 1200), y: Double((step * 97) % 8_800)),
+            slots: slots, previous: previous, zoom: step.isMultiple(of: 2) ? 1 : 0.35)
+        let elapsed = ContinuousClock.now - started
+        samples.append(Double(elapsed.components.attoseconds) / 1e18 + Double(elapsed.components.seconds))
+    }
+    let sorted = samples.sorted()
+    let p95 = sorted[Int(Double(sorted.count - 1) * 0.95)]
+    expect(previous != nil, "board.large-drag: resolver must always produce a target")
+    print("board.large-drag cards=1000 slots=1005 samples=120 p95Seconds=\(p95)")
+    expect(p95 < 0.050, "board.large-drag: p95 resolver latency \(p95)s exceeds 50ms")
 }
 
 private let boardNow = Date(timeIntervalSinceReferenceDate: 760_000_000)
@@ -614,4 +692,47 @@ private func runBoardAssignmentCheck() {
 private func digest(of url: URL) -> String {
     guard let data = try? Data(contentsOf: url) else { return "missing" }
     return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+// Regression: previously an attachment decoded successfully, then vanished on save.
+private func runBoardAttachmentWireCheck() {
+    do {
+        let (board, _, _) = makeFixture()
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(board.cards[0])) as! [String: Any]
+        json["attachments"] = [["id": UUID().uuidString, "filename": "screen.png", "contentType": "image/png",
+                                "pixelWidth": 20, "pixelHeight": 10, "byteCount": 100]]
+        let card = try JSONDecoder().decode(BoardCard.self, from: JSONSerialization.data(withJSONObject: json))
+        let saved = try JSONSerialization.jsonObject(with: JSONEncoder().encode(card)) as! [String: Any]
+        expect((saved["attachments"] as? [[String: Any]])?.count == 1,
+               "B11: task images must survive decoding and saving before any agent is assigned")
+    } catch { expect(false, "B11 attachment round trip: \(error)") }
+}
+
+private func runBoardTaskContentCheck() {
+    let (board, columns, ids) = makeFixture()
+    let card = board.card(ids[0])!
+    let baseline = BoardTaskContent(card: card)
+    var edited = baseline
+    edited.body = "Detailed **task**"
+    edited.attachments = [BoardAttachment(filename: "proof.png", contentType: "image/png", pixelWidth: 20, pixelHeight: 10, byteCount: 100)]
+    let concurrent = applyOrFail(.moveCard(id: card.id, toColumn: columns[1], after: nil, before: nil), to: board).after
+    let transaction = applyOrFail(.editTask(id: card.id, expected: baseline, content: edited), to: concurrent)
+    expect(transaction.after.card(card.id)?.columnId == columns[1], "B12: content autosave preserves a concurrent status change")
+    expect(transaction.after.card(card.id)?.attachments == edited.attachments, "B12: content and images save together")
+    let undone = applyOrFail(transaction.inverse, to: transaction.after).after
+    expect(BoardTaskContent(card: undone.card(card.id)!) == baseline, "B12: one undo restores text and images together")
+    var conflicting = edited; conflicting.body = "Other version"
+    if case .failure(.contentConflict) = BoardEngine.apply(.editTask(id: card.id, expected: baseline, content: conflicting), to: transaction.after, now: boardNow) {} else {
+        expect(false, "B12: overlapping content edits must refuse to overwrite")
+    }
+    var titleOnly = baseline; titleOnly.title = "Renamed"
+    let merged = applyOrFail(.editTask(id: card.id, expected: baseline, content: titleOnly), to: transaction.after).after
+    expect(merged.card(card.id)?.body == edited.body && merged.card(card.id)?.title == "Renamed", "B12: disjoint title and document edits merge")
+    let context = BoardTaskContext(boardID: board.id, card: transaction.after.card(card.id)!, revision: transaction.after.revision, imageAttachmentIDs: [])
+    let draft = AgentComposerDraft(text: "My instructions", selection: 0..<0, updatedAt: boardNow, taskContext: context)
+    do {
+        let decoded = try JSONDecoder().decode(AgentComposerDraft.self, from: JSONEncoder().encode(draft))
+        expect(decoded == draft, "B13: prepared context survives a draft round trip")
+        expect(decoded.text == "My instructions" && context.promptText(additionalInstructions: decoded.text).contains("Detailed **task**"), "B13: context stays separate until prompt assembly")
+    } catch { expect(false, "B13: draft round trip: \(error)") }
 }

@@ -10,9 +10,8 @@ import ContinuumRevivedCore
 // kept — `AgentBlockHostView` learned that the expensive way — and a tile's
 // content view is placed by frame.
 //
-// NO per-lane add button. Adding is `⌘N`, Return at the end of a lane, or the
-// tile's own title-bar action; a button per lane is N pieces of chrome for one
-// verb, and it competed with the tasks for attention.
+// Adding stays in the lane where the task belongs; the keyboard and title-bar
+// action still use the focused lane.
 
 @MainActor
 final class KanbanColumnView: NSView, TokenThemed {
@@ -25,10 +24,13 @@ final class KanbanColumnView: NSView, TokenThemed {
     private let emptyLabel = NSTextField(labelWithString: "No tasks")
 
     private(set) var cardViews: [KanbanCardView] = []
-    /// Cached per-card heights. Recomputed when a card or the width changes,
-    /// never during `layout()`.
+    /// Cached per-card heights. Measured when content changes or once after a
+    /// width change, then reused across drag and ordinary layout passes.
     private var cardHeights: [UUID: CGFloat] = [:]
     private var measuredWidth: CGFloat = 0
+    private var measurementCards: [UUID: (BoardCard, String?)] = [:]
+    var onAddTask: (() -> Void)?
+    private let addButton = NSButton(title: "+ Add task", target: nil, action: nil)
 
     private(set) var liftedCardId: UUID?
     private var previewGapIndex: Int?
@@ -38,9 +40,9 @@ final class KanbanColumnView: NSView, TokenThemed {
     private(set) var previewGapFrame: NSRect?
     private var animatesNextLayout = false
 
-    static let headerHeight: CGFloat = 28
-    static let cardSpacing: CGFloat = 7
-    static let contentInset: CGFloat = 7
+    static let headerHeight: CGFloat = 38
+    static let cardSpacing: CGFloat = 10
+    static let contentInset: CGFloat = 10
     static let width: CGFloat = 248
 
     init(columnId: UUID, name: String) {
@@ -49,8 +51,8 @@ final class KanbanColumnView: NSView, TokenThemed {
         wantsLayer = true
         layer?.cornerRadius = 10
 
-        headerLabel.stringValue = name.uppercased()
-        headerLabel.font = NSFont.token(.caption)
+        headerLabel.stringValue = name
+        headerLabel.font = NSFont.token(.label)
         headerLabel.lineBreakMode = .byTruncatingTail
         addSubview(headerLabel)
 
@@ -65,15 +67,25 @@ final class KanbanColumnView: NSView, TokenThemed {
 
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
         scrollView.documentView = cardsContainer
         addSubview(scrollView)
+        addButton.isBordered = false
+        addButton.alignment = .left
+        addButton.font = NSFont.token(.body)
+        addButton.target = self
+        addButton.action = #selector(addTask)
+        addButton.setAccessibilityLabel("Add task to " + name)
+        cardsContainer.addSubview(addButton)
 
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         applyTokens()
     }
+
+    @objc private func addTask() { onAddTask?() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
@@ -81,7 +93,7 @@ final class KanbanColumnView: NSView, TokenThemed {
 
     var name: String {
         get { headerLabel.stringValue }
-        set { headerLabel.stringValue = newValue.uppercased() }
+        set { headerLabel.stringValue = newValue }
     }
 
     /// The scroll owner this lane contributes to the tile's surface revision.
@@ -98,10 +110,12 @@ final class KanbanColumnView: NSView, TokenThemed {
     /// id so a re-render during a drag does not destroy the view under the
     /// pointer.
     func setCards(_ cards: [BoardCard], assigneeName: @escaping (AgentID) -> String?) {
+        measurementCards.removeAll(keepingCapacity: true)
         var existing = Dictionary(uniqueKeysWithValues: cardViews.map { ($0.cardId, $0) })
         var next: [KanbanCardView] = []
         for card in cards {
             let name = card.assignee.flatMap(assigneeName)
+            measurementCards[card.id] = (card, name)
             if let view = existing.removeValue(forKey: card.id) {
                 view.update(card: card, assigneeName: name)
                 next.append(view)
@@ -119,7 +133,7 @@ final class KanbanColumnView: NSView, TokenThemed {
         }
         cardViews = next
         countLabel.stringValue = "\(cards.count)"
-        emptyLabel.isHidden = !cards.isEmpty
+        emptyLabel.isHidden = true
         needsLayout = true
     }
 
@@ -128,7 +142,7 @@ final class KanbanColumnView: NSView, TokenThemed {
     }
 
     private var measuredCardWidth: CGFloat {
-        max(0, (measuredWidth > 0 ? measuredWidth : Self.width) - Self.contentInset * 2)
+        max(0, measuredWidth > 0 ? measuredWidth : Self.width - Self.contentInset * 2)
     }
 
     // MARK: - Geometry the drag resolver needs
@@ -198,7 +212,7 @@ final class KanbanColumnView: NSView, TokenThemed {
     private func layoutCards(width: CGFloat) {
         let cardWidth = max(0, width - Self.contentInset * 2)
         if cardWidth != measuredWidth {
-            measuredWidth = width
+            measuredWidth = cardWidth
             // Width changed, so every cached height is stale. Cleared here and
             // recomputed lazily below — never measured per layout pass.
             cardHeights.removeAll(keepingCapacity: true)
@@ -222,6 +236,9 @@ final class KanbanColumnView: NSView, TokenThemed {
             if previewGapIndex == flowIndex {
                 gapFrame = NSRect(x: Self.contentInset, y: y, width: cardWidth, height: previewGapHeight)
                 y += previewGapHeight + Self.cardSpacing
+            }
+            if cardHeights[view.cardId] == nil, let (card, name) = measurementCards[view.cardId] {
+                cardHeights[view.cardId] = KanbanCardView.height(for: card, assigneeName: name, width: cardWidth)
             }
             let height = cardHeights[view.cardId] ?? KanbanCardView.minimumHeight
             targets.append((view, NSRect(x: Self.contentInset, y: y, width: cardWidth, height: height)))
@@ -251,7 +268,8 @@ final class KanbanColumnView: NSView, TokenThemed {
             for (view, frame) in targets { view.frame = frame }
         }
 
-        let documentHeight = max(scrollView.contentSize.height, y + Self.contentInset)
+        addButton.frame = NSRect(x: Self.contentInset + 2, y: y + 2, width: cardWidth - 4, height: 30)
+        let documentHeight = max(scrollView.contentSize.height, y + 36 + Self.contentInset)
         cardsContainer.frame = NSRect(x: 0, y: 0, width: width, height: documentHeight)
     }
 
@@ -292,8 +310,9 @@ final class KanbanColumnView: NSView, TokenThemed {
 
     func applyTokens() {
         // The lane is the RECESSED surface; its cards are raised above it.
-        layer?.backgroundColor = SurfaceToken.canvas.color.cgColor(in: self)
-        headerLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
+        addButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        headerLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         countLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         for view in cardViews { view.applyTokens() }

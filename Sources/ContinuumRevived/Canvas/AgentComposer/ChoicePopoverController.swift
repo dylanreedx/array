@@ -317,6 +317,7 @@ final class ChoicePopoverController {
         relativeTo view: NSView,
         placementFrame: NSRect? = nil,
         takesFocus: Bool = true,
+        accessibilityLabel customAccessibilityLabel: String? = nil,
         onSelection: @escaping (ChoiceItem) -> Void,
         focusReturnView: NSView? = nil,
         onDismiss: (() -> Void)? = nil
@@ -411,12 +412,13 @@ final class ChoicePopoverController {
         self.focusReturnView = focusReturnView
         cancellationHandler = onDismiss
         parentWindow = window
-        let accessibilityLabel: String
+        let defaultAccessibilityLabel: String
         switch layout {
-        case .intrinsic: accessibilityLabel = "Agent actions"
-        case .completion: accessibilityLabel = "File suggestions"
-        case .commands: accessibilityLabel = "Commands"
+        case .intrinsic: defaultAccessibilityLabel = "Agent actions"
+        case .completion: defaultAccessibilityLabel = "File suggestions"
+        case .commands: defaultAccessibilityLabel = "Commands"
         }
+        let accessibilityLabel = customAccessibilityLabel ?? defaultAccessibilityLabel
         list.setAccessibilityLabel(accessibilityLabel)
         panel.setAccessibilityLabel(accessibilityLabel)
         anchorWasPostingFrameChanges = view.postsFrameChangedNotifications
@@ -434,12 +436,13 @@ final class ChoicePopoverController {
             panel.makeKey()
             panel.makeFirstResponder(list)
         }
-        let announcement: String
-        switch layout {
-        case .intrinsic: announcement = "Agent actions menu"
-        case .completion: announcement = "File suggestions"
-        case .commands: announcement = "Commands"
-        }
+        let announcement = customAccessibilityLabel.map { "\($0) menu" } ?? {
+            switch layout {
+            case .intrinsic: return "Agent actions menu"
+            case .completion: return "File suggestions"
+            case .commands: return "Commands"
+            }
+        }()
         // Keep the observable value on the same path as the real VoiceOver post;
         // checks do not claim an announcement merely because a label exists.
         lastAccessibilityAnnouncementForQA = announcement

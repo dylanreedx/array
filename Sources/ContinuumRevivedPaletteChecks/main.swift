@@ -43,7 +43,7 @@ func profile(
 
 let builtInActionNames = [
     "New Agent…", "New Agent Without a Tile…", "Fan Out Selected Tickets…",
-    "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review",
+    "New Note", "New Board", "New Browser", "Open File...", "Open File Tree...", "New Diff Review",
     "Fit Canvas to All", "Tidy Canvas", "Focus Current Tile", "Back to Previous View",
     "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar",
     "Replay Getting Started", "New Workspace…",
@@ -56,8 +56,9 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "claude", displayName: "Claude CLI Terminal")
 ])
 expect(rows.map(\.displayName) == ["Shell", "Claude CLI Terminal"] + builtInActionNames + ["Create Zone…"], "palette appends every registered built-in action after profiles, then Create Zone")
+expect(LaunchPaletteModel.filterRows(rows, query: "kanban").map(\.displayName) == ["New Board"], "kanban query reaches the board creation action")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "New Diff Review", "New Workspace…", "Create Zone…"], "new query matches New actions including Create Zone (has 'new' token)")
+expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Board", "New Browser", "New Diff Review", "New Workspace…", "Create Zone…"], "new query matches New actions including Create Zone (has 'new' token)")
 expect(LaunchPaletteModel.filterRows(rows, query: "fit all").map(\.displayName) == ["Fit Canvas to All"], "fit all query matches Fit Canvas to All")
 expect(LaunchPaletteModel.filterRows(rows, query: "browser").map(\.displayName) == ["New Browser"], "browser query matches New Browser")
 let focusedBrowserRows = LaunchPaletteModel.makeRows(profiles: [], contextualActions: [.openInspectorForFocusedBrowser])

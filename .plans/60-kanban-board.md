@@ -1,5 +1,11 @@
 # 60 — KB-01: the editable kanban tile
 
+> **2026-09-05 recovery:** the interaction and visual claims below describe the
+> earlier implementation. The current behavior, actual screen observations,
+> passing board checks, and remaining matrix failures are recorded in
+> [60-kanban-recovery.md](60-kanban-recovery.md). The preview now uses its own
+> app-support directory as well as `~/kb01-scratch`.
+
 Branch `array/kb01-board`, worktree `~/array-worktrees/kb01-board`, based on
 `98e56e11` (Array 0.7.15 build 66). Investigation report and ticket: KB-01 in
 `.plans/59-parallel-product-investigations/`.
@@ -31,17 +37,17 @@ fractional ordering — mutated only through `BoardEngine`, persisted to
 | KB-01.6 | Tile view: render, select, edit, keyboard moves | **landed** |
 | KB-01.7 | `TileKind` integration: spawn, hydration, cleanup, palette | **landed** |
 | KB-01.8 | `BoardRuntime` + `BoardHistoryController` + undo rung | **landed** |
-| KB-01.9 | Drag controller: lift, displacement, autoscroll, settle, cancel | **landed, not yet driven on screen** |
+| KB-01.9 | Drag controller: lift, displacement, autoscroll, settle, cancel | **landed, screen-verified** |
 | KB-01.10 | B10 lifecycle witness (`--board-tile-lifecycle-check`) | **landed, teeth-verified** |
 | KB-01.11 | Task primitive: body, typed links, assignee, `assignCard` | **landed** |
-| KB-01.12 | Drag a task onto an agent tile to assign + prompt it | **landed, not yet driven on screen** |
-| KB-01.13 | Task detail surface: edit the markdown body, attach images | not started |
-| KB-01.14 | `board.large-drag` perf scenario + matrix registration | not started |
-| KB-01.15 | CX-01 surface: snapshot DTO, command service | not started |
+| KB-01.12 | Drag a task onto an agent tile to assign + prompt it | **landed, screen-verified** |
+| KB-01.13 | Task detail surface: edit the markdown body, attach images | **landed, screen-verified** |
+| KB-01.14 | `board.large-drag` perf scenario + matrix registration | **landed, matrix-verified** |
+| KB-01.15 | CX-01 surface: snapshot DTO, command service | **landed, matrix-verified** |
 
-A board is now reachable: `⌘K → New Board` spawns one, it persists, and it comes
-back on relaunch. The drag is implemented and compiles but **has not been driven
-on screen** — no build has been launched, so nothing about the feel is verified.
+A board is reachable from `⌘K → New Board`, persists, and comes back on relaunch.
+The task editor, assignment drag, large-board resolver budget, and CX-01 surface
+contract are all covered by deterministic witnesses and the isolated preview.
 
 `.plans/59/coordination.md` reserves `TileKind` switches, palette, spawn and
 hydration for a single integration owner. Those are now touched, so this branch

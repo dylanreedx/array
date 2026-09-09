@@ -32,27 +32,25 @@ final class BoardDragSession {
     /// Pointer offset within the card at mouse-down, so the card does not snap
     /// its corner to the cursor.
     let grabOffset: CGPoint
-    /// Whether the card was ALREADY selected when the gesture began. A click on
-    /// an already-selected card opens it for editing; the first click only
-    /// selects.
-    let wasSelected: Bool
+    let startPoint: CGPoint
     var freePoint: CGPoint
     var target: BoardDragTarget?
     var didMove = false
+    var assignmentHints: [NSView] = []
     /// The agent tile the pointer is currently over, if the drag has left the
     /// board. Nil means this is still an ordinary reorder.
     var hoveredAgentTileId: UUID?
 
     init(
         cardId: UUID, sourceColumnId: UUID, liftedView: KanbanCardView,
-        grabOffset: CGPoint, freePoint: CGPoint, wasSelected: Bool
+        grabOffset: CGPoint, freePoint: CGPoint
     ) {
         self.cardId = cardId
         self.sourceColumnId = sourceColumnId
         self.liftedView = liftedView
         self.grabOffset = grabOffset
+        self.startPoint = freePoint
         self.freePoint = freePoint
-        self.wasSelected = wasSelected
     }
 }
 
@@ -63,11 +61,10 @@ extension KanbanTileNSView {
 
     // MARK: - Begin
 
-    func beginCardDrag(cardId: UUID, event: NSEvent, wasSelected: Bool) {
+    func beginCardDrag(cardId: UUID, event: NSEvent) {
         guard dragSession == nil else { return }
         guard let card = board.card(cardId),
-              let cardViewInColumn = cardView(for: cardId),
-              let column = columnView(for: card.columnId) else { return }
+              let cardViewInColumn = cardView(for: cardId) else { return }
 
         // Editing must commit before a drag; a half-typed title that vanishes
         // because the card moved is a data loss the user did not ask for.
@@ -81,30 +78,48 @@ extension KanbanTileNSView {
         lifted.setSelected(true)
         lifted.ignoresHitTesting = true
         lifted.applyLiftedChrome()
-        addSubview(lifted, positioned: .above, relativeTo: nil)
+        lifted.loadThumbnail(card: card, store: taskAttachmentStore, boardID: board.id)
+        // Host in canvas space so the board's clipping cannot cut off a handoff.
+        let host: NSView = canvas ?? self
+        host.addSubview(lifted, positioned: .above, relativeTo: nil)
+        lifted.frame = convert(cardFrame, to: host)
+        lifted.bounds = NSRect(origin: .zero, size: cardFrame.size)
+        lifted.isHidden = true
 
         let session = BoardDragSession(
             cardId: cardId,
             sourceColumnId: card.columnId,
             liftedView: lifted,
             grabOffset: CGPoint(x: pointInTile.x - cardFrame.minX, y: pointInTile.y - cardFrame.minY),
-            freePoint: pointInTile,
-            wasSelected: wasSelected)
+            freePoint: pointInTile)
         dragSession = session
 
-        column.setLifted(cardId)
         takeKeyboardFocusIfIdle()
         boardRuntime?.beginPointerDrag(cardId: cardId)
         installDragCancelMonitor()
-        updateDragPreview(freePoint: pointInTile)
+
     }
 
     // MARK: - Track
 
     func continueCardDrag(event: NSEvent) {
         guard let session = dragSession else { return }
-        session.didMove = true
         let point = convert(event.locationInWindow, from: nil)
+        if !session.didMove {
+            let distance = hypot(point.x - session.startPoint.x, point.y - session.startPoint.y)
+            guard distance * canvasZoomForDrag >= 4 else { return }
+            session.didMove = true
+            if let canvas {
+                for choice in taskAgents?() ?? [] {
+                    guard let id = choice.tileID, let target = canvas.tileView(for: id) else { continue }
+                    let hint = BoardAssignmentHint(frame: target.convert(target.bounds, to: canvas), name: choice.name)
+                    canvas.addSubview(hint, positioned: .above, relativeTo: nil)
+                    session.assignmentHints.append(hint)
+                }
+            }
+            session.liftedView.isHidden = false
+            columnView(for: session.sourceColumnId)?.setLifted(session.cardId)
+        }
         session.freePoint = point
         // Autoscroll first, then resolve — so the preview is computed against
         // slots in their POST-scroll positions and never lags the scroll.
@@ -120,10 +135,13 @@ extension KanbanTileNSView {
     /// pointer event AND after any re-render, which is what makes a concurrent
     /// model change interruptible rather than a conflict.
     func updateDragPreview(freePoint: CGPoint) {
-        guard let session = dragSession else { return }
-        session.liftedView.setFrameOrigin(CGPoint(
-            x: freePoint.x - session.grabOffset.x,
-            y: freePoint.y - session.grabOffset.y))
+        guard let session = dragSession, session.didMove else { return }
+        let carriedBounds = session.liftedView.bounds
+        let frame = NSRect(x: freePoint.x - session.grabOffset.x,
+                           y: freePoint.y - session.grabOffset.y,
+                           width: carriedBounds.width, height: carriedBounds.height)
+        session.liftedView.frame = convert(frame, to: session.liftedView.superview)
+        session.liftedView.bounds = carriedBounds
 
         // Has the card left the board? If so this is an assignment gesture and
         // the lane preview must get out of the way entirely — showing an
@@ -142,6 +160,15 @@ extension KanbanTileNSView {
         if session.hoveredAgentTileId != nil {
             session.hoveredAgentTileId = nil
             canvas?.hideDragGhost()
+        }
+
+        // Empty canvas is not a destination. Keep carrying the card, but do not
+        // suggest or commit an unrelated move to the nearest board lane.
+        guard bounds.contains(freePoint) else {
+            session.target = nil
+            for column in allColumnViews { column.setPreviewGap(index: nil, height: 0, animated: true) }
+            hideCardGhost()
+            return
         }
 
         var slots: [BoardSlot] = []
@@ -167,7 +194,7 @@ extension KanbanTileNSView {
         let changed = resolved != session.target
         session.target = resolved
 
-        let gapHeight = session.liftedView.frame.height
+        let gapHeight = session.liftedView.bounds.height
         for column in allColumnViews {
             if let resolved, column.columnId == resolved.columnId {
                 column.setLifted(session.cardId)
@@ -211,20 +238,21 @@ extension KanbanTileNSView {
         guard let canvas, let agentView = canvas.tileView(for: agentTileId) else { return }
         let world = canvas.worldFrame(forTileFrame: agentView.tile.frame, tileId: agentTileId)
         let title = board.card(cardId)?.title ?? "Task"
-        canvas.showDragGhost(at: world, label: "Assign task", detail: title)
+        canvas.showDragGhost(at: world, label: "Release to assign to " + (taskAgents?().first(where: { $0.tileID == agentTileId })?.name ?? "agent"), detail: title)
     }
 
     /// The managed-agent tile under a point given in this tile's coordinates, or
     /// nil when the pointer is still inside the board.
     private func agentTile(under point: CGPoint) -> UUID? {
         guard bounds.contains(point) == false else { return nil }
-        guard let canvas, let superview else { return nil }
-        let inCanvas = convert(point, to: canvas)
-        // The lifted card ignores hit-testing, so it cannot mask the target.
-        _ = superview
-        guard var hit = canvas.hitTest(inCanvas) else { return nil }
+        guard let canvas, let host = canvas.superview else { return nil }
+        // hitTest takes coordinates in the receiver's parent, not its bounds.
+        guard var hit = canvas.hitTest(convert(point, to: host)) else { return nil }
         while let parent = hit.superview {
-            if let agent = hit as? ManagedAgentTileNSView { return agent.tile.id }
+            if let agent = hit as? ManagedAgentTileNSView {
+                guard taskAgents?().contains(where: { $0.tileID == agent.tile.id }) ?? true else { return nil }
+                return agent.tile.id
+            }
             hit = parent
         }
         return nil
@@ -244,15 +272,13 @@ extension KanbanTileNSView {
             return
         }
 
-        // A click that never moved is a selection — or, on an already-selected
-        // card, the way into editing. This branch is why the drag session records
-        // `wasSelected`: mouseDown always opens a session, so mouseUp is the only
-        // place that can tell a click from a drag.
+        // Releasing below the drag threshold only selects. Double-click and
+        // Return are the explicit edit gestures.
         guard session.didMove, let target = session.target else {
             let cardId = session.cardId
-            let wasSelected = session.wasSelected
             endDragSession(commit: false)
-            setFocusState(wasSelected ? .editing(cardId) : .selected(cardId))
+            setFocusState(.selected(cardId))
+            if !session.didMove { openTask(cardId) }
             return
         }
         // EXACTLY the previewed anchors. Not "nearest slot at mouse-up" — a fast
@@ -277,6 +303,7 @@ extension KanbanTileNSView {
         removeDragCancelMonitor()
         boardRuntime?.endPointerDrag()
         session.liftedView.removeFromSuperview()
+        session.assignmentHints.forEach { $0.removeFromSuperview() }
         hideCardGhost()
         cardGhost?.removeFromSuperview()
         canvas?.hideDragGhost()
@@ -296,15 +323,56 @@ extension KanbanTileNSView {
 
     private func installDragCancelMonitor() {
         guard dragCancelMonitor == nil else { return }
-        dragCancelMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.dragSession != nil, event.keyCode == 53 else { return event }
-            self.cancelCardDrag()
+        // AppKit may stop delivering to the source NSView once its lane hides
+        // it. Own the rest of this gesture until release, independently of hits.
+        dragCancelMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            guard let self, self.dragSession != nil else { return event }
+            switch event.type {
+            case .leftMouseDragged:
+                self.continueCardDrag(event: event)
+            case .leftMouseUp:
+                self.finishCardDrag()
+            case .keyDown where event.keyCode == 53:
+                self.cancelCardDrag()
+            default:
+                return event
+            }
             return nil
+        }
+        dragDeactivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelCardDrag() }
         }
     }
 
     private func removeDragCancelMonitor() {
         if let monitor = dragCancelMonitor { NSEvent.removeMonitor(monitor) }
         dragCancelMonitor = nil
+        if let observer = dragDeactivationObserver { NotificationCenter.default.removeObserver(observer) }
+        dragDeactivationObserver = nil
     }
+}
+
+@MainActor
+private final class BoardAssignmentHint: NSView {
+    init(frame: NSRect, name: String) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.borderWidth = 2
+        layer?.cornerRadius = 12
+        layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
+        let label = NSTextField(labelWithString: "Drop to assign · " + name)
+        label.frame = NSRect(x: 14, y: 12, width: max(0, frame.width - 28), height: 24)
+        label.font = NSFont.token(.caption)
+        label.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        label.drawsBackground = true
+        label.backgroundColor = SurfaceToken.overlay.color.nsColor(in: self)
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

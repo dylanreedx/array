@@ -616,6 +616,11 @@ run_app_check .build/debug/Array --zone-hydration-lifecycle-check
 run_app_check .build/debug/Array --zone-save-isolation-check
 run_app_check .build/debug/Array --zone-project-session-naming-check
 run_app_check .build/debug/Array --zone-lazy-resume-check
+run_app_check .build/debug/Array --board-task-workflow-check
+run_leg npm test --prefix Tools/TaskEditor
+run_app_check .build/debug/Array --board-interaction-check
+run_app_check .build/debug/Array --board-tile-lifecycle-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
 run_app_check .build/debug/Array --workspace-runtime-install-check

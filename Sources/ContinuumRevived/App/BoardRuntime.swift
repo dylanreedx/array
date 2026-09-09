@@ -211,7 +211,7 @@ extension BoardCommand {
     /// long as a pointer is down.
     func touches(cardId: UUID, in board: Board) -> Bool {
         switch self {
-        case let .editCard(id, _, _), let .moveCard(id, _, _, _),
+        case let .editTask(id, _, _), let .editCard(id, _, _), let .moveCard(id, _, _, _),
              let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _):
             return id == cardId
         case let .restoreCard(card):

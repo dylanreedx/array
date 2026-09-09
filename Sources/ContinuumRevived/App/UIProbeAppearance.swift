@@ -53,6 +53,26 @@ enum UIProbeAppearance {
     /// probes).
     private static let sentinel = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).cgColor
 
+    /// KB-01: both resting and selected tasks, with wrapped text and metadata.
+    private static func makeKanbanTile() -> NSView {
+        let column = BoardColumn(id: UUID(), name: "To Do", position: .fromLegacyRank(0))
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let cards = [
+            BoardCard(id: UUID(), columnId: column.id, position: .fromLegacyRank(0),
+                      title: "Hand a task with context directly to an agent", body: "Instructions",
+                      createdAt: now, updatedAt: now),
+            BoardCard(id: UUID(), columnId: column.id, position: .fromLegacyRank(1),
+                      title: "Keep selection visible", createdAt: now, updatedAt: now)
+        ]
+        let board = Board(id: UUID(), title: "Tasks", columns: [column], cards: cards)
+        let tile = Tile(id: UUID(), kind: .kanban, title: "Tasks",
+                        frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
+                        zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata(boardId: board.id))
+        let view = KanbanTileNSView(tile: tile, board: board)
+        view.setFocusState(.selected(cards[1].id))
+        return view
+    }
+
     // MARK: - Layer colour slots
 
     /// One assignable colour on one layer.
@@ -287,6 +307,7 @@ enum UIProbeAppearance {
         // App-layer half of the ticket is covered by the same sweep.
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
+            ("appearance.kanbanTile", NSSize(width: 480, height: 320), makeKanbanTile),
             ("appearance.editorNavigator", NSSize(width: 260, height: 400), {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),
@@ -863,6 +884,9 @@ enum UIProbeAppearance {
         "DescriptorTileNSView",
         "DescriptorTileNSView.body",
         "NoteTileNSView",
+        "KanbanTileNSView",
+        "KanbanColumnView",
+        "KanbanCardView",
         "FileTileNSView",
         "RunArtifactsTileNSView",
         "DiffReviewTileNSView",
@@ -961,6 +985,13 @@ enum UIProbeAppearance {
         theme: TokenTheme
     ) -> Set<String> {
         var values = legalValues(for: kind, theme: theme)
+        if owner == "KanbanCardView" {
+            return [hex((kind == .background || kind == .fill
+                         ? SurfaceToken.overlay.color : LineToken.borderStrong.color).cgColor(for: theme))]
+        }
+        if owner == "KanbanColumnView" {
+            return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
+        }
         guard kind == .background || kind == .fill else { return values }
         switch owner {
         case "FileTreeBrowserView":
@@ -1471,6 +1502,7 @@ enum UIProbeAppearance {
                     ])
                 return card
             }),
+            AdoptedSurface(id: "kanbanTile", size: NSSize(width: 480, height: 320), make: makeKanbanTile),
             AdoptedSurface(id: "noteTile", size: NSSize(width: 480, height: 320), make: {
                 NoteTileNSView(
                     tile: canned(kind: .note, title: "release notes"),
@@ -1681,11 +1713,14 @@ enum UIProbeAppearance {
     ]
 
     private static func runDescriptorTileFillCheck() throws -> String {
-        // Every kind must be accounted for, so shrinking `TileKind` cannot leave the
-        // evidence table silently partial.
+        // Kanban was introduced on tokens: it has no retired literal to invent.
+        // Keep all eleven historical measurements and account explicitly for the
+        // new kind, whose current fill is rendered in both themes below.
+        let bornOnTokens: Set<TileKind> = [.kanban]
         let covered = Set(retiredDescriptorFills.map(\.kind))
-        guard covered == Set(TileKind.allCases) else {
-            throw fail("the retired-descriptor-fill table covers \(covered.count) of \(TileKind.allCases.count) TileKinds — add the missing kind(s) with the literal that was deleted, or this evidence is partial")
+        guard covered.isDisjoint(with: bornOnTokens),
+              covered.union(bornOnTokens) == Set(TileKind.allCases) else {
+            throw fail("the retired-descriptor-fill table plus kinds born on tokens must cover every TileKind exactly once")
         }
 
         // a · the fill channel was never distinguishing anything.
@@ -1719,7 +1754,7 @@ enum UIProbeAppearance {
             throw fail("TileKind.displayName is not pairwise distinct (\(names.joined(separator: ", "))) — the descriptor tile now carries its kind in TEXT, so two kinds sharing a name means the distinction is gone for real")
         }
 
-        // d · all eleven kinds paint a legal token fill, both appearances.
+        // d · every current kind paints a legal token fill, both appearances.
         var fills = 0
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
@@ -1751,7 +1786,7 @@ enum UIProbeAppearance {
                 restoreAppPin()
             }
         }
-        return String(format: "11 descriptor kinds x 2 appearances = %d token fills; retired literals' widest pairwise ratio %.2f:1 (%d of 55 under 1.10:1), all 11 dark-only", fills, ratios.max() ?? 0, nearIdentical)
+        return String(format: "\(TileKind.allCases.count) descriptor kinds x 2 appearances = %d token fills; retired literals' widest pairwise ratio %.2f:1 (%d of 55 under 1.10:1), all 11 dark-only", fills, ratios.max() ?? 0, nearIdentical)
     }
 
     // MARK: - 6 · The title bar's status pill must clear the drag handle

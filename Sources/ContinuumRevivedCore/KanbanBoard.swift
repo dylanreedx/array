@@ -88,6 +88,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
     /// than one line of text.
     public var body: String
     public var links: [CardLink]
+    public var attachments: [BoardAttachment]
     /// The agent this task is assigned to. Distinct from a `CardLink.agent`:
     /// a link is one of many references, an assignee is a singular
     /// responsibility, and only one of those answers "who is doing this".
@@ -102,6 +103,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         title: String,
         body: String = "",
         links: [CardLink] = [],
+        attachments: [BoardAttachment] = [],
         assignee: AgentID? = nil,
         createdAt: Date,
         updatedAt: Date
@@ -112,16 +114,35 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         self.title = title
         self.body = body
         self.links = links
+        self.attachments = attachments
         self.assignee = assignee
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+    private enum CodingKeys: String, CodingKey {
+        case id, columnId, position, title, body, links, attachments, assignee, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        columnId = try c.decode(UUID.self, forKey: .columnId)
+        position = try c.decode(FracIndex.self, forKey: .position)
+        title = try c.decode(String.self, forKey: .title)
+        body = try c.decodeIfPresent(String.self, forKey: .body) ?? ""
+        links = try c.decodeIfPresent([CardLink].self, forKey: .links) ?? []
+        attachments = try c.decodeIfPresent([BoardAttachment].self, forKey: .attachments) ?? []
+        assignee = try c.decodeIfPresent(AgentID.self, forKey: .assignee)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    }
+
 }
 
 public struct Board: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
-    public let schemaVersion: Int
+    public var schemaVersion: Int
     public let id: UUID
     public var title: String
     /// Monotonic. Bumped by exactly one place — `BoardEngine.apply` — so it is a

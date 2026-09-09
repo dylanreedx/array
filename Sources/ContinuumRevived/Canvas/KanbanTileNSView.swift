@@ -36,6 +36,8 @@ final class KanbanTileNSView: TileNSView {
     var onCommand: ((BoardCommand) -> Void)?
 
     private let body = FlippedContainerView()
+    private let contentContainer = FlippedContainerView()
+    private let gestureHint = NSTextField(labelWithString: "Drag a task onto an agent to assign it  ·  Click to open details")
     private let horizontalScroll = NSScrollView()
     fileprivate var columnViews: [KanbanColumnView] = []
     private let emptyBoardLabel = NSTextField(labelWithString: "")
@@ -51,6 +53,7 @@ final class KanbanTileNSView: TileNSView {
     /// leave the next drag inheriting a target.
     var dragSession: BoardDragSession?
     var dragCancelMonitor: Any?
+    var dragDeactivationObserver: NSObjectProtocol?
     /// The insertion phantom, reparented into whichever lane currently holds the
     /// preview. One instance, so moving between lanes keeps its trailing
     /// animation continuous instead of restarting it.
@@ -59,8 +62,22 @@ final class KanbanTileNSView: TileNSView {
     /// the app; the view must not reach into the supervisor itself.
     var agentDisplayName: ((AgentID) -> String?)?
     /// Fires when a task is dropped on a managed-agent tile. The app turns it
-    /// into an assignment plus a prompt; the view knows nothing about either.
+    /// into an assignment. Preparing and sending remain separate actions.
     var onAssignToAgent: ((UUID, UUID) -> Void)?
+    var taskAgents: (() -> [BoardAgentChoice])?
+    var onTaskAssign: ((UUID, AgentID?) -> String?)?
+    var onTaskActionError: ((String) -> Void)?
+    var onTaskPrepare: ((UUID) async -> String?)?
+    var onTaskCreateAgent: (() -> Bool)?
+    var taskAttachmentStore: BoardAttachmentStore?
+    private var taskDetail: BoardTaskDetailController?
+    func openTask(_ id: UUID, assign: Bool = false) {
+        if case .editing(let editingID) = focusState { setFocusState(.selected(editingID)) }
+        guard taskDetail?.finishBeforeOpeningAnother() ?? true else { return }
+        guard let card = board.card(id) else { return }
+        taskDetail = BoardTaskDetailController(tile: self, card: card)
+        taskDetail?.present(openAssignee: assign)
+    }
     /// The board authority, so a drag can take and release the lease that makes
     /// a concurrent API edit on the carried card reject rather than race.
     weak var boardRuntime: BoardRuntime?
@@ -85,6 +102,25 @@ final class KanbanTileNSView: TileNSView {
         card.assignee.flatMap { agentDisplayName?($0) } ?? (card.assignee == nil ? nil : "agent")
     }
 
+    func moveTaskFromMenu(_ cardID: UUID, to columnID: UUID) {
+        guard board.card(cardID) != nil, board.columns.contains(where: { $0.id == columnID }) else { return }
+        onCommand?(.moveCard(
+            id: cardID,
+            toColumn: columnID,
+            after: board.orderedCards(in: columnID).last(where: { $0.id != cardID })?.id,
+            before: nil
+        ))
+    }
+
+    func assignTaskFromMenu(_ cardID: UUID, to agentID: AgentID?) {
+        if let error = onTaskAssign?(cardID, agentID) { onTaskActionError?(error) }
+    }
+
+    func deleteTaskFromMenu(_ cardID: UUID) {
+        guard board.card(cardID) != nil else { return }
+        onCommand?(.deleteCard(id: cardID))
+    }
+
     init(tile: Tile, board: Board) {
         self.board = board
         super.init(tile: tile)
@@ -92,6 +128,7 @@ final class KanbanTileNSView: TileNSView {
         horizontalScroll.hasHorizontalScroller = true
         horizontalScroll.hasVerticalScroller = false
         horizontalScroll.autohidesScrollers = true
+        horizontalScroll.scrollerStyle = .overlay
         horizontalScroll.drawsBackground = false
         horizontalScroll.documentView = body
 
@@ -101,7 +138,11 @@ final class KanbanTileNSView: TileNSView {
         emptyBoardLabel.isHidden = true
         body.addSubview(emptyBoardLabel)
 
-        setContentView(horizontalScroll)
+        gestureHint.font = NSFont.token(.caption)
+        gestureHint.lineBreakMode = .byTruncatingTail
+        contentContainer.addSubview(horizontalScroll)
+        contentContainer.addSubview(gestureHint)
+        setContentView(contentContainer)
         installAddAccessory()
         rebuildColumns()
         applyTokens()
@@ -139,6 +180,7 @@ final class KanbanTileNSView: TileNSView {
     func render(_ board: Board) {
         let structureChanged = board.orderedColumns.map(\.id) != self.board.orderedColumns.map(\.id)
         self.board = board
+        taskDetail?.refresh()
         if structureChanged {
             rebuildColumns()
         } else {
@@ -150,6 +192,10 @@ final class KanbanTileNSView: TileNSView {
                 })
             }
         }
+        for card in board.cards { cardView(for: card.id)?.loadThumbnail(card: card, store: taskAttachmentStore, boardID: board.id) }
+        // A cross-lane move may replace the card view while retaining the
+        // focused ID. Reapply selection to that new renderer.
+        if let focused = focusState.cardId { cardView(for: focused)?.setSelected(true) }
         // A card the model no longer has cannot stay selected.
         if let focused = focusState.cardId, board.card(focused) == nil {
             setFocusState(.none)
@@ -175,6 +221,7 @@ final class KanbanTileNSView: TileNSView {
             view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
                 self?.agentDisplayName?(id)
             })
+            view.onAddTask = { [weak self] in self?.createCard(in: column.id) }
             body.addSubview(view)
             return view
         }
@@ -199,8 +246,13 @@ final class KanbanTileNSView: TileNSView {
         super.layout()
         // Recompute the grab-strip inset every layout: it is zoom-dependent, and
         // the canvas rescales chrome without re-creating the tile.
-        grabStripInset = grabHeightInLocalCoordinates
-        let columnWidth = KanbanColumnView.width
+        grabStripInset = max(0, grabHeightInLocalCoordinates - contentTopInsetWorldHeight)
+        horizontalScroll.frame = NSRect(x: 0, y: 0, width: contentContainer.bounds.width,
+                                        height: max(0, contentContainer.bounds.height - 30))
+        gestureHint.frame = NSRect(x: 20, y: max(0, contentContainer.bounds.height - 24),
+                                  width: max(0, contentContainer.bounds.width - 40), height: 16)
+        let columnWidth = max(224, (horizontalScroll.contentSize.width - CGFloat(columnViews.count + 1) * 10)
+                                  / CGFloat(max(1, columnViews.count)))
         let spacing: CGFloat = 10
         let visible = horizontalScroll.contentSize
         let contentHeight = max(0, visible.height - grabStripInset)
@@ -295,7 +347,7 @@ final class KanbanTileNSView: TileNSView {
         switch event.keyCode {
         case 36:  // Return
             switch focusState {
-            case .selected(let id): setFocusState(.editing(id))
+            case .selected(let id): openTask(id)
             case .editing(let id): setFocusState(.selected(id))
             case .none: break
             }
@@ -410,6 +462,7 @@ final class KanbanTileNSView: TileNSView {
         super.applyTokens()
         contentBackgroundLayer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         emptyBoardLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        gestureHint.textColor = TextToken.textSecondary.color.nsColor(in: self)
         for view in columnViews { view.applyTokens() }
     }
 

@@ -133,6 +133,27 @@ final class ManagedAgentTileNSView: TileNSView {
     private var streamingMarkupParseTimerGeneration: UInt64 = 0
 
     private let transcriptCollectionFixture: AgentTranscriptListView?
+    func prepareBoardTask(
+        boardID: UUID,
+        card: BoardCard,
+        revision: UInt64,
+        store: BoardAttachmentStore,
+        focusComposer: Bool = true,
+        confirmReplacement: Bool = true
+    ) async throws {
+        guard let v2Composer else { throw NSError(domain: "BoardTask", code: 1, userInfo: [NSLocalizedDescriptionKey: "The agent composer is unavailable."]) }
+        try await v2Composer.prepareBoardTask(
+            boardID: boardID,
+            card: card,
+            revision: revision,
+            store: store,
+            focusComposer: focusComposer,
+            confirmReplacement: confirmReplacement
+        )
+    }
+    func clearBoardTask(boardID: UUID, cardID: UUID) async {
+        await v2Composer?.clearBoardTask(boardID: boardID, cardID: cardID)
+    }
     private let v2Composer: AgentComposerView?
     private let v2ActionButton: ComposerActionButton?
     private let projectionMonotonicNow: @Sendable () -> TimeInterval
@@ -2662,7 +2683,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 canSteer: capabilities.canSteer,
                 canQueue: capabilities.canQueue
             ),
-            hasDraft: !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            hasDraft: v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         )
         // In flight, not merely working (P5.5 consolidation): the pickers must
         // stay dark from send until the runner slot frees, or they flash

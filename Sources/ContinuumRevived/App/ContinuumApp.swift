@@ -2980,6 +2980,26 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--board-task-workflow-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await BoardTaskWorkflowChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--board-interaction-check") {
+            do {
+                _ = NSApplication.shared
+                try BoardInteractionChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--board-tile-lifecycle-check") {
             do {
                 _ = NSApplication.shared
@@ -6973,51 +6993,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func configuredBoardRuntime(_ controller: ZoneRuntimeController) -> BoardRuntime {
         let runtime = controller.boardRuntime
         guard runtime.tileConfigurator == nil else { return runtime }
+        let projectID = controller.project.id
+        let attachmentStore = BoardAttachmentStore(projectRoot: controller.projectRoot)
         runtime.tileConfigurator = { [weak self, weak runtime] view in
             guard let self else { return }
-            view.agentDisplayName = { [weak self] id in
-                self?.agentSupervisor.displayName(forAgent: id)
+            view.taskAttachmentStore = attachmentStore
+            view.onTaskActionError = { [weak self] error in self?.presentSpawnRefusal(error) }
+            view.agentDisplayName = { [weak self] id in self?.agentSupervisor.displayName(forAgent: id) }
+            view.taskAgents = { [weak self, weak view] in
+                guard let self else { return [] }
+                let zoneID = view?.tile.zoneId
+                return self.agentSupervisor.records.values.filter { $0.projectId == projectID && $0.archivedAt == nil && $0.capabilities.locallyManaged }.map { record in
+                    let sameZone = record.tileId.flatMap { self.canvasView?.navigationTileSnapshot(for: $0)?.zoneId } == zoneID
+                    return BoardAgentChoice(id: record.id, name: self.agentSupervisor.displayName(forAgent: record.id) ?? record.displayName,
+                        detail: (sameZone ? "Current zone" : "Elsewhere in this project") + " · " + (self.agentSupervisor.turnSnapshot(for: record.id)?.state.kindName.replacingOccurrences(of: "needsAction", with: "needs attention").capitalized ?? "Unavailable"), tileID: record.tileId)
+                }.sorted { a, b in
+                    if a.detail.hasPrefix("Current zone") != b.detail.hasPrefix("Current zone") { return a.detail.hasPrefix("Current zone") }
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                }
             }
-            view.onAssignToAgent = { [weak self, weak runtime, weak view] cardId, agentTileId in
-                guard let self, let runtime, let boardId = view?.boardIdForUndo else { return }
-                self.assignBoardTask(cardId: cardId, toAgentTile: agentTileId, boardId: boardId, runtime: runtime)
+            view.onTaskAssign = { [weak self, weak runtime, weak view] cardID, agentID in
+                guard let self, let runtime, let view else { return "The board is no longer available." }
+                let previousAgentID = view.board.card(cardID)?.assignee
+                if let agentID {
+                    guard let record = self.agentSupervisor.records[agentID], record.projectId == projectID, record.archivedAt == nil else { return "Choose an available agent from this project." }
+                }
+                switch runtime.apply(.assignCard(id: cardID, to: agentID), to: view.board.id) {
+                case .applied, .rebased:
+                    if previousAgentID != agentID,
+                       let previousTileID = previousAgentID.flatMap({ self.agentSupervisor.records[$0]?.tileId }),
+                       let previousView = self.canvasView?.tileView(for: previousTileID) as? ManagedAgentTileNSView {
+                        Task { await previousView.clearBoardTask(boardID: view.board.id, cardID: cardID) }
+                    }
+                    if let agentID,
+                       let card = view.board.card(cardID),
+                       let tileID = self.agentSupervisor.records[agentID]?.tileId,
+                       let agentView = self.canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView {
+                        Task {
+                            try? await agentView.prepareBoardTask(
+                                boardID: view.board.id,
+                                card: card,
+                                revision: view.board.revision,
+                                store: attachmentStore,
+                                focusComposer: false,
+                                confirmReplacement: false
+                            )
+                        }
+                    }
+                    return nil
+                default: return "That task could not be assigned."
+                }
+            }
+            view.onAssignToAgent = { [weak self, weak view] cardID, tileID in
+                guard let self, let view, let agentID = self.agentSupervisor.agent(forTile: tileID) else { return }
+                if let error = view.onTaskAssign?(cardID, agentID) { self.presentSpawnRefusal(error) }
+            }
+            view.onTaskCreateAgent = { [weak self, weak view] in
+                guard let self, let view, self.revealTileFromInbox(view.tile.id),
+                      self.workspaceRuntime?.activeController?.project.id == projectID else { return false }
+                return self.spawnManagedAgentFromPalette()
+            }
+            view.onTaskPrepare = { [weak self, weak view] cardID in
+                guard let self, let view, let card = view.board.card(cardID), let agentID = card.assignee,
+                      self.agentSupervisor.records[agentID]?.projectId == projectID,
+                      self.agentSupervisor.records[agentID]?.archivedAt == nil else { return "Assign an available agent from this project first." }
+                guard self.revealAgentFromInbox(agentID.rawValue), let tileID = self.agentSupervisor.records[agentID]?.tileId,
+                      let agentView = self.canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView else { return "Could not open this agent's composer." }
+                do {
+                    try await agentView.prepareBoardTask(boardID: view.board.id, card: card, revision: view.board.revision, store: attachmentStore)
+                    return nil
+                } catch { return error.localizedDescription }
             }
         }
         return runtime
-    }
-
-    /// Hand a task to an agent: record the assignment, then give the agent the
-    /// task itself as its prompt.
-    ///
-    /// The assignment is recorded FIRST and independently of the send. An agent
-    /// that is busy, refusing, or not yet started still owns the task — losing
-    /// the assignment because a prompt bounced would make the board lie about
-    /// who is responsible.
-    private func assignBoardTask(
-        cardId: UUID, toAgentTile agentTileId: UUID, boardId: UUID, runtime: BoardRuntime
-    ) {
-        guard let agentId = agentSupervisor.agent(forTile: agentTileId) else {
-            presentSpawnRefusal("That tile has no agent yet — start it, then assign the task.")
-            return
-        }
-        guard let card = runtime.board(id: boardId)?.card(cardId) else { return }
-        let outcome = runtime.apply(.assignCard(id: cardId, to: agentId), to: boardId)
-        guard case .applied = outcome else {
-            if case .rejectedCardHeldByPointer = outcome { return }
-            presentSpawnRefusal("That task could not be assigned.")
-            return
-        }
-        // The task IS the prompt. Title first, then the body verbatim — a task's
-        // markdown is written to be read by whoever picks it up.
-        var prompt = card.title
-        let body = card.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !body.isEmpty { prompt += "\n\n" + body }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if !agentSupervisor.send(prompt, to: agentId) {
-            // The assignment stands; only the send failed, and the agent's own
-            // surface reports why.
-            fputs("board: assigned task \(cardId) to \(agentId.rawValue) but the prompt was refused\n", stderr)
-        }
     }
 
     private func installInitialKanbanTile(_ tile: Tile, in canvasView: CanvasNSView) {
@@ -7195,6 +7243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// transition (released, or a second modifier joined) cancel the pending dwell and
     /// exit the leader if open.
     func handleFlagsChanged(_ event: NSEvent) {
+        guard !BoardTaskDetailController.isPresented(in: window) else { return }
         let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
         // P3.10: the inbox's ⌘-hold hint pills ride this monitor rather than a
         // `flagsChanged` override on the list. It is the only observer that sees a
@@ -7227,6 +7276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
+            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
             if let session = self.focusModeSession {
                 _ = self.visitFocusModeTile(
                     at: event.locationInWindow, candidateTileIDs: session.protectedTileIds)
@@ -7251,6 +7301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// NSScrollView/NSTextView, WKWebView/browser host, or Ghostty terminal host
     /// are passed through so tile content keeps native trackpad scrolling.
     static func routeTileClickFocus(at windowPoint: NSPoint, in canvas: CanvasNSView, focusBroker: FocusBroker) {
+        guard !BoardTaskDetailController.isPresented(in: canvas.window) else { return }
         // A click while an inline zone rename is open must not reroute focus out
         // from under the editing field. A click on the renamed zone's header keeps
         // editing (this is the mouse-up of the very double-click that opened it);
@@ -7304,6 +7355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let scrollMon = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
+            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
             guard event.hasPreciseScrollingDeltas else { return event }
             // While a camera zoom session is live (pinch in progress, glide
             // running, or just after zoom input), the follow-through pan keeps
@@ -7325,6 +7377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let magnifyMon = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
+            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
             canvas.handlePinch(event)
             return nil
         }
@@ -7354,6 +7407,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func handleHotkey(_ event: NSEvent) -> Bool {
+        if BoardTaskDetailController.isPresented(in: event.window ?? window) {
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               event.charactersIgnoringModifiers == "w" {
+                BoardTaskDetailController.dismissPresented(in: event.window ?? window)
+                return true
+            }
+            return false
+        }
 
         if focusBroker.activeSurface == .modal(.focusMode) {
             if event.keyCode == 53 {

@@ -178,7 +178,8 @@ let package = Package(
                 "ContinuumRevived.entitlements"
             ],
             resources: [
-                .copy("Resources/CodeEditor")
+                .copy("Resources/CodeEditor"),
+                .copy("Resources/TaskEditor")
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),
