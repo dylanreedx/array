@@ -7863,6 +7863,7 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+    let automaticRefreshReport = try await checkAutomaticNameRefresh(fail: fail)
 
     func managedImageAttachment(
         _ store: AgentComposerAttachmentStore,
@@ -8737,7 +8738,7 @@ func runAgentSupervisorChecks() async throws {
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(automaticRefreshReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
 }
 
 /// A callback queued by a runner that Stop has already retired must not reopen
@@ -10621,6 +10622,188 @@ private func checkClaudeHarnessTitleReader<Failure: Error>(
           AgentSupervisor.claudeRunnerConfig(for: located).sessionId == located.providerSessionId else {
         throw fail("an adopted provider session id did not reach both the reader and the runner")
     }
+}
+
+/// Witnesses the SUPERVISOR wiring that `checkAgentNameContract`'s pure
+/// AgentRecord/reader assertions cannot reach: `refreshDerivedName` actually
+/// fires from a real `.turnCompleted` event rather than only from the
+/// explicit "Generate Name" menu action, codex/pi's automatic fallback is
+/// bounded per agent rather than retried forever, claude's own harness never
+/// falls through to the pi one-shot, and a manual rename shuts every
+/// automatic path off before the next turn arrives.
+@MainActor
+private func checkAutomaticNameRefresh<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-automatic-name-refresh-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+    // A fake pi that appends one line per invocation to a counter file, so a
+    // test can count how many times the provider actually ran. `succeed`
+    // picks between a usable name (encoding which invocation it was, so a
+    // second turn's title can be told apart from the first) and output that
+    // never sanitises to a candidate at all.
+    func makeCapability(name: String, counter: URL, succeed: Bool) throws -> AgentNameGenerationCapability {
+        let executable = root.appendingPathComponent("fake-pi-\(name)", isDirectory: false)
+        let tally = """
+        count=0
+        if [ -f "\(counter.path)" ]; then count=$(wc -l < "\(counter.path)" | tr -d ' '); fi
+        n=$((count + 1))
+        echo "$n" >> "\(counter.path)"
+        """
+        let body = succeed
+            ? "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf '{\"name\":\"Attempt %s\"}\\n' \"$n\"\n"
+            : "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf 'not a json name at all\\n'\n"
+        try body.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let configDirectory = root.appendingPathComponent("config-\(name)", isDirectory: true)
+        try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        return AgentNameGenerationCapability(
+            executable: executable.path, configDirectory: configDirectory, loginShellPath: "/bin:/usr/bin")
+    }
+
+    func lineCount(_ url: URL) -> Int {
+        (try? String(contentsOf: url, encoding: .utf8)).map {
+            $0.split(separator: "\n", omittingEmptySubsequences: true).count
+        } ?? 0
+    }
+
+    // -- 1 & 2. codex: refreshDerivedName fires from .turnCompleted alone (no
+    // explicit "Generate Name" call anywhere in this test), and a SECOND
+    // turn's title supersedes the first — equal authority replaces, now
+    // proven through the live wiring rather than the record in isolation. --
+    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let fireCounter = root.appendingPathComponent("fire-counter.txt")
+    let fireCapability = try makeCapability(name: "fire", counter: fireCounter, succeed: true)
+    let fireStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("fire-support", isDirectory: true))
+    let fireRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let fireSupervisor = AgentSupervisor(
+        store: fireStore, makeRunner: { _ in fireRunner },
+        nameGenerationCapabilityProvider: { fireCapability }, nameGenerationTimeout: 2)
+    let fireID = fireSupervisor.spawn(
+        role: nil, prompt: "investigate the flaky build", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { fireRunner.runCount > 0 }) else {
+        throw fail("the codex fixture agent's runner never started")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner had no live handler to accept a turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayNameSource == .generated
+    }) else {
+        throw fail("a codex agent's turnCompleted did not trigger the automatic generated-name fallback: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
+        throw fail("the automatic fallback did not land the provider's own name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner refused a second turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayName == "Attempt 2"
+    }) else {
+        throw fail("a second harness turn did not replace the first automatic name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    fireRunner.releaseRunAfterStop()
+
+    // -- 3. codex: the automatic path is BOUNDED. A provider that never
+    // produces a usable name must not be retried forever — three attempts,
+    // then silence, across five completed turns. --
+    let boundCounter = root.appendingPathComponent("bound-counter.txt")
+    let boundCapability = try makeCapability(name: "bound", counter: boundCounter, succeed: false)
+    let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support", isDirectory: true))
+    let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let boundSupervisor = AgentSupervisor(
+        store: boundStore, makeRunner: { _ in boundRunner },
+        nameGenerationCapabilityProvider: { boundCapability }, nameGenerationTimeout: 2)
+    let boundID = boundSupervisor.spawn(
+        role: nil, prompt: "a prompt that never gets named", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
+        throw fail("the bounded-retry fixture agent's runner never started")
+    }
+    for turn in 1...5 {
+        guard boundRunner.emit(.turnCompleted(threadId: "t", turnId: "t\(turn)", outcome: .completed, errorMessage: nil)) else {
+            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+    }
+    guard lineCount(boundCounter) == 3 else {
+        throw fail("a provider that never produces a name was invoked \(lineCount(boundCounter)) time(s) across 5 completed turns, not bounded to 3")
+    }
+    boundRunner.releaseRunAfterStop()
+
+    // -- 4. codex: a MANUAL rename shuts the automatic path off before the
+    // next turn — the automatic fallback must never even ask the provider. --
+    let manualCounter = root.appendingPathComponent("manual-counter.txt")
+    let manualCapability = try makeCapability(name: "manual", counter: manualCounter, succeed: true)
+    let manualStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("manual-support", isDirectory: true))
+    let manualRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let manualSupervisor = AgentSupervisor(
+        store: manualStore, makeRunner: { _ in manualRunner },
+        nameGenerationCapabilityProvider: { manualCapability }, nameGenerationTimeout: 2)
+    let manualID = manualSupervisor.spawn(
+        role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
+        throw fail("the manual-rename fixture agent's runner never started")
+    }
+    guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
+        throw fail("the manual rename fixture call itself was refused")
+    }
+    guard manualRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the manual-rename fixture runner had no live handler")
+    }
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
+          manualSupervisor.records[manualID]?.displayNameSource == .manual,
+          lineCount(manualCounter) == 0 else {
+        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(lineCount(manualCounter))")
+    }
+    manualRunner.releaseRunAfterStop()
+
+    // -- 5. claude: the harness that DOES name its own conversations must
+    // never fall through to the pi one-shot, and a turn with no session file
+    // on disk yet must not crash or invent a title. --
+    let claudeConfig = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode)
+    let claudeCalled = LockedFlag()
+    let claudeStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("claude-support", isDirectory: true))
+    let claudeRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let claudeSupervisor = AgentSupervisor(
+        store: claudeStore, makeRunner: { _ in claudeRunner },
+        nameGenerationCapabilityProvider: { claudeCalled.set(); return nil },
+        nameGenerationTimeout: 2)
+    let claudeID = claudeSupervisor.spawn(
+        role: nil, prompt: "a claude agent with no session file on disk", cwd: root, harness: .claudeCode,
+        model: claudeConfig.model, thinking: claudeConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { claudeRunner.runCount > 0 }) else {
+        throw fail("the claude fixture agent's runner never started")
+    }
+    let claudeNameBefore = claudeSupervisor.records[claudeID]?.displayName
+    guard claudeRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the claude fixture runner had no live handler")
+    }
+    // No session file exists at this cwd, so there is nothing to read; this
+    // must resolve to "no title yet", not a crash and not an invented one.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard claudeSupervisor.records[claudeID]?.displayName == claudeNameBefore,
+          !claudeCalled.wasSet else {
+        throw fail("a claude agent with no session file fell through to the pi one-shot fallback (called=\(claudeCalled.wasSet)) or changed its name without a title to read")
+    }
+    claudeRunner.releaseRunAfterStop()
+
+    return "automatic name refresh: codex/pi fallback fires from turnCompleted with no explicit action, a later harness turn supersedes an earlier automatic name, the automatic path is bounded to 3 attempts against a provider that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and claude's own harness never falls through to the pi one-shot on a session-less turn"
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var wasSet: Bool { lock.withLock { flag } }
 }
 
 private struct AgentNameSentinelSourceMatch {
