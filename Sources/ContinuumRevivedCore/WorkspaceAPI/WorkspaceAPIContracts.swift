@@ -40,6 +40,10 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // CX-01 Phase 2c (§10): one text message into a child the caller created.
     // Contracts in `WorkspaceAPIContracts+Delegation.swift`. Appended last.
     case agentMessage = "agent.message"
+    // KB-01: project board documents. Appended so the frozen wire order of all
+    // existing operations remains stable.
+    case boardQuery = "board.query"
+    case boardApply = "board.apply"
 }
 
 // MARK: - Identity
@@ -513,7 +517,7 @@ public struct ArtifactOpenResult: Codable, Equatable, Sendable {
 // MARK: - Errors (§14.4, Phase 1 subset)
 
 public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStringConvertible {
-    public enum Code: String, Codable, Sendable {
+    public enum Code: String, Codable, Sendable, Error {
         case invalidRequest = "invalid_request"
         case targetConflict = "target_conflict"
         case scopeApprovalRequired = "scope_approval_required"
@@ -529,6 +533,11 @@ public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStri
         /// A `canvas.query` cursor minted under an older structural revision;
         /// restart the scoped query (§14.4).
         case cursorExpired = "cursor_expired"
+        /// A user gesture currently owns the same board object.
+        case busy
+        /// The owner rejected or rolled back the write because it could not be
+        /// made durable. The result was never published as committed state.
+        case durabilityFailed = "durability_failed"
     }
 
     public var code: Code

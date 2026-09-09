@@ -15,7 +15,14 @@ import Foundation
 
 public enum BoardCommand: Equatable, Sendable {
     case createCard(id: UUID, columnId: UUID, title: String, after: UUID?, before: UUID?)
+    /// API-facing atomic task creation. One command means one persistence
+    /// barrier, one revision, and one undo even when body, links and ownership
+    /// are supplied together.
+    case createTask(id: UUID, columnId: UUID, title: String, body: String, links: [CardLink], assignee: AgentID?, after: UUID?, before: UUID?)
     case editCard(id: UUID, title: String?, body: String?)
+    /// Atomic task field edit used by non-UI surfaces. Attachments remain owned
+    /// by the detail editor and are preserved verbatim.
+    case editTaskFields(id: UUID, title: String?, body: String?, links: [CardLink]?)
     case editTask(id: UUID, expected: BoardTaskContent, content: BoardTaskContent)
     case moveCard(id: UUID, toColumn: UUID, after: UUID?, before: UUID?)
     case deleteCard(id: UUID)
@@ -117,6 +124,22 @@ public enum BoardEngine {
                 title: title, createdAt: now, updatedAt: now))
             inverse = .deleteCard(id: id)
 
+        case let .createTask(id, columnId, title, body, links, assignee, after, before):
+            guard board.column(columnId) != nil else { return .failure(.unknownColumn(columnId)) }
+            guard board.card(id) == nil else { return .failure(.duplicateCard(id)) }
+            let resolved: ResolvedPosition
+            switch cardPosition(in: board, columnId: columnId, after: after, before: before, moving: nil) {
+            case .failure(let error): return .failure(error)
+            case .success(let value): resolved = value
+            }
+            rebased = resolved.rebased
+            next = resolved.board
+            next.cards.append(BoardCard(
+                id: id, columnId: columnId, position: resolved.position,
+                title: title, body: body, links: links, assignee: assignee,
+                createdAt: now, updatedAt: now))
+            inverse = .deleteCard(id: id)
+
         case let .editCard(id, title, body):
             guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
                 return .failure(.unknownCard(id))
@@ -124,6 +147,20 @@ public enum BoardEngine {
             inverse = .editCard(id: id, title: next.cards[index].title, body: next.cards[index].body)
             if let title { next.cards[index].title = title }
             if let body { next.cards[index].body = body }
+            next.cards[index].updatedAt = now
+
+        case let .editTaskFields(id, title, body, links):
+            guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
+                return .failure(.unknownCard(id))
+            }
+            inverse = .editTaskFields(
+                id: id,
+                title: title == nil ? nil : next.cards[index].title,
+                body: body == nil ? nil : next.cards[index].body,
+                links: links == nil ? nil : next.cards[index].links)
+            if let title { next.cards[index].title = title }
+            if let body { next.cards[index].body = body }
+            if let links { next.cards[index].links = links }
             next.cards[index].updatedAt = now
 
         case let .editTask(id, expected, content):

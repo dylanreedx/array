@@ -336,3 +336,54 @@ TaskEditor build and both npm tests pass in `/tmp/kb08-editor-build.log` and
 continues to reject native selects. `/tmp/kb08-workflow.log` passes all 21 workflow
 assertions, `/tmp/kb08-bundle.log` records the isolated bundle, and
 `git diff --check` passed.
+
+## 2026-09-09 — board tasks in the Array workspace API
+
+- Added provider-neutral `board.query` / `board.apply` contracts and the
+  `array_board_query` / `array_board_apply` tools. Pi, native Claude, and native
+  Codex share the same names, schemas, host dispatch and role allowlist. Canvas
+  kanban tile projections now include `boardId`.
+- `board.query` discovers open or closed project boards through the durable board
+  index and returns deterministic summaries or revision-bound paginated task
+  snapshots. Task snapshots include Markdown, typed path-free links, attachment
+  metadata, assignee, column and card identity.
+- `board.apply` supports create, edit, move, assign, unassign and delete. Complete
+  create/edit operations are atomic BoardEngine commands. The host validates
+  operation-specific fields, project agent/tile identities, revisions and retry
+  keys; positional writes can rebase surviving anchors. Every successful call
+  persists before broadcast, updates every open tile, and registers one board undo.
+- Board assignment side effects now run from one post-commit callback regardless
+  of whether the commit came from UI, API, lifecycle automation, undo or redo.
+  Assigned task content refreshes the composer without sending or stealing focus;
+  reassignment, unassignment and deletion remove only that task from the old agent.
+- The composer captures `BoardTaskContext` at the accepted-send boundary. The
+  runtime advances a still-assigned task from the first ordered lane to the end of
+  the second through the normal durable command path. Refused sends, stale owners,
+  pointer-held tasks, one-column boards and tasks already beyond the first lane do
+  not move. Completion does not mark Done; the agent must call `board.apply`.
+- Attached prompt context now carries `boardId`, `cardId` and `observedRevision`,
+  so the working agent can query the exact task again before changing it.
+
+Verification:
+
+- Builds passed for `Array`, `ContinuumRevivedCoreChecks`, and
+  `array-workspace-mcp`.
+- Targeted gates passed: `--board-model-check`,
+  `--workspace-api-board-contract-check`, `--workspace-api-contract-check`,
+  `--workspace-api-canvas-contract-check`, `--workspace-mcp-check`,
+  `--role-registry-check`, `--pi-host-tool-bridge-check`,
+  `--workspace-api-board-check`, `--board-task-workflow-check`,
+  `--workspace-api-canvas-check`, `--workspace-mcp-host-check`,
+  `--pi-extension-load-check`, and `--strict-agent-harness-check`.
+- The board host witness exercises Workspace Tools denial/enabling, closed-board
+  discovery, create/edit/move/assign/unassign/delete, persistence, live broadcast,
+  undo, strict conflicts, anchor rebasing, cursor expiry, idempotent replay and
+  payload conflicts, missing identities, pointer refusal, automatic start-work,
+  explicit Done and the one-column/stale-owner guards.
+- The packaged task workflow and packaged native MCP transport both passed from
+  `/tmp/kb01-preview/Array Dev.app`. The isolated preview was rebuilt and relaunched
+  with `/Users/dylan/kb01-scratch` and `/tmp/kb01-preview/support`.
+- The new board API leg is registered in `scripts/run-matrix.sh`.
+- `git diff --check` passes. No staging, commit, merge, push, global provider
+  configuration change, production app change, or production project change was
+  made.

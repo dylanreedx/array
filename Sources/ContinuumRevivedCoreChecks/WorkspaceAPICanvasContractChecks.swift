@@ -171,7 +171,7 @@ private func checkCanvasDTORoundTrip() {
         revision: WorkspaceRevision(epoch: "e", structure: 2),
         coverage: WorkspaceCoverage(installedZoneIds: [zoneId], unhydratedZoneIds: [UUID()]),
         zones: [CanvasQueryZone(zoneId: zoneId, projectId: UUID(), worldRect: rect(-40, -80, 900, 700), hydrated: true, collapsed: false)],
-        tiles: [CanvasQueryTile(tileId: UUID(), kind: "file", zoneId: zoneId, worldRect: rect(-20, -60, 480, 360), title: "notes.md")],
+        tiles: [CanvasQueryTile(tileId: UUID(), kind: "kanban", zoneId: zoneId, worldRect: rect(-20, -60, 480, 360), title: "Tasks", boardId: UUID())],
         nextCursor: CanvasQueryCursor.encode(structure: 2, offset: 2), truncated: true)
     guard let data = try? canvasEncoder.encode(response),
           let decoded = try? JSONDecoder().decode(CanvasQueryResponse.self, from: data) else {
@@ -180,6 +180,8 @@ private func checkCanvasDTORoundTrip() {
     }
     expect(decoded == response && decoded.schema == WorkspaceAPISchema.v1, "P4: the query response round-trips verbatim, negative origins included")
     expect(decoded.coverage.complete == false && decoded.zones[0].stale == false, "P4: coverage and staleness survive the wire")
+    expect(decoded.tiles[0].boardId == response.tiles[0].boardId,
+           "KB-01 API: canvas query projects a kanban tile's board identity")
 
     // The request decoder must accept the shorthand the pi tool sends.
     let payload: [String: Any] = ["op": "resize", "tileId": UUID().uuidString, "size": ["width": 640, "height": 480],

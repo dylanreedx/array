@@ -16,7 +16,7 @@ public extension WorkspaceAPIOp {
     /// trusted approval UI, and "allow for session" covers the later ones.
     static let sessionPresetOperations: Set<WorkspaceAPIOp> = [
         .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
-        .canvasQuery, .agentReveal, .operationGet,
+        .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply,
     ]
 }
 
@@ -69,13 +69,17 @@ public struct CanvasQueryTile: Codable, Equatable, Sendable {
     public var zoneId: UUID
     public var worldRect: CanvasWorldRect
     public var title: String?
+    /// Present for a kanban tile. This is the stable document identity used by
+    /// `board.query`/`board.apply`; it is not derived from the tile title.
+    public var boardId: UUID?
 
-    public init(tileId: UUID, kind: String, zoneId: UUID, worldRect: CanvasWorldRect, title: String?) {
+    public init(tileId: UUID, kind: String, zoneId: UUID, worldRect: CanvasWorldRect, title: String?, boardId: UUID? = nil) {
         self.tileId = tileId
         self.kind = kind
         self.zoneId = zoneId
         self.worldRect = worldRect
         self.title = title
+        self.boardId = boardId
     }
 }
 

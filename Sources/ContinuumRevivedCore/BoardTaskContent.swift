@@ -46,6 +46,10 @@ public struct BoardTaskContext: Codable, Equatable, Sendable {
 
     public func promptText(additionalInstructions: String) -> String {
         var text = "# Task: " + title
+        text += "\n\n# Array task reference\n"
+        text += "boardId: \(boardID.uuidString.lowercased())\n"
+        text += "cardId: \(cardID.uuidString.lowercased())\n"
+        text += "observedRevision: \(revision)"
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { text += "\n\n" + body }
         if !additionalInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             text += "\n\n# Additional instructions\n" + additionalInstructions

@@ -29,11 +29,41 @@ func runBoardChecks() {
     runBoardDragColumnCrossingCheck()
     runBoardPersistenceCheck()
     runBoardAssignmentCheck()
+    runBoardAtomicTaskCommandCheck()
     runBoardAttachmentWireCheck()
     runBoardTaskContentCheck()
     runBoardSurfaceChecks()
     runBoardLargeDragPerformanceCheck()
     print("Board checks: B1-B13, CX-01, and board.large-drag passed")
+}
+
+private func runBoardAtomicTaskCommandCheck() {
+    let (board, columns, _) = makeFixture()
+    let cardID = UUID()
+    let agent = AgentID(rawValue: UUID())
+    let link = CardLink.url("https://example.invalid/qa")
+    let created = applyOrFail(
+        .createTask(id: cardID, columnId: columns[0], title: "QA note", body: "Reproduction",
+                    links: [link], assignee: agent, after: nil, before: nil),
+        to: board, "KB-01 atomic create")
+    let card = created.after.card(cardID)
+    expect(created.after.revision == board.revision + 1 && card?.body == "Reproduction"
+           && card?.links == [link] && card?.assignee == agent,
+           "KB-01: complete task creation is one revision")
+    let removed = applyOrFail(created.inverse, to: created.after, "KB-01 undo atomic create").after
+    expect(removed.card(cardID) == nil, "KB-01: one inverse removes the complete created task")
+
+    let edited = applyOrFail(
+        .editTaskFields(id: cardID, title: "Updated", body: "New body", links: []),
+        to: created.after, "KB-01 atomic edit")
+    expect(edited.after.revision == created.after.revision + 1
+           && edited.after.card(cardID)?.title == "Updated"
+           && edited.after.card(cardID)?.body == "New body"
+           && edited.after.card(cardID)?.links.isEmpty == true,
+           "KB-01: editing title, body and links is one revision")
+    let reverted = applyOrFail(edited.inverse, to: edited.after, "KB-01 undo atomic edit").after
+    expect(reverted.card(cardID) == created.after.card(cardID),
+           "KB-01: one inverse restores every atomically edited task field")
 }
 
 func runBoardSurfaceChecks() {

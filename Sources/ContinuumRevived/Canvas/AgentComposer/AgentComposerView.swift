@@ -100,6 +100,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// An acceptance-aware seam for owners that can synchronously accept/reject
     /// send intent. Only `true` clears the per-agent draft.
     var onSubmitIntent: ((String) -> Bool)?
+    /// Fires only after the supervisor accepts a submission carrying a task.
+    /// The context value is captured before the accepted draft is cleared.
+    var onAcceptedBoardTask: ((BoardTaskContext) -> Void)?
     /// Non-command semantic completion actions that belong to a provider adapter.
     /// Slash commands edit the draft and use the acceptance-aware action sink on
     /// Enter; the synchronous callback remains for direct file/skill adapters.
@@ -1126,6 +1129,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     ) {
         guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
         let generation = bindingGeneration
+        let submittedTaskContext = draft.taskContext
         let isPromptSubmission: Bool
         if case .sendPrompt = intent { isPromptSubmission = true } else { isPromptSubmission = false }
         let previewPrompt: AgentPrompt?
@@ -1217,6 +1221,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     )
                 }
                 return
+            }
+            if let submittedTaskContext {
+                self.onAcceptedBoardTask?(submittedTaskContext)
             }
             guard self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
             if let submittedPrompt {

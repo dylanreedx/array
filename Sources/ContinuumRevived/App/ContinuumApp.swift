@@ -1177,6 +1177,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--workspace-api-board-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIBoardChecks.run()
+                print("ContinuumRevivedWorkspaceAPIBoardChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         // CX-01: grants, trusted approval, forgery, revocation, and the five
         // presentation dimensions including concurrent user interaction.
         if CommandLine.arguments.contains("--workspace-api-grants-check") {
@@ -4246,6 +4257,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusBroker: { [weak self] in self?.focusBroker },
         supervisor: agentSupervisor,
         registryStore: { [weak self] in self?.registryStore },
+        boardRuntime: { [weak self] projectId in
+            guard let self, let workspace = self.workspaceRuntime else { return nil }
+            if workspace.controller(for: projectId) == nil {
+                _ = try? workspace.ensureSpawner(forProjectId: projectId)
+            }
+            guard let controller = workspace.controller(for: projectId) else { return nil }
+            return self.configuredBoardRuntime(controller)
+        },
         epoch: hostEpoch,
         approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
         tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) }
@@ -7214,6 +7233,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard runtime.tileConfigurator == nil else { return runtime }
         let projectID = controller.project.id
         let attachmentStore = BoardAttachmentStore(projectRoot: controller.projectRoot)
+        runtime.onCommittedTransaction = { [weak self, weak runtime] transaction in
+            guard let self, let runtime else { return }
+            self.synchronizeBoardTaskContexts(
+                transaction, runtime: runtime, projectID: projectID,
+                attachmentStore: attachmentStore)
+        }
         runtime.tileConfigurator = { [weak self, weak runtime] view in
             guard let self else { return }
             view.taskAttachmentStore = attachmentStore
@@ -7233,33 +7258,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             view.onTaskAssign = { [weak self, weak runtime, weak view] cardID, agentID in
                 guard let self, let runtime, let view else { return "The board is no longer available." }
-                let previousAgentID = view.board.card(cardID)?.assignee
                 if let agentID {
                     guard let record = self.agentSupervisor.records[agentID], record.projectId == projectID, record.archivedAt == nil else { return "Choose an available agent from this project." }
                 }
                 switch runtime.apply(.assignCard(id: cardID, to: agentID), to: view.board.id) {
-                case .applied, .rebased:
-                    if previousAgentID != agentID,
-                       let previousTileID = previousAgentID.flatMap({ self.agentSupervisor.records[$0]?.tileId }),
-                       let previousView = self.canvasView?.tileView(for: previousTileID) as? ManagedAgentTileNSView {
-                        Task { await previousView.clearBoardTask(boardID: view.board.id, cardID: cardID) }
-                    }
-                    if let agentID,
-                       let card = view.board.card(cardID),
-                       let tileID = self.agentSupervisor.records[agentID]?.tileId,
-                       let agentView = self.canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView {
-                        Task {
-                            try? await agentView.prepareBoardTask(
-                                boardID: view.board.id,
-                                card: card,
-                                revision: view.board.revision,
-                                store: attachmentStore,
-                                focusComposer: false,
-                                confirmReplacement: false
-                            )
-                        }
-                    }
-                    return nil
+                case .applied, .rebased: return nil
                 default: return "That task could not be assigned."
                 }
             }
@@ -7285,6 +7288,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         return runtime
+    }
+
+    /// One post-commit path for UI, API, lifecycle automation and undo. The
+    /// board assignment is authoritative even when an agent tile is absent;
+    /// composer context is a best-effort view of that durable fact and never
+    /// sends by itself.
+    private func synchronizeBoardTaskContexts(
+        _ transaction: BoardTransaction,
+        runtime: BoardRuntime,
+        projectID: UUID,
+        attachmentStore: BoardAttachmentStore
+    ) {
+        let before = Dictionary(uniqueKeysWithValues: transaction.before.cards.map { ($0.id, $0) })
+        let after = Dictionary(uniqueKeysWithValues: transaction.after.cards.map { ($0.id, $0) })
+        let cardIDs = Set(before.keys).union(after.keys)
+        for cardID in cardIDs {
+            let old = before[cardID]
+            let new = after[cardID]
+            let oldAgent = old?.assignee
+            let newAgent = new?.assignee
+            if let oldAgent, oldAgent != newAgent,
+               let tileID = agentSupervisor.records[oldAgent]?.tileId,
+               let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView {
+                Task { await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID) }
+            }
+            let contentChanged = old.map { BoardTaskContent(card: $0) } != new.map { BoardTaskContent(card: $0) }
+            let taskFieldsEdited: Bool
+            switch transaction.command {
+            case .editCard, .editTask, .editTaskFields, .setCardLinks:
+                taskFieldsEdited = true
+            default:
+                taskFieldsEdited = false
+            }
+            guard let card = new, let newAgent,
+                  oldAgent != newAgent || contentChanged || taskFieldsEdited,
+                  let record = agentSupervisor.records[newAgent], record.projectId == projectID,
+                  record.archivedAt == nil, record.capabilities.locallyManaged,
+                  let tileID = record.tileId,
+                  let view = canvasView?.tileView(for: tileID) as? ManagedAgentTileNSView else { continue }
+            Task { [weak runtime, weak view] in
+                guard let runtime, let view else { return }
+                try? await view.prepareBoardTask(
+                    boardID: transaction.after.id, card: card,
+                    revision: transaction.after.revision, store: attachmentStore,
+                    focusComposer: false, confirmReplacement: false)
+                // Async image import may finish after a rapid reassignment. Do
+                // not leave the superseded agent holding context that landed late.
+                if runtime.board(id: transaction.after.id)?.card(cardID)?.assignee != newAgent {
+                    await view.clearBoardTask(boardID: transaction.after.id, cardID: cardID)
+                }
+            }
+        }
+    }
+
+    private func advanceAcceptedBoardTask(agentID: AgentID, context: BoardTaskContext) {
+        guard let projectID = agentSupervisor.records[agentID]?.projectId,
+              let workspace = workspaceRuntime,
+              let controller = workspace.controller(for: projectID) else { return }
+        let runtime = configuredBoardRuntime(controller)
+        _ = runtime.advanceAssignedTaskAfterAcceptedSend(
+            boardId: context.boardID, cardId: context.cardID, agentId: agentID)
     }
 
     private func installInitialKanbanTile(_ tile: Tile, in canvasView: CanvasNSView) {
@@ -13185,6 +13249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onIngestedEvent = { [weak self, weak view] event in
             guard let view else { return }
             self?.recordManagedActivity(agentId: agentId, tileId: tileId, event: event, status: view.currentAgentStatus)
+        }
+        view.onAcceptedBoardTask = { [weak self] acceptedAgentID, context in
+            self?.advanceAcceptedBoardTask(agentID: acceptedAgentID, context: context)
         }
         view.onLocationActionMenuRequested = { [weak self] requestedAgentID, anchor in
             self?.showLocationActionMenu(for: requestedAgentID, anchoredTo: anchor)

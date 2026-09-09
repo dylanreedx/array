@@ -287,6 +287,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The app wires this to a PiAgentRunner (ticket 88.4b). Minimal now; the
     /// framework ComposeBox component supersedes it later.
     var onSubmitPrompt: ((String) -> Void)?
+    var onAcceptedBoardTask: ((_ agentID: AgentID, _ context: BoardTaskContext) -> Void)?
     /// P6.1: fired after the user picks a model or a thinking level. The write to the
     /// agent's record has already happened by then (through the supervisor the tile
     /// attached to); this is for a host that wants to know, and for a tile with no
@@ -366,6 +367,10 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         v2Composer?.onSubmissionFinished = { [weak self] accepted in
             self?.finishOptimisticSubmission(accepted: accepted)
+        }
+        v2Composer?.onAcceptedBoardTask = { [weak self] context in
+            guard let self, let agentID = self.projectedAgentID else { return }
+            self.onAcceptedBoardTask?(agentID, context)
         }
         v2ActionButton?.target = self
         v2ActionButton?.action = #selector(performV2PrimaryAction)

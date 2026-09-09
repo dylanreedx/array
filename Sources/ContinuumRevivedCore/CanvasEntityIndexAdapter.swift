@@ -73,6 +73,7 @@ public struct CanvasEntityIndexTileSnapshot: Sendable, Equatable {
     public var relativeWorkingDirectory: String?
     public var checkoutHandle: String?
     public var attachedAgentId: AgentID?
+    public var boardId: UUID?
     public var freshness: CanvasEntityFreshness?
 
     public init(
@@ -86,6 +87,7 @@ public struct CanvasEntityIndexTileSnapshot: Sendable, Equatable {
         relativeWorkingDirectory: String? = nil,
         checkoutHandle: String? = nil,
         attachedAgentId: AgentID? = nil,
+        boardId: UUID? = nil,
         freshness: CanvasEntityFreshness? = nil
     ) {
         self.id = id
@@ -98,6 +100,7 @@ public struct CanvasEntityIndexTileSnapshot: Sendable, Equatable {
         self.relativeWorkingDirectory = relativeWorkingDirectory
         self.checkoutHandle = checkoutHandle
         self.attachedAgentId = attachedAgentId
+        self.boardId = boardId
         self.freshness = freshness
     }
 }

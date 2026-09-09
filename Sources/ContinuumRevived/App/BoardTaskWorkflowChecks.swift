@@ -69,10 +69,31 @@ enum BoardTaskWorkflowChecks {
         )
         try require(composer.draft.taskContext?.cardID == card.id && composer.draft.text == "Keep keyboard access", "assignment attaches visible task context without sending or replacing agent text")
         try require(focusWindow.firstResponder === responderBeforeAssignment, "background assignment does not steal focus into the agent composer")
+        var acceptedTaskContexts: [BoardTaskContext] = []
+        composer.onAcceptedBoardTask = { acceptedTaskContexts.append($0) }
         composer.composerRequestedSend(composer.textView)
-        for _ in 0..<100 where sink.prompts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<100 where sink.prompts.isEmpty || acceptedTaskContexts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         try require(sink.prompts.count == 1, "explicit send reaches the existing sink exactly once")
+        try require(acceptedTaskContexts.count == 1 && acceptedTaskContexts[0].cardID == card.id,
+                    "accepted-send hook receives the attached task captured before the composer clears")
         try require(sink.prompts[0].text.contains(card.title) && sink.prompts[0].text.contains("Keep keyboard access") && sink.prompts[0].imageAttachments.count == 2, "explicit send contains task, instructions and both images")
+        let refusedAgent = AgentID(rawValue: UUID())
+        let refusedSink = TaskWorkflowSink()
+        refusedSink.acceptance = .refused(.turnNotReady)
+        let refusedComposer = AgentComposerView(frame: composer.frame)
+        refusedComposer.bindAttachmentStore(images, agentID: refusedAgent)
+        refusedComposer.bindDraftStore(drafts, agentID: refusedAgent)
+        refusedComposer.bindActionSink(
+            refusedSink, agentID: refusedAgent,
+            snapshot: AgentTileTurnSnapshot(
+                state: .ready, capabilities: AgentTurnCapabilities(canSend: true), turnStartedAt: nil))
+        var refusedTaskContexts: [BoardTaskContext] = []
+        refusedComposer.onAcceptedBoardTask = { refusedTaskContexts.append($0) }
+        try await refusedComposer.prepareBoardTask(boardID: boardID, card: card, revision: 4, store: tasks)
+        refusedComposer.composerRequestedSend(refusedComposer.textView)
+        for _ in 0..<100 where refusedSink.prompts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        try require(refusedTaskContexts.isEmpty,
+                    "a refused send never invokes the attached-task lifecycle hook")
         let original = try await tasks.read(boardID: boardID, attachmentID: taskImage.id)
         try require(original == data, "composer preparation and send preserve the project-owned original")
     }
@@ -144,8 +165,9 @@ enum BoardTaskWorkflowChecks {
 @MainActor
 private final class TaskWorkflowSink: AgentTileActionSink {
     var prompts: [AgentPrompt] = []
+    var acceptance: IntentAcceptance = .accepted
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         if case .sendPrompt(let prompt) = intent { prompts.append(prompt) }
-        return .accepted
+        return acceptance
     }
 }

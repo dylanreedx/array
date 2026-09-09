@@ -41,6 +41,9 @@ final class BoardRuntime {
     /// Applied to every tile this runtime adopts. The app installs it once; the
     /// runtime knows nothing about agents or supervisors itself.
     var tileConfigurator: ((KanbanTileNSView) -> Void)?
+    /// Installed by the app once. Runs for UI, API, automatic lifecycle and
+    /// undo/redo commits alike so assignment context cannot drift by origin.
+    var onCommittedTransaction: ((BoardTransaction) -> Void)?
 
     init(projectStore: any ProjectStoring) {
         self.projectStore = projectStore
@@ -54,6 +57,13 @@ final class BoardRuntime {
         guard let loaded = try? projectStore.tryLoadBoard(id: id) ?? nil else { return nil }
         boards[id] = loaded
         return loaded
+    }
+
+    /// The durable board index, including documents whose tile is currently
+    /// closed. Query callers use the index for discovery and `board(id:)` for
+    /// authoritative current contents.
+    func boardIndexEntries() -> [BoardIndexEntry] {
+        ((try? projectStore.tryLoadBoardState()) ?? nil)?.boards ?? []
     }
 
     /// Creates and persists a new board with the default columns. Used by the
@@ -150,6 +160,7 @@ final class BoardRuntime {
         boards[boardId] = transaction.after
         if recordUndo { history(for: boardId).record(transaction) }
         broadcast(transaction.after, for: boardId, skipping: nil)
+        onCommittedTransaction?(transaction)
         return transaction.rebasedAnchors
             ? .rebased(revision: transaction.after.revision)
             : .applied(revision: transaction.after.revision)
@@ -161,6 +172,31 @@ final class BoardRuntime {
     @discardableResult
     func applyForHistory(_ command: BoardCommand, to boardId: UUID) -> BoardCommandOutcome {
         apply(command, to: boardId, recordUndo: false)
+    }
+
+    /// The accepted-send lifecycle hook. Starting an attached task advances it
+    /// from the first ordered lane to the end of the second, but only while the
+    /// assignment still names the sending agent. `apply` supplies persistence,
+    /// drag refusal, broadcast, assignment synchronization and one undo.
+    @discardableResult
+    func advanceAssignedTaskAfterAcceptedSend(
+        boardId: UUID,
+        cardId: UUID,
+        agentId: AgentID
+    ) -> BoardCommandOutcome? {
+        guard let board = board(id: boardId),
+              let card = board.card(cardId),
+              card.assignee == agentId,
+              board.orderedColumns.count > 1,
+              card.columnId == board.orderedColumns[0].id else { return nil }
+        let destination = board.orderedColumns[1].id
+        return apply(
+            .moveCard(
+                id: card.id,
+                toColumn: destination,
+                after: board.orderedCards(in: destination).last?.id,
+                before: nil),
+            to: board.id)
     }
 
     private func broadcast(_ board: Board, for boardId: UUID, skipping: KanbanTileNSView? = nil) {
@@ -211,7 +247,8 @@ extension BoardCommand {
     /// long as a pointer is down.
     func touches(cardId: UUID, in board: Board) -> Bool {
         switch self {
-        case let .editTask(id, _, _), let .editCard(id, _, _), let .moveCard(id, _, _, _),
+        case let .editTask(id, _, _), let .editCard(id, _, _), let .editTaskFields(id, _, _, _),
+             let .moveCard(id, _, _, _),
              let .deleteCard(id), let .setCardLinks(id, _), let .assignCard(id, _):
             return id == cardId
         case let .restoreCard(card):
@@ -219,7 +256,7 @@ extension BoardCommand {
         case let .deleteColumn(id, _):
             // Deleting the held card's own column moves that card too.
             return board.card(cardId)?.columnId == id
-        case .createCard, .createColumn, .renameColumn, .moveColumn,
+        case .createCard, .createTask, .createColumn, .renameColumn, .moveColumn,
              .restoreColumn, .renameBoard:
             return false
         }

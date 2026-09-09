@@ -43,8 +43,9 @@ func runWorkspaceMCPHostCheck() throws {
     process.environment = environment
     try process.run()
     let initialize = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
-    let call = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"array_workspace_context\",\"arguments\":{}}}\n"
-    input.fileHandleForWriting.write(Data((initialize + call).utf8))
+    let list = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+    let call = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"array_board_query\",\"arguments\":{}}}\n"
+    input.fileHandleForWriting.write(Data((initialize + list + call).utf8))
     try input.fileHandleForWriting.close()
     // The production listener marshals requests onto the main actor. Keep the
     // actor's run loop alive while the helper is exchanging its request.
@@ -57,10 +58,11 @@ func runWorkspaceMCPHostCheck() throws {
         throw WorkspaceMCPHostCheckError("workspace MCP helper exited \(process.terminationStatus): \(text)")
     }
     guard text.contains("\"protocolVersion\":\"2024-11-05\""),
+          text.contains("\"name\":\"array_board_query\"") && text.contains("\"name\":\"array_board_apply\""),
           text.contains("\"status\":\"ok\""),
           receivedAgentID == agentID.rawValue.uuidString,
-          receivedOperation == WorkspaceAPIOp.workspaceContext.rawValue else {
+          receivedOperation == WorkspaceAPIOp.boardQuery.rawValue else {
         throw WorkspaceMCPHostCheckError("workspace MCP child/host exchange was incomplete: output=\(text) receivedAgentID=\(String(describing: receivedAgentID)) receivedOperation=\(String(describing: receivedOperation))")
     }
-    print("Workspace MCP host check passed: provider child handshake, authenticated loopback request, and bound agent identity")
+    print("Workspace MCP host check passed: provider child discovered both board tools and routed an authenticated board query with bound agent identity")
 }

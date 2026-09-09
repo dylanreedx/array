@@ -62,6 +62,7 @@ private func checkAgentOpsAndPreset() {
         .canvasQuery, .canvasApply,
         .agentDelegate, .agentReveal, .operationGet,
         .agentMessage,
+        .boardQuery, .boardApply,
     ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
     expect(WorkspaceAPIOp(rawValue: "agent.message") == .agentMessage
             && !WorkspaceAPIOp.sessionPresetOperations.contains(.agentMessage),
@@ -70,6 +71,7 @@ private func checkAgentOpsAndPreset() {
     let preset = WorkspaceToolGrant.phase1Preset(agentId: me, checkout: ckOwn, generation: 3)
     expect(preset.operations == WorkspaceAPIOp.sessionPresetOperations
             && preset.operations.isSuperset(of: [.workspaceContext, .artifactOpen, .agentFind, .agentInspect])
+            && preset.operations.isSuperset(of: [.boardQuery, .boardApply])
             && preset.operations.isDisjoint(with: [.canvasApply, .agentDelegate]),
            "the preset lists its ops explicitly (find + self-inspect in, apply/delegate out), got \(preset.operations)")
     expect(preset.inspectableAgentIds == [me], "the preset lets an agent inspect only ITSELF, got \(preset.inspectableAgentIds)")

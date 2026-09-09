@@ -68,8 +68,8 @@ extension BoardTransaction {
     /// command shape.
     var actionName: String {
         switch command {
-        case .createCard: return "Add Card"
-        case .editCard, .editTask: return "Edit Card"
+        case .createCard, .createTask: return "Add Card"
+        case .editCard, .editTask, .editTaskFields: return "Edit Card"
         case .moveCard: return "Move Card"
         case .deleteCard, .restoreCard: return "Delete Card"
         case .setCardLinks: return "Change Card Links"

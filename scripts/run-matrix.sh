@@ -689,6 +689,10 @@ run_app_check .build/debug/Array --workspace-api-agents-check
 # unhydrated tiles surviving, and every conflict (stale revision, live gesture,
 # unhydrated or foreign target) applying nothing.
 run_app_check .build/debug/Array --workspace-api-canvas-check
+# KB-01: board discovery and every task mutation through the production API
+# dispatch and BoardRuntime persistence/broadcast/undo path, including stale
+# writes, anchor rebasing, idempotency, pointer ownership and start-work lifecycle.
+run_app_check .build/debug/Array --workspace-api-board-check
 # CX-01 Phase 2b (.plans/59, §10): visible delegation with safe retry — create
 # once under retry, idempotency conflict, the child tile inside the parent's zone,
 # a presentation failure repaired by agent.reveal, operation.get per step, and

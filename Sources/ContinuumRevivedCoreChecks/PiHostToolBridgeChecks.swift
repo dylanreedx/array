@@ -14,6 +14,7 @@ import Foundation
 // foreign dialogs left alone, and an unbound runner answering `unsupported`.
 func runPiHostToolBridgeChecks() {
     checkBridgeSuccessAndContext()
+    checkBridgeBoardTool()
     checkBridgeStructuredError()
     checkBridgeCancellationOnAbort()
     checkBridgeHostDeadline()
@@ -240,7 +241,14 @@ private func runTurnInBackground(_ runner: PiRpcAgentRunner, prompt: String = "h
 }
 
 private func oneCall(_ toolCallId: String, op: String = "artifact.open", payload: [String: Any] = ["relativePath": "README.md"]) -> [String: Any] {
-    ["toolCallId": toolCallId, "toolName": op == "artifact.open" ? "array_open_document" : "array_workspace_context", "op": op, "payload": payload]
+    let toolName: String
+    switch op {
+    case "artifact.open": toolName = "array_open_document"
+    case "board.query": toolName = "array_board_query"
+    case "board.apply": toolName = "array_board_apply"
+    default: toolName = "array_workspace_context"
+    }
+    return ["toolCallId": toolCallId, "toolName": toolName, "op": op, "payload": payload]
 }
 
 // MARK: - Cases
@@ -282,6 +290,34 @@ private func checkBridgeSuccessAndContext() {
     let completed = events.value.contains { if case let .itemCompleted(_, itemId, _, status) = $0 { return itemId == "tc-1" && status == .completed }; return false }
     expect(started && completed, "bridge success: the transcript still sees the tool item start and complete")
     expect(runner.qaPendingHostToolRequestIds.isEmpty, "bridge success: nothing pending after the turn")
+}
+
+private func checkBridgeBoardTool() {
+    guard let root = try? makeFakeBridgePi(scenario: [
+        "calls": [oneCall("tc-board", op: "board.query", payload: ["boardId": "board-1"])]
+    ]) else { expect(false, "board bridge: failed to write fake pi"); return }
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (runner, restorePath) = makeBridgeRunner(root: root)
+    defer { restorePath() }
+    let seen = BridgeBox<[String]>([])
+    runner.observeHostToolRequests { call in
+        seen.value.append(call.request.op)
+        call.respond(.ok(["boardId": "board-1", "revision": 4]))
+    }
+    let events = BridgeBox<[AgentRuntimeEvent]>([])
+    let done = runTurnInBackground(runner, events: events)
+    expect(done.wait(timeout: .now() + 15) == .success, "board bridge: the turn must complete")
+    runner.stop()
+    let result = bridgeToolResult(root: root, toolCallId: "tc-board")
+    expect(seen.value == ["board.query"] && result?["status"] as? String == "ok",
+           "board bridge: Pi routes array_board_query through the authenticated host bridge")
+    let started = events.value.contains {
+        if case let .itemStarted(_, itemId, _, title) = $0 {
+            return itemId == "tc-board" && title == "array_board_query"
+        }
+        return false
+    }
+    expect(started, "board bridge: the real Pi transport exposes the board tool in its transcript")
 }
 
 private func checkBridgeStructuredError() {

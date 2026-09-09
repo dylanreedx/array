@@ -80,7 +80,8 @@ extension WorkspaceAPIService {
         items += tiles.map { tile in
             .tile(CanvasQueryTile(
                 tileId: tile.id, kind: tile.kind.rawValue, zoneId: tile.zoneId!,
-                worldRect: tile.worldFrame, title: tile.label.isEmpty ? nil : tile.label))
+                worldRect: tile.worldFrame, title: tile.label.isEmpty ? nil : tile.label,
+                boardId: tile.boardId))
         }
 
         func response(_ page: [CanvasQueryItem], next: String?, truncated: Bool) -> CanvasQueryResponse {

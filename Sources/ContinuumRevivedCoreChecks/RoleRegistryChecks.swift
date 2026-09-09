@@ -260,7 +260,7 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
     // are not delegation. A roleless agent sends no `--tools` and already has them.
     expect(pi.toolsArguments(roleId: "pi-orchestrator") == ["--tools", "read, grep"],
            "C8: the default must stay the role's own allowlist, unchanged (the runner path adds Array's tools)")
-    expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: false) == ["--tools", "read, grep, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
+    expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: false) == ["--tools", "read, grep, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
            "C8: below the cap the spawn verb must be withheld, not refused later")
     // T5.2 (2026-08-25): pi has TWO delegation verbs and ALL missing ones are
     // appended, not just the first. `spawn_agent` is Array's own bundled
@@ -269,7 +269,7 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
     // first silently denied the other — which is what made pi delegation look
     // broken while Array's own extension was installed and loading correctly.
     expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: true)
-            == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
+            == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
            "T5.2: a roled pi agent allowed to spawn must be offered BOTH pi delegation verbs plus spawn_agent's wait_agents collection half (and CX-01's host tools)")
 
     // Idempotent, per verb: a role that already lists ONE is given only the other,
@@ -277,12 +277,12 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
     try writeRole(.pi, name: "pi-spawner", tools: "read, spawn_agent")
     let respawned = RoleRegistry(projectRoot: temp, harness: .pi)
     expect(respawned.toolsArguments(roleId: "pi-spawner", allowingSpawn: true)
-            == ["--tools", "read, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
+            == ["--tools", "read, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
            "T5.2: a role already declaring one spawn verb must gain the missing ones and not repeat the declared one")
     try writeRole(.pi, name: "pi-both", tools: "read, delegate_agent, spawn_agent, wait_agents")
     let both = RoleRegistry(projectRoot: temp, harness: .pi)
     expect(both.toolsArguments(roleId: "pi-both", allowingSpawn: true)
-            == ["--tools", "read, delegate_agent, spawn_agent, wait_agents, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
+            == ["--tools", "read, delegate_agent, spawn_agent, wait_agents, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_delegate, array_reveal_agent, array_get_operation, array_message_agent"],
            "T5.2: a role declaring every spawn verb keeps its ordering; only the host bridge tools are appended")
 
     // A role with no tool list keeps having none: pi's default already includes

@@ -65,6 +65,7 @@ final class WorkspaceAPIService {
     let focusBrokerProvider: () -> FocusBroker?
     let supervisor: AgentSupervisor
     let registryStoreProvider: () -> RegistryStore?
+    var boardRuntimeProvider: (UUID) -> BoardRuntime?
     let epoch: String
     /// Production: an NSAlert (`AppDelegate.presentWorkspaceToolApproval`). Checks
     /// inject a deterministic decision. This is the ONLY place a grant beyond the
@@ -105,6 +106,9 @@ final class WorkspaceAPIService {
     struct CachedCanvasApply { let payloadHash: String; let result: CanvasApplyResult }
     var canvasApplyIdempotency: [AgentID: [String: CachedCanvasApply]] = [:]
     var canvasApplyIdempotencyOrder: [AgentID: [String]] = [:]
+    struct CachedBoardApply { let payloadHash: String; let result: BoardApplyResult }
+    var boardApplyIdempotency: [AgentID: [String: CachedBoardApply]] = [:]
+    var boardApplyIdempotencyOrder: [AgentID: [String]] = [:]
     static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
@@ -114,6 +118,7 @@ final class WorkspaceAPIService {
         focusBroker: @escaping () -> FocusBroker?,
         supervisor: AgentSupervisor,
         registryStore: @escaping () -> RegistryStore?,
+        boardRuntime: @escaping (UUID) -> BoardRuntime? = { _ in nil },
         epoch: String,
         approvalHandler: @escaping ApprovalHandler,
         tileWiring: ((UUID, AgentID) -> Void)? = nil
@@ -123,6 +128,7 @@ final class WorkspaceAPIService {
         self.focusBrokerProvider = focusBroker
         self.supervisor = supervisor
         self.registryStoreProvider = registryStore
+        self.boardRuntimeProvider = boardRuntime
         self.epoch = epoch
         self.approvalHandler = approvalHandler
         self.tileWiring = tileWiring
@@ -247,6 +253,13 @@ final class WorkspaceAPIService {
         case .agentMessage:
             return message(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                            payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .boardQuery:
+            return boardQuery(agentId: agentId, record: record, ownHandle: ownHandle,
+                              payload: payload, runtime: runtime)
+        case .boardApply:
+            return boardApply(agentId: agentId, record: record, ownHandle: ownHandle,
+                              requestId: requestId, payload: payload, runtime: runtime,
+                              isCancelled: isCancelled)
         }
     }
 
@@ -722,7 +735,8 @@ final class WorkspaceAPIService {
                     label: tile.title,
                     worldFrame: CanvasWorldRect(tile.frame),
                     zoneId: zone.zoneId,
-                    projectId: zone.projectId))
+                    projectId: zone.projectId,
+                    boardId: tile.metadata.boardId))
             }
         }
         let agents = records.map { record in
