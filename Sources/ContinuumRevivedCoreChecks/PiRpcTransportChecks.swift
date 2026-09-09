@@ -18,9 +18,10 @@ import Foundation
 // otherwise the SAME shape one-shot `--mode json` produces.
 func runPiRpcTransportChecks() {
     runPiRpcTransportCorrelationChecks()
+    runPiRpcTransportConcurrentWriteChecks()
     runPiRpcAgentRunnerChecks()
     runPiEventTranslatorRpcFrameChecks()
-    print("PiRpcTransport/PiRpcAgentRunner checks passed: request/response correlation survives interleaving, one process serves many turns, abort keeps the connection alive for the next prompt, steer resolves without ending the turn it landed in, a malformed/unknown frame is dropped not fatal, and the two rpc-only frame types translate to zero events")
+    print("PiRpcTransport/PiRpcAgentRunner checks passed: request/response correlation survives interleaving, concurrent sends land as whole frames in completion order, one process serves many turns, abort keeps the connection alive for the next prompt, steer resolves without ending the turn it landed in, a malformed/unknown frame is dropped not fatal, and the two rpc-only frame types translate to zero events")
 }
 
 /// A lock-protected mutable box, for state a `@Sendable` event callback
@@ -145,6 +146,13 @@ for line in sys.stdin:
         obj = json.loads(line)
     except Exception:
         continue
+    # An `echo_inline` handler answers on the READ thread, so the echo order is
+    # the order whole frames came off the pipe -- the write-serialization
+    # witness needs exactly that ordering, and a torn frame shows up as a line
+    # that fails to parse above (dropped) rather than as an echo.
+    if handlers.get(obj.get("type"), default_handler).get("echo_inline"):
+        emit_locked({"type": "echo", "received": obj})
+        continue
     threading.Thread(target=handle, args=(obj,), daemon=True).start()
 
 time.sleep(0.3)
@@ -262,6 +270,100 @@ private func runPiRpcTransportCorrelationChecks() {
     }
     expect(deltas.contains("x") && deltas.contains("y"),
            "pi-rpc transport: event lines interleaved between the two responses must still reach onEvent (got deltas \(deltas))")
+
+    transport.stop()
+}
+
+// MARK: - 1b. PiRpcTransport: concurrent sends are never torn
+
+/// CX-01 hardening. The host-tool bridge made `extension_ui_response` a third
+/// writer of pi's stdin, off `bridgeQueue`, beside prompt/steer/abort sends. A
+/// pipe write past PIPE_BUF is not atomic, so two unserialised writers can
+/// interleave the bytes of their frames; pi then drops both as unparsable JSON
+/// -- a lost tool response wedges the model's turn forever. Eight senders on
+/// eight queues each write a frame far larger than the pipe buffer; the fake
+/// echoes every WHOLE frame it read, in read order. Every frame must arrive
+/// intact, and a marker sent after all eight have RETURNED must be echoed after
+/// all eight: a `send` that has returned has been written.
+private func runPiRpcTransportConcurrentWriteChecks() {
+    let scenario: [String: Any] = [
+        "handlers": [
+            "blob": ["echo_inline": true],
+            "marker": ["echo_inline": true],
+        ],
+        "default": ["events": []],
+    ]
+    guard let (script, scenarioFile, root) = try? makeFakePiRpc(scenario: scenario) else {
+        expect(false, "pi-rpc transport: failed to write fake pi rpc fixture (concurrent writes)")
+        return
+    }
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let transport = PiRpcTransport()
+    let echoes = Box<[[String: Any]]>([])
+    let markerSeen = DispatchSemaphore(value: 0)
+    transport.onEvent = { line in
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "echo",
+              let received = object["received"] as? [String: Any] else { return }
+        echoes.value.append(received)
+        if received["type"] as? String == "marker" { markerSeen.signal() }
+    }
+    do {
+        try transport.start(
+            executable: "/usr/bin/env",
+            arguments: ["python3", script.path, scenarioFile.path],
+            environment: ["PATH": "/usr/bin:/bin"],
+            currentDirectory: nil)
+    } catch {
+        expect(false, "pi-rpc transport: fake pi failed to launch (concurrent writes): \(error)")
+        return
+    }
+
+    // Well past the 64 KiB pipe buffer, so every write blocks mid-frame and an
+    // unserialised neighbour gets its chance to interleave.
+    let senderCount = 8
+    let fillLength = 200_000
+    func fill(_ index: Int) -> String {
+        String(repeating: Character(UnicodeScalar(UInt8(97 + index))), count: fillLength)
+    }
+    let sendFailures = Box<[String]>([])
+    let group = DispatchGroup()
+    for index in 0..<senderCount {
+        group.enter()
+        DispatchQueue(label: "pi-rpc-writer-\(index)").async {
+            do {
+                try transport.send(type: "blob", payload: ["seq": index, "fill": fill(index)])
+            } catch {
+                sendFailures.value.append("\(index): \(error)")
+            }
+            group.leave()
+        }
+    }
+    group.wait()
+    do {
+        try transport.send(type: "marker")
+    } catch {
+        sendFailures.value.append("marker: \(error)")
+    }
+    expect(sendFailures.value.isEmpty, "pi-rpc transport: every concurrent send must succeed, got \(sendFailures.value)")
+    let markerArrived = markerSeen.wait(timeout: .now() + 15) == .success
+    expect(markerArrived, "pi-rpc transport: the marker frame sent after all senders returned must be echoed")
+
+    let received = echoes.value
+    let blobs = received.filter { $0["type"] as? String == "blob" }
+    expect(blobs.count == senderCount,
+           "pi-rpc transport: \(senderCount) concurrent sends must reach pi as \(senderCount) whole frames; the fake parsed \(blobs.count) (a torn frame is dropped as unparsable)")
+    let intact = blobs.allSatisfy { blob in
+        guard let seq = blob["seq"] as? Int, let text = blob["fill"] as? String else { return false }
+        return text == fill(seq)
+    }
+    expect(intact, "pi-rpc transport: every echoed frame must carry its own payload byte for byte")
+    expect(Set(blobs.compactMap { $0["seq"] as? Int }) == Set(0..<senderCount),
+           "pi-rpc transport: every sender's frame must arrive exactly once, got seqs \(blobs.compactMap { $0["seq"] as? Int }.sorted())")
+    expect(received.last?["type"] as? String == "marker" && received.count == senderCount + 1,
+           "pi-rpc transport: frames land in completion order -- a send that returned before the marker was sent is read before it (got \(received.compactMap { $0["type"] as? String }))")
 
     transport.stop()
 }

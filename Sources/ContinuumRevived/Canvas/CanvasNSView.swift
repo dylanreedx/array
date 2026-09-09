@@ -419,6 +419,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// canvas reports the hit and `WorkspaceRuntime.setActiveZone` decides whether
     /// it may arm (a group zone may not), so the arming policy stays in one place.
     var onZoneActivated: ((UUID) -> Void)?
+    /// CX-01: fired from `setViewport` when the writer is the user (camera driver
+    /// or pointer pan). `WorkspaceRuntime.noteUserInteraction` listens.
+    var onUserCameraChange: (() -> Void)?
 
     /// Fired after a zone is renamed (inline edit committed) so the caller can
     /// persist the new name. Carries (zoneId, newName).
@@ -3625,6 +3628,10 @@ final class CanvasNSView: NSView, TokenThemed {
         pendingFrameStartedAt = cameraStepStart
         defer { gestureStepDurationsMs.append((ProcessInfo.processInfo.systemUptime - cameraStepStart) * 1_000) }
         qaViewportApplyCount += 1
+        // CX-01: only the USER's camera (trackpad/pinch through the driver, or a
+        // pointer pan) counts as an interaction; a navigation snap, a restore, an
+        // API reveal or a check is programmatic and must not defer itself.
+        if cameraDriver.isApplying || pointerPanActive { onUserCameraChange?() }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -6681,6 +6688,68 @@ final class CanvasNSView: NSView, TokenThemed {
     func zoneId(containing tileId: UUID) -> UUID? {
         zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) })?.placement.zoneId
             ?? (flatCompatibilitySceneActive ? canvasState.tiles.first(where: { $0.id == tileId })?.zoneId : nil)
+    }
+
+    /// Every installed layer holding a tile with this id. More than one is a
+    /// duplicate appearance (UUIDs are persistence identities, not occurrence
+    /// identities — see `applyZoneTransaction`), which the workspace API must
+    /// refuse to target rather than pick a peer. CX-01 (`.plans/59`, §6.1).
+    func installedZoneIds(containing tileId: UUID) -> [UUID] {
+        zoneLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }.map(\.placement.zoneId)
+    }
+
+    /// A pointer gesture owns the geometry right now: a tile move/resize between
+    /// `beginGeometryEdit` and its commit, or a pointer pan. The workspace API
+    /// must not apply behind it (§14.2: never queue a write behind a drag).
+    var isGeometryGestureActive: Bool { pendingGeometryEdit != nil || pointerPanActive }
+
+    enum ProgrammaticGeometryOutcome: Equatable {
+        /// The owner transaction committed and `persistGeometrySnapshot` ran
+        /// (`onLayoutCommitted` → `persistLayoutTransaction`, synchronous).
+        case committed(undoRecorded: Bool)
+        /// The layout engine resolved the request back to the tile's current frame.
+        case unchanged
+        case gestureActive
+        /// The tile is in no installed layer (unhydrated, flat scene, or unknown).
+        case notInstalled
+        /// The commit rolled the model back because the persistence barrier failed.
+        case persistenceFailed
+    }
+
+    /// CX-01 Phase 4 (`.plans/59`, §14.3): apply ONE world-frame move or resize
+    /// to a layer-owned tile through exactly the route a pointer drag takes —
+    /// `beginGeometryEdit` / `beginAutoLayoutGesture` / `updateTile` (which is the
+    /// WORLD→ZONE-LOCAL boundary via `tileFrame(fromWorldFrame:)`) / membership
+    /// re-evaluation and settle for a move / `finishAutoLayoutGesture` /
+    /// `commitGeometryEdit`. Commit persists synchronously and records the same
+    /// undo entry a drag does. Camera, focus, selection and the armed zone are not
+    /// touched. `zoneId` pins the occurrence the caller validated.
+    func applyProgrammaticTileGeometry(tileId: UUID, in zoneId: UUID, worldFrame: TileFrame, action: CanvasGeometryAction) -> ProgrammaticGeometryOutcome {
+        guard action == .moveTile || action == .resizeTile else { return .notInstalled }
+        guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }),
+              let tile = layer.tiles.first(where: { $0.id == tileId }) else { return .notInstalled }
+        guard !isGeometryGestureActive else { return .gestureActive }
+        let before = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+        guard before != worldFrame else { return .unchanged }
+        guard beginGeometryEdit(action, tileIds: [tileId], includeAllZones: true) else { return .gestureActive }
+        beginAutoLayoutGesture()
+        var next = tile
+        next.frame = tileFrame(fromWorldFrame: worldFrame, tileId: tileId)
+        if action == .moveTile {
+            updateTile(next, recalculateZoneBounds: false, notifyChange: false)
+            _ = reevaluateZoneMembership(forMovedTile: tileId, notifyChange: false)
+            settleAutoLayoutAfterMove(tileId: tileId, honorSnap: false)
+        } else {
+            updateTile(next, notifyChange: false)
+        }
+        _ = finishAutoLayoutGesture()
+        let afterLayout = tilesInWorldFrames(forZoneId: zoneId)?.first(where: { $0.id == tileId })?.frame
+            ?? self.worldFrame(forTileFrame: next.frame, tileId: tileId)
+        let recordsUndo = activeUndoWorkspaceId != nil
+        if commitGeometryEdit() != nil { return .committed(undoRecorded: recordsUndo) }
+        // A nil commit is either a no-op (the engine put the tile back where it
+        // was) or a failed barrier (the commit itself rolled the model back).
+        return afterLayout == before ? .unchanged : .persistenceFailed
     }
 
     /// Where `installProjectTile` actually put a tile. Callers persist through the

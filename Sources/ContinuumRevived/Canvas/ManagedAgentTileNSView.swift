@@ -252,13 +252,20 @@ final class ManagedAgentTileNSView: TileNSView {
     /// See `TurnLiveness`. Written only from the event switch, so it moves with
     /// the same stream that produces the transcript's rows.
     private(set) var turnLiveness: TurnLiveness = .unknown
-    var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
-    /// Explicit provider response transport for v2 request blocks. Production
-    /// binds nothing today because no compiled `AgentAdapter` response conformer
-    /// exists (Queue 90 owns that capability); an unbound seam means a choice
-    /// press resolves NOTHING — the request stays truthfully pending until a
-    /// real `requestResolved`/`userInputResolved` runtime event arrives. This
-    /// tile never fabricates a resolution locally.
+    /// Explicit provider response transport for v2 request blocks.
+    ///
+    /// Returns whether the app ACCEPTED the response for dispatch — not whether
+    /// the provider received it, which cannot be known on this turn (the
+    /// transport blocks on a round trip). False, or an unbound seam, means
+    /// nothing was dispatched and the tile paints `.failed`; true means
+    /// `.submitting`, and the request still stays open until a real
+    /// `requestResolved`/`userInputResolved` runtime event arrives. This tile
+    /// never fabricates a resolution locally.
+    ///
+    /// Bound in `AppDelegate.wireManagedAgentTile`. The buttons that reach it are
+    /// gated on `AgentTurnCapabilities.canRespondToRequests`, so a runner with no
+    /// response transport renders a readable request and no controls at all —
+    /// rather than controls that press into nothing.
     var onProviderResponse: ((_ requestID: String, _ value: String) -> Bool)?
 
     /// App-owned sink for a local-file link this agent authored. It receives the
@@ -298,12 +305,13 @@ final class ManagedAgentTileNSView: TileNSView {
         monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         let fileIndex = AgentFileIndex()
+        // No fixtures. The filter here used to drop `fixture.files` and
+        // `fixture.commands` and keep `fixture.skills`, which put two invented
+        // rows ("review", "research") on the live `$` menu of every managed
+        // agent tile — and `$` is a real trigger for this composer variant.
         self.v2DefaultCompletionRegistry = AgentCompletionProviderRegistry(
-            providers: AgentCompletionFixtures.providers().filter {
-                $0.providerID != "fixture.files" && $0.providerID != "fixture.commands"
-            }
-                + [AgentCommandCompletionProvider()]
-                + [AgentFileCompletionProvider(index: fileIndex)]
+            providers: [AgentCommandCompletionProvider(),
+                        AgentFileCompletionProvider(index: fileIndex)]
         )
         self.threadId = threadId
         self.statusRowPlacement = statusRowPlacement
@@ -591,6 +599,10 @@ final class ManagedAgentTileNSView: TileNSView {
         runtimeObservationObserverToken = supervisor.addRuntimeObservationObserver(for: agentID) { [weak self] observation in
             self?.transcriptCollectionFixture?.captureRuntimeObservation(observation)
             self?.updateLiveToolVerb(for: observation)
+            // ST-01 — an account quota reading changes a row element without
+            // producing any runtime EVENT, so nothing else in this tile would
+            // repaint it.
+            if case .accountQuota = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
@@ -821,7 +833,39 @@ final class ManagedAgentTileNSView: TileNSView {
             menu.addItem(item)
         }
         root.submenu = menu
-        return makePageZoomMenuItems() + [root]
+        return makePageZoomMenuItems() + [root] + makeWorkspaceToolsMenuItems()
+    }
+
+    /// CX-01 (`.plans/59` §14.1): the per-agent workspace-tools policy, offered on
+    /// the tile the agent lives in. A checkmark, not a submenu — it is one boolean.
+    ///
+    /// It reads `AgentRecord.workspaceToolsEnabled` and writes it through
+    /// `AgentSupervisor.setWorkspaceToolsEnabled`, whose `onWorkspaceToolsChanged`
+    /// makes the host service drop every grant it had minted for this agent, so
+    /// unchecking it revokes rather than only affecting the next dispatch. ABSENT
+    /// (not disabled) for a tile with no agent behind it: there is no record to
+    /// toggle, and the policy belongs to the agent, never to the tile.
+    private func makeWorkspaceToolsMenuItems() -> [NSMenuItem] {
+        guard let agentID = attachedAgentID,
+              let record = agentSource?.records[agentID] else { return [] }
+        let item = NSMenuItem(
+            title: "Workspace Tools",
+            action: #selector(toggleWorkspaceToolsMenuItem(_:)),
+            keyEquivalent: "")
+        item.target = self
+        item.identifier = NSUserInterfaceItemIdentifier("agentTile.workspaceTools.toggle")
+        item.state = record.workspaceToolsEnabled ? .on : .off
+        return [item]
+    }
+
+    @objc private func toggleWorkspaceToolsMenuItem(_ sender: NSMenuItem) {
+        // Re-read the record rather than trusting the item's painted state: the
+        // menu can have been built before another surface (Settings, a revoking
+        // API deny) moved the flag.
+        guard let agentID = attachedAgentID,
+              let supervisor = agentSource,
+              let record = supervisor.records[agentID] else { return }
+        _ = supervisor.setWorkspaceToolsEnabled(agentID: agentID, !record.workspaceToolsEnabled)
     }
 
     private func soundOverrideItem(title: String, kind: AgentSignalKind, value: String) -> NSMenuItem {
@@ -1276,7 +1320,33 @@ final class ManagedAgentTileNSView: TileNSView {
                 // The model filters on this tile's thread id; rebind exactly as
                 // the live subscription does, but ingest DIRECTLY (never via the
                 // event stream) so activity mirroring stays untriggered.
-                model.ingest(event.withThreadId(threadId))
+                let bound = event.withThreadId(threadId)
+                // TR-01 — the host-local capture seam runs here too. It used to
+                // live only on the live path (`ingest(_:originalEvent:)`), so a
+                // restored file change reached the document with no detail
+                // identity and no store record, and its card could only report
+                // that it knew nothing. This is the same three-step dance the
+                // live path performs: capture, ingest, bind the entry the event
+                // just created.
+                let priorEntryIDs = Set(model.document.entries.map(\.id))
+                let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(bound)
+                model.ingest(bound)
+                if let identity = capturedIdentity,
+                   case let .itemStarted(_, itemID, _, _) = bound {
+                    let candidates = model.document.entries.filter { entry in
+                        guard !priorEntryIDs.contains(entry.id),
+                              case let .providerItem(provider, providerItemID) = entry.provenance
+                        else { return false }
+                        return provider == identity.scope.provider && providerItemID == itemID
+                    }
+                    if candidates.count == 1 {
+                        _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: candidates[0].id)
+                    }
+                }
+            case .observation(let observation):
+                // Parked by the view until the matching item starts, exactly as
+                // a live provider observation that arrives on the same frame is.
+                transcriptCollectionFixture?.captureRuntimeObservation(observation)
             }
         }
         // A restored agent is idle until prompted — set directly, the way
@@ -1605,7 +1675,9 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: compactContextWindow)
+                contextWindow: compactContextWindow,
+                accountQuota: currentAccountQuota(),
+                enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
@@ -1615,7 +1687,10 @@ final class ManagedAgentTileNSView: TileNSView {
         compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
             location: compactLocationPresentation(snapshot, detail: locationPresentation),
             activity: activity,
-            context: AgentRadialContextMeterPresenter.present(compactContextWindow))))
+            context: AgentRadialContextMeterPresenter.present(compactContextWindow),
+            quotas: currentQuotaPresentations(at: now),
+            cost: currentCostPresentation(),
+            enabledElements: AgentStatusElementConfig.visibleElements())))
         transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
         syncCompactStatusTick(for: activity)
     }
@@ -1670,7 +1745,10 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(snapshot, detail: detail),
                 activity: unknownCompactActivity(),
-                context: AgentRadialContextMeterPresenter.present(nil))))
+                context: AgentRadialContextMeterPresenter.present(nil),
+                quotas: currentQuotaPresentations(at: now),
+                cost: currentCostPresentation(),
+                enabledElements: AgentStatusElementConfig.visibleElements())))
         } else {
             applyUnknownCompactStatus()
         }
@@ -1687,7 +1765,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 detailText: "Location unavailable",
                 isExternal: false),
             activity: unknownCompactActivity(),
-            context: AgentRadialContextMeterPresenter.present(nil))))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // Even a fully-unknown row keeps the enabled set and the account
+            // reading: the quota belongs to the harness, not to whatever this
+            // tile currently knows about its own location.
+            quotas: currentQuotaPresentations(at: Date()),
+            cost: currentCostPresentation(),
+            enabledElements: AgentStatusElementConfig.visibleElements())))
     }
 
     /// Splits the activity by KIND between the tile's two status surfaces.
@@ -1702,11 +1786,17 @@ final class ManagedAgentTileNSView: TileNSView {
         _ presentation: AgentCompactStatusPresentation
     ) -> AgentCompactStatusPresentation {
         let activity = presentation.activity
+        // Only the ACTIVITY is being rewritten here. Everything else must be
+        // carried across verbatim: this helper sits on every production repaint,
+        // so a field it forgets is a field the row never shows.
         guard !activity.isSilent, Self.footerRetainsPhase(activity.phase) else {
             return AgentCompactStatusPresentation(
                 location: presentation.location,
                 activity: .silent(detailText: activity.detailText),
-                context: presentation.context)
+                context: presentation.context,
+                quotas: presentation.quotas,
+                cost: presentation.cost,
+                enabledElements: presentation.enabledElements)
         }
         return AgentCompactStatusPresentation(
             location: presentation.location,
@@ -1718,7 +1808,10 @@ final class ManagedAgentTileNSView: TileNSView {
                 accessibilityLabel: activity.accessibilityLabel,
                 detailText: activity.detailText,
                 showsThinkingIndicator: false),
-            context: presentation.context)
+            context: presentation.context,
+            quotas: presentation.quotas,
+            cost: presentation.cost,
+            enabledElements: presentation.enabledElements)
     }
 
     /// Attention states only. These occur precisely when the gyro is NOT shown
@@ -1796,10 +1889,16 @@ final class ManagedAgentTileNSView: TileNSView {
     /// QA uses the same tile composition seam to feed deterministic facts. This
     /// is intentionally a view probe, not an adapter-only assertion: the call
     /// resolves the adapter and paints the installed row in the real hierarchy.
+    /// `accountQuota` is an injection seam, not a second source of truth: nil
+    /// falls through to `currentAccountQuota()`, exactly what production reads.
+    /// A probe needs it because the geometry harness builds a tile with no
+    /// supervisor to deliver an observation through.
     func qaApplyCompactStatusFacts(
         _ facts: AgentCompactStatusPhaseFacts,
         location: AgentLocationSnapshot,
         contextWindow: AgentContextWindowSnapshot? = nil,
+        accountQuota: AgentAccountQuotaSnapshot? = nil,
+        enabledElements: [AgentStatusElement]? = nil,
         now: Date
     ) {
         compactStatusSession = facts.session
@@ -1817,9 +1916,17 @@ final class ManagedAgentTileNSView: TileNSView {
                 projectName: locationProjectName ?? branchContext?.projectName,
                 activity: input,
                 now: now,
-                contextWindow: contextWindow)
+                contextWindow: contextWindow,
+                accountQuota: accountQuota ?? currentAccountQuota(),
+                // An explicit set keeps a probe deterministic. Reading live
+                // defaults here would make the witness depend on whichever
+                // toggles the developer happens to have set.
+                enabledElements: enabledElements ?? AgentStatusElementConfig.visibleElements())
             // Same split as production: footer filter, then the gyro's words.
             // A probe that skipped either would witness a surface no user sees.
+            // The rebuild is exactly where the account chips were being dropped,
+            // so a witness MUST come through here rather than calling
+            // `compactStatusRow.apply` with a presentation of its own.
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: presented.activity)
@@ -1832,7 +1939,13 @@ final class ManagedAgentTileNSView: TileNSView {
             compactStatusRow.apply(presentationWithoutThinkingIndicator(AgentCompactStatusPresentation(
                 location: compactLocationPresentation(location, detail: detail),
                 activity: activity,
-                context: AgentRadialContextMeterPresenter.present(contextWindow))))
+                context: AgentRadialContextMeterPresenter.present(contextWindow),
+                quotas: AgentStatusElementConfig.visibleElements()
+                    .filter(\.isAccountScoped)
+                    .compactMap { AgentAccountQuotaPresenter.present(
+                        accountQuota ?? currentAccountQuota(), element: $0, now: now) },
+                cost: currentCostPresentation(),
+                enabledElements: AgentStatusElementConfig.visibleElements())))
             transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
             syncCompactStatusTick(for: activity)
         }
@@ -1840,6 +1953,31 @@ final class ManagedAgentTileNSView: TileNSView {
 
     /// The words currently riding the gyro, for witnesses.
     var qaTailStatusText: String { transcriptCollectionFixture?.qaTailStatusText ?? "" }
+
+    /// TR-01 — the thread the model filters on, so a witness can bind a restored
+    /// transcript to this tile the way the supervisor does.
+    /// (`qaTranscriptForChecks` and `qaDocumentForChecks` already exist below.)
+    var qaThreadIdForChecks: String { threadId }
+
+    /// This agent's harness-wide account quota, or nil when the provider reports
+    /// none. Read live rather than cached on the tile: one reading serves every
+    /// agent on the login, so the supervisor is its only owner.
+    private func currentAccountQuota() -> AgentAccountQuotaSnapshot? {
+        guard let id = projectedAgentID else { return nil }
+        return agentSource?.accountQuota(for: id)
+    }
+
+    private func currentQuotaPresentations(at now: Date) -> [AgentQuotaElementPresentation] {
+        let quota = currentAccountQuota()
+        return AgentStatusElementConfig.visibleElements()
+            .filter(\.isAccountScoped)
+            .compactMap { AgentAccountQuotaPresenter.present(quota, element: $0, now: now) }
+    }
+
+    private func currentCostPresentation() -> AgentCostElementPresentation? {
+        guard AgentStatusElementConfig.isVisible(.cost) else { return nil }
+        return AgentAccountQuotaPresenter.presentCost(compactContextWindow)
+    }
 
     /// Fills a per-turn usage snapshot with an occupancy reading so the radial
     /// meter can show a real percentage: the prompt tokens the provider reported
@@ -1911,6 +2049,11 @@ final class ManagedAgentTileNSView: TileNSView {
                     paused: supervisor.isQueuePaused(for: agentID)
                 )
             }
+            // TR-06: the reply chips are a function of the turn state as well as
+            // the document, and queueing moves ONLY the state — it appends no
+            // entry. Refreshed on the same seam as the queue rail so the two
+            // cannot disagree about whether the last question is still open.
+            refreshReplyOptions(from: model.document)
         }
         let status: AgentStatus
         if let snapshot = v2TurnSnapshot {
@@ -2424,8 +2567,25 @@ final class ManagedAgentTileNSView: TileNSView {
             appearance: effectiveTokenTheme,
             pageZoom: pageZoom,
             imageResources: managedImageResourceProvider,
-            agentStatus: agentReferenceStatusSource
+            agentStatus: agentReferenceStatusSource,
+            // TR-06 — read LIVE from the supervisor, exactly like
+            // `updateV2ComposerPresentation` does, and never from the cached
+            // `v2TurnSnapshot` alone: the cache is what latched a stale
+            // "Unavailable" onto the composer in the P5.5 live finding, and a
+            // stale read here would either hide a usable button or offer a dead
+            // one. The cache remains the fallback for tiles with no live source
+            // (fixtures, post-detach repaints).
+            canRespondToRequests: liveTurnSnapshot?.capabilities.canRespondToRequests ?? false
         )
+    }
+
+    /// The supervisor's current snapshot when one is reachable, else the cached
+    /// copy. One accessor, so every live-capability reader agrees.
+    private var liveTurnSnapshot: AgentTileTurnSnapshot? {
+        if let agentID = attachedAgentID, let live = agentSource?.turnSnapshot(for: agentID) {
+            return live
+        }
+        return v2TurnSnapshot
     }
 
     /// C10: built from `agentSource` (the supervisor), never from anything the
@@ -2566,12 +2726,27 @@ final class ManagedAgentTileNSView: TileNSView {
     ///
     /// Deliberately NOT routed through the request/approval system: no harness
     /// opened a request here, so there is nothing to resolve and nothing may
-    /// claim otherwise (see `AgentReplyOptionDetector`). A working turn withdraws
-    /// the offer outright — the question it belongs to has already been answered
-    /// by whatever the user just sent.
+    /// claim otherwise (see `AgentReplyOptionDetector`). A turn that is no longer
+    /// idle withdraws the offer outright — the question it belongs to has already
+    /// been answered by whatever the user just sent.
+    ///
+    /// TR-06: the withdrawal covers every non-idle state, not just `.working`.
+    /// `.starting` and `.working` self-corrected (the optimistic user echo becomes
+    /// the last entry, and the detector only reads assistant turns), but a QUEUED
+    /// reply adds no entry at all — so the chips for a question the user has
+    /// already answered stayed on screen, ready to overwrite the answer waiting
+    /// to be sent. `.needsAction` is included for a different reason: a provider
+    /// holding a real request is the one moment prose guesswork must not compete
+    /// with the actual answer controls.
     private func refreshReplyOptions(from document: AgentDocument) {
         guard let composer = v2Composer else { return }
-        let working = v2TurnSnapshot?.state == .working
+        let working: Bool
+        switch v2TurnSnapshot?.state {
+        case .working, .starting, .queued, .compacting, .needsAction:
+            working = true
+        case .ready, .failed, .restored, .none:
+            working = false
+        }
         composer.setReplyOptions(working ? [] : AgentReplyOptionDetector.options(in: document))
     }
 
@@ -2606,11 +2781,52 @@ final class ManagedAgentTileNSView: TileNSView {
         guard let payload = v2RequestPayload(requestID),
               [.pending, .inProgress].contains(payload.status),
               payload.choices.contains(value) else { return }
-        // With no compiled response transport (Queue 90), the seam is unbound:
-        // nothing resolves, the block stays pending, and only a runtime
-        // resolution event may complete it. A bound seam reporting false is a
-        // refusal and equally resolves nothing.
-        _ = onProviderResponse?(requestID, value)
+        // TR-06 — one press, one dispatch. The second press is refused here,
+        // because the first left the block `.submitting` and this reads the
+        // block. That is a LOCAL delivery state and never makes the request look
+        // resolved; only a real runtime `requestResolved`/`userInputResolved`
+        // does that.
+        //
+        // Marking happens after the seam returns rather than before, which is
+        // safe only because the seam is synchronous on the main actor: nothing
+        // can press again between the call and the mark.
+        //
+        // This is the ONLY duplicate guard. The supervisor validates that the
+        // request is still pending, which a second press also satisfies, so it
+        // would happily put a second answer on the wire. `--provider-request-
+        // response-check` deletes this line to prove it.
+        guard payload.responseState != .submitting else { return }
+        // An unbound seam is a refusal, exactly like a bound seam returning
+        // false: nothing was dispatched, so nothing may claim it was.
+        guard onProviderResponse?(requestID, value) == true else {
+            markProviderResponse(requestID: requestID, .failed)
+            return
+        }
+        markProviderResponse(requestID: requestID, .submitting)
+    }
+
+    /// TR-06 — the app's report that a dispatch it accepted did not reach the
+    /// provider. Separate from the accept/refuse return value because the
+    /// transport blocks on a provider round trip and cannot answer on the press's
+    /// own turn (see `AgentSupervisor.respondToRequest`).
+    ///
+    /// The request stays OPEN. A delivery failure is not a decision, and the user
+    /// may press again — which is why this clears `.submitting` rather than
+    /// latching the block.
+    func reportProviderResponseFailure(requestID: String, message: String?) {
+        markProviderResponse(requestID: requestID, .failed)
+        if let message, !message.isEmpty {
+            showActionFailedNotice("Couldn't send that response — \(message)")
+        } else {
+            showActionFailedNotice("Couldn't send that response to the provider.")
+        }
+    }
+
+    private func markProviderResponse(
+        requestID: String, _ state: AgentRequestResponseState
+    ) {
+        guard model.markRequestResponseState(requestID: requestID, state) else { return }
+        synchronizeV2Transcript()
     }
 
     /// The projected payload for one explicit provider request, read from the
@@ -2875,6 +3091,24 @@ final class ManagedAgentTileNSView: TileNSView {
             return (id: id, title: item.title, enabled: item.isEnabled)
         }
     }
+    /// The workspace-tools item as the menu offers it, or nil when it is absent.
+    func qaWorkspaceToolsMenuEntry() -> (title: String, isOn: Bool)? {
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.workspaceTools.toggle" })
+        else { return nil }
+        return (title: item.title, isOn: item.state == .on)
+    }
+
+    /// Invoke the workspace-tools item exactly as AppKit would, target and all.
+    @discardableResult
+    func qaInvokeWorkspaceToolsMenuItem() -> Bool {
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.workspaceTools.toggle" }),
+            let action = item.action, let target = item.target else { return false }
+        _ = target.perform(action, with: item)
+        return true
+    }
+
     /// Invoke a zoom menu item exactly as AppKit would, target and all.
     @discardableResult
     func qaInvokePageZoomMenuItem(_ identifier: String) -> Bool {
@@ -2935,11 +3169,32 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaV2RequestStatus(_ requestID: String) -> AgentItemStatus? { v2RequestPayload(requestID)?.status }
     func qaV2RequestChoices(_ requestID: String) -> [String]? { v2RequestPayload(requestID)?.choices }
     var qaV2HasCompactRequestEditor: Bool { false }
+    /// TR-06 — the LOCAL delivery state of this machine's response, read from the
+    /// reducer-owned document like every other request fact.
+    func qaV2RequestResponseState(_ requestID: String) -> AgentRequestResponseState? {
+        v2RequestPayload(requestID)?.responseState
+    }
+    /// TR-06 — whether the APP bound the response transport.
+    ///
+    /// The point of this seam is that a witness may assert the binding without
+    /// creating it. `onProviderResponse` sat declared-and-unbound through every
+    /// release of the request system, and the one check that exercised it bound
+    /// the closure itself — so it proved the tile's dispatch logic and nothing
+    /// at all about production.
+    var qaHasProviderResponseBinding: Bool { onProviderResponse != nil }
     /// The reply-option chips the composer is currently offering, and a press
     /// through the real button. Read from the installed composer, never from a
     /// tile-side copy of the detector's answer.
     var qaReplyOptionChipTitles: [String] { v2Composer?.qaReplyOptionChipTitles ?? [] }
+    var qaReplyOptionChipAccessibilityLabels: [String] {
+        v2Composer?.qaReplyOptionChipAccessibilityLabels ?? []
+    }
     var qaComposerDraftText: String { v2Composer?.qaDraftText ?? "" }
+    /// Drives the composer's real draft-apply path, so clearing a draft in a
+    /// check runs the same observer production runs.
+    func qaSetComposerDraftForChecks(_ text: String) {
+        v2Composer?.apply(.init(text: text, selection: NSRange(location: text.utf16.count, length: 0), revision: 0))
+    }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {
         v2Composer?.qaPressReplyOptionChip(titled: title) ?? false
@@ -2953,6 +3208,15 @@ final class ManagedAgentTileNSView: TileNSView {
         v2TurnSnapshot = snapshot
         v2Composer?.updateTurnSnapshot(snapshot)
         updateV2ComposerPresentation()
+        // Mirrors `refreshV2TurnSnapshot`: a state change withdraws the chips.
+        refreshReplyOptions(from: model.document)
+    }
+
+    /// TR-06 — whether the chips are reachable by keyboard, read from the real
+    /// buttons. A control that only a mouse can reach is not an accessible
+    /// control, and nothing asserted this before.
+    var qaReplyOptionChipsAcceptFocus: Bool {
+        v2Composer?.qaReplyOptionChipsAcceptFocus ?? false
     }
 
     var qaComposerIsOffered: Bool { !(v2Composer?.isHidden ?? true) }
@@ -2966,7 +3230,7 @@ final class ManagedAgentTileNSView: TileNSView {
         transcriptCollectionFixture.collectionView.layoutSubtreeIfNeeded()
         func find(in view: NSView) -> AgentRequestChoiceButton? {
             if let button = view as? AgentRequestChoiceButton,
-               button.title == safeSingleLine(value, fallback: "Respond"),
+               button.title == ApprovalDecision.displayTitle(forChoice: value),
                (button.superview as? AgentRequestView)?.requestID == requestID {
                 return button
             }
@@ -3041,7 +3305,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 accessibilityLabel: presentation.whatAccessibilityValue,
                 detailText: presentation.detailText,
                 showsThinkingIndicator: false),
-            context: AgentRadialContextMeterPresenter.present(nil)))
+            context: AgentRadialContextMeterPresenter.present(nil),
+            // Preview seam with no supervisor: there is no account reading to
+            // show, and inventing one for a screenshot is how a fabricated
+            // number ends up in a design review.
+            quotas: [],
+            cost: nil,
+            enabledElements: [.location, .activity, .contextMeter]))
     }
 
     // These location accessors retain the semantic presenter witness for the

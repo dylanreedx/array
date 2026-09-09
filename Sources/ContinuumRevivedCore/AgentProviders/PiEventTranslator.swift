@@ -86,6 +86,18 @@ public struct PiEventTranslator {
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
 
+    /// CX-01 (`.plans/59`, §15) — an Array-owned request the pi extension made
+    /// through `ctx.ui.input`, arriving as an `extension_ui_request` frame. Local-
+    /// only and non-Codable for the same I5 reason as `onSpawnRequest`: the
+    /// payload is model-authored. Foreign UI requests (another extension's
+    /// dialog) never reach this hook and stay dropped as before.
+    public var onHostToolRequest: (@Sendable (PiHostToolRequest) -> Void)?
+
+    /// CX-01 — the tool call id of every `tool_execution_end`, so the bridge knows
+    /// a call already returned (aborted or timed out on pi's side) and a late
+    /// host reply must not be written.
+    public var onToolExecutionEnded: (@Sendable (String) -> Void)?
+
     /// Recover assistant prose from COMPLETED messages instead of from deltas.
     ///
     /// Off for the live path, which must stay byte-identical: pi streams assistant
@@ -273,6 +285,7 @@ public struct PiEventTranslator {
         case "tool_execution_end":
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
+            onToolExecutionEnded?(toolCallId)
             let isError = (object["isError"] as? Bool) ?? false
             // The `runId` that names the child's transcript on disk. Measured on
             // the wire: `result.details.runId`, alongside `details.task` — which
@@ -332,7 +345,17 @@ public struct PiEventTranslator {
         // `extension_ui_request` is a UI prompt pi's own extension host
         // answers. Explicit here (rather than relying on `default:`) so the
         // ignore is a decision, not an accident of the fallthrough.
-        case "response", "extension_ui_request":
+        case "extension_ui_request":
+            // CX-01: Array's own extension asks the HOST through this frame. Only
+            // an envelope carrying our schema is ours; the parse rejects everything
+            // else and the frame is dropped exactly as it always was. Still zero
+            // events either way -- the request is not part of the turn transcript.
+            if let onHostToolRequest, let request = PiHostToolRequest.parse(object, now: now()) {
+                onHostToolRequest(request)
+            }
+            return []
+
+        case "response":
             return []
 
         default:
@@ -491,6 +514,9 @@ public struct PiEventTranslator {
             cacheWriteTokens: Self.intValue(usage["cacheWrite"]),
             totalProcessedTokens: Self.intValue(usage["totalTokens"]),
             totalCostUsd: totalCost,
+            // pi meters a real account: `usage.cost.total` is a charge, not the
+            // list-price estimate claude reports.
+            costBasis: totalCost == nil ? nil : .providerMetered,
             automaticCompaction: nil,
             observedAt: observedAt,
             source: .piMessageUsage,
@@ -649,17 +675,63 @@ public struct PiEventTranslator {
         if let description = string("description") {
             fields.append((key: "description", value: description))
         }
+        // TR-03 — the delegation ROLE, on the same reasoning the claude
+        // translator already crosses `subagent_type` on: a role id is
+        // publishable (`RoleRegistry` reads them out of project files and the
+        // inbox already shows them). Without it a pi delegation row could say
+        // nothing at all but its own tool name, because every other key on
+        // `delegate_agent`/`spawn_agent` is the child's PROMPT BODY — `task` and
+        // `prompt`, which stay out here and always will.
+        if let role = string("agent") ?? string("role") ?? string("subagent_type") {
+            fields.append((key: "subagent_type", value: role))
+        }
         return fields
     }
 
-    private static func fileDetails(toolName: String, args: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
+    /// Internal, not private: `PiSessionTranscriptReader` describes a RESTORED
+    /// tool call with the very same extractor the live stream uses, so a
+    /// rehydrated card and a live card cannot disagree about one operation.
+    static func fileDetails(toolName: String, args: [String: Any]) -> [AgentToolDetailObservation.FileChange] {
         guard let path = (args["path"] as? String) ?? (args["file"] as? String) ?? (args["file_path"] as? String) else { return [] }
         let name = toolName.lowercased()
         let action: AgentToolDetailObservation.FileAction
         if name == "write" { action = .write }
         else if name.contains("edit") || name.contains("patch") { action = .edit }
         else { return [] }
-        return [.init(action: action, path: path)]
+        let counts = editCounts(toolName: name, args: args)
+        return [.init(action: action, path: path,
+                      addedLines: counts.added, removedLines: counts.removed)]
+    }
+
+    /// TR-01 — pi hands over enough to MEASURE its edits, in a shape captured
+    /// live from pi 0.85.0 on 2026-09-05:
+    ///
+    ///   edit  → `{"path": …, "edits": [{"oldText": …, "newText": …}]}`
+    ///   write → `{"path": …, "content": …}`
+    ///
+    /// Same rule as claude's: the TEXT stays in this translator and only the two
+    /// integers cross onto the host-local channel. A write knows what it wrote
+    /// and cannot know what it replaced, so its removal count stays absent
+    /// rather than becoming a zero.
+    private static func editCounts(
+        toolName: String, args: [String: Any]
+    ) -> (added: UInt?, removed: UInt?) {
+        if toolName == "write" {
+            guard let content = args["content"] as? String else { return (nil, nil) }
+            return (AgentFileChangeCounting.lineCount(content), nil)
+        }
+        guard let edits = args["edits"] as? [[String: Any]], !edits.isEmpty else { return (nil, nil) }
+        var added: UInt = 0
+        var removed: UInt = 0
+        for edit in edits {
+            guard let old = (edit["oldText"] as? String) ?? (edit["old_string"] as? String),
+                  let new = (edit["newText"] as? String) ?? (edit["new_string"] as? String),
+                  let counts = AgentFileChangeCounting.replacementCounts(old: old, new: new)
+            else { return (nil, nil) }
+            added += counts.added
+            removed += counts.removed
+        }
+        return (added, removed)
     }
 
     /// A bounded preview of `result.content[].text`. Non-text blocks and

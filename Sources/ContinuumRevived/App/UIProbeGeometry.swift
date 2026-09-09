@@ -358,7 +358,7 @@ enum UIProbeGeometry {
             sidebarGate.measured, sidebarGate.truncated
         ))
         print(String(
-            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
+            format: "UIProbeGeometry: reusable block host identity/reset and 9-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/560/640/900 in both appearances with footer truncation measured across the required effort values; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; host-local tool composition held %d reflow/copy/accessibility/scroll assertions; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, %d image/gallery states preserve opaque local media actions, %d exceptional states preserve request identity and opaque privacy, and %d completed-reasoning disclosure states preserve scoped expansion at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, toolCompositionAssertions, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, mediaRows, exceptionalRows, reasoningDisclosureRows
         ))
     }
@@ -799,6 +799,255 @@ enum UIProbeGeometry {
             try require(row.qaLocationCompressionPriority < row.qaActivityCompressionPriority,
                         "compact status row location was not the lowest compression sink under provider/action competition")
         }
+
+        assertions += try checkCompactStatusAccountElements()
+        return assertions
+    }
+
+    /// ST-01 — the ACCOUNT-scoped chips and the element toggles, in the real row.
+    ///
+    /// The pure parts (parsing, unit normalization, drop order) are pinned in
+    /// `--agent-account-quota-check`. What can only be seen here is whether the
+    /// row DRAWS them: whether a shared account number is labelled as shared,
+    /// whether an unknown window renders a dash instead of a zero, and whether an
+    /// element the width pass dropped is still reachable in the tooltip and to a
+    /// screen reader.
+    private static func checkCompactStatusAccountElements() throws -> Int {
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            guard condition() else { throw fail(message()) }
+            assertions += 1
+        }
+
+        let now = Date(timeIntervalSince1970: 1_787_700_000)
+        let checkout = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+        let location = AgentLocationSnapshot(
+            home: AgentHome(projectId: nil, projectRoot: checkout, checkoutRoot: checkout),
+            whereDirectory: checkout)
+
+        // A reading with one live window (18%), one high enough to be critical
+        // (94%), and NO spend limit at all — so the spend element must show
+        // unknown rather than inventing a zero.
+        let quota = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [
+                AgentQuotaWindow(kind: .fiveHour, utilization: 0.18,
+                                 resetsAt: now.addingTimeInterval(3_600)),
+                AgentQuotaWindow(kind: .sevenDay, utilization: 0.94,
+                                 resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            observedAt: now,
+            source: .claudeRateLimitEvent)
+
+        let contextWindow = AgentContextOccupancy.withDerivedOccupancy(
+            AgentContextWindowSnapshot(
+                inputTokens: 1_200, outputTokens: 900,
+                cacheReadTokens: 40_000, cacheWriteTokens: 800,
+                totalProcessedTokens: 42_900, totalCostUsd: 0.0149,
+                costBasis: .listPriceEstimate,
+                observedAt: now, source: .claudeAssistantUsage, freshness: .live),
+            contextWindow: 200_000)
+
+        let everything: [AgentStatusElement] = AgentStatusElement.presentationOrder
+
+        func makeRow(width: CGFloat, elements: [AgentStatusElement]) -> AgentCompactStatusRowView {
+            let row = AgentCompactStatusRowView(
+                frame: NSRect(x: 0, y: 0, width: width,
+                              height: AgentCompactStatusRowView.preferredHeight),
+                configuration: AgentCompactStatusRowConfiguration(
+                    reducedMotion: true, deterministicSnapshotPhase: 0.25),
+                thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+            row.apply(AgentCompactStatusPresentation.present(
+                location: location,
+                projectName: "continuum",
+                activity: AgentCompactActivityInput(
+                    phase: .waiting, phaseStartedAt: now.addingTimeInterval(-12)),
+                now: now,
+                contextWindow: contextWindow,
+                accountQuota: quota,
+                enabledElements: elements))
+            row.layoutSubtreeIfNeeded()
+            return row
+        }
+
+        // WIDE: every enabled element draws.
+        let wide = makeRow(width: 1_200, elements: everything)
+        try require(wide.qaQuotaText(.quotaFiveHour) == "5h 18%",
+                    "the 5-hour chip must draw its percentage, got \"\(wide.qaQuotaText(.quotaFiveHour))\"")
+        // 94% is past the critical threshold and must be marked, not merely
+        // coloured — colour alone is not a signal every reader receives.
+        try require(wide.qaQuotaText(.quotaSevenDay).contains("94%")
+                        && wide.qaQuotaState(.quotaSevenDay) == .critical,
+                    "a critical account window must be marked and stated, got \"\(wide.qaQuotaText(.quotaSevenDay))\" state \(String(describing: wide.qaQuotaState(.quotaSevenDay)))")
+        // AN UNREPORTED WINDOW DRAWS NOTHING. The provider named no spend limit,
+        // so no reading is ever coming for it, and `cap —` would be a promise
+        // the app cannot keep. A dash is reserved for a window that exists and
+        // is momentarily unknown — see the expired case below.
+        try require(wide.qaQuotaPill(.quotaSpendLimit) == nil
+                        && wide.qaQuotaText(.quotaSpendLimit).isEmpty,
+                    "a window the provider never reported must draw nothing, got \"\(wide.qaQuotaText(.quotaSpendLimit))\"")
+        try require(wide.qaQuotaText(.cost).contains("est"),
+                    "a list-price cost estimate must be labelled as one, got \"\(wide.qaQuotaText(.cost))\"")
+        try require(wide.qaDroppedElements.isEmpty,
+                    "a 1200pt row must drop nothing, dropped \(wide.qaDroppedElements)")
+
+        // NO TRUNCATION WITH ROOM TO SPARE. `locationGroup` used to be the only
+        // low-hugging view in the row, so it swallowed every spare point — 721
+        // of a 1200pt row for a 61pt name — and left the phase label 44.0pt for
+        // a 45.0pt word. One point short is all it takes: AppKit drew "Waiti…"
+        // beside 600pt of empty space. A dedicated spacer owns the slack now.
+        if let actLabel = wide.qaActivityLabelFrame {
+            try require(actLabel.width >= wide.qaActivityLabelFittingWidth,
+                        "the phase label was given \(actLabel.width)pt for \(wide.qaActivityLabelFittingWidth)pt of text on a 1200pt row — it will render truncated with room to spare")
+        }
+        if let locFrame = wide.qaLocationFrame {
+            try require(locFrame.width < wide.bounds.width / 2,
+                        "the location group claimed \(locFrame.width)pt of a \(wide.bounds.width)pt row; slack belongs in the spacer, not in a rendering view")
+        }
+
+        // DISTINCT GLYPHS. Three chips sharing one icon was half of why the row
+        // read as a single string: a repeated mark implies sameness.
+        let glyphs = [AgentStatusElement.quotaFiveHour, .quotaSevenDay]
+            .compactMap { wide.qaQuotaPill($0)?.qaSymbolName }
+        try require(glyphs.count == 2 && Set(glyphs).count == 2,
+                    "each account pill needs its own glyph, got \(glyphs)")
+        // The capsules must not touch. Adjacent pills with no gap read as one
+        // wide chip, which is the grouping failure again in a new shape.
+        for (lhs, rhs) in [
+            (AgentStatusElement.quotaFiveHour, AgentStatusElement.quotaSevenDay),
+        ] {
+            guard let a = wide.qaQuotaFrame(lhs), let b = wide.qaQuotaFrame(rhs) else {
+                throw fail("compactStatusRow.accountElements: \(lhs.rawValue)/\(rhs.rawValue) pill frames missing")
+            }
+            let gap = b.minX - a.maxX
+            try require(gap >= CGFloat(Space.s),
+                        "\(lhs.rawValue) and \(rhs.rawValue) are \(gap)pt apart; capsules that touch read as one chip")
+        }
+        // Label and value must be separately legible inside the pill, which is
+        // the whole reason `49%` no longer sits against `7d`.
+        for element in [AgentStatusElement.quotaFiveHour, .quotaSevenDay] {
+            guard let pill = wide.qaQuotaPill(element) else {
+                throw fail("compactStatusRow.accountElements: \(element.rawValue) pill missing at 1200pt")
+            }
+            try require(!pill.qaLabelText.isEmpty && !pill.qaValueText.isEmpty
+                            && pill.qaLabelText != pill.qaValueText,
+                        "\(element.rawValue) must render its label and value as separate text, got \"\(pill.qaLabelText)\"/\"\(pill.qaValueText)\"")
+            try require(pill.qaCornerRadius == pill.bounds.height / 2 && pill.bounds.height > 0,
+                        "\(element.rawValue) is not a capsule at 1200pt")
+        }
+        // The metrics sit apart from identity and phase. Without the wider gap
+        // the context capsule butts against the activity label and the row's two
+        // halves stop being distinguishable.
+        if let activityFrame = wide.qaActivityFrame, let contextFrame = wide.qaContextFrame {
+            try require(contextFrame.minX - activityFrame.maxX >= CGFloat(Space.l),
+                        "the metrics cluster must be set apart from the phase; gap was \(contextFrame.minX - activityFrame.maxX)pt")
+        }
+        try expectNoClipping(wide, label: "compactStatusRow.accountElements.wide")
+
+        // SCOPE IS SPOKEN. A number shared by every agent on the login must not
+        // be announced as this agent's own.
+        try require(wide.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent"),
+                    "the row must announce an account window as account-scoped, got \"\(wide.qaAccessibilityLabel)\"")
+        try require(wide.qaToolTip.contains("shared by every agent signed into it"),
+                    "the tooltip must state that a quota is account-wide, got \"\(wide.qaToolTip)\"")
+
+        // NARROW: the width pass drops the low-priority chips, and everything it
+        // drops stays reachable. This is the half a screenshot cannot show.
+        let narrow = makeRow(width: 300, elements: everything)
+        try expectNoClipping(narrow, label: "compactStatusRow.accountElements.narrow")
+        try require(!narrow.qaDroppedElements.isEmpty,
+                    "a 300pt row with seven elements must drop some of them")
+        try require(!narrow.qaDroppedElements.contains(.location),
+                    "location must never be dropped; it truncates instead")
+        for dropped in narrow.qaDroppedElements where dropped.isAccountScoped {
+            try require(narrow.qaQuotaText(dropped).isEmpty,
+                        "a dropped chip must not still be drawing")
+        }
+        // The 5-hour reading survives in speech and in the tooltip even at a
+        // width that cannot draw it.
+        try require(narrow.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent"),
+                    "a dropped element must still be announced, got \"\(narrow.qaAccessibilityLabel)\"")
+        try require(narrow.qaToolTip.contains("Account 5-hour usage: 18% used"),
+                    "a dropped element must still be in the tooltip")
+
+        // WIDENING RESTORES. A drop is a width constraint, not a latch.
+        narrow.setFrameSize(NSSize(width: 1_200, height: AgentCompactStatusRowView.preferredHeight))
+        narrow.layoutSubtreeIfNeeded()
+        try require(narrow.qaDroppedElements.isEmpty && narrow.qaQuotaText(.quotaFiveHour) == "5h 18%",
+                    "widening the row must bring dropped elements back, dropped \(narrow.qaDroppedElements) chip \"\(narrow.qaQuotaText(.quotaFiveHour))\"")
+
+        // DISABLED IS NOT DROPPED. With the quota elements off, the row neither
+        // draws them nor promises them in the tooltip, at any width.
+        let minimal = makeRow(width: 1_200, elements: [.location, .activity, .contextMeter])
+        try require(minimal.qaQuotaText(.quotaFiveHour).isEmpty
+                        && minimal.qaQuotaFrame(.quotaFiveHour) == nil,
+                    "a disabled element must not draw")
+        try require(!minimal.qaAccessibilityLabel.contains("Account"),
+                    "a disabled element must not be announced, got \"\(minimal.qaAccessibilityLabel)\"")
+        try require(minimal.qaContextText.isEmpty == false,
+                    "disabling the quota elements must not disturb the context meter")
+        try expectNoClipping(minimal, label: "compactStatusRow.accountElements.minimal")
+
+        // EXPIRED IS ITS OWN STATE. A window whose reset has passed must not
+        // keep asserting its last number.
+        let stale = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [AgentQuotaWindow(kind: .fiveHour, utilization: 0.42,
+                                       resetsAt: now.addingTimeInterval(-60))],
+            observedAt: now.addingTimeInterval(-7_200),
+            source: .claudeRateLimitEvent)
+        let expiredRow = AgentCompactStatusRowView(
+            frame: NSRect(x: 0, y: 0, width: 1_200,
+                          height: AgentCompactStatusRowView.preferredHeight),
+            configuration: AgentCompactStatusRowConfiguration(
+                reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+        expiredRow.apply(AgentCompactStatusPresentation.present(
+            location: location,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now),
+            now: now,
+            contextWindow: contextWindow,
+            accountQuota: stale,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour]))
+        expiredRow.layoutSubtreeIfNeeded()
+        try require(expiredRow.qaQuotaState(.quotaFiveHour) == .expired,
+                    "a window past its reset must read expired, got \(String(describing: expiredRow.qaQuotaState(.quotaFiveHour)))")
+        try require(!expiredRow.qaQuotaText(.quotaFiveHour).contains("42"),
+                    "an expired window must stop asserting its last number, got \"\(expiredRow.qaQuotaText(.quotaFiveHour))\"")
+        try require(expiredRow.qaToolTip.contains("no longer true"),
+                    "an expired window must explain itself in the tooltip")
+
+        // NO TELEMETRY AT ALL (pi, or before the first turn): unknown, and the
+        // tooltip says why rather than showing a confident nothing.
+        let noQuota = AgentCompactStatusRowView(
+            frame: NSRect(x: 0, y: 0, width: 1_200,
+                          height: AgentCompactStatusRowView.preferredHeight),
+            configuration: AgentCompactStatusRowConfiguration(
+                reducedMotion: true, deterministicSnapshotPhase: 0.25),
+            thinkingIndicatorFactory: { CompactStatusProbeThinkingIndicatorView() })
+        noQuota.apply(AgentCompactStatusPresentation.present(
+            location: location,
+            projectName: "continuum",
+            activity: AgentCompactActivityInput(phase: .waiting, phaseStartedAt: now),
+            now: now,
+            contextWindow: contextWindow,
+            accountQuota: nil,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour]))
+        noQuota.layoutSubtreeIfNeeded()
+        // NO TELEMETRY AT ALL draws nothing — this is the fresh-launch state and
+        // pi's permanent one. A row of `5h — 7d — cap —` was three promises for
+        // numbers that were not coming; the setting's description carries the
+        // explanation instead.
+        try require(noQuota.qaQuotaPill(.quotaFiveHour) == nil
+                        && noQuota.qaQuotaText(.quotaFiveHour).isEmpty,
+                    "with no telemetry the row must draw no account pill at all, got \"\(noQuota.qaQuotaText(.quotaFiveHour))\"")
+        try require(!noQuota.qaAccessibilityLabel.contains("Account"),
+                    "a metric that draws nothing must not be announced either")
+        // The rest of the row is unaffected: an absent quota is not an excuse to
+        // lose the per-agent reading beside it.
+        try require(!noQuota.qaContextText.isEmpty,
+                    "an absent account reading must not disturb per-agent occupancy")
 
         return assertions
     }
@@ -5870,6 +6119,76 @@ enum UIProbeGeometry {
             throw fail("\(label): a derived-occupancy snapshot must fill the radial meter with a real percentage and disclose the derivation, fraction \(String(describing: meterRow.qaContextFraction)) text \(meterRow.qaContextText)")
         }
 
+        // ST-01, THROUGH THE TILE. The row-level assertions elsewhere in this
+        // file call `row.apply` with a presentation they built themselves, and
+        // that is precisely why they missed the real defect: every production
+        // repaint goes through `presentationWithoutThinkingIndicator`, which
+        // rebuilt the presentation and dropped the account chips, the cost and
+        // the enabled set. The row was perfect and the tile showed nothing.
+        //
+        // Driving `qaApplyCompactStatusFacts` crosses that rebuild, so this is
+        // the assertion that has teeth. Deleting the carry-through lines in the
+        // helper fails HERE and passes every row-level check.
+        let quotaReading = AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [
+                AgentQuotaWindow(kind: .fiveHour, utilization: 0.18,
+                                 resetsAt: now.addingTimeInterval(3_600)),
+                AgentQuotaWindow(kind: .sevenDay, utilization: 0.67,
+                                 resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            observedAt: now,
+            source: .claudeRateLimitEvent)
+        // An EXPLICIT element set: three metrics that fit at 320pt, so the
+        // assertion is about the tile delivering the reading rather than about
+        // whichever toggles this machine happens to have set.
+        tile.qaApplyCompactStatusFacts(
+            .init(interaction: .pending(startedAt: now.addingTimeInterval(-5))),
+            location: location, contextWindow: occupied,
+            accountQuota: quotaReading,
+            enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
+            now: now)
+        let quotaRow = tile.qaCompactStatusRow
+        quotaRow.layoutSubtreeIfNeeded()
+        guard quotaRow.qaEnabledElements.contains(.quotaFiveHour) else {
+            throw fail("\(label): the 5-hour element must be enabled by default; enabled set was \(quotaRow.qaEnabledElements)")
+        }
+        guard quotaRow.qaQuotaText(.quotaFiveHour) == "5h 18%" else {
+            throw fail("\(label): the tile must paint the account chip through presentationWithoutThinkingIndicator, got \"\(quotaRow.qaQuotaText(.quotaFiveHour))\" — a rebuild that drops `quotas` shows exactly this")
+        }
+        guard quotaRow.qaQuotaState(.quotaFiveHour) == .known,
+              quotaRow.qaAccessibilityLabel.contains("Account 5-hour usage 18 percent") else {
+            throw fail("\(label): the tile lost the account reading's state or its spoken scope, state \(String(describing: quotaRow.qaQuotaState(.quotaFiveHour)))")
+        }
+        // The per-agent occupancy must still be its own number beside it, or the
+        // two concepts have been merged.
+        guard quotaRow.qaContextText == "21%" else {
+            throw fail("\(label): the account chip must not disturb per-agent occupancy, context read \(quotaRow.qaContextText)")
+        }
+
+        // PILL SHAPE AND GROUPING. The readings used to render as one run of
+        // digits — `3% 5h 49% 7d 15% spend —` — where a value sat beside the
+        // NEXT window's label and nothing said which belonged to which. Each
+        // metric is now a capsule, and these are the properties that make it one.
+        guard let fivePill = quotaRow.qaQuotaPill(.quotaFiveHour) else {
+            throw fail("\(label): the 5-hour reading must render as a pill in the live tile")
+        }
+        guard fivePill.qaHasFill else {
+            throw fail("\(label): the 5-hour pill has no fill, so it groups nothing")
+        }
+        guard fivePill.qaCornerRadius == fivePill.bounds.height / 2, fivePill.bounds.height > 0 else {
+            throw fail("\(label): the 5-hour pill is not a capsule — radius \(fivePill.qaCornerRadius) against height \(fivePill.bounds.height)")
+        }
+        guard fivePill.qaIconHasImage, fivePill.qaLabelText == "5h", fivePill.qaValueText == "18%" else {
+            throw fail("\(label): the pill must carry an icon, its own label and its own value; got icon \(fivePill.qaIconHasImage) label \"\(fivePill.qaLabelText)\" value \"\(fivePill.qaValueText)\"")
+        }
+        // The context ring is NOT a pill: it is a shape already carrying its own
+        // reading, and a circle inside a capsule is two containers for one
+        // number. Its meter and label stay bare beside the account pills.
+        guard quotaRow.qaContextMeterFrame != nil, !quotaRow.qaContextText.isEmpty else {
+            throw fail("\(label): the context ring and its reading must stay visible beside the account pills")
+        }
+
         // A zero-turn session is empty for ANY window size: the seeded
         // zero-used/no-max snapshot renders an authoritative 0%, never
         // "unknown". A real report always carries a max and keeps the
@@ -6691,16 +7010,28 @@ enum UIProbeGeometry {
         let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
         // `.plans/45` S3 — the presented row's TITLE is now the action sentence,
         // so the disclosure's first line (which repeats it) no longer counts as
-        // expandable content. The exit code keeps this record's disclosure at
-        // two additional lines, which is what the click/remeasure assertions
-        // below exist to witness.
+        // expandable content. The exit code alone leaves a single body line,
+        // which is not enough to arm the disclosure control
+        // (`hasDisclosureDetail` requires `lineCount > 1 || outputText !=
+        // nil`); the captured `output` below is what the click/remeasure
+        // assertions exist to witness expanding.
+        //
+        // The argument is `description`, not `command`: TR-03 (`35ff1c58`)
+        // removed the dead "Ran <command>" branch because no production
+        // translator ever forwards a shell command body — claude drops
+        // `Bash.command` on purpose, pi carries no command key, and codex's
+        // shell start carries no arguments at all. `description` is the
+        // field claude's Bash tool actually publishes, and it is already
+        // capitalized the way a real one is, so the dedupe against the title
+        // (`echoNamesFile`'s sibling exact-match check) does not double it.
         let record = AgentToolDetailRecord(
             identity: identity,
             toolName: "bash",
             arguments: [AgentToolDetailArgument(
-                key: "command",
-                value: AgentToolDetailBoundedText(text: String(repeating: "inspect safe output ", count: 12))
+                key: "description",
+                value: AgentToolDetailBoundedText(text: "List files in the build directory")
             )],
+            output: AgentToolDetailBoundedText(text: "Listing complete: 42 files found"),
             status: .completed,
             exitCode: 0,
             updatedAt: Date(timeIntervalSinceReferenceDate: 10)
@@ -6740,7 +7071,13 @@ enum UIProbeGeometry {
         list.collectionView.layoutSubtreeIfNeeded()
 
         var assertions = 0
-        guard list.qaPresentedToolSummary(for: blockID)?.contains("Ran") == true else {
+        // Pinned on the TITLE, not just the disclosure summary: the sentence
+        // must compose into `payload.name` (what `collapsed(_:).actionLine`
+        // produces), not merely show up somewhere in the disclosure body as
+        // an echoed argument line — a regression that drops the sentence from
+        // the title but leaves the raw argument in the body would still
+        // contain this text if only the summary were checked.
+        guard list.qaPresentedToolTitle(for: blockID) == "List files in the build directory" else {
             throw fail("host-local tool composition did not reflow the sanitized terminal summary")
         }
         assertions += 1
@@ -8386,10 +8723,16 @@ enum UIProbeGeometry {
         }
 
         var actions: [AgentRenderAction] = []
+        // TR-06 — a request may only offer controls when the BOUND RUNNER can
+        // carry a response. This context grants that; `checkRequestWithoutTransport`
+        // below is the negative twin, and it is the one that matters: for the
+        // whole life of this subsystem the buttons rendered regardless, and
+        // pressing one dispatched into an unbound seam.
         let context = AgentRenderContext(
             actions: AgentRenderActions { actions.append($0) },
             tokens: .transcript,
-            appearance: .dark
+            appearance: .dark,
+            canRespondToRequests: true
         )
         let approval = AgentBlock(
             id: id("approval-first"), revision: 1, kind: .approval,
@@ -8455,6 +8798,142 @@ enum UIProbeGeometry {
         guard actions.count == 2,
               (approvalHost.rendererView as? AgentRequestView)?.choiceButtons.isEmpty == true else {
             throw fail("resolved approval retained a response control or stale choice action")
+        }
+
+        // MARK: TR-06 — no transport, no controls
+
+        // THE anti-dead-button witness. Same pending payload, same real request
+        // id, same supplied choices as the actionable case above — the ONLY
+        // difference is that the bound runner cannot carry a response. The
+        // request must stay readable and offer nothing, and the reserved height
+        // must lose the action row with it, or the buttons come back as a
+        // clipped strip nobody can press.
+        // Its own action sink, deliberately: the assertions further down pin
+        // `actions` by exact count and index, so a section that appended to the
+        // shared array would silently renumber them.
+        var requestActions: [AgentRenderAction] = []
+        let transportlessContext = AgentRenderContext(
+            actions: AgentRenderActions { requestActions.append($0) },
+            tokens: .transcript,
+            appearance: .dark,
+            canRespondToRequests: false
+        )
+        let respondingContext = AgentRenderContext(
+            actions: AgentRenderActions { requestActions.append($0) },
+            tokens: .transcript,
+            appearance: .dark,
+            canRespondToRequests: true
+        )
+        let heldRequest = AgentBlock(
+            id: id("approval-no-transport"), revision: 1, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices
+            ))
+        )
+        let heldHost = AgentBlockHostView()
+        let heldHeight = try heldHost.measuredHeight(
+            for: heldRequest, width: 320, context: transportlessContext)
+        heldHost.frame = NSRect(x: 0, y: 0, width: 320, height: heldHeight)
+        try heldHost.apply(block: heldRequest, context: transportlessContext)
+        heldHost.layoutSubtreeIfNeeded()
+        let actionsBeforeHeld = requestActions.count
+        guard let heldView = heldHost.rendererView as? AgentRequestView,
+              heldView.choiceButtons.isEmpty,
+              visibleStrings(in: heldView).contains(where: {
+                  $0.contains("Allow the provider-enforced operation?")
+              }) else {
+            throw fail(
+                "TR-06: a request with no response transport rendered controls (or lost its "
+                + "readable prompt) — every press would dispatch into an unbound seam")
+        }
+        let actionableHeight = try heldHost.measuredHeight(
+            for: heldRequest, width: 320, context: respondingContext)
+        guard heldHeight < actionableHeight else {
+            throw fail(
+                "TR-06: the transport-less request reserved the same height as the actionable "
+                + "one (\(heldHeight) vs \(actionableHeight)) — the action row is measured but "
+                + "never rendered")
+        }
+        guard requestActions.count == actionsBeforeHeld else {
+            throw fail("TR-06: rendering a transport-less request emitted an action")
+        }
+
+        // MARK: TR-06 — the compiled vocabulary is never shown raw
+
+        try heldHost.apply(block: heldRequest, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        guard let vocabularyView = heldHost.rendererView as? AgentRequestView,
+              vocabularyView.choiceButtons.count == ApprovalDecision.compiledChoices.count else {
+            throw fail("TR-06: the compiled decision set lost a choice with a live transport")
+        }
+        let titles = vocabularyView.choiceButtons.map(\.title)
+        guard titles == ["Allow", "Allow for session", "Decline", "Cancel"] else {
+            throw fail(
+                "TR-06: compiled decisions reached the user as raw enum values \(titles) — a real "
+                + "approval offered a button labelled 'acceptForSession'")
+        }
+        // The wire value is untouched by the display mapping.
+        vocabularyView.choiceButtons[1].performClick(nil)
+        guard requestActions.count == actionsBeforeHeld + 1,
+              case .submitResponse(
+                requestID: "provider-request-held",
+                value: ApprovalDecision.acceptForSession.rawValue) = requestActions[actionsBeforeHeld]
+        else {
+            throw fail("TR-06: the display title replaced the wire value in the dispatched action")
+        }
+
+        // MARK: TR-06 — local delivery state is visible and blocks a second press
+
+        let submitting = AgentBlock(
+            id: id("approval-no-transport"), revision: 2, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices,
+                responseState: .submitting
+            ))
+        )
+        try heldHost.apply(block: submitting, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        let actionsBeforeSecondPress = requestActions.count
+        guard let submittingView = heldHost.rendererView as? AgentRequestView,
+              submittingView.choiceButtons.allSatisfy({ !$0.isEnabled }),
+              visibleStrings(in: submittingView).contains(where: { $0.contains("Sending") }),
+              submittingView.accessibilityLabel()?.contains("Sending") == true else {
+            throw fail(
+                "TR-06: a response already on the wire left its choices pressable, or said "
+                + "nothing about it in either the visible label or the accessibility label")
+        }
+        submittingView.choiceButtons[0].performClick(nil)
+        guard requestActions.count == actionsBeforeSecondPress else {
+            throw fail("TR-06: a disabled choice on an in-flight response still dispatched")
+        }
+        // A dispatch that never reached the provider says so, and — crucially —
+        // leaves the request OPEN and pressable again. A delivery failure is not
+        // a decision.
+        let failedSend = AgentBlock(
+            id: id("approval-no-transport"), revision: 3, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-held",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ApprovalDecision.compiledChoices,
+                responseState: .failed
+            ))
+        )
+        try heldHost.apply(block: failedSend, context: respondingContext)
+        heldHost.layoutSubtreeIfNeeded()
+        guard let failedView = heldHost.rendererView as? AgentRequestView,
+              failedView.choiceButtons.allSatisfy({ $0.isEnabled }),
+              visibleStrings(in: failedView).contains(where: { $0.contains("Not sent") }) else {
+            throw fail(
+                "TR-06: a response that never reached the provider either stayed silent or "
+                + "latched the request unpressable — the user cannot retry an answer they "
+                + "believe they already gave")
         }
 
         let question = AgentBlock(
@@ -8572,13 +9051,16 @@ enum UIProbeGeometry {
         try registry.freeze()
 
         var actions: [String] = []
-        func context(_ name: String, appearance: TokenTheme) -> AgentRenderContext {
+        func context(
+            _ name: String, appearance: TokenTheme, canRespondToRequests: Bool = false
+        ) -> AgentRenderContext {
             AgentRenderContext(
                 actions: AgentRenderActions { action in
                     if case let .copy(blockID) = action { actions.append("\(name):\(blockID.rawValue)") }
                 },
                 tokens: .transcript,
-                appearance: appearance
+                appearance: appearance,
+                canRespondToRequests: canRespondToRequests
             )
         }
         let firstID = AgentNodeID(rawValue: "geometry-host-first")!
@@ -8663,6 +9145,14 @@ enum UIProbeGeometry {
             contentSizePolicy: AgentContentSizePolicy(scaleBucket: 125), renderer: renderer
         )
         _ = cache.height(for: firstAsHeading, width: 100.1, context: dark, renderer: headingRenderer)
+        // TR-06 — the response capability changes a request block's reserved
+        // height without changing its revision, so it is a key dimension. Without
+        // this measurement nothing would notice the field being dropped again.
+        _ = cache.height(
+            for: revised, width: 101.2,
+            context: context("responding", appearance: .dark, canRespondToRequests: true),
+            renderer: renderer
+        )
         try expectIsolatedBlockMeasurements(
             cacheCount: cache.cachedMeasurementCount,
             rendererCount: renderer.measureCount + headingRenderer.measureCount
@@ -8682,8 +9172,8 @@ enum UIProbeGeometry {
         cacheCount: Int,
         rendererCount: Int
     ) throws {
-        guard cacheCount == 6, rendererCount == 6 else {
-            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size/presentation-revision keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
+        guard cacheCount == 7, rendererCount == 7 else {
+            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size/presentation-revision/respond-capability keys (cache \(cacheCount), renderer \(rendererCount), expected 7)")
         }
     }
 

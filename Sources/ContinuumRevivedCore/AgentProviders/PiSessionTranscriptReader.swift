@@ -37,10 +37,12 @@ public enum PiSessionTranscriptReader {
         lines: [String],
         threadId: String,
         truncated: Bool = false,
-        limits: RehydrationLimits = RehydrationLimits()
+        limits: RehydrationLimits = RehydrationLimits(),
+        now: () -> Date = Date.init
     ) -> RehydratedTranscript {
         ManagedTranscriptRehydrator.assemble(
-            normalize(lines: lines, threadId: threadId), threadId: threadId, truncated: truncated, limits: limits)
+            normalize(lines: lines, threadId: threadId), threadId: threadId, truncated: truncated,
+            limits: limits, now: now)
     }
 
     static func normalize(lines: [String], threadId: String) -> [NormalizedTranscriptMessage] {
@@ -111,7 +113,18 @@ public enum PiSessionTranscriptReader {
                 if let value = part["text"] as? String { text += value }
             case "toolCall":
                 if let id = part["id"] as? String, let name = part["name"] as? String {
-                    toolCalls.append(.init(id: id, name: name))
+                    // TR-01 — pi's session file carries the call's `arguments`,
+                    // and a restored file change needs exactly the same facts
+                    // the live stream publishes for it. Read through pi's own
+                    // extractor so the two cannot disagree; the values ride the
+                    // host-local observation channel, never the document.
+                    let args = part["arguments"] as? [String: Any] ?? [:]
+                    toolCalls.append(.init(
+                        id: id, name: name,
+                        fileChanges: PiEventTranslator.fileDetails(toolName: name, args: args),
+                        absolutePath: (args["path"] as? String)
+                            ?? (args["file"] as? String)
+                            ?? (args["file_path"] as? String)))
                 }
             default:
                 // image and any other part type carry no replayable text.

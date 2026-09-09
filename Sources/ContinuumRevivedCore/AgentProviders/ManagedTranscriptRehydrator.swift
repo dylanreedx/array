@@ -32,6 +32,19 @@ import Foundation
 public enum RehydratedTranscriptStep: Equatable, Sendable {
     case userPrompt(String)
     case event(AgentRuntimeEvent)
+    /// TR-01 — the host-local side channel, replayed.
+    ///
+    /// A restored file change used to arrive as an `.itemStarted` and nothing
+    /// else, so its card had no file list, no action and no counts, and printed
+    /// "0 files · line counts unavailable" over an edit whose path was sitting
+    /// in the session file being read. The observation is emitted immediately
+    /// BEFORE the item it belongs to, exactly as claude's live translator does
+    /// (the detail rides the same frame as the `tool_use` and the view parks it
+    /// until the item starts).
+    ///
+    /// Replayed into the tile's detail store, never into the document: this is
+    /// the same I5 boundary the live channel respects.
+    case observation(AgentRuntimeObservation)
 }
 
 /// The reconstructed prior conversation, bounded and self-describing. `steps`
@@ -85,7 +98,21 @@ public struct RehydrationLimits: Equatable, Sendable {
 /// turn-boundary/cap assembly has exactly one definition.
 struct NormalizedTranscriptMessage: Equatable {
     enum Role: Equatable { case userPrompt, assistant, toolResult, compaction }
-    struct ToolCall: Equatable { var id: String; var name: String; var detail: String? = nil }
+    struct ToolCall: Equatable {
+        var id: String
+        var name: String
+        var detail: String? = nil
+        /// TR-01 — the same host-local file facts the LIVE translator publishes
+        /// for this tool call (action, and counts when the session file carried
+        /// enough to measure them). Replayed as an observation, never as
+        /// document content.
+        var fileChanges: [AgentToolDetailObservation.FileChange] = []
+        /// The unabbreviated target, for the detail store's affected-file list.
+        /// `fileChanges` paths are basenames by the time they cross the privacy
+        /// boundary, so the card would otherwise lose the directory it needs to
+        /// tell two `index.ts` apart.
+        var absolutePath: String? = nil
+    }
 
     var role: Role
     /// User prompt text, or the assistant's visible text.
@@ -132,7 +159,10 @@ public enum ManagedTranscriptRehydrator {
     /// exact tool name rides `title`.
     static func itemKind(forTool tool: String) -> ItemKind {
         switch tool.lowercased() {
-        case "edit", "write", "multiedit", "notebookedit":
+        // `apply_patch` is codex's file-change verb (and pi's alias for it).
+        // Without it a RESTORED codex patch bucketed as a command and rendered
+        // as a shell row rather than a change card.
+        case "edit", "write", "multiedit", "notebookedit", "apply_patch", "applypatch":
             return .fileChange
         case "websearch", "webfetch":
             return .webSearch
@@ -149,11 +179,15 @@ public enum ManagedTranscriptRehydrator {
     /// Reconstructs a bounded, replayable transcript from normalized messages.
     /// One turn spans from an assistant reply up to the next user prompt, so the
     /// tool lifecycle stays inside its turn exactly as the live flow produces it.
+    /// `now` is injectable because the replayed observations carry an observed
+    /// instant, and a witness that compares whole step lists must be able to
+    /// produce the same list twice.
     static func assemble(
         _ messages: [NormalizedTranscriptMessage],
         threadId: String,
         truncated: Bool,
-        limits: RehydrationLimits
+        limits: RehydrationLimits,
+        now: () -> Date = Date.init
     ) -> RehydratedTranscript {
         var kept = messages
         var omitted = truncated
@@ -207,7 +241,40 @@ public enum ManagedTranscriptRehydrator {
                     // "Bash · ls && cat …" instead of an opaque, contextless
                     // "Bash". Display-only (rehydration never re-syncs); the live
                     // translator keeps name-only for the I5 sync boundary.
-                    let title = call.detail.map { "\(call.name) · \($0)" } ?? call.name
+                    //
+                    // TR-01 — a FILE CHANGE is the exception: its path now rides
+                    // the observations below and renders as the card's file row,
+                    // so repeating it in the title printed the same absolute path
+                    // twice on one card (and put it in the document, which the
+                    // live path is careful never to do).
+                    let title = kind == .fileChange && !call.fileChanges.isEmpty
+                        ? call.name
+                        : (call.detail.map { "\(call.name) · \($0)" } ?? call.name)
+                    // Before the item, mirroring the live claude frame order.
+                    // Gated on `fileChanges`: this observation says "editing",
+                    // so it may only describe a call that really changed a file.
+                    // A restored Read carries `file_path` too and must not claim
+                    // to have edited it.
+                    if !call.fileChanges.isEmpty,
+                       let path = call.absolutePath, (path as NSString).isAbsolutePath {
+                        steps.append(.observation(.toolActivity(
+                            itemId: call.id,
+                            activity: AgentObservedActivity(
+                                operation: .editing,
+                                targetPath: URL(fileURLWithPath: path).standardizedFileURL,
+                                startedAt: now(),
+                                updatedAt: now(),
+                                evidenceSource: .toolEvent))))
+                    }
+                    if !call.fileChanges.isEmpty {
+                        steps.append(.observation(.toolDetail(
+                            itemId: call.id,
+                            detail: AgentToolDetailObservation(
+                                phase: .started,
+                                toolName: call.name,
+                                fileChanges: call.fileChanges,
+                                observedAt: now()))))
+                    }
                     steps.append(.event(.itemStarted(
                         threadId: threadId, itemId: call.id, kind: kind, title: title)))
                 }

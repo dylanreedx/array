@@ -291,6 +291,21 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         let sessionId = runtime.id
         host.attach(runtime: runtime)
         host.layoutSubtreeIfNeeded()
+
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            host.detachRuntime()
+        }
+        defer { tearDownRuntime() }
+
         runtime.sendInput(Data("printf 'con44-ready\\n'\n".utf8))
         try tick(context: context, timeout: 4.0) { runtime.visibleText().contains("con44-ready") }
 
@@ -305,8 +320,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         let sameIdAfterRehydrate = runtime.id == sessionId
         let inputWorked = runtime.visibleText().contains("con44-input-ok")
 
-        runtime.terminate(policy: .force)
-        host.detachRuntime()
+        tearDownRuntime()
 
         guard aliveWhileSnapshotted, sameIdWhileSnapshotted, sameIdAfterRehydrate, inputWorked else {
             throw NSError(
@@ -487,6 +501,22 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
                 RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
             }
         }
+
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            tileView.hostView.detachRuntime()
+            try? pump(0.2)
+        }
+        defer { tearDownRuntime() }
+
         try pump(0.6)
 
         guard let term = runtime.qaTerminalView, term.surface != nil else { throw CheckError(message: "terminal surface missing") }
@@ -573,8 +603,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         runtime.sendInput(Data("printf 't12-input-ok\\n'\n".utf8))
         try tick(context: context, timeout: 4.0) { runtime.visibleText().contains("t12-input-ok") }
         let inputWorked = runtime.visibleText().contains("t12-input-ok")
-        runtime.terminate(policy: .force)
-        tileView.hostView.detachRuntime()
+        tearDownRuntime()
 
         let timestamp = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -656,6 +685,21 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
                 RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
             }
         }
+
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            tileView.hostView.detachRuntime()
+        }
+        defer { tearDownRuntime() }
+
         try pump(0.6)
 
         let backing = Double(window.backingScaleFactor)
@@ -677,8 +721,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             samples.append(Sample(zoom: zoom, widthPx: Int(size.width_px), columns: Int(size.columns)))
         }
 
-        runtime.terminate(policy: .force)
-        tileView.hostView.detachRuntime()
+        tearDownRuntime()
 
         let summary = samples.map { String(format: "z=%.2f surf=%dpx cols=%d", $0.zoom, $0.widthPx, $0.columns) }.joined(separator: " | ")
 

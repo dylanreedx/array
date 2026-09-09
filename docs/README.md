@@ -12,6 +12,12 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [Architecture overview](./internals/architecture-overview.md)
 - [Agent providers (pi, claude, codex)](./internals/providers.md)
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
+- Workspace API v1 (CX-01) — the frozen contracts are the header of
+  `Sources/ContinuumRevivedCore/WorkspaceAPI/WorkspaceAPIContracts.swift`; the
+  host service is `Sources/ContinuumRevived/App/WorkspaceAPIService.swift`; the
+  pi bridge is `Sources/ContinuumRevivedCore/AgentProviders/PiHostToolBridge.swift`
+  plus `Resources/PiExtensions/continuum-workspace-tools.ts`. Design and status:
+  `.plans/59-parallel-product-investigations/canvas-awareness-api-design.md`.
 - [Performance on the canvas](./internals/performance.md) — the traps that froze
   the Markdown tile, and how to get evidence instead of theories
 - [Performance budgets](./internals/performance-budgets.md) — deterministic work

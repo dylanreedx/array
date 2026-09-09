@@ -67,10 +67,15 @@ enum TranscriptRhythmChecks {
         try checkADisplayCycleCostsNothingPerRow()
         try checkAThoughtIsNotShoutedAtTheReader()
         try checkGlyphsDistinguishRowKinds()
+        try checkAToolRowIsExactlyAsTallAsItsContent()
+        try checkASettledRowKeepsItsDuration()
+        try checkAToolRowsIdentitySurvivesDisclosure()
         print(
             "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
-            + "the replayed real claude turn, tool-run clustering, one line per fact, and a glyph vocabulary that distinguishes row kinds"
+            + "the replayed real claude turn, tool-run clustering, one line per fact, "
+            + "a glyph vocabulary that distinguishes row kinds, rows measured at the height they draw, "
+            + "durations that survive a failure, and an accessibility identity that survives disclosure"
         )
     }
 
@@ -1972,9 +1977,19 @@ extension TranscriptRhythmChecks {
         // tool literally named `mcp__linear__create_task`). Both must resolve
         // to their own kind, not the collided one.
         let fallback = ToolCallView.fallbackSymbolName
+        // TR-03 — the OPPOSITE failure, which the word-boundary fix introduced
+        // while curing the one above: `_` is a word character, so "read" is not
+        // `\b`-bounded inside `read_file` and every snake_case tool name — which
+        // is every MCP tool there is, plus half of pi's — fell to the wrench
+        // while the presenter, still matching by raw substring, titled the same
+        // row "Read foo.swift". Over-match and under-match are pinned together
+        // here because a fix for either one alone reintroduces the other.
         for (name, expected) in [
             ("locate", fallback), ("relocate", fallback),
             ("mcp__linear__create_task", fallback),
+            ("read_file", "eye"), ("search_issues", "magnifyingglass"),
+            ("ToolSearch", "magnifyingglass"), ("TodoWrite", "checklist"),
+            ("WebFetch", "globe"), ("Shell", "terminal"),
         ] {
             let resolved = ToolCallView.symbolName(forToolNamed: name)
             guard resolved == expected else {
@@ -1986,6 +2001,145 @@ extension TranscriptRhythmChecks {
         }
     }
 
+
+    /// A row must be exactly as tall as what it draws.
+    ///
+    /// The dedupe that hides a body line repeating the title lived only in
+    /// `apply`. `measure` was handed the RAW summary, so it reserved a line the
+    /// view then hid — and the shape that triggers it is the commonest row on
+    /// the surface. A claude `Read` of one file produces the action line
+    /// "Read Foo.swift" and a disclosure text that is, after the presenter's own
+    /// suppressions, exactly "Read Foo.swift" again. Every one of those rows
+    /// carried ~21pt of blank space at 100%.
+    ///
+    /// Driven through `AgentBlockHostView`, the seam the transcript layout
+    /// actually measures with — not `ToolCallView.measuredHeight` directly,
+    /// which would witness the helper rather than the row.
+    private static func checkAToolRowIsExactlyAsTallAsItsContent() throws {
+        guard let blockID = AgentNodeID(rawValue: "tool-height-honesty") else {
+            throw fail("row height: could not mint a block id")
+        }
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+
+        // The real single-file Read shape: title and only body line identical.
+        var echoed = AgentToolCallPayload(name: "Read Foo.swift", status: .completed)
+        echoed.summary = "Read Foo.swift"
+        echoed.presentedToolNameText = "Read"
+        let echoedBlock = AgentBlock(id: blockID, revision: 1, kind: .toolCall, payload: .toolCall(echoed))
+
+        let host = AgentBlockHostView()
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 1)
+        let measured = try host.measuredHeight(for: echoedBlock, width: 420, context: context)
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: measured)
+        try host.apply(block: echoedBlock, context: context)
+        host.layoutSubtreeIfNeeded()
+        guard let view = host.rendererView as? ToolCallView else {
+            throw fail("row height: the echoed payload did not render a tool view")
+        }
+        // Teeth: this only witnesses anything if the row really is hiding the line.
+        guard view.summaryLabel.isHidden || view.summaryLabel.stringValue.isEmpty else {
+            throw fail(
+                "row height: the row is SHOWING '\(view.summaryLabel.stringValue)', so the "
+                + "measurement below is not the doubling case this exists to catch"
+            )
+        }
+        guard abs(measured - ToolCallView.rowHeight) < 0.5 else {
+            throw fail(
+                "row height: a row that hides its only body line still reserved "
+                + "\(measured)pt for it, against a bare row height of \(ToolCallView.rowHeight)pt — "
+                + "blank space under the commonest row on the surface"
+            )
+        }
+
+        // Positive control: a row with a line it genuinely SHOWS must still be
+        // taller, or the assertion above would pass by measuring nothing.
+        var informative = AgentToolCallPayload(name: "Ran the core checks", status: .completed)
+        informative.summary = "Exit code: 1"
+        informative.presentedToolNameText = "Bash"
+        let informativeBlock = AgentBlock(
+            id: blockID, revision: 2, kind: .toolCall, payload: .toolCall(informative))
+        let informativeHeight = try host.measuredHeight(for: informativeBlock, width: 420, context: context)
+        guard informativeHeight > measured + 0.5 else {
+            throw fail(
+                "row height: a row with a real body line measured \(informativeHeight)pt, no taller "
+                + "than one with none (\(measured)pt) — the dedupe is swallowing real detail"
+            )
+        }
+    }
+
+    /// A row that FAILED still has to say how long it burned.
+    ///
+    /// The trailing column was gated on `.completed`, so exactly the states
+    /// where the number matters — failed, cancelled, interrupted — threw it
+    /// away and printed the wordy label instead.
+    private static func checkASettledRowKeepsItsDuration() throws {
+        for status in [AgentItemStatus.completed, .failed, .cancelled, .interrupted] {
+            let text = ToolCallView.statusText(status: status, duration: "2.1s")
+            guard text.contains("2.1s") else {
+                throw fail(
+                    "duration: a \(status) row showed '\(text)' — the one number saying how long "
+                    + "it ran before it settled is missing"
+                )
+            }
+        }
+        // Unfinished work has no span yet, and "In progress" is the fact.
+        for status in [AgentItemStatus.inProgress, .pending] {
+            let text = ToolCallView.statusText(status: status, duration: "2.1s")
+            guard !text.contains("2.1s") else {
+                throw fail("duration: an unfinished row claimed a completed span: '\(text)'")
+            }
+        }
+        // No duration known: the label carries the state.
+        let unknown = ToolCallView.statusText(status: .failed, duration: nil)
+        guard unknown.contains("Failed") else {
+            throw fail("duration: a failed row with no known span must still say Failed, got '\(unknown)'")
+        }
+    }
+
+    /// Expanding a row must not change WHAT IT IS.
+    ///
+    /// `toggleDisclosure` relabelled from `titleLabel`, which is the action
+    /// sentence — so a VoiceOver reader who opened a row watched it stop being
+    /// "Bash" and become "Ran npm test".
+    private static func checkAToolRowsIdentitySurvivesDisclosure() throws {
+        guard let blockID = AgentNodeID(rawValue: "tool-ax-identity") else {
+            throw fail("ax identity: could not mint a block id")
+        }
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        var payload = AgentToolCallPayload(name: "Run the core checks", status: .completed)
+        payload.summary = "Run the core checks\nExit code: 0"
+        payload.presentedToolNameText = "Bash"
+        payload.presentedTrailingDetailText = "2.1s"
+        payload.presentedOutputText = "all checks passed"
+
+        let view = ToolCallView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        view.apply(blockID: blockID, payload: payload, context: context)
+        view.layoutSubtreeIfNeeded()
+        let before = view.accessibilityLabel() ?? ""
+        guard before.contains("Bash") else {
+            throw fail("ax identity: the collapsed label does not name the tool: '\(before)'")
+        }
+        // The facts a sighted reader gets from the trailing column and the pane.
+        guard before.contains("2.1s"), before.lowercased().contains("output available") else {
+            throw fail(
+                "ax identity: the label omits what the row is visibly showing — duration and an "
+                + "output pane. Got '\(before)'"
+            )
+        }
+        // Teeth: the control must actually be there to click.
+        guard !view.disclosureButton.isHidden else {
+            throw fail("ax identity: no disclosure control, so this witnesses nothing")
+        }
+        view.disclosureButton.performClick(nil)
+        view.layoutSubtreeIfNeeded()
+        let after = view.accessibilityLabel() ?? ""
+        guard after.contains("Bash") else {
+            throw fail(
+                "ax identity: expanding the row changed its name from 'Bash' to something else: "
+                + "'\(after)'"
+            )
+        }
+    }
 
     /// Dylan: "the working time isn't cumulative, it restarts often?"
     ///

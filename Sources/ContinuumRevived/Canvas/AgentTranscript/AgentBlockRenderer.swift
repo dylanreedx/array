@@ -319,6 +319,15 @@ struct AgentRenderContext {
     /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
     /// outside the semantic document (see `AgentReferenceStatusSource`).
     var agentStatus: AgentReferenceStatusSource = .unavailable
+    /// TR-06: whether the BOUND RUNNER can carry a response back to a provider
+    /// request. Live capability, deliberately outside the semantic document for
+    /// the same reason `agentStatus` is — the document records what the provider
+    /// said, not what this machine's transport can do about it right now.
+    ///
+    /// Defaults to FALSE so that a context which never sets it renders a request
+    /// as readable history with no controls. A dead button is a worse failure
+    /// than a missing one, so the conservative default is the safe one.
+    var canRespondToRequests: Bool = false
 }
 
 /// One AppKit renderer for one semantic block family. `update` and

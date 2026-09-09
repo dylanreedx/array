@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
@@ -78,7 +79,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private let fileReferenceRailHeightConstraint: NSLayoutConstraint
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
-    private var replyOptions: [String] = []
+    private var replyOptions: [AgentReplyOption] = []
     /// B4 — Array's own follow-up queue, rendered as chips above the composer.
     private let queuedMessageRail: ComposerQueuedMessageRailView
     private let queuedMessageRailHeightConstraint: NSLayoutConstraint
@@ -114,8 +115,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     // their checkout-aware registry later, while palette/component surfaces can
     // still discover Array/provider commands without a separate wiring step.
     private var completionSource: any AgentCompletionSuggestionSource =
-        AgentCompletionProviderRegistry(providers: [AgentCommandCompletionProvider()]
-            + AgentCompletionFixtures.providers().filter { $0.providerID != "fixture.commands" })
+        AgentCompletionProviderRegistry(providers: [AgentCommandCompletionProvider()])
     private var completionContext: AgentCompletionContext?
     /// `@` browsing state belongs to the live composer surface, never the draft.
     private var completionNavigationPath: String?
@@ -750,14 +750,23 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             let intent: AgentComposerIntent?
             if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty,
                let invocation = resolvedSelectedCommand(in: prompt) {
-                if invocation.name == "compact" {
+                // By descriptor ID, not by name. `/compact` is Array's own typed
+                // operation, and matching on the string "compact" handed the
+                // native compaction route to any command that happened to share
+                // the name — including a project's own `.claude/commands/compact.md`.
+                if invocation.descriptorID == "array:compact" {
                     let focus = invocation.arguments.joined(separator: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     intent = .compact(AgentCompactionRequest(
                         focus: focus.isEmpty ? nil : focus))
                 } else {
-                    intent = snapshot.executionState == .ready && snapshot.capabilities.canSend
-                        ? .providerCommand(invocation) : nil
+                    // Submitted whatever the turn state is, and refused by the
+                    // ACTION SINK when the agent is busy. This used to resolve to
+                    // `nil` while working, and `guard let intent else { return }`
+                    // below then swallowed the keystroke whole: no send, no queue,
+                    // no refusal, no repaint — Enter did nothing at all and the
+                    // user had no way to tell whether the command had run.
+                    intent = .providerCommand(invocation)
                 }
             } else if !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil {
                 let attachedPrompt = AgentPrompt(
@@ -1474,7 +1483,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// `AgentReplyOptionDetector`. The owner recomputes this per document
     /// version; the composer decides whether to SHOW them, because only it knows
     /// whether the user has already started writing.
-    func setReplyOptions(_ options: [String]) {
+    func setReplyOptions(_ options: [AgentReplyOption]) {
         guard replyOptions != options else { return }
         replyOptions = options
         updateReplyOptionRail()
@@ -1564,6 +1573,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     // Deterministic AppKit probes; not a tile integration seam.
     var qaReplyOptionChipTitles: [String] { replyOptionRail.qaChipTitles }
+    var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
+    var qaReplyOptionChipAccessibilityLabels: [String] { replyOptionRail.qaChipAccessibilityLabels }
     var qaDraftText: String { draft.text }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {

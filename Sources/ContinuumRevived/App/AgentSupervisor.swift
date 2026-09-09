@@ -56,6 +56,13 @@ protocol AgentRunning: AnyObject, Sendable {
     /// Codable runtime and companion activity streams.
     func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void)
+    /// TR-04 — what THIS runner can do with a `/command`. A REQUIREMENT, not an
+    /// extension-only member: the supervisor holds an `AgentRunning` existential,
+    /// and a member that exists only in a protocol extension dispatches
+    /// statically — every concrete runner's override would be dead code and the
+    /// default would answer for all three. `--agent-supervisor-check` caught
+    /// exactly that.
+    var commandCapabilities: AgentSessionCommandCapabilities { get }
     /// A provider session which remains useful after `run` returns can be
     /// retained by the supervisor and rebound to the next prompt.
     var keepsSessionAliveBetweenTurns: Bool { get }
@@ -110,6 +117,44 @@ protocol AgentCompactionRunning: AgentRunning {
     ) throws
 }
 
+extension AgentRunning {
+    /// The conservative floor, and deliberately the floor: a runner that has not
+    /// said otherwise hands a leading slash to the model, which spends a real
+    /// paid turn answering conversationally about a command that means nothing
+    /// to it in that mode. Opting in is per runner, below.
+    ///
+    /// This replaces a `switch records[id]?.harness` in
+    /// `sessionCommandCapabilities(for:)` — the stored provider NAME, which is
+    /// the one thing a capability may never be derived from. It lies for the
+    /// whole of a transport migration: `.pi` returned the one-shot answer
+    /// unconditionally while production had been binding `PiRpcAgentRunner`,
+    /// whose vocabulary includes `compact`, `fork`, `set_model` and
+    /// `set_session_name`, since before this comment existed.
+    var commandCapabilities: AgentSessionCommandCapabilities { .oneShotProse }
+}
+
+/// TR-06 — the response transport for a request a provider OPENED and is
+/// holding. A REFINEMENT of `AgentRunning`, for the same reason
+/// `AgentSessionRunning` is one: only some transports can carry a response back.
+///
+/// Deliberately NOT `AgentAdapter`. That protocol already declares
+/// `respondToRequest`/`respondToUserInput`, and has had exactly one conformer
+/// since it was written — `ProbeAdapter`, inside CoreChecks. Reviving it is a
+/// program (tickets 67/69/70, all `[gaps]`); this is the seam the runners Array
+/// actually spawns can implement.
+///
+/// **A conformer must acknowledge, not assume.** `respond` returns only after
+/// the provider has accepted the response frame; a transport error throws. The
+/// caller turns that into a visible failed state rather than a silent no-op,
+/// because the failure mode this whole ticket exists to kill is a control that
+/// looks like it worked.
+protocol AgentRequestResponding: AgentRunning {
+    /// True only while a response could actually be delivered — the process is
+    /// alive and its transport is open. Read per-snapshot, never cached.
+    var canRespondToRequests: Bool { get }
+    func respond(requestID: String, decision: ApprovalDecision) throws
+}
+
 extension PiAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentRunning {}
 extension PiRpcAgentRunner: AgentSessionRunning {}
@@ -117,9 +162,25 @@ extension PiRpcAgentRunner: AgentCompactionRunning {}
 extension PiRpcAgentRunner {
     var keepsSessionAliveBetweenTurns: Bool { true }
     var canAcceptAnotherTurn: Bool { isSessionRunning }
+    /// A live rpc session carries a command AS a command over its own transport,
+    /// so it never depends on the CLI interpreting a leading slash.
+    /// `advertisedCommandNames` is pi's `get_commands` answer, nil until this
+    /// session has given a parseable one.
+    var commandCapabilities: AgentSessionCommandCapabilities {
+        AgentSessionCommandCapabilities(
+            interpretsLeadingSlash: false,
+            canDelegateCommands: true,
+            advertisedNames: advertisedCommandNames)
+    }
 }
 extension ClaudeAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentCompactionRunning {}
+extension ClaudeAgentRunner {
+    /// Measured 2026-08-24: `claude -p` answers `/help`, `/status` and
+    /// `/compact` itself with `model: "<synthetic>"`, zero tokens and zero cost,
+    /// and "Unknown command: …" for one it does not have.
+    var commandCapabilities: AgentSessionCommandCapabilities { .claudeOneShot }
+}
 extension CodexAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentCompactionRunning {}
 
@@ -947,6 +1008,24 @@ final class AgentSupervisor {
     private let nameGenerationTimeout: TimeInterval
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
+    ///
+    /// Deliberately not a field on `AgentRecord`. A record is per-agent and
+    /// persisted per-agent, so storing an account allowance there would mint one
+    /// racing copy per agent, write N files for one provider notification, and
+    /// resurrect whichever stale copy happened to load first on relaunch. One
+    /// login has one allowance; this dictionary is that shape.
+    ///
+    /// Persisted per harness and validated on restore against each window's own
+    /// `resets_at`, so a relaunch shows the last real percentages instead of a
+    /// row of em dashes. See `AgentAccountQuotaStore` for why checking the reset
+    /// is the right answer rather than discarding the reading.
+    private var accountQuotas: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
+    private lazy var accountQuotaStore: AgentAccountQuotaStore? = {
+        guard let directory = AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
+        else { return nil }
+        return AgentAccountQuotaStore(applicationSupportDirectory: directory)
+    }()
     /// Live views of an agent's identity. Names are record state rather than
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
@@ -967,6 +1046,17 @@ final class AgentSupervisor {
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
     private(set) var records: [AgentID: AgentRecord] = [:]
+
+    /// CX-01 (`.plans/59`, §15): where a bound runner's host tool request goes.
+    /// Called on the main actor with the SUPERVISOR's `AgentID` for the runner
+    /// instance that received the frame — the caller binding. The envelope carries
+    /// no identity and could not be trusted if it did. nil (checks, or before the
+    /// app wires its service) answers every request `unsupported`.
+    var hostToolHandler: ((AgentID, PiHostToolCall) -> Void)?
+
+    /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
+    /// the host grant table can revoke (or start honouring) the agent's policy.
+    var onWorkspaceToolsChanged: ((AgentID, Bool) -> Void)?
     /// The runner for the prompt currently in flight, if any.
     private var runners: [AgentID: AgentRunning] = [:]
     /// The latest runner generation to own each agent. Unlike `runners`, this is
@@ -1001,6 +1091,15 @@ final class AgentSupervisor {
     private var activeNameGenerations = 0
     private var nameGenerationTasks: [AgentID: Task<Void, Never>] = [:]
     private var nameGenerationRequestIDs: [AgentID: UUID] = [:]
+    /// Agents whose harness title has already been polled for the current turn
+    /// count, so a burst of completions cannot start a file read per event.
+    private var harnessTitleTasks: Set<AgentID> = []
+    /// How many times the AUTOMATIC generated-name path has been tried per agent.
+    /// Bounded, because naming is best-effort and retrying a provider that is
+    /// simply not installed on every subsequent turn is how a convenience
+    /// becomes a tax. The explicit action is never limited by this.
+    private var automaticNamingAttempts: [AgentID: Int] = [:]
+    private static let maximumAutomaticNamingAttempts = 3
     /// Recovery operations are serialized per agent. Completion and teardown
     /// events can arrive back-to-back; ordering them prevents a late restore from
     /// racing a successful confirmation and makes replay/rebind idempotent.
@@ -1225,6 +1324,21 @@ final class AgentSupervisor {
     /// after a streaming turn floods it, so a tile that attaches later seeds
     /// from this instead (`contextWindowSnapshot(for:)`).
     private var contextWindowSnapshots: [AgentID: AgentContextWindowSnapshot] = [:]
+    /// TR-04 — the slash commands each harness has told us THIS session has,
+    /// or no entry when it has not said yet.
+    ///
+    /// In-memory and per launch on purpose. It is a fact about a live CLI
+    /// binary, and the classifier's refusal branch reads it: a list persisted
+    /// across a `claude`/`pi` upgrade would refuse commands the new binary
+    /// gained. Absent means "answer from the baseline catalogue", which is
+    /// exactly what a pre-init agent needs.
+    private var advertisedCommandNames: [AgentID: Set<String>] = [:]
+    /// TR-04 — how many Array-owned notices this agent has been given, so each
+    /// one gets a distinct transcript entry id. `appendNotice` de-dupes by id
+    /// (correctly — it protects replay), and the id used to be a constant per
+    /// command: a second `/status` in one transcript printed nothing at all,
+    /// and a second `/clear` ran its whole transaction and left no boundary.
+    private var arrayOwnedNoticeCounts: [AgentID: Int] = [:]
     /// Restore-time Codex rollout lookup. Injected in checks so repair is
     /// deterministic and never depends on a developer's real ~/.codex tree.
     private let codexRestoredContextSnapshot: @Sendable (AgentRecord) -> AgentContextWindowSnapshot?
@@ -1377,6 +1491,24 @@ final class AgentSupervisor {
     /// claude itself has reported since (captured from `system/init`), which
     /// is authoritative once `--fork-session` (B7.2) has minted an id Array
     /// could not have predicted.
+    /// WHERE this agent's claude conversation lives — the working directory
+    /// claude will encode into `~/.claude/projects/<encoded>/`, and the session
+    /// id that names the file inside it.
+    ///
+    /// One function because it has two callers that must never disagree: the
+    /// runner that SPAWNS the conversation, and the title reader that opens the
+    /// file that conversation writes. They are a matched pair, and a mismatch is
+    /// silent — a title read against the wrong directory finds no file, returns
+    /// nil, and simply never names anything. That is exactly the bug this
+    /// function exists to make impossible: `cwd` is the agent's project root,
+    /// but claude is spawned in `lastObservedWhere`, and those differ the moment
+    /// an agent is working anywhere but the root.
+    nonisolated static func claudeSessionLocation(
+        for record: AgentRecord
+    ) -> (cwd: String, sessionId: String) {
+        (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
+    }
+
     nonisolated static func claudeRunnerConfig(for record: AgentRecord) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
@@ -1393,11 +1525,12 @@ final class AgentSupervisor {
                 forkSession: true
             )
         }
+        let location = claudeSessionLocation(for: record)
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
-            cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
-            sessionId: record.providerSessionId ?? claudeSessionId(for: record.id),
+            cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
+            sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
             // resume, so resume-first would spawn a CLI process purely to be told
             // so. `latestTurnAt` is stamped on `.turnStarted` and persisted, which
@@ -1584,6 +1717,24 @@ final class AgentSupervisor {
             persist(updated)
             return
         }
+        // TR-04 — the harness's own command list. In-memory only and per
+        // launch: it is a fact about THIS session, and a stale list persisted
+        // across a CLI upgrade would refuse commands the new binary has.
+        if case let .advertisedCommands(names) = observation {
+            advertisedCommandNames[id] = Set(names)
+            return
+        }
+        // An account quota belongs to the signed-in harness, not to this agent:
+        // file it by harness so every agent on the same login reads one value,
+        // then still fan the observation out so their tiles repaint.
+        if case let .accountQuota(snapshot) = observation {
+            accountQuotas[snapshot.harness] = snapshot
+            accountQuotaStore?.save(accountQuotas)
+            runtimeObservationObservers.values.forEach { observers in
+                observers.values.forEach { $0(observation) }
+            }
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -1597,6 +1748,35 @@ final class AgentSupervisor {
     /// Claude harness offers aliases (`anthropic/opus`) that are not catalogue
     /// keys, so without this a claude agent has no window and an empty ring.
     func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
+
+    /// The account quota for THIS agent's harness, or nil when the provider has
+    /// reported none. Pi reports no account windows at all, so nil there is
+    /// "unsupported" rather than "not yet observed" — the presenter says so
+    /// either way, because both are unknown and neither is zero.
+    func accountQuota(for id: AgentID) -> AgentAccountQuotaSnapshot? {
+        guard let harness = records[id]?.harness else { return nil }
+        restoreAccountQuotasIfNeeded()
+        return accountQuotas[harness]
+    }
+
+    /// Loads the persisted readings once per process, on first ask rather than
+    /// at boot: an empty row is only a problem when something is looking at it,
+    /// and this keeps a disk read off the launch path.
+    private var didRestoreAccountQuotas = false
+    private func restoreAccountQuotasIfNeeded() {
+        guard !didRestoreAccountQuotas else { return }
+        didRestoreAccountQuotas = true
+        guard let restored = accountQuotaStore?.restore(now: Date()), !restored.isEmpty else { return }
+        // A live reading observed this session always wins over a restored one.
+        for (harness, snapshot) in restored where accountQuotas[harness] == nil {
+            accountQuotas[harness] = snapshot
+        }
+    }
+
+    /// QA seam: deliver a quota observation without a live provider.
+    func qaDeliverAccountQuota(_ snapshot: AgentAccountQuotaSnapshot) {
+        accountQuotas[snapshot.harness] = snapshot
+    }
 
     /// True once there is user/session work that makes Home retargeting unsafe.
     /// Used by the native Home action surface: zero-turn agents may be reassigned;
@@ -2070,6 +2250,12 @@ final class AgentSupervisor {
                 return id
             }
             records[id] = child
+            if WorkspaceToolsConfig.enabledForNewAgents(), !child.workspaceToolsEnabled {
+                var enabled = child
+                enabled.workspaceToolsEnabled = true
+                records[id] = enabled
+                persist(enabled)
+            }
         } else {
             var record = AgentRecord(
                 id: id,
@@ -2107,6 +2293,8 @@ final class AgentSupervisor {
                 record.displayName = proposal.name
                 record.displayNameSource = proposal.source
             }
+            // CX-01 (§14.1): the Settings default seeds NEW agents only.
+            record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents()
             records[id] = record
             persist(record)
         }
@@ -2524,6 +2712,28 @@ final class AgentSupervisor {
                       self.runnerGenerationTokens[id] == runnerGeneration,
                       self.runners[id] === runner else { return }
                 self.ingestRuntimeObservation(observation, for: id)
+            }
+        }
+        // CX-01 (`.plans/59`, §15): the host tool bridge. Same generation guard as
+        // the spawn side channel — a reply for a retired runner is answered
+        // `outcome_unknown` on ITS transport and never re-routed to a newer one.
+        // Asked for as a capability so the one-shot and scripted runners stay
+        // untouched.
+        if let bridging = runner as? HostToolBridging {
+            bridging.observeHostToolRequests { [weak self] call in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runnerGenerationTokens[id] == runnerGeneration,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else {
+                        call.respond(.error("outcome_unknown", "The agent session that made this request has been replaced."))
+                        return
+                    }
+                    guard let handler = self.hostToolHandler else {
+                        call.respond(.unsupportedUnbound)
+                        return
+                    }
+                    handler(id, call)
+                }
             }
         }
         // C7: a claude subagent's own work, routed to the CHILD rather than the
@@ -3604,6 +3814,7 @@ final class AgentSupervisor {
                     warn: warn
                 )
             }
+            lastSpawnRefusals[parentId] = nil
             let childName = records[childID]?.humanDisplayName ?? "Subagent"
             deliver(.childAgentSpawned(
                 threadId: Self.threadId(for: parentId),
@@ -3640,6 +3851,7 @@ final class AgentSupervisor {
         toolName: String = SpawnRequest.toolName
     ) -> AgentID? {
         warn("AgentSupervisor: refusing \(toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
+        lastSpawnRefusals[parentId] = refusal
         guard let parent = records[parentId] else { return nil }
         let itemId = "spawn-refused-\(UUID().uuidString)"
         let thread = Self.threadId(for: parentId)
@@ -3676,6 +3888,12 @@ final class AgentSupervisor {
         }
         return nil
     }
+
+    /// CX-01 Phase 2b: the reason `handleSpawnRequest` last returned nil for this
+    /// parent, so the workspace API can report it as a structured error (the
+    /// same shape as `sendRefusal(for:)`). Cleared when a spawn succeeds.
+    private var lastSpawnRefusals: [AgentID: SpawnRefusal] = [:]
+    func spawnRefusal(for parentId: AgentID) -> SpawnRefusal? { lastSpawnRefusals[parentId] }
 
     /// The agents this one spawned.
     func children(of id: AgentID) -> [AgentID] {
@@ -4099,6 +4317,8 @@ final class AgentSupervisor {
         locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
         contextWindowSnapshots.removeValue(forKey: id)
+        advertisedCommandNames.removeValue(forKey: id)
+        arrayOwnedNoticeCounts.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
@@ -4318,7 +4538,9 @@ final class AgentSupervisor {
     /// one truncating line and it crosses to the phone inside
     /// `AgentInventory.safeSummary`, where anything over 512 characters is a
     /// `transcriptBody` taint (`SyncPayloadTaintScanner`).
-    static let maximumDisplayNameLength = AgentName.maximumLength
+    /// The cap on what a RECORD may hold. Painting is capped separately and more
+    /// tightly by `AgentName.displayTitle`.
+    static let maximumDisplayNameLength = AgentName.storageLimit
 
     /// User text, made into a label. Whitespace and newlines collapse to single
     /// spaces, the result is capped, and an ABSOLUTE PATH keeps only its last
@@ -4371,6 +4593,123 @@ final class AgentSupervisor {
         persist(record)
         return true
     }
+
+    /// CX-01 (§14.1): the persisted per-agent workspace-tools POLICY. The host
+    /// grant table reads it on every dispatch and again before every effect, so
+    /// flipping it off revokes; `onWorkspaceToolsChanged` lets the table drop its
+    /// minted grants immediately. Returns true when the record changed.
+    @discardableResult
+    func setWorkspaceToolsEnabled(agentID id: AgentID, _ enabled: Bool) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.setWorkspaceToolsEnabled: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.workspaceToolsEnabled != enabled else { return false }
+        record.workspaceToolsEnabled = enabled
+        records[id] = record
+        persist(record)
+        onWorkspaceToolsChanged?(id, enabled)
+        return true
+    }
+
+    // MARK: - Derived name refresh (harness title, then generated fallback)
+
+    /// Give one agent the best title currently available to it. Called on every
+    /// turn completion.
+    ///
+    /// The ladder is authority-ordered and stops at the first rung that can
+    /// speak: a person's rename ends it outright; otherwise claude's own
+    /// conversation title wins when the harness has one; and only a harness with
+    /// no native title at all reaches the provider one-shot, which costs a
+    /// process and so runs once per agent.
+    ///
+    /// Everything here is best-effort and silent. A naming path that can make a
+    /// turn fail, block, or warn at the user is worse than a bad name.
+    private func refreshDerivedName(for id: AgentID) {
+        guard let record = records[id] else { return }
+        // A person has decided. Nothing automatic runs again, ever.
+        guard !record.displayNameSource.isManual else { return }
+        // An observed child is already named by the label the parent model wrote
+        // for its own call (`SpawnRequest.displayLabel`) — a 3-to-5 word summary
+        // of the delegated task, which is exactly the shape everything below is
+        // trying to reconstruct. It also has no session file and no process of
+        // Array's, so there is nothing here that could improve on it.
+        guard record.capabilities != .observedReadOnly else { return }
+
+        switch record.harness {
+        case .claudeCode:
+            refreshClaudeHarnessTitle(for: id, record: record)
+        case .codex, .pi:
+            requestAutomaticGeneratedName(for: id, record: record)
+        case nil:
+            return
+        }
+    }
+
+    /// Poll claude's own `ai-title` for this agent's conversation and adopt it.
+    ///
+    /// The file read is off the main actor: a session `.jsonl` is on the order of
+    /// megabytes, and the tail scan is bounded but not free. The record is
+    /// re-fetched after the hop because a rename can land while the read is in
+    /// flight — `adoptAutomaticName` refuses on `.manual` regardless, but
+    /// re-reading keeps this from persisting a stale copy of the rest of the
+    /// record.
+    private func refreshClaudeHarnessTitle(for id: AgentID, record: AgentRecord) {
+        guard record.acceptsAutomaticName(from: .harness) else { return }
+        guard harnessTitleTasks.insert(id).inserted else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        // The SAME derivation the runner used to spawn this conversation. See
+        // `claudeSessionLocation` for why reading `record.cwd` here is a silent
+        // no-op rather than an error.
+        let (cwd, sessionId) = Self.claudeSessionLocation(for: record)
+        Task.detached(priority: .utility) { [weak self] in
+            let title = ClaudeSessionTitleReader.title(
+                homeURL: home, cwd: cwd, sessionId: sessionId)
+            await MainActor.run {
+                self?.finishHarnessTitle(title, for: id)
+            }
+        }
+    }
+
+    private func finishHarnessTitle(_ title: String?, for id: AgentID) {
+        harnessTitleTasks.remove(id)
+        guard let title, var record = records[id] else { return }
+        guard record.adoptAutomaticName(title, source: .harness) else { return }
+        records[id] = record
+        persist(record)
+    }
+
+    /// The fallback for a harness that does not name its own conversations —
+    /// codex and pi. One attempt per agent per app session, and only while the
+    /// existing title is still no better than a truncated prompt.
+    private func requestAutomaticGeneratedName(for id: AgentID, record: AgentRecord) {
+        guard Self.automaticGeneratedNamingEnabled else { return }
+        guard record.acceptsAutomaticName(from: .generated) else { return }
+        // A BOUNDED number of attempts, not one.
+        //
+        // `requestGeneratedName` refuses for two very different reasons and
+        // returns the same `false` for both: a permanent one (no pi capability
+        // on this machine) and a transient one (the concurrency cap, which a
+        // restore storm makes likely precisely when many agents finish at once).
+        // Marking the agent done on the first refusal loses every capped agent's
+        // only chance; never marking it retries a missing binary on every turn
+        // forever. A small counter covers both without having to tell them apart.
+        let attempts = automaticNamingAttempts[id] ?? 0
+        guard attempts < Self.maximumAutomaticNamingAttempts else { return }
+        automaticNamingAttempts[id] = attempts + 1
+        // `requestGeneratedName` owns every remaining guard: the manual check,
+        // the concurrency cap, capability resolution, and the CAS. A refusal
+        // here is silent on purpose — this path was not asked for by anyone.
+        _ = requestGeneratedName(agentID: id)
+    }
+
+    /// The single switch for the automatic half of generated naming. The explicit
+    /// "Generate Name" action is unaffected by it.
+    ///
+    /// It exists because this is the only rung that spends a provider process
+    /// without a person asking. If it ever proves noisy or expensive, this is the
+    /// line to flip — not a redesign of the ladder above it.
+    static let automaticGeneratedNamingEnabled = true
 
     /// Start an automatic name proposal without doing any provider work. The
     /// caller keeps the returned token and must hand it back to
@@ -4519,8 +4858,12 @@ final class AgentSupervisor {
         // so cancellation failure cannot clobber a newer request.
         nameGenerationTasks[id]?.cancel()
         guard let request = beginNameGeneration(agentID: id) else { return false }
-        let source = firstPromptByAgent[id]
-            ?? "No source prompt is available. Propose a concise name from the current agent title: \(record.humanDisplayName)"
+        // `firstPromptByAgent` is memory-only, so it is empty for every agent
+        // that predates this app session. The fallback is the record's STORED
+        // name — the full seed, not the 60-character painted one. Before the
+        // storage/display split those were the same string, which meant a
+        // relaunched agent was asking a model to summarize a summary.
+        let source = firstPromptByAgent[id] ?? record.storedDisplayName
         let prompt = Self.generatedNamePrompt(source)
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         let timeout = nameGenerationTimeout
@@ -4565,7 +4908,17 @@ final class AgentSupervisor {
 
     private static func generatedNamePrompt(_ source: String) -> String {
         let bounded = String(source.prefix(AgentNameOneShot.maximumPromptLength))
-        return "Name the agent from this user request. Return one short name only, with no explanation or metadata.\n\nUser request:\n\(bounded)"
+        // "Summarize, do not restate" is the entire instruction that matters.
+        // Without it a model hands back the opening clause of the request, which
+        // is the truncation this whole path exists to replace.
+        return """
+        Name the agent from this user request. Summarize what the request is \
+        ABOUT; do not restate its opening words. Return one short name only, \
+        with no explanation or metadata.
+
+        User request:
+        \(bounded)
+        """
     }
 
     private func finishGeneratedName(
@@ -4683,6 +5036,15 @@ final class AgentSupervisor {
         runners[id] != nil
     }
 
+    /// CX-01 Phase 2a (`.plans/59` §11): the semantic transcript document this
+    /// supervisor holds for an agent — fed by `deliver` → `ingestTranscriptEvent`,
+    /// the same projection the durable snapshot is written from — or nil when no
+    /// event has reached it in this session. A READ: nothing is flushed, marked,
+    /// persisted or woken. Absence here is not evidence the agent did nothing.
+    func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
+        transcriptProjections[id]?.document
+    }
+
     /// Operational state for one tile. State comes only from explicit lifecycle
     /// and request events. Transport occupancy affects capability acceptance, not
     /// the label: a process that has emitted Ready still presents Ready.
@@ -4748,6 +5110,11 @@ final class AgentSupervisor {
         // runner. That is honest for every harness with an occupied runner,
         // one-shot or session-backed alike — there is no RPC to gate on.
         let queueable = occupied && !mirrored
+        // TR-06 — same sourcing rule as `steerable`: asked of the BOUND RUNNER.
+        // A mirrored agent has no runner here at all, so it can never respond;
+        // that is the same reason it gets no composer and no Stop.
+        let responder = mirrored ? nil : (runners[id] as? AgentRequestResponding)
+        let canRespond = responder?.canRespondToRequests ?? false
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
@@ -4759,7 +5126,12 @@ final class AgentSupervisor {
                 // "Unavailable" on the composer.
                 canStop: !mirrored && occupied && record.capabilities.canStop,
                 canSteer: steerable && occupied,
-                canQueue: queueable && occupied
+                canQueue: queueable && occupied,
+                // NOT gated on `occupied`. A held request is exactly the state
+                // where the provider is waiting on the user and the runner may
+                // read as idle; requiring occupancy would hide the buttons on
+                // the only request that matters.
+                canRespondToRequests: canRespond
             ),
             // P3.3: carried, never derived here. A consumer that wanted an elapsed
             // reading had to reach for the event ring instead, which is why the
@@ -4768,6 +5140,46 @@ final class AgentSupervisor {
             submittedAt: facts.submittedAt,
             isMirrored: mirrored
         )
+    }
+
+    /// TR-06 — carries a user's decision back to a request the provider OPENED.
+    ///
+    /// Returns whether the response was ACCEPTED FOR DISPATCH, synchronously, on
+    /// the same main-actor turn as the press — the same contract as `accept`, and
+    /// for the same reason: a control must not be told "yes" by one check and
+    /// "no" by another hidden further down.
+    ///
+    /// It deliberately does NOT report delivery. The transport blocks on a
+    /// provider round trip (`CodexAppServerTransport.sendRequest` waits on a
+    /// semaphore), so it runs off the main thread and reports a failure through
+    /// `onDispatchFailure`. And it never resolves anything: a delivered response
+    /// leaves the request open until the provider's own
+    /// `requestResolved`/`userInputResolved` event arrives. Array does not get to
+    /// decide that the provider agreed.
+    @discardableResult
+    func respondToRequest(
+        agentID: AgentID,
+        requestID: String,
+        decision: ApprovalDecision,
+        onDispatchFailure: @escaping @MainActor (String) -> Void = { _ in }
+    ) -> Bool {
+        guard records[agentID] != nil else { return false }
+        // The request must be one this supervisor is actually holding open. A
+        // press against a request already resolved (or never opened) is a stale
+        // callback, and forwarding it would put a second answer on the wire.
+        guard turnFacts[agentID]?.pendingRequests[requestID] != nil else { return false }
+        guard let responder = runners[agentID] as? AgentRequestResponding,
+              responder.canRespondToRequests else { return false }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try responder.respond(requestID: requestID, decision: decision)
+            } catch {
+                let message = SecretRedactor.redactLocalDiagnostics("\(error)")
+                DispatchQueue.main.async { MainActor.assumeIsolated { onDispatchFailure(message) } }
+            }
+        }
+        return true
     }
 
     /// One action owner for the v2 composer. Validation and mutation happen on the
@@ -4825,24 +5237,42 @@ final class AgentSupervisor {
             stop(agentID)
             return .accepted
         case .providerCommand(let invocation):
-            if invocation.name == "compact" {
+            // ONE set for the picker and for dispatch. This used to look the
+            // descriptor up in `AgentCommandCatalog.allBaselines()` while the
+            // menu offered `allBaselines() + discovered + manifests` — so every
+            // discovered skill, prompt template and `.array/commands` manifest
+            // was an ENABLED row whose dispatch fell straight through to
+            // "unsupported", and every availability verdict the user could read
+            // (`Requires Codex`, the CLI-surface refusal) was recomputed from a
+            // pristine descriptor the picker had never shown.
+            let offered = await offeredCommandDescriptors(for: agentID)
+            // Provider-resource discovery touches the filesystem, so re-read the
+            // turn state after it: an agent that was idle when the row was
+            // clicked can be mid-turn by the time the scan returns.
+            guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
+            guard let descriptor = offered.first(where: { $0.id == invocation.descriptorID })
+                    ?? AgentCommandCatalog.allBaselines()
+                        .first(where: { $0.id == invocation.descriptorID }) else {
+                return .refused(.unsupported)
+            }
+            // `/compact` is an Array-owned typed operation on every harness, and
+            // it is matched by descriptor ID rather than by NAME. Name-matching
+            // meant any invocation called "compact" — including a project's own
+            // `.claude/commands/compact.md`, which dispatch can now resolve —
+            // seized the native compaction route.
+            if descriptor.id == "array:compact" {
                 let focus = invocation.arguments.joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return await accept(
                     .compact(AgentCompactionRequest(focus: focus.isEmpty ? nil : focus)),
                     for: agentID)
             }
-            guard invocation.surface != .cli else { return .refused(.unsupported) }
             // B5 — routed through the classifier instead of unconditionally
             // serializing and sending. `AgentCommandExecutionPlanner` decides per
             // invocation whether Array performs it, the harness does, it expands
             // into an ordinary prompt, or it cannot run here at all — never
             // derived from `record.harness`, always from the BOUND runner (the
             // same rule `turnSnapshot` already follows for steer/queue).
-            guard let descriptor = AgentCommandCatalog.allBaselines()
-                .first(where: { $0.id == invocation.descriptorID }) else {
-                return .refused(.unsupported)
-            }
             switch AgentCommandExecutionPlanner.resolve(
                 descriptor, capabilities: sessionCommandCapabilities(for: agentID)
             ) {
@@ -4850,30 +5280,42 @@ final class AgentSupervisor {
                 // Array performs it and authors the reply itself as a `.system`
                 // notice — it never reaches the CLI as text, so no runtime event
                 // is invented and no turn is spent.
-                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard snapshot.capabilities.canSend else {
+                    appendCommandRefusalNotice(descriptor, reason: Self.busyRefusalReason, for: agentID)
+                    return .refused(.turnNotReady)
+                }
                 if descriptor.name == "clear" {
                     // B7.2 — `/clear` is not just a notice: it is one transaction
                     // over session rotation, the stale context meter, naming, and
                     // subagent chips, or it is worse than doing nothing.
                     performClearCommand(descriptor, for: agentID)
                 } else {
-                    appendArrayOwnedCommandNotice(descriptor, for: agentID)
+                    appendArrayOwnedCommandNotice(descriptor, for: agentID, offered: offered)
                 }
                 return .accepted
             case .harnessDelegated, .skillTemplate:
                 let native = invocation.nativeSlashText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !native.isEmpty else { return .refused(.emptyDraft) }
-                guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+                guard snapshot.capabilities.canSend else {
+                    appendCommandRefusalNotice(descriptor, reason: Self.busyRefusalReason, for: agentID)
+                    return .refused(.turnNotReady)
+                }
                 guard sendPrepared(
                     PreparedAgentPrompt(prompt: AgentPrompt(native), expectedAgentID: agentID),
                     to: agentID
                 ) else { return .refused(.invalidAttachment) }
                 return .accepted
-            case .unavailable:
+            case let .unavailable(reason):
                 // Disabled with a reason, never degraded into prose: codex and pi
                 // hand a leading slash straight to the model, spending a real paid
                 // turn answering conversationally about a command that means
-                // nothing to them in this mode.
+                // nothing to them in that mode.
+                //
+                // And the reason is now SAID. `IntentRefusal` stays opaque — that
+                // is an attachment-privacy rule and this is not an attachment —
+                // so the words go where the user is already looking, as a local
+                // notice beside the command they just ran.
+                appendCommandRefusalNotice(descriptor, reason: reason, for: agentID)
                 return .refused(.unsupported)
             }
         case .compact(let request):
@@ -5546,34 +5988,33 @@ final class AgentSupervisor {
 
     // MARK: - B5 command classifier
 
-    /// Capability facts for `AgentCommandExecutionPlanner`.
+    /// Capability facts for `AgentCommandExecutionPlanner`, from the BOUND
+    /// RUNNER.
     ///
-    /// **This comment used to describe something the body does not do**, and the
-    /// difference is a live defect rather than a documentation nicety. It claimed
-    /// the facts came "from the BOUND runner's harness rather than a stored
-    /// preference — the same rule `turnSnapshot` already follows", and that
-    /// "every compiled runner today is one-shot". Both were false by 2026-08-25:
-    /// the body switches on `records[id]?.harness`, which IS the stored record and
-    /// not the bound runner, and `PiRpcAgentRunner`/`PiRpcTransport` ship a
-    /// session runner with `steer`, `interrupt` and a generic `command`.
+    /// This used to `switch records[id]?.harness` and return `.oneShotProse` for
+    /// `.pi` unconditionally, and its own doc comment said so and said it was a
+    /// live defect. Production binds `PiRpcAgentRunner`
+    /// (`piSessionTransportEnabled()` is default-on), whose transport carries a
+    /// command AS a command — so every pi slash command was refused with "this
+    /// agent's CLI doesn't run slash commands outside its own terminal", about a
+    /// CLI that does.
     ///
-    /// The consequence is `.plans/49` §3.4: a pi agent whose rpc runner is bound
-    /// and can genuinely take `/compact` is told it cannot, because this returns
-    /// `.oneShotProse` for `.pi` unconditionally. Fixing that means consulting the
-    /// bound runner the way `AgentSessionRunning.sessionCapabilities` already does
-    /// for steer — deliberately NOT done here, because it changes what the
-    /// composer offers and belongs with the rest of the advertise-then-refuse
-    /// work, not smuggled in behind a comment correction.
-    ///
-    /// Measured 2026-08-24: `claude -p` interprets `/help`, `/status`,
-    /// `/compact` itself (synthetic zero-token replies); `codex exec --json`
-    /// and `pi -p --mode json` both hand the literal text to the model, which
-    /// spends a real paid turn answering conversationally.
+    /// The runner is resolved the way `accept(.compact)` already resolves one:
+    /// bound, else the idle session, else the runner the NEXT turn would create.
+    /// That last rung matters — a command is usually typed at an idle agent, and
+    /// construction spawns nothing (`run()` does).
     private func sessionCommandCapabilities(for id: AgentID) -> AgentSessionCommandCapabilities {
-        switch records[id]?.harness {
-        case .claudeCode: return .claudeOneShot
-        case .codex, .pi, nil: return .oneShotProse
+        guard let record = records[id] else { return .oneShotProse }
+        let runner = runners[id] ?? idleSessionRunners[id]
+            ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))
+        var capabilities = runner.commandCapabilities
+        // The runner answers for the transport; the supervisor answers for what
+        // the harness has ADVERTISED, because a one-shot claude process is
+        // rebuilt every turn and cannot carry the list from the last one.
+        if let advertised = advertisedCommandNames[id] {
+            capabilities.advertisedNames = advertised
         }
+        return capabilities
     }
 
     /// B7.2 — `/clear`, in one transaction. `/clear` alone used to be
@@ -5634,22 +6075,85 @@ final class AgentSupervisor {
         appendArrayOwnedCommandNotice(descriptor, for: id)
     }
 
+    /// Every command Array would offer this agent, with the menu's own
+    /// availability verdicts already applied — resolved OFF the main actor,
+    /// because it enumerates provider resource directories.
+    ///
+    /// One set for the picker and for dispatch (`AgentCommandCatalog`), so a row
+    /// the user can click can no longer be a row the supervisor cannot find.
+    private func offeredCommandDescriptors(for id: AgentID) async -> [AgentCommandDescriptor] {
+        let context = completionContext(for: id)
+        return await Task.detached(priority: .userInitiated) {
+            AgentCommandCatalog.offeredDescriptors(context: context)
+        }.value
+    }
+
     /// Tier A of the classifier: Array performs the command itself and authors
     /// the reply as a `.system` notice, never as text sent to the CLI. No new
     /// runtime event, no I5 pressure — `AgentTranscriptProjection.appendNotice`
     /// is already idempotent and already carries `provenance: .localNotice`.
-    private func appendArrayOwnedCommandNotice(_ descriptor: AgentCommandDescriptor, for id: AgentID) {
+    private func appendArrayOwnedCommandNotice(
+        _ descriptor: AgentCommandDescriptor,
+        for id: AgentID,
+        offered: [AgentCommandDescriptor] = []
+    ) {
         guard transcriptStore != nil else { return }
-        let (title, body) = Self.arrayOwnedCommandNoticeText(descriptor, record: records[id])
+        let (title, body) = Self.arrayOwnedCommandNoticeText(
+            descriptor, record: records[id], offered: offered)
+        appendLocalNotice(id: id, key: "array-command-\(descriptor.id)", title: title, body: body)
+    }
+
+    /// One Array-authored `.system` notice, with an id no earlier notice can
+    /// collide with.
+    ///
+    /// `appendNotice` returns without doing anything when the transcript
+    /// already holds an entry with that id — correct, because that is what
+    /// makes REPLAY idempotent. The id here used to be
+    /// `"array-command-<descriptorID>"`, a constant per command, so the
+    /// de-dupe meant to protect replay silently ate the second `/status` and
+    /// left the second `/clear` with no boundary marker at all, while `accept`
+    /// still returned `.accepted` and the composer still cleared the draft.
+    private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
+        guard transcriptStore != nil else { return }
+        let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
+        arrayOwnedNoticeCounts[id] = ordinal
         var projection = transcriptProjections[id]
             ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
-        projection.appendNotice(id: "array-command-\(descriptor.id)", title: title, text: body)
+        projection.appendNotice(id: "\(key)#\(ordinal)", title: title, text: body)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
     }
 
+    /// The reason a command could not run, in the user's transcript.
+    ///
+    /// A refusal used to be `.refused(.unsupported)` and nothing else:
+    /// `IntentRefusal` carries no reason (deliberately — that opacity is an
+    /// attachment-privacy rule), the composer painted an optimistic bubble from
+    /// `nativeSlashText` and rolled it straight back, and the descriptor's own
+    /// `disabledReason` — already computed, already shown on the menu row — was
+    /// dropped on the floor. The user saw a bubble flash and vanish.
+    private func appendCommandRefusalNotice(
+        _ descriptor: AgentCommandDescriptor,
+        reason: String,
+        for id: AgentID
+    ) {
+        appendLocalNotice(
+            id: id,
+            key: "array-command-refused-\(descriptor.id)",
+            title: "/\(descriptor.name) didn\u{2019}t run",
+            body: reason)
+    }
+
+    /// Why a command was refused mid-turn. Commands are not queueable — Array's
+    /// follow-up queue holds PROMPTS, and replaying a command later would make
+    /// `/clear` or `/model` land against a conversation the user was not looking
+    /// at when they asked for it.
+    static let busyRefusalReason = "This agent is busy. Wait for the current turn to finish, or stop it first."
+
     private static func arrayOwnedCommandNoticeText(
-        _ descriptor: AgentCommandDescriptor, record: AgentRecord?
+        _ descriptor: AgentCommandDescriptor,
+        record: AgentRecord?,
+        offered: [AgentCommandDescriptor] = []
     ) -> (title: String, body: String) {
         switch descriptor.name {
         case "clear":
@@ -5662,10 +6166,39 @@ final class AgentSupervisor {
             let model = record?.model ?? "default"
             return ("Agent status", "Harness: \(harness) · Model: \(model)")
         case "help":
-            let names = AgentCommandCatalog.arrayCommands().map { "/\($0.name)" }.joined(separator: ", ")
+            let names = AgentCommandCatalog.arrayCommands()
+                .filter { $0.isEnabled }
+                .map { "/\($0.name)" }
+                .joined(separator: ", ")
             return ("Array commands", names)
+        case "commands":
+            // Real content, from the same set the picker offers. `/commands`
+            // used to answer with its own one-line description — "Browse all
+            // provider commands" — and browse nothing.
+            let runnable = offered.filter { $0.isEnabled }
+                .map { "/\($0.name)" }
+            let names = Set(runnable).sorted().joined(separator: ", ")
+            let blocked = offered.filter { !$0.isEnabled }.count
+            let body = names.isEmpty
+                ? "No commands are available for this agent right now."
+                : names + (blocked > 0 ? "\n\n\(blocked) more are listed but unavailable here." : "")
+            return ("Available commands", body)
+        case "skills":
+            let skills = offered
+                .filter { $0.surface == .skill || $0.surface == .promptTemplate }
+                .map { "/\($0.name)" }
+            let names = Set(skills).sorted().joined(separator: ", ")
+            return (
+                "Discovered skills",
+                names.isEmpty ? "No skills or prompt templates were found for this agent." : names
+            )
         default:
-            return (descriptor.name.capitalized, descriptor.detail ?? "Handled by Array.")
+            // Unreachable while `AgentCommandCatalog.implementedArrayCommandNames`
+            // and this switch agree — the catalogue marks everything outside that
+            // set unavailable, so the classifier refuses it before it gets here.
+            // If the two ever drift, say so rather than echoing the command's own
+            // description back as though something had happened.
+            return (descriptor.name.capitalized, AgentCommandCatalog.unimplementedArrayReason)
         }
     }
 
@@ -6170,6 +6703,12 @@ final class AgentSupervisor {
             completedFanOutItems.insert(itemId)
             onFanOutItemCompleted?(itemId, id)
         }
+
+        // A finished turn is when this agent's identity is most likely to have
+        // improved: claude has had a chance to write its own title for the
+        // conversation, and the transcript now says what the work turned out to
+        // be. Last, after the record and every subscriber are consistent.
+        if case .turnCompleted = event { refreshDerivedName(for: id) }
     }
 
     /// The child half of the `spawn_agent` result-file channel. No-op for any
@@ -7720,6 +8259,7 @@ func runAgentSupervisorChecks() async throws {
     // than being masked by the broader historical naming corpus below.
     let generatedNameReport = try await checkGeneratedNameOneShot(config: config, fail: fail)
     let namingReport = try await checkAgentNameContract(config: config, cwd: cwd, fail: fail)
+    let automaticRefreshReport = try await checkAutomaticNameRefresh(fail: fail)
 
     func managedImageAttachment(
         _ store: AgentComposerAttachmentStore,
@@ -7893,7 +8433,7 @@ func runAgentSupervisorChecks() async throws {
         throw fail("image transport: mixed prompt text/attachments were not preserved at the runner: \(mixedRunner.agentPrompts)")
     }
     let mixedName = mixedSupervisor.records[mixedAgent]?.displayName ?? ""
-    guard mixedName.count <= AgentName.maximumLength,
+    guard mixedName.count <= AgentName.storageLimit,
           !mixedName.contains("/"),
           !mixedName.contains("@"),
           !mixedName.contains("name-leak"),
@@ -8475,6 +9015,10 @@ func runAgentSupervisorChecks() async throws {
 
     let clearCommandReport = try await checkClearCommandTransaction(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 22b · TR-04 — command dispatch tells the truth about what can run
+
+    let commandDispatchReport = try await checkCommandDispatchTruth(config: config, cwd: cwd, fail: fail)
+
     // MARK: 23 · a runner that dies without a result still ends the turn
 
     // D1 (2026-08-26): the translators mint `.turnCompleted` only from a provider
@@ -8594,7 +9138,8 @@ func runAgentSupervisorChecks() async throws {
     let observedRaceReport = try await checkObservedRunBindingSurvivesAdoptionRace(fail: fail)
     let observedLivenessReport = try await checkObservedRunLivenessSweepClosesQuietDeadRun(fail: fail)
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(commandDispatchReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, \(locationProjectionReport), spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(namingReport), \(generatedNameReport), \(automaticRefreshReport), \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(persistentRunnerReport); \(detachReport); \(snapshotTailReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(transcriptPersistenceReport); \(branchReport); \(spawnCallReport); \(spawnResultReport); \(readStateReport); \(unsettleReport); \(lifecycleReport); \(inboxLifecycleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport); \(agentReferenceStatusReport); \(clearCommandReport); \(deadRunnerReport); \(piDelegateReport); \(piRewriteFirstReport); \(codexSubagentReport); \(refusalReport); \(observedCapReport); \(observedRaceReport); \(observedLivenessReport); \(retiredRunnerReport)")
 }
 
 /// A callback queued by a runner that Stop has already retired must not reopen
@@ -8783,6 +9328,181 @@ private func checkTranscriptSnapshotAndTailBeyondReplayCap(
         throw fail("snapshot-tail: closing the replacement tile leaked its observer")
     }
     return "full semantic snapshot + tail preserved an open 552-delta response beyond replayCap with zero loss/duplication and zero leaked observers"
+}
+
+/// TR-04 — a runner that CAN take a command is not told it cannot, a command
+/// that runs twice is visible twice, and a refusal says why.
+///
+/// Driven through `AgentSupervisor.accept(.providerCommand(…))`, the real
+/// production dispatch. That matters more than usual here: the pure
+/// classifier's own checks (`AgentCommandExecutionPlannerChecks`) were green for
+/// the entire period during which production derived its capability facts from
+/// `records[id]?.harness` and never populated `advertisedNames` at all. A
+/// witness over hand-built capability structs cannot see either defect.
+@MainActor
+func checkCommandDispatchTruth(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    /// A bound runner that carries commands over its own session transport --
+    /// the shape `PiRpcAgentRunner` has in production, which
+    /// `sessionCommandCapabilities` used to answer for by reading the stored
+    /// harness NAME and returning the one-shot verdict regardless.
+    final class SessionCommandRunner: AgentRunning, @unchecked Sendable {
+        private let advertised: Set<String>?
+        init(advertised: Set<String>? = nil) { self.advertised = advertised }
+        var commandCapabilities: AgentSessionCommandCapabilities {
+            AgentSessionCommandCapabilities(
+                interpretsLeadingSlash: false,
+                canDelegateCommands: true,
+                advertisedNames: advertised)
+        }
+        private let lock = NSLock()
+        private var promptsStorage: [String] = []
+        var prompts: [String] { lock.withLock { promptsStorage } }
+        func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            lock.withLock { promptsStorage.append(prompt.text) }
+        }
+        func stop() {}
+        func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+        func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-command-dispatch-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    // `sendPrepared` consults `AgentModelCatalog` readiness, so a delegated
+    // command reaching the transport needs a ready pi harness that owns this
+    // model. Offline and deterministic — no probe runs.
+    let previousPi = AgentModelCatalog.shared.snapshot(for: .pi)
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: [config.model],
+        displayNames: [:], refreshedAt: Date()))
+    defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPi) }
+    let transcriptStore = AgentTranscriptStore(
+        root: root.appendingPathComponent("agent-transcripts", isDirectory: true))
+
+    /// Persistence is debounced, so poll for AT LEAST the expected count rather
+    /// than reading once the file exists — a helper that returns on the first
+    /// non-empty read would report 1 for a transcript about to hold 2 and make
+    /// the de-dupe assertion below meaningless.
+    func notices(for id: AgentID, atLeast expected: Int) async throws -> [AgentEntry] {
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        let deadline = Date().addingTimeInterval(5)
+        var found: [AgentEntry] = []
+        while Date() < deadline {
+            if let document = try await transcriptStore.load(agentID: id, sessionID: sessionID) {
+                found = document.entries.filter {
+                    if case .localNotice = $0.provenance { return true }
+                    return false
+                }
+                if found.count >= expected { return found }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return found
+    }
+
+    func makeSupervisor(
+        _ runner: @escaping (AgentRunnerLaunch) -> AgentRunning
+    ) -> (AgentSupervisor, AgentID) {
+        let store = AgentStore(
+            applicationSupportDirectory: root.appendingPathComponent(UUID().uuidString, isDirectory: true))
+        let id = AgentID(rawValue: UUID())
+        let record = AgentRecord(
+            id: id,
+            displayName: "dispatch",
+            harness: .pi,
+            model: config.model,
+            thinking: config.thinking,
+            cwd: cwd.path,
+            createdAt: Date(),
+            lastActivityAt: Date())
+        try? store.upsert(record)
+        let supervisor = AgentSupervisor(
+            store: store, makeRunner: runner, transcriptStore: transcriptStore)
+        supervisor.restore()
+        return (supervisor, id)
+    }
+
+    // MARK: 1 · a pi agent whose bound runner takes commands is not refused
+
+    // `/session` is a pi provider-slash command. Before TR-04 this returned
+    // `.refused(.unsupported)` for EVERY pi agent, because the capability came
+    // from the harness name and pi's name mapped to `.oneShotProse` — while
+    // production has bound `PiRpcAgentRunner` by default the whole time.
+    let (delegating, delegatingID) = makeSupervisor { _ in SessionCommandRunner() }
+    let session = AgentCommandInvocation(
+        descriptorID: "pi:session", name: "session", harness: .pi, surface: .providerSlash)
+    let delegated = await delegating.accept(.providerCommand(session), for: delegatingID)
+    guard case .accepted = delegated else {
+        throw fail("a pi agent bound to a command-carrying session runner refused /session: \(delegated)")
+    }
+
+    // MARK: 2 · and the same command IS refused on a runner that cannot
+
+    // The default `AgentRunning.commandCapabilities` floor: a leading slash goes
+    // to the model, so the command is disabled with a reason rather than
+    // serialized into a real paid turn.
+    let (oneShot, oneShotID) = makeSupervisor { _ in ScriptedAgentRunner(script: []) }
+    let refused = await oneShot.accept(.providerCommand(session), for: oneShotID)
+    guard case .refused(.unsupported) = refused else {
+        throw fail("a one-shot runner must refuse a provider slash rather than send it as prose, got \(refused)")
+    }
+    // …and the refusal SAYS why, where the user is already looking. The reason
+    // used to be computed for the menu row and dropped at dispatch.
+    let refusalNotices = try await notices(for: oneShotID, atLeast: 1)
+    guard !refusalNotices.isEmpty else {
+        throw fail("a refused command left no explanation in the transcript")
+    }
+
+    // MARK: 3 · discovery narrows, through production
+
+    let (narrow, narrowID) = makeSupervisor { _ in
+        SessionCommandRunner(advertised: ["compact", "fork"])
+    }
+    let narrowed = await narrow.accept(.providerCommand(session), for: narrowID)
+    guard case .refused(.unsupported) = narrowed else {
+        throw fail("a command the harness did not advertise must be refused once the list exists, got \(narrowed)")
+    }
+    let fork = AgentCommandInvocation(
+        descriptorID: "pi:fork", name: "fork", harness: .pi, surface: .providerSlash)
+    guard case .accepted = await narrow.accept(.providerCommand(fork), for: narrowID) else {
+        throw fail("an advertised command must still run")
+    }
+
+    // MARK: 4 · an Array-owned command run twice is visible twice
+
+    // `appendNotice` de-dupes by entry id -- correct, it is what makes replay
+    // idempotent -- and the id was a constant per command. The second `/status`
+    // returned `.accepted`, cleared the composer draft, and printed nothing.
+    let (repeated, repeatedID) = makeSupervisor { _ in ScriptedAgentRunner(script: []) }
+    let status = AgentCommandInvocation(
+        descriptorID: "array:status", name: "status", surface: .array)
+    for attempt in 1...2 {
+        guard case .accepted = await repeated.accept(.providerCommand(status), for: repeatedID) else {
+            throw fail("/status was refused on attempt \(attempt)")
+        }
+    }
+    let statusNotices = try await notices(for: repeatedID, atLeast: 2)
+    guard statusNotices.count == 2 else {
+        throw fail("/status twice produced \(statusNotices.count) notice(s); the second was swallowed by the replay de-dupe")
+    }
+
+    // MARK: 5 · an Array command with no implementation is not offered
+
+    // `/model` presented as an enabled row, accepted, and answered with its own
+    // one-line description -- "Choose the active model" -- having changed no
+    // model. Nine of the thirteen behaved that way.
+    let model = AgentCommandInvocation(
+        descriptorID: "array:model", name: "model", surface: .array)
+    let unimplemented = await repeated.accept(.providerCommand(model), for: repeatedID)
+    guard case .refused(.unsupported) = unimplemented else {
+        throw fail("/model has no implementation and must not be accepted, got \(unimplemented)")
+    }
+
+    return "TR-04 command dispatch: a command-carrying bound runner accepted where the harness NAME said refuse, a one-shot runner refused with a written reason instead of paid prose, harness-advertised discovery narrowing through production, a repeated Array command visible every time, and an unimplemented Array command refused instead of echoing its own description"
 }
 
 /// B7.2 — `/clear`'s one-transaction contract, driven through the real
@@ -9249,7 +9969,10 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         supervisor.qaActiveNameGenerationCount == 0
     }), let generated = supervisor.records[generatedID],
           generated.displayName == "Ship It",
-          generated.displayNameSource == .prompt,
+          // `.generated`, not `.prompt`: a model wrote this text, and the source
+          // has to say so both for the sync boundary and for the authority
+          // ladder that keeps the next harness poll from undoing it.
+          generated.displayNameSource == .generated,
           generated.namingRequest == nil,
           try store.load(id: generatedID)?.displayName == "Ship It" else {
         throw fail("the production request did not land the sanitized name through its CAS path")
@@ -9720,7 +10443,7 @@ private func checkAgentNameContract<Failure: Error>(
           generatedRequest.expectedName == AgentRecord.defaultAgentName,
           supervisor.applyGeneratedName("Generated title", for: generatedRequest, agentID: generatedID),
           supervisor.records[generatedID]?.displayName == "Generated title",
-          supervisor.records[generatedID]?.displayNameSource == .prompt,
+          supervisor.records[generatedID]?.displayNameSource == .generated,
           supervisor.records[generatedID]?.namingRequest == nil else {
         throw fail("a current generated name did not pass the marker CAS and persist")
     }
@@ -10135,17 +10858,48 @@ private func checkAgentNameContract<Failure: Error>(
             throw fail("prompt naming edge case \(prompt.debugDescription) produced \(String(describing: AgentName.fromPrompt(prompt))), expected \(String(describing: expected))")
         }
     }
-    let longPrompt = String(repeating: "long words ", count: 20)
+    // TWO caps, and the split is the point. A stored name keeps the user's words
+    // so a later namer has real source material; a PAINTED name is 60 characters.
+    // Collapsing these back into one number is what made the generated-name
+    // fallback summarize an already-truncated string.
+    let longPrompt = String(repeating: "long words ", count: 40)
     guard let longName = AgentName.fromPrompt(longPrompt),
-          longName.count == AgentName.maximumLength,
+          longName.count <= AgentName.storageLimit,
+          longName.count > AgentName.maximumLength,
           longName.hasSuffix(AgentName.ellipsis),
-          AgentSupervisor.maximumDisplayNameLength == AgentName.maximumLength else {
-        throw fail("prompt naming did not apply one \(AgentName.maximumLength)-character cap with one ellipsis rule")
+          AgentSupervisor.maximumDisplayNameLength == AgentName.storageLimit else {
+        throw fail("prompt naming did not apply the \(AgentName.storageLimit)-character STORAGE cap")
+    }
+    guard let paintedLong = AgentName.displayLabel(longPrompt),
+          paintedLong.count <= AgentName.maximumLength,
+          paintedLong.hasSuffix(AgentName.ellipsis) else {
+        throw fail("display naming did not apply the \(AgentName.maximumLength)-character DISPLAY cap")
+    }
+    // A word-boundary cut, not a grapheme one: the old hard prefix is what
+    // produced titles that ended mid-word.
+    let boundaryPrompt = "investigate and propose a plan to handle identifying which agent is doing which"
+    guard let boundaryName = AgentName.displayLabel(boundaryPrompt),
+          boundaryName.hasSuffix(AgentName.ellipsis),
+          !boundaryName.dropLast(AgentName.ellipsis.count).hasSuffix(" "),
+          boundaryPrompt.hasPrefix(String(boundaryName.dropLast(AgentName.ellipsis.count))),
+          boundaryName.dropLast(AgentName.ellipsis.count).split(separator: " ").allSatisfy({ word in
+              boundaryPrompt.split(separator: " ").contains(word)
+          }) else {
+        throw fail("display truncation cut mid-word instead of at a word boundary: \(String(describing: AgentName.displayLabel(boundaryPrompt)))")
+    }
+    // A single unbroken token has no useful boundary, so the hard cut must
+    // still apply rather than collapsing the title to nothing.
+    let unbroken = String(repeating: "x", count: 200)
+    guard let unbrokenName = AgentName.displayLabel(unbroken),
+          unbrokenName.count == AgentName.maximumLength else {
+        throw fail("a boundary-less token did not fall back to the hard display cut")
     }
     guard AgentRecord.defaultAgentName == AgentName.defaultName,
           AgentInboxRow.untitled == AgentName.defaultName else {
         throw fail("the sentinel has divergent record and row definitions")
     }
+    try checkAgentNameAuthorityLadder(fail: fail, config: config, cwd: cwd)
+    try checkClaudeHarnessTitleReader(fail: fail)
     let sourceReport = try checkAgentNameSentinelSourceContract(fail: fail)
 
     // P4.1 migration: old disk records with model, role, and UUID titles are
@@ -10254,7 +11008,378 @@ private func checkAgentNameContract<Failure: Error>(
         throw fail("prompt-derived display text crossed the companion payload")
     }
 
-    return "agent naming: sentinel-only spawn, P4.4 explicit→prompt→source→parent ordinal funnels across headless/role-based children with deletion/restore stability, prompt/source/parent I5 scrubbing, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), \(AgentName.maximumLength)-character cap, model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+    return "agent naming: sentinel-only spawn, P4.4 explicit→prompt→source→parent ordinal funnels across headless/role-based children with deletion/restore stability, prompt/source/parent I5 scrubbing, first-send seed, repeat/manual no-clobber incl. manual sentinel disarm, P4.3 durable request CAS (manual race, current/superseded completion, expected-name mismatch, round-trip, explicit+regenerate rejection), identifier prompt held at sentinel, edge corpus \(edgeCases.count), split \(AgentName.storageLimit)-character storage / \(AgentName.maximumLength)-character display caps with word-boundary truncation, authority ladder (harness title upgrades a truncated prompt, manual is never overwritten, a weaker source cannot undo a stronger one, an unchanged title is not a write, both new sources stay redacted at the sync boundary), claude ai-title reader (newest wins, absent/blank/impostor/unparseable rejected), model/role/UUID migration with manual provenance, row defensive read, \(sourceReport), and prompt I5 boundary"
+}
+
+/// The authority ladder: a better name may arrive LATE, and a human's name is
+/// never replaced. Before the ladder, `.prompt` was terminal — the funnel
+/// demanded the sentinel, so the first thing that named an agent was also the
+/// last. Every assertion here is a way that used to be impossible.
+private func checkAgentNameAuthorityLadder<Failure: Error>(
+    fail: (String) -> Failure,
+    config: AgentModelConfig.Resolution,
+    cwd: URL
+) throws {
+    let stamp = Date(timeIntervalSinceReferenceDate: 807_000_000)
+    func record(_ name: String, _ source: AgentDisplayNameSource) -> AgentRecord {
+        var value = AgentRecord(
+            id: AgentID(rawValue: UUID()), displayName: name, model: config.model,
+            thinking: config.thinking, cwd: cwd.path, createdAt: stamp, lastActivityAt: stamp)
+        value.displayNameSource = source
+        return value
+    }
+
+    // THE HEADLINE. A truncated first prompt is replaced by the harness's own
+    // title for the same conversation.
+    var promptNamed = record("this isn't specific to the prompts we wrote i want you…", .prompt)
+    guard promptNamed.adoptAutomaticName("Agent tile naming redesign", source: .harness),
+          promptNamed.displayName == "Agent tile naming redesign",
+          promptNamed.displayNameSource == .harness else {
+        throw fail("a harness title did not upgrade a truncated prompt name")
+    }
+
+    // A person's name is absolute, against every automatic source.
+    for source in [AgentDisplayNameSource.harness, .generated, .prompt, .sourceItem, .parent] {
+        var manual = record("Dylan's own words", .manual)
+        guard !manual.adoptAutomaticName("Something Else", source: source),
+              manual.displayName == "Dylan's own words",
+              manual.displayNameSource == .manual else {
+            throw fail("automatic source \(source.rawValue) overwrote a manual name")
+        }
+    }
+
+    // A weaker source cannot undo a stronger one: the next harness poll must not
+    // wipe out a name the user explicitly asked a model to generate.
+    var generated = record("Canvas zoom unification", .generated)
+    guard !generated.adoptAutomaticName("Some harness title", source: .harness),
+          generated.displayName == "Canvas zoom unification" else {
+        throw fail("a harness title overwrote an explicitly generated name")
+    }
+
+    // Equal authority DOES replace — a harness title tracks a conversation that
+    // is still moving, and that is the whole reason to re-read it every turn.
+    var harnessNamed = record("Old subject", .harness)
+    guard harnessNamed.adoptAutomaticName("New subject", source: .harness),
+          harnessNamed.displayName == "New subject" else {
+        throw fail("a revised harness title did not replace the earlier one")
+    }
+
+    // Re-reading the SAME title is not a write. This runs on every turn
+    // completion; a record that persisted each time would rewrite the store for
+    // nothing.
+    var unchanged = record("Steady subject", .harness)
+    guard !unchanged.adoptAutomaticName("Steady subject", source: .harness) else {
+        throw fail("an unchanged harness title reported a record mutation")
+    }
+
+    // A title that lands while a generated-name proposal is in flight must
+    // consume the marker. That proposal's `expectedName` is the title just
+    // replaced, so its CAS can never succeed — leaving it armed strands the
+    // record with a request nothing can ever complete.
+    var midFlight = record("truncated prompt words", .prompt)
+    let stranded = midFlight.beginNamingRequest()
+    guard midFlight.adoptAutomaticName("Harness title arrived first", source: .harness),
+          midFlight.namingRequest == nil,
+          !midFlight.applyGeneratedName("late generated title", for: stranded),
+          midFlight.displayName == "Harness title arrived first" else {
+        throw fail("a harness title landing mid-generation left a stranded naming request or lost the race")
+    }
+
+    // An identifier is never a name, on this path as on every other.
+    var identifierTarget = record("prompt words", .prompt)
+    guard !identifierTarget.adoptAutomaticName(config.model, source: .harness),
+          identifierTarget.displayName == "prompt words" else {
+        throw fail("a model id was adopted as a harness title")
+    }
+
+    // The sync boundary stays closed for both new sources. If this ever flips it
+    // must be a deliberate decision, not a case someone added to a switch.
+    for source in [AgentDisplayNameSource.harness, .generated] {
+        let published = record("A real conversation subject", source)
+        guard published.syncDisplayName == AgentRecord.defaultAgentName else {
+            throw fail("source \(source.rawValue) published an automatic title across the sync boundary")
+        }
+    }
+
+    // A ticket id is a deliberate identifier, not a guess at a subject. An
+    // overnight queue agent named from its source item keeps that name: the id
+    // is the only key tying the row back to the queue, and no automatic namer
+    // may trade it for prettier prose.
+    for source in [AgentDisplayNameSource.harness, .generated, .prompt, .parent] {
+        var ticketNamed = record("P4.5-generated-name-oneshot", .sourceItem)
+        guard !ticketNamed.adoptAutomaticName("Generated name one-shot work", source: source),
+              ticketNamed.displayName == "P4.5-generated-name-oneshot" else {
+            throw fail("automatic source \(source.rawValue) overwrote a ticket id taken from a source item")
+        }
+    }
+
+    // Authority is a total order with `.manual` on top; a tie anywhere below it
+    // would make two sources able to flap against each other forever.
+    let ranked: [AgentDisplayNameSource] = [.sentinel, .parent, .prompt, .harness, .generated, .sourceItem]
+    guard Set(ranked.map(\.authority)).count == ranked.count,
+          zip(ranked, ranked.dropFirst()).allSatisfy({ $0.authority < $1.authority }),
+          ranked.allSatisfy({ $0.authority < AgentDisplayNameSource.manual.authority }) else {
+        throw fail("the display-name authority ladder is not a strict order below .manual")
+    }
+}
+
+/// The claude harness title reader, over the exact line shape claude writes.
+/// Captured from claude's own store on 2026-09-05, including from Array's own
+/// headless probe roots — this is not an interactive-only affordance.
+private func checkClaudeHarnessTitleReader<Failure: Error>(
+    fail: (String) -> Failure
+) throws {
+    let lines = [
+        #"{"type":"user","message":{"role":"user","content":"look into the zscaler thing"}}"#,
+        #"{"type":"ai-title","aiTitle":"First guess at the subject","sessionId":"35c834ed"}"#,
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"…"}]}}"#,
+        #"{"type":"ai-title","aiTitle":"Andable Zscaler connection investigation","sessionId":"35c834ed"}"#,
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"…"}]}}"#,
+    ]
+    // LAST wins: claude revises the title as the conversation develops, and the
+    // revision is the point.
+    guard ClaudeSessionTitleReader.title(inLines: lines) == "Andable Zscaler connection investigation" else {
+        throw fail("the claude title reader did not take the newest ai-title: \(String(describing: ClaudeSessionTitleReader.title(inLines: lines)))")
+    }
+    // A session with no title line yet is an ordinary state, not an error: claude
+    // writes the title after the first exchange.
+    guard ClaudeSessionTitleReader.title(inLines: [lines[0], lines[2]]) == nil else {
+        throw fail("the claude title reader invented a title for a session that has none")
+    }
+    // The substring prefilter must not be the whole test — a frame that merely
+    // MENTIONS the string is not a title line.
+    let impostor = [
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"grep for \"ai-title\" in the store"}]}}"#
+    ]
+    guard ClaudeSessionTitleReader.title(inLines: impostor) == nil else {
+        throw fail("the claude title reader accepted a frame that only mentioned ai-title")
+    }
+    guard ClaudeSessionTitleReader.title(inLines: [#"{"type":"ai-title","aiTitle":"   "}"#]) == nil,
+          ClaudeSessionTitleReader.title(inLines: [#"{"type":"ai-title"}"#]) == nil,
+          ClaudeSessionTitleReader.title(inLines: ["not json at all"]) == nil else {
+        throw fail("the claude title reader accepted a blank, absent, or unparseable title")
+    }
+    // The snake-case spelling, matching `ClaudeAgentStateReader.decodeEvent`.
+    guard ClaudeSessionTitleReader.title(
+        inLines: [#"{"type":"ai-title","ai_title":"Snake case title"}"#]) == "Snake case title" else {
+        throw fail("the claude title reader did not accept the ai_title spelling")
+    }
+
+    // THE LOCATION PAIR. The reader must open the file the runner's own
+    // conversation writes. A mismatch here does not crash and does not warn — it
+    // finds no file, returns nil, and the feature simply never happens. The
+    // record below is deliberately shaped so the two candidate directories
+    // DIFFER, which is the only configuration that can catch the confusion.
+    let stamp = Date(timeIntervalSinceReferenceDate: 807_100_000)
+    var located = AgentRecord(
+        id: AgentID(rawValue: UUID(uuidString: "A11CE000-0000-4000-8000-000000000001")!),
+        displayName: AgentRecord.defaultAgentName,
+        model: "anthropic/claude-opus-4-6", thinking: "high",
+        cwd: "/tmp/array-title-root", createdAt: stamp, lastActivityAt: stamp)
+    located.lastObservedWhere = "/tmp/array-title-root/packages/server"
+    guard located.cwd != located.lastObservedWhere else {
+        throw fail("the location witness is vacuous: its two candidate directories are equal")
+    }
+    let readerLocation = AgentSupervisor.claudeSessionLocation(for: located)
+    let runnerConfig = AgentSupervisor.claudeRunnerConfig(for: located)
+    guard readerLocation.cwd == runnerConfig.cwd.path,
+          readerLocation.sessionId == runnerConfig.sessionId else {
+        throw fail("the claude title reader's location disagrees with the runner's: reader \(readerLocation) vs runner (\(runnerConfig.cwd.path), \(runnerConfig.sessionId))")
+    }
+    // Agreement alone is not enough: if BOTH drift to `cwd` they still agree,
+    // and the feature is still dead. Pin the absolute fact too — claude is
+    // spawned in, and therefore encodes, `lastObservedWhere`.
+    guard readerLocation.cwd == located.lastObservedWhere else {
+        throw fail("the claude session location is not the directory the runner spawns in: \(readerLocation.cwd)")
+    }
+    // And once claude has reported an id of its own, both follow it.
+    located.providerSessionId = "9f1d0c44-0000-4000-8000-00000000abcd"
+    guard AgentSupervisor.claudeSessionLocation(for: located).sessionId == located.providerSessionId,
+          AgentSupervisor.claudeRunnerConfig(for: located).sessionId == located.providerSessionId else {
+        throw fail("an adopted provider session id did not reach both the reader and the runner")
+    }
+}
+
+/// Witnesses the SUPERVISOR wiring that `checkAgentNameContract`'s pure
+/// AgentRecord/reader assertions cannot reach: `refreshDerivedName` actually
+/// fires from a real `.turnCompleted` event rather than only from the
+/// explicit "Generate Name" menu action, codex/pi's automatic fallback is
+/// bounded per agent rather than retried forever, claude's own harness never
+/// falls through to the pi one-shot, and a manual rename shuts every
+/// automatic path off before the next turn arrives.
+@MainActor
+private func checkAutomaticNameRefresh<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-automatic-name-refresh-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+    // A fake pi that appends one line per invocation to a counter file, so a
+    // test can count how many times the provider actually ran. `succeed`
+    // picks between a usable name (encoding which invocation it was, so a
+    // second turn's title can be told apart from the first) and output that
+    // never sanitises to a candidate at all.
+    func makeCapability(name: String, counter: URL, succeed: Bool) throws -> AgentNameGenerationCapability {
+        let executable = root.appendingPathComponent("fake-pi-\(name)", isDirectory: false)
+        let tally = """
+        count=0
+        if [ -f "\(counter.path)" ]; then count=$(wc -l < "\(counter.path)" | tr -d ' '); fi
+        n=$((count + 1))
+        echo "$n" >> "\(counter.path)"
+        """
+        let body = succeed
+            ? "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf '{\"name\":\"Attempt %s\"}\\n' \"$n\"\n"
+            : "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf 'not a json name at all\\n'\n"
+        try body.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let configDirectory = root.appendingPathComponent("config-\(name)", isDirectory: true)
+        try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        return AgentNameGenerationCapability(
+            executable: executable.path, configDirectory: configDirectory, loginShellPath: "/bin:/usr/bin")
+    }
+
+    func lineCount(_ url: URL) -> Int {
+        (try? String(contentsOf: url, encoding: .utf8)).map {
+            $0.split(separator: "\n", omittingEmptySubsequences: true).count
+        } ?? 0
+    }
+
+    // -- 1 & 2. codex: refreshDerivedName fires from .turnCompleted alone (no
+    // explicit "Generate Name" call anywhere in this test), and a SECOND
+    // turn's title supersedes the first — equal authority replaces, now
+    // proven through the live wiring rather than the record in isolation. --
+    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
+    let fireCounter = root.appendingPathComponent("fire-counter.txt")
+    let fireCapability = try makeCapability(name: "fire", counter: fireCounter, succeed: true)
+    let fireStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("fire-support", isDirectory: true))
+    let fireRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let fireSupervisor = AgentSupervisor(
+        store: fireStore, makeRunner: { _ in fireRunner },
+        nameGenerationCapabilityProvider: { fireCapability }, nameGenerationTimeout: 2)
+    let fireID = fireSupervisor.spawn(
+        role: nil, prompt: "investigate the flaky build", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { fireRunner.runCount > 0 }) else {
+        throw fail("the codex fixture agent's runner never started")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner had no live handler to accept a turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayNameSource == .generated
+    }) else {
+        throw fail("a codex agent's turnCompleted did not trigger the automatic generated-name fallback: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
+        throw fail("the automatic fallback did not land the provider's own name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the scripted runner refused a second turnCompleted event")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fireSupervisor.records[fireID]?.displayName == "Attempt 2"
+    }) else {
+        throw fail("a second harness turn did not replace the first automatic name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    }
+    fireRunner.releaseRunAfterStop()
+
+    // -- 3. codex: the automatic path is BOUNDED. A provider that never
+    // produces a usable name must not be retried forever — three attempts,
+    // then silence, across five completed turns. --
+    let boundCounter = root.appendingPathComponent("bound-counter.txt")
+    let boundCapability = try makeCapability(name: "bound", counter: boundCounter, succeed: false)
+    let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support", isDirectory: true))
+    let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let boundSupervisor = AgentSupervisor(
+        store: boundStore, makeRunner: { _ in boundRunner },
+        nameGenerationCapabilityProvider: { boundCapability }, nameGenerationTimeout: 2)
+    let boundID = boundSupervisor.spawn(
+        role: nil, prompt: "a prompt that never gets named", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
+        throw fail("the bounded-retry fixture agent's runner never started")
+    }
+    for turn in 1...5 {
+        guard boundRunner.emit(.turnCompleted(threadId: "t", turnId: "t\(turn)", outcome: .completed, errorMessage: nil)) else {
+            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+    }
+    guard lineCount(boundCounter) == 3 else {
+        throw fail("a provider that never produces a name was invoked \(lineCount(boundCounter)) time(s) across 5 completed turns, not bounded to 3")
+    }
+    boundRunner.releaseRunAfterStop()
+
+    // -- 4. codex: a MANUAL rename shuts the automatic path off before the
+    // next turn — the automatic fallback must never even ask the provider. --
+    let manualCounter = root.appendingPathComponent("manual-counter.txt")
+    let manualCapability = try makeCapability(name: "manual", counter: manualCounter, succeed: true)
+    let manualStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("manual-support", isDirectory: true))
+    let manualRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let manualSupervisor = AgentSupervisor(
+        store: manualStore, makeRunner: { _ in manualRunner },
+        nameGenerationCapabilityProvider: { manualCapability }, nameGenerationTimeout: 2)
+    let manualID = manualSupervisor.spawn(
+        role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
+        model: codexConfig.model, thinking: codexConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
+        throw fail("the manual-rename fixture agent's runner never started")
+    }
+    guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
+        throw fail("the manual rename fixture call itself was refused")
+    }
+    guard manualRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the manual-rename fixture runner had no live handler")
+    }
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
+          manualSupervisor.records[manualID]?.displayNameSource == .manual,
+          lineCount(manualCounter) == 0 else {
+        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(lineCount(manualCounter))")
+    }
+    manualRunner.releaseRunAfterStop()
+
+    // -- 5. claude: the harness that DOES name its own conversations must
+    // never fall through to the pi one-shot, and a turn with no session file
+    // on disk yet must not crash or invent a title. --
+    let claudeConfig = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode)
+    let claudeCalled = LockedFlag()
+    let claudeStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("claude-support", isDirectory: true))
+    let claudeRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let claudeSupervisor = AgentSupervisor(
+        store: claudeStore, makeRunner: { _ in claudeRunner },
+        nameGenerationCapabilityProvider: { claudeCalled.set(); return nil },
+        nameGenerationTimeout: 2)
+    let claudeID = claudeSupervisor.spawn(
+        role: nil, prompt: "a claude agent with no session file on disk", cwd: root, harness: .claudeCode,
+        model: claudeConfig.model, thinking: claudeConfig.thinking)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { claudeRunner.runCount > 0 }) else {
+        throw fail("the claude fixture agent's runner never started")
+    }
+    let claudeNameBefore = claudeSupervisor.records[claudeID]?.displayName
+    guard claudeRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("the claude fixture runner had no live handler")
+    }
+    // No session file exists at this cwd, so there is nothing to read; this
+    // must resolve to "no title yet", not a crash and not an invented one.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    guard claudeSupervisor.records[claudeID]?.displayName == claudeNameBefore,
+          !claudeCalled.wasSet else {
+        throw fail("a claude agent with no session file fell through to the pi one-shot fallback (called=\(claudeCalled.wasSet)) or changed its name without a title to read")
+    }
+    claudeRunner.releaseRunAfterStop()
+
+    return "automatic name refresh: codex/pi fallback fires from turnCompleted with no explicit action, a later harness turn supersedes an earlier automatic name, the automatic path is bounded to 3 attempts against a provider that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and claude's own harness never falls through to the pi one-shot on a session-less turn"
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var wasSet: Bool { lock.withLock { flag } }
 }
 
 private struct AgentNameSentinelSourceMatch {
@@ -14005,7 +15130,9 @@ private func checkSpawnFromToolCall(
         throw fail("the child's depth is \(childDepth), which is not below the cap — this act no longer tests what it says")
     }
     let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
-    let expectedChildTools = "\(scoutTools), " + RoleRegistry.spawnToolNames(for: .pi).joined(separator: ", ")
+    // CX-01: Array's host bridge tools follow every roled pi agent, at any depth.
+    let expectedChildTools = "\(scoutTools), "
+        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi)).joined(separator: ", ")
     guard childRunnerArgs == ["--tools", expectedChildTools] else {
         throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }

@@ -55,6 +55,38 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// row rendered as `search` / `searching` / `Completed` and nothing else.
     /// The location projector ignores this case: it is not a location fact.
     case toolDetail(itemId: String, detail: AgentToolDetailObservation)
+    /// TR-04 — the slash commands the harness itself says this session has.
+    ///
+    /// claude publishes `slash_commands` on `system/init` and Array threw it
+    /// away, so `AgentSessionCommandCapabilities.advertisedNames` was nil in
+    /// every production code path that ever existed. The classifier's "the
+    /// harness did not advertise this, refuse it" branch was therefore
+    /// unreachable, and every one of the 34 baseline claude commands — including
+    /// the ones that only mean anything inside claude's own TUI — was serialized
+    /// and sent as an ordinary prompt.
+    ///
+    /// It rides this host-local side channel for exactly the reason
+    /// `providerSessionId` does: the supervisor rebinds every event's threadId
+    /// before delivery, so a fact captured mid-stream cannot survive on an
+    /// `AgentRuntimeEvent`. It is also not Codable state and must never cross
+    /// the I5 sync boundary. Not a location fact: the projector ignores it.
+    case advertisedCommands([String])
+    /// ST-01 — an ACCOUNT-scoped provider quota reading (claude's
+    /// `rate_limit_event`, codex's `account/rateLimits/updated`).
+    ///
+    /// It rides this host-local side channel for the same reason as
+    /// `resolvedModel` and `providerSessionId`: the supervisor rebinds every
+    /// `AgentRuntimeEvent`'s threadId before delivery, so a value captured here
+    /// could not survive on an event. But it also must not become an event for
+    /// a second, stronger reason — an account quota is not thread state at all.
+    /// It belongs to the signed-in account, is shared by every agent on that
+    /// harness across every project, and putting it on the per-agent event log
+    /// (the I5 sync boundary) would both mislabel it and leak account facts into
+    /// a per-agent payload.
+    ///
+    /// The supervisor stores it keyed by HARNESS, never on an `AgentRecord`.
+    /// Not a location fact: the projector ignores it.
+    case accountQuota(AgentAccountQuotaSnapshot)
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -258,12 +290,41 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         public let path: String
         public let renamePath: String?
         public let diffPreview: String?
-        public init(action: FileAction, path: String, renamePath: String? = nil, diffPreview: String? = nil) {
+        /// TR-01 — per-operation line counts, when the provider's own event
+        /// supplied enough to measure them (claude's `old_string`/`new_string`,
+        /// a codex `changes[].diff` that really is a unified diff). Each is
+        /// independently optional: a whole-file write knows its additions and
+        /// cannot know what it replaced.
+        ///
+        /// NUMBERS, not content. This is the same boundary `AgentDiffSource`
+        /// draws — counts are safe to carry where a path or a diff body is not
+        /// — so a translator may compute these from raw input it must not, and
+        /// does not, forward.
+        public let addedLines: UInt?
+        public let removedLines: UInt?
+        /// The counts were measured from a preview that had already been cut to
+        /// a byte/line bound, so they are a floor rather than a total.
+        public let countsAreLowerBound: Bool
+
+        public init(
+            action: FileAction,
+            path: String,
+            renamePath: String? = nil,
+            diffPreview: String? = nil,
+            addedLines: UInt? = nil,
+            removedLines: UInt? = nil,
+            countsAreLowerBound: Bool = false
+        ) {
             self.action = action
             self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
             self.renamePath = renamePath.flatMap { AgentToolDetailDisplaySanitizer.path($0) }
             self.diffPreview = AgentToolDetailDisplaySanitizer.diffPreview(diffPreview, maxBytes: Self.maxDiffCharacters, maxLines: 80)
+            self.addedLines = addedLines
+            self.removedLines = removedLines
+            self.countsAreLowerBound = countsAreLowerBound
         }
+
+        public var hasAnyMeasuredCount: Bool { addedLines != nil || removedLines != nil }
     }
     public enum Phase: Equatable, Sendable {
         case started
@@ -380,6 +441,18 @@ public struct AgentLocationProjector: Sendable {
             // Argument/output detail for `AgentToolDetailStore`, not a Home /
             // Where / What fact. The host consumes it; the projector ignores it
             // (same shape as `.threadId`).
+            break
+
+        case .advertisedCommands:
+            // The harness's own slash-command list, feeding the command
+            // classifier. Host-local capability state, not a Home / Where /
+            // What fact.
+            break
+
+        case .accountQuota:
+            // An account-scoped quota reading is not a Home / Where / What fact,
+            // and it is not this agent's state at all — the supervisor files it
+            // by harness. Same shape as `.threadId`.
             break
         }
     }

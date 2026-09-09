@@ -68,12 +68,55 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     private var compactionSemaphore: DispatchSemaphore?
     private var compactionOutcomeError: Error?
     private var observedAutomaticCompactionPolicy: AgentAutomaticCompactionPolicy?
+    private var observedAdvertisedCommands: Set<String>?
+
+    /// The session's own slash commands, as answered by `get_commands`, or nil
+    /// when this session has not answered with a parseable list.
+    ///
+    /// `get_commands` is deliberately absent from `PiRpcCommand.knownTypes` --
+    /// it returns the SESSION's slash commands rather than the rpc vocabulary --
+    /// and nothing had ever called it. It is pi's exact counterpart to claude's
+    /// `slash_commands` on `system/init`, and it is what lets the command
+    /// classifier narrow instead of trusting a frozen baseline forever.
+    public var advertisedCommandNames: Set<String>? {
+        queue.sync { observedAdvertisedCommands }
+    }
+
+    // CX-01 host tool bridge state (`.plans/59`, §15). All `queue`-confined.
+    private enum HostToolPhase { case dispatched, cancelRequested, toolReturned, answered }
+    private struct HostToolEntry {
+        let call: PiHostToolCall
+        var phase: HostToolPhase
+        let deadline: DispatchWorkItem
+    }
+    private var hostToolHandler: (@Sendable (PiHostToolCall) -> Void)?
+    private var hostToolPending: [String: HostToolEntry] = [:]
+    private var hostToolPiIdByRequestId: [String: String] = [:]
+    /// Replies are written from here, never from the transport or runner queue:
+    /// `transport.onEvent` runs `queue.sync`, and `transport.send` runs its own
+    /// `queue.sync`, so answering synchronously inside a translator hook deadlocks.
+    private let bridgeQueue = DispatchQueue(label: "continuum.pi-rpc-host-tool-bridge")
+    /// How long the host may take before the model is told `outcome_unknown`.
+    /// Shorter than the extension's own 45 s `ui.input` timeout so the host's
+    /// structured answer wins. Injectable for the bridge witnesses.
+    public var hostToolDeadline: TimeInterval {
+        get { queue.sync { hostToolDeadlineStorage } }
+        set { queue.sync { hostToolDeadlineStorage = newValue } }
+    }
+    private var hostToolDeadlineStorage: TimeInterval = 30
 
     public init(config: Config) {
         self.config = config
         self.translator = PiEventTranslator(workingDirectory: config.cwd)
         transport.onEvent = { [weak self] line in
             self?.queue.sync { self?.handleEventLine(line) }
+        }
+        // Both hooks fire INSIDE `handleEventLine`, i.e. already on `queue`.
+        translator.onHostToolRequest = { [weak self] request in
+            self?.receiveHostToolRequestOnQueue(request)
+        }
+        translator.onToolExecutionEnded = { [weak self] toolCallId in
+            self?.hostToolReturnedOnQueue(toolCallId: toolCallId)
         }
         transport.onExit = { [weak self] _ in
             self?.queue.sync {
@@ -201,6 +244,16 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         queue.sync { stopRequested = true }
         transport.stop(graceSeconds: ProcessGroupChild.Grace.interactive)
         queue.sync {
+            // The child is gone: every pending host call is cancelled AND can no
+            // longer be answered on this transport.
+            for (piId, var entry) in hostToolPending {
+                entry.deadline.cancel()
+                entry.phase = .answered
+                hostToolPending[piId] = entry
+                entry.call.markCancelled()
+            }
+            hostToolPending.removeAll()
+            hostToolPiIdByRequestId.removeAll()
             if let semaphore = turnSemaphore {
                 turnOutcomeError = AgentRunStopped(detail: "")
                 turnSemaphore = nil
@@ -220,6 +273,105 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
 
     public func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {
         queue.sync { translator.onRuntimeObservation = handler }
+    }
+
+    // MARK: - CX-01 host tool bridge (`HostToolBridging`)
+
+    /// The supervisor installs this per runner instance and hops to the main
+    /// actor itself, exactly like `observeSpawnRequests`. A request arriving with
+    /// no handler bound is answered `unsupported` immediately so the model never
+    /// hangs on an unbound runner.
+    public func observeHostToolRequests(_ handler: @escaping @Sendable (PiHostToolCall) -> Void) {
+        queue.sync { hostToolHandler = handler }
+    }
+
+    /// QA: the pi ids still awaiting an answer.
+    public var qaPendingHostToolRequestIds: [String] {
+        queue.sync { hostToolPending.filter { $0.value.phase != .answered }.keys.sorted() }
+    }
+
+    /// `queue`-confined (called from the translator hook inside `handleEventLine`).
+    private func receiveHostToolRequestOnQueue(_ request: PiHostToolRequest) {
+        let piId = request.piRequestId
+        guard hostToolPending[piId] == nil else { return }
+        let deadline = DispatchWorkItem { [weak self] in
+            self?.completeHostToolRequest(piId: piId, response: .transportTimeout, completion: nil)
+        }
+        let call = PiHostToolCall(request: request) { [weak self] response, completion in
+            guard let self else { completion?(.droppedRunnerGone); return }
+            self.bridgeQueue.async {
+                self.completeHostToolRequest(piId: piId, response: response, completion: completion)
+            }
+        }
+        hostToolPending[piId] = HostToolEntry(call: call, phase: .dispatched, deadline: deadline)
+        hostToolPiIdByRequestId[request.requestId] = piId
+        bridgeQueue.asyncAfter(deadline: .now() + hostToolDeadlineStorage, execute: deadline)
+        if let hostToolHandler {
+            hostToolHandler(call)
+        } else {
+            bridgeQueue.async { [weak self] in
+                self?.completeHostToolRequest(piId: piId, response: .unsupportedUnbound, completion: nil)
+            }
+        }
+    }
+
+    /// `queue`-confined. pi already has this call's answer (it aborted, or its own
+    /// timeout fired); a host reply from now on is recorded, not written.
+    private func hostToolReturnedOnQueue(toolCallId: String) {
+        guard let piId = hostToolPiIdByRequestId[toolCallId], var entry = hostToolPending[piId] else { return }
+        entry.deadline.cancel()
+        if entry.phase != .answered { entry.phase = .toolReturned }
+        hostToolPending[piId] = entry
+        entry.call.markCancelled()
+    }
+
+    /// `queue`-confined. Abort, or the turn ending, means pi has dropped (or is
+    /// about to drop) every pending dialog; the host may still be working, and if
+    /// it commits it must say so through `recentOperations`.
+    private func cancelAllHostToolCallsOnQueue() {
+        for (piId, var entry) in hostToolPending where entry.phase == .dispatched {
+            entry.phase = .cancelRequested
+            hostToolPending[piId] = entry
+            entry.call.markCancelled()
+        }
+    }
+
+    /// `bridgeQueue`-confined: the ONLY writer of `extension_ui_response`.
+    private func completeHostToolRequest(
+        piId: String,
+        response: PiHostToolResponse,
+        completion: (@Sendable (PiHostToolDelivery) -> Void)?
+    ) {
+        let decision: (PiHostToolDelivery?, PiHostToolCall?) = queue.sync {
+            guard var entry = hostToolPending[piId] else { return (.droppedRunnerGone, nil) }
+            switch entry.phase {
+            case .answered:
+                return (.droppedAlreadyAnswered, nil)
+            case .toolReturned:
+                entry.phase = .answered
+                hostToolPending[piId] = entry
+                hostToolPiIdByRequestId[entry.call.request.requestId] = nil
+                return (.droppedToolReturned, nil)
+            case .dispatched, .cancelRequested:
+                entry.deadline.cancel()
+                let wasCancelled = entry.phase == .cancelRequested
+                entry.phase = .answered
+                hostToolPending[piId] = entry
+                hostToolPiIdByRequestId[entry.call.request.requestId] = nil
+                return (wasCancelled ? .sentAfterCancel : nil, entry.call)
+            }
+        }
+        guard let call = decision.1 else {
+            completion?(decision.0 ?? .droppedRunnerGone)
+            return
+        }
+        let value = response.encodedValue(requestId: call.request.requestId)
+        do {
+            _ = try transport.send(type: "extension_ui_response", payload: ["value": value], id: piId)
+            completion?(decision.0 ?? .delivered)
+        } catch {
+            completion?(.droppedRunnerGone)
+        }
     }
 
     // MARK: - Session-runner surface (`AgentSessionRunning`, wired in the app target)
@@ -246,6 +398,9 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         } catch {
             throw RunError.commandFailed(command: "abort", message: String(describing: error))
         }
+        // pi resolves every pending dialog `undefined` on abort; tell the host
+        // before it commits anything else for this turn.
+        queue.sync { cancelAllHostToolCallsOnQueue() }
     }
 
     /// Escape hatch onto the raw vocabulary (`get_state`, `set_model`,
@@ -300,6 +455,45 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
                 }
             }
         }
+        if let response = try? transport.sendAndAwait(type: "get_commands"),
+           let names = Self.parseAdvertisedCommands(response), !names.isEmpty {
+            queue.sync { observedAdvertisedCommands = names }
+        }
+    }
+
+    /// `get_commands`' response shape is NOT measured -- unlike every other
+    /// command in `PiRpcCommand.knownTypes`, which were probed live. So this
+    /// reads the plausible shapes and, crucially, **fails open**: an
+    /// unrecognised or empty response leaves `observedAdvertisedCommands` nil,
+    /// which the classifier reads as "not discovered yet" and answers from the
+    /// baseline catalogue.
+    ///
+    /// Getting that direction wrong is the whole risk here. Adopting an empty
+    /// set on a shape we guessed wrong would disable EVERY pi slash command,
+    /// which is strictly worse than the frozen baseline it replaces. Widen this
+    /// only against a captured fixture.
+    public static func parseAdvertisedCommands(_ response: [String: Any]) -> Set<String>? {
+        let candidates: [Any]?
+        if let direct = response["commands"] as? [Any] {
+            candidates = direct
+        } else if let nested = (response["result"] as? [String: Any])?["commands"] as? [Any] {
+            candidates = nested
+        } else if let bare = response["result"] as? [Any] {
+            candidates = bare
+        } else {
+            candidates = nil
+        }
+        guard let candidates else { return nil }
+        let names = candidates.compactMap { entry -> String? in
+            if let text = entry as? String { return text }
+            if let object = entry as? [String: Any] {
+                return (object["name"] as? String) ?? (object["command"] as? String)
+            }
+            return nil
+        }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        return names.isEmpty ? nil : Set(names)
     }
 
     /// Queue-confined: translate one raw rpc line, forward each resulting
@@ -308,6 +502,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         let events = translator.translate(line: line)
         for event in events {
             currentOnEvent?(event)
+            if case .turnCompleted = event { cancelAllHostToolCallsOnQueue() }
             if case .turnCompleted = event, let semaphore = turnSemaphore {
                 turnOutcomeError = nil
                 turnSemaphore = nil
@@ -398,5 +593,7 @@ extension PiRpcAgentRunner: ObservedRunReporting {
         queue.sync { translator.onObservedRun = handler }
     }
 }
+
+extension PiRpcAgentRunner: HostToolBridging {}
 
 #endif  // os(macOS)

@@ -1062,6 +1062,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--file-card-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await FileCardChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("file-card check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--transcript-provider-parity-check") {
             do {
                 try TranscriptProviderParityChecks.run()
@@ -1120,6 +1133,77 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try WorkspaceSceneOwnerChecks.run()
                 print("ContinuumRevivedWorkspaceSceneOwnerChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // CX-01 (`.plans/59`): the workspace API through the production mount and
+        // the production dispatch entry — open/reveal identity, draft preservation,
+        // partial relationship failure, unhydrated and duplicate refusals.
+        if CommandLine.arguments.contains("--workspace-api-open-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runOpenRevealCheck()
+                print("ContinuumRevivedWorkspaceAPIOpenChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // CX-01 Phase 4: canvas.query paging/coverage and validated canvas.apply
+        // geometry — the owner route, the persistence barrier, and every conflict
+        // applying nothing.
+        if CommandLine.arguments.contains("--workspace-api-canvas-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPICanvasChecks.run()
+                print("ContinuumRevivedWorkspaceAPICanvasChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // CX-01: grants, trusted approval, forgery, revocation, and the five
+        // presentation dimensions including concurrent user interaction.
+        if CommandLine.arguments.contains("--workspace-api-grants-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runGrantsAndPresentationCheck()
+                print("ContinuumRevivedWorkspaceAPIGrantsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // CX-01 Phase 2a: agent.find ranking/ambiguity and agent.inspect evidence,
+        // self-inspect in the preset, other-agent inspect through the trusted
+        // prompt, byte caps, and zero lifecycle/presentation side effects.
+        if CommandLine.arguments.contains("--workspace-api-agents-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIAgentsChecks.run()
+                print("ContinuumRevivedWorkspaceAPIAgentsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        // CX-01: the bundled pi extensions, through the REAL pi's own parser.
+        // Deliberately BEFORE `NSApplication.shared` — this leg only spawns pi
+        // subprocesses and must not need AppKit.
+        if CommandLine.arguments.contains("--pi-extension-load-check") {
+            do {
+                let verified = try PiExtensionLoadChecks.run()
+                print(verified
+                    ? "ContinuumRevivedPiExtensionLoadChecks passed"
+                    : "ContinuumRevivedPiExtensionLoadChecks SKIPPED — nothing was verified (see the SKIP lines above)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -1498,6 +1582,60 @@ enum ContinuumApp {
             // Same reason as `--ui-test-support-check`: the supervisor delivers
             // events via `DispatchQueue.main.async` and the check waits on them with
             // `waitUntil`, so a live main run loop is what drains both.
+            NSApp.run()
+        }
+
+        // CX-01 (`.plans/59`, §15): the pi host tool bridge through the REAL
+        // supervisor runner factory against a fake `pi` on PATH — caller binding by
+        // runner instance, and a stale reply dropped after runner replacement.
+        if CommandLine.arguments.contains("--workspace-api-pi-bridge-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIPiBridgeChecks()
+                    print("ContinuumRevivedWorkspaceAPIPiBridgeChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // CX-01: the ten-operation walkthrough. NOT a `*-check` flag on purpose —
+        // it is a narrated demonstration, not a gate, so it stays out of the check
+        // inventory and out of the matrix. See `WorkspaceAPIDemo.swift`.
+        if CommandLine.arguments.contains("--workspace-api-demo") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDemo()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("DEMO ABORTED: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
+        // through the production mount and dispatch — create-once under retry,
+        // idempotency conflict, child tile in the parent's zone, presentation
+        // failure repaired by agent.reveal, operation.get, cancellation truth.
+        if CommandLine.arguments.contains("--workspace-api-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runWorkspaceAPIDelegationChecks()
+                    print("ContinuumRevivedWorkspaceAPIDelegationChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
             NSApp.run()
         }
 
@@ -2700,6 +2838,20 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--provider-request-response-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ProviderRequestResponseChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--completion-awareness-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -3233,6 +3385,21 @@ enum ContinuumApp {
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
                 Foundation.exit(1)
+            }
+        }
+
+        // `--terminal-theme-fidelity-check` asserts that the shell Ghostty spawns is
+        // handed THIS bundle's terminfo and shell integration. libghostty resolves its
+        // resources directory from an inherited GHOSTTY_RESOURCES_DIR before it ever
+        // looks beside its own executable (ghostty src/os/resourcesdir.zig), and it
+        // resolves it once, inside the `ghostty_init()` below — so the scrub has to
+        // happen here, not in the check body. Run from a Ghostty window (an Array
+        // terminal included) the bundled leg otherwise measured the HOST terminal's
+        // resources and failed, while the same inheritance could just as easily have
+        // satisfied the assertion for the wrong reason.
+        if CommandLine.arguments.contains("--terminal-theme-fidelity-check") {
+            for inherited in ["GHOSTTY_RESOURCES_DIR", "TERMINFO", "GHOSTTY_SHELL_FEATURES"] {
+                unsetenv(inherited)
             }
         }
 
@@ -4057,6 +4224,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
         transcriptStore: agentTranscriptStore
+    )
+    /// CX-01 (`.plans/59`): distinguishes this host instance in every issued
+    /// revision, so a handle from a previous launch is re-resolved, not trusted.
+    let hostEpoch = UUID().uuidString
+    /// CX-01: the host-owned workspace API. Reads the mounted scene through the
+    /// same private properties the app uses; never a second store.
+    lazy var workspaceAPI = WorkspaceAPIService(
+        runtime: { [weak self] in self?.workspaceRuntime },
+        canvas: { [weak self] in self?.canvasView },
+        focusBroker: { [weak self] in self?.focusBroker },
+        supervisor: agentSupervisor,
+        registryStore: { [weak self] in self?.registryStore },
+        epoch: hostEpoch,
+        approvalHandler: { [weak self] prompt in self?.presentWorkspaceToolApproval(prompt) ?? .deny },
+        tileWiring: { [weak self] tileId, agentId in self?.wireManagedAgentTile(tileId, agentID: agentId) }
     )
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
@@ -7285,6 +7467,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             let clickedTileId = canvas.tileId(at: pointInCanvas)
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
+            // CX-01: a click is the user's newer intent for focus and selection.
+            self.workspaceRuntime?.noteUserInteraction()
             if let clickedTileId,
                canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
                 self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
@@ -8090,6 +8274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func fitAllNavZones() {
         guard let viewport = canvasView?.fitAllToViewport() else { return }
+        workspaceRuntime?.noteUserInteraction()
         navSelectedZoneId = nil
         canvasView?.setViewport(viewport)
     }
@@ -12651,6 +12836,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
+        // CX-01: a palette spawn's focus is the user's newer intent; `.tileSpawned`
+        // never arms a zone, so nothing else records it.
+        workspaceRuntime?.noteUserInteraction()
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
@@ -12978,6 +13166,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 view?.showActionFailedNotice(
                     "Couldn't open that subagent — it may have been deleted.")
             }
+        }
+        // TR-06 — the response transport for a request the provider is holding.
+        // This binding is the whole point of the ticket: it was declared and left
+        // unbound, so every choice button in a request block pressed into nil.
+        // The buttons are additionally gated on `canRespondToRequests`, so this
+        // seam and the controls that reach it appear and disappear together.
+        view.onProviderResponse = { [weak self, weak view] requestID, value in
+            guard let self, let decision = ApprovalDecision(rawValue: value) else { return false }
+            return self.agentSupervisor.respondToRequest(
+                agentID: agentId,
+                requestID: requestID,
+                decision: decision,
+                onDispatchFailure: { [weak view] message in
+                    view?.reportProviderResponseFailure(requestID: requestID, message: message)
+                }
+            )
         }
         // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
         // the same restamped event stream every consumer sees, so a tile-less
@@ -13698,6 +13902,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         scopeReason: FocusRequest
     ) -> Bool {
         guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
+        // CX-01: every route here (⌘K, leader, hold-⌥ Return, previous tile) is
+        // the user's own jump — newer intent than any pending API presentation.
+        // `setViewport` cannot tell, because an API reveal drives it too.
+        workspaceRuntime?.noteUserInteraction()
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
             canvasView.setViewport(targetViewport)
@@ -13749,6 +13957,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///   nothing to strand. Where nav mode leaves scope on exit is nav mode's
     ///   own (legacy) contract, out of this plan's scope.
     private func completeZoneJump(_ zoneId: UUID, landingInputOnCanvas: Bool = true) {
+        // CX-01: the shared landing for every user zone jump (see `revealTileForWork`).
+        workspaceRuntime?.noteUserInteraction()
         if landingInputOnCanvas {
             focusBroker.enterScope(.canvas, reason: .tileSpawned)
         }
@@ -13797,6 +14007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     private func restorePreviousView() -> Bool {
         guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return false }
+        workspaceRuntime?.noteUserInteraction()
         canvasView.setViewport(snapshot.viewport)
         navSelectedZoneId = snapshot.focusedZoneId
         if let tileId = snapshot.focusedTileId, canvasView.navigationTileSnapshot(for: tileId) != nil {
@@ -14096,6 +14307,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 throw error
             }
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            // CX-01: a committed gesture is a structural change for every issued
+            // workspace.context revision.
+            workspaceRuntime?.noteStructuralCommit()
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
@@ -14861,6 +15075,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
+    /// CX-01 (§14.1): the TRUSTED host UI that mints extra scope. Modal and
+    /// synchronous, so it fits the service's synchronous dispatch; the model can
+    /// neither answer it nor substitute a payload after it. Only this handler
+    /// (or a check's injected stand-in) ever produces a grant beyond the preset.
+    func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
+        let alert = NSAlert()
+        var detail: String
+        if prompt.op == .agentInspect, let target = prompt.targetAgentDisplayName {
+            // CX-01 Phase 2a: another agent's transcript is never in the preset (§14.1).
+            alert.messageText = "Allow \(prompt.agentDisplayName) to inspect \(target)?"
+            detail = "The agent asked Array for \(target)'s status and a bounded excerpt of its recent transcript (checkout: \(prompt.checkoutDisplayName)).\n\nInspecting is read-only: it never messages, interrupts or steers \(target)."
+        } else if prompt.op == .agentDelegate {
+            // CX-01 Phase 2b (§10.1 / §14.1): delegation is outside the preset.
+            alert.messageText = "Allow \(prompt.agentDisplayName) to delegate work to a new agent in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to start a child agent with its own provider and model, in the same checkout, and show it beside itself on the canvas. No worktree is created."
+        } else if prompt.op == .agentMessage {
+            // CX-01 Phase 2c: writing into another agent's run is an effect, so
+            // it is never in the preset — and an approved DELEGATION does not
+            // imply it.
+            let child = prompt.targetAgentDisplayName ?? "a child agent"
+            alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(child)?"
+            detail = "The agent asked Array to start a new turn on \(child) — a child agent it created in \(prompt.checkoutDisplayName) — using text the agent wrote.\n\nIt can reach only the children it created: never a sibling, never its own parent, never any other agent."
+        } else if prompt.op == .canvasApply {
+            // CX-01 Phase 4: geometry is never in the session preset, so the first
+            // move/resize of the agent's OWN checkout lands here.
+            alert.messageText = "Allow \(prompt.agentDisplayName) to move and resize tiles in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to change tile geometry on the canvas. Each change is one move or resize of one tile, goes through the same undo history as a drag, and never touches the camera, focus or selection."
+        } else {
+            alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
+            detail = "The agent asked Array to open a document outside its own checkout."
+            if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
+            detail += "\n\nOpening never edits the file."
+        }
+        detail += " \"Allow for This Agent Session\" lasts until the agent is stopped or its Workspace Tools are turned off."
+        alert.informativeText = detail
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Allow Once")
+        alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Deny")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .allowOnce
+        case .alertSecondButtonReturn: return .allowForSession
+        default: return .deny
+        }
+    }
+
     /// Resolves a local-file link an agent authored and opens it beside that agent.
     ///
     /// The agent's CURRENT `cwd` is the only base a relative path resolves against:
@@ -15284,6 +15544,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// then needs to read the supervisor's observer counts back.
     var qaAgentSupervisor: AgentSupervisor { agentSupervisor }
 
+    /// CX-01: the workspace API witnesses dispatch through the REAL service the
+    /// bridge uses, with an injected approval handler.
+    var qaWorkspaceAPI: WorkspaceAPIService { workspaceAPI }
+
     /// Minimal offline wiring so a check living in another file can drive the
     /// REAL `configureWorkspaceRuntimeHooks()` instead of substituting its own
     /// closures. `AppDelegate`'s scene properties are `private`, and file-private
@@ -15365,6 +15629,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // seven tickets passed against code the app never executed.
         canvasView.onZoneActivated = { [weak self] zoneId in
             self?.workspaceRuntime?.setActiveZone(zoneId, reason: .click)
+        }
+        // CX-01 (`.plans/59`): wired HERE for the same reason as `onZoneActivated`
+        // — the workspace API witnesses drive this mount. The user's camera bumps
+        // the interaction generation; the bridge routes bound runners' requests to
+        // the host service; a policy flip revokes the agent's grants.
+        canvasView.onUserCameraChange = { [weak self] in
+            self?.workspaceRuntime?.noteUserInteraction()
+        }
+        agentSupervisor.hostToolHandler = { [weak self] agentId, call in
+            guard let self else { call.respond(.unsupportedUnbound); return }
+            self.workspaceAPI.handle(agentId: agentId, call: call)
+        }
+        agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
+            self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)
@@ -26412,6 +26690,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         host.attach(runtime: runtime)
         host.layoutSubtreeIfNeeded()
 
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            host.detachRuntime()
+            try? tickTerminal(context: context, seconds: 0.2)
+        }
+        defer { tearDownRuntime() }
+
         // Wait for shell to be ready.
         runtime.sendInput(Data("printf 'con13-ready\\n'\n".utf8))
         try tickTerminal(context: context, timeout: 6.0) { runtime.visibleText().contains("con13-ready") }
@@ -26515,8 +26808,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(migratedDescriptor.cwd == termRoot.path, "A3 FAIL: v1 descriptor cwd not decoded correctly")
 
         // A4: Terminate old runtime — old PID dies.
-        runtime.terminate(policy: .force)
-        host.detachRuntime()
+        tearDownRuntime()
         try tickTerminal(context: context, seconds: 0.5)
         let oldPidDead = runtime.isProcessExitedForSnapshotCheck
         try expect(oldPidDead, "A4 FAIL: old runtime PID should be dead after terminate(.force)")
@@ -26541,6 +26833,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         defer { window2.close() }
         host2.attach(runtime: restartedRuntime)
         host2.layoutSubtreeIfNeeded()
+
+        // Same reasoning as tearDownRuntime above, for the restarted runtime's surface.
+        var restartedRuntimeTornDown = false
+        func tearDownRestartedRuntime() {
+            guard !restartedRuntimeTornDown else { return }
+            restartedRuntimeTornDown = true
+            restartedRuntime.terminate(policy: .force)
+            host2.detachRuntime()
+            try? tickTerminal(context: context, seconds: 0.2)
+        }
+        defer { tearDownRestartedRuntime() }
 
         // A5: Distinct instance.
         try expect(
@@ -26601,8 +26904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "A7 FAIL: cwd should be persisted even when scrollback toggle is off"
         )
 
-        restartedRuntime.terminate(policy: .force)
-        host2.detachRuntime()
+        tearDownRestartedRuntime()
 
         // Clean up terminal temp dir.
         try? fm.removeItem(at: termRoot)

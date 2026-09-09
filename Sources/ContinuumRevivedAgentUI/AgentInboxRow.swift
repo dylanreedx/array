@@ -7,9 +7,20 @@ public enum AgentName {
     /// The only automatic-overwrite permission. A second sentinel literal would
     /// let one surface silently disagree with the name gate.
     public static let defaultName = "New agent"
-    /// One cap for prompt-derived names and manual renames alike.
+    /// The DISPLAY cap: what a surface may paint. Applied by `displayTitle`, at
+    /// draw time, and by nothing that writes to the record.
     public static let maximumLength = 60
-    /// The one truncation marker, included in the cap above.
+    /// The STORAGE cap: what the record may hold.
+    ///
+    /// These used to be one number, and that is why every later namer had
+    /// nothing to work with. A first prompt was cut to 60 characters *before*
+    /// being persisted, so the generated-name one-shot — which falls back to the
+    /// current title once the in-memory prompt is gone — was summarizing an
+    /// already-truncated string. Keep the user's words in the record; take the
+    /// 60 characters at the moment of painting, where the surface that has to
+    /// fit them is the one asking.
+    public static let storageLimit = 240
+    /// The one truncation marker, included in whichever cap applied.
     public static let ellipsis = "…"
 
     /// Human-cased prompt twin of `WorktreeManager.slug`: preserve case and
@@ -104,10 +115,41 @@ public enum AgentName {
         guard collapsed.unicodeScalars.contains(where: { !CharacterSet.nonBaseCharacters.contains($0) }) else {
             return nil
         }
+        return truncate(collapsed, to: storageLimit)
+    }
+
+    /// The title a surface may paint: the stored name, cut to the display cap at
+    /// a word boundary. Every painting path goes through `displayTitle`, so this
+    /// is the only place the 60-character limit exists.
+    public static func displayLabel(_ raw: String) -> String? {
+        guard let stored = normalizedLabel(raw) else { return nil }
+        return truncate(stored, to: maximumLength)
+    }
+
+    /// Cut to `limit` characters INCLUDING the ellipsis, preferring the last word
+    /// boundary. A hard grapheme cut is what produced titles ending mid-word
+    /// ("i want you to investigate and purpose me a plan to handle ident…"); the
+    /// boundary is not cosmetic, it is the difference between a readable
+    /// fragment and a broken one.
+    ///
+    /// The boundary is only honoured while it keeps most of the budget. A single
+    /// very long token (a URL, a path, a hash) has no useful boundary, and
+    /// backing off to the last space would throw away nearly the whole title, so
+    /// that case falls back to the hard cut.
+    static func truncate(_ collapsed: String, to limit: Int) -> String {
         let characters = Array(collapsed)
-        guard characters.count > maximumLength else { return collapsed }
-        let prefixLength = maximumLength - ellipsis.count
-        return String(characters.prefix(prefixLength)) + ellipsis
+        guard characters.count > limit else { return collapsed }
+        let budget = max(1, limit - ellipsis.count)
+        let head = characters.prefix(budget)
+        // Only a space introduced INSIDE the kept region is a real boundary; a
+        // trailing space at `budget` means the cut already landed on one.
+        let boundary = head.lastIndex(of: " ")
+        if let boundary, boundary >= (budget * 3) / 5 {
+            let word = String(head[head.startIndex..<boundary])
+                .trimmingCharacters(in: .whitespaces)
+            if !word.isEmpty { return word + ellipsis }
+        }
+        return String(head) + ellipsis
     }
 
     /// Whether a stored/displayed title is an identifier rather than a human
@@ -143,7 +185,7 @@ public enum AgentName {
         role: String? = nil,
         id: UUID? = nil
     ) -> String {
-        guard let label = normalizedLabel(raw),
+        guard let label = displayLabel(raw),
               !isIdentifier(raw, model: model, role: role, id: id) else {
             return defaultName
         }

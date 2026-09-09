@@ -95,6 +95,11 @@ private func runPiContextWindowTelemetryChecks() {
         cacheWriteTokens: 11,
         totalProcessedTokens: 1069,
         totalCostUsd: 0.00642,
+        // ST-01 — pi meters a real account, so its `usage.cost.total` is a
+        // charge. Asserted here rather than left unset: the basis is what stops
+        // this figure being rendered identically to claude's list-price
+        // ESTIMATE, which is not a bill at all under a subscription login.
+        costBasis: .providerMetered,
         automaticCompaction: nil,
         observedAt: observedAt,
         source: .piMessageUsage,

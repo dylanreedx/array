@@ -161,6 +161,26 @@ public enum BuiltInSettingRegistry {
         consumerID: "canvas.zoneGesture"
     )
 
+    /// ST-01 — one independent toggle per compact-status element, generated
+    /// from `AgentStatusElement` so a new element cannot ship without a
+    /// setting. `.agents` was an empty category until now.
+    public static let statusElements: [SettingDefinition<Bool>] =
+        AgentStatusElement.presentationOrder.map { element in
+            SettingDefinition(
+                id: SettingID(rawValue: element.settingKey),
+                category: .agents,
+                title: element.title,
+                description: element.settingDescription,
+                defaultValue: element.defaultVisible,
+                control: .toggle,
+                applicationPolicy: .live,
+                keywords: element.isAccountScoped
+                    ? ["agent", "status", "quota", "account", "limits"]
+                    : ["agent", "status", "tile"],
+                consumerID: SettingConsumerID(rawValue: "agent.status.\(element.rawValue)")
+            )
+        }
+
     public static func all() -> [AnySettingDefinition] {
         [
             autoLayout.erased,
@@ -171,6 +191,6 @@ public enum BuiltInSettingRegistry {
             zoneColorPolicy.erased,
             zonePadding.erased,
             creationThreshold.erased,
-        ]
+        ] + statusElements.map { $0.erased }
     }
 }

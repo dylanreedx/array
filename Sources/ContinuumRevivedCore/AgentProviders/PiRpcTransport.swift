@@ -99,6 +99,14 @@ public final class PiRpcTransport: @unchecked Sendable {
     }
 
     private let queue = DispatchQueue(label: "continuum.pi-rpc-transport")
+    /// CX-01 hardening: the child's stdin has three writers -- `send`
+    /// (prompt/steer/abort), `sendAndAwait`, and the host-tool bridge's
+    /// `extension_ui_response` off `PiRpcAgentRunner.bridgeQueue`. A pipe write
+    /// past PIPE_BUF is not atomic, so two concurrent `FileHandle.write`s can
+    /// interleave their bytes and tear both NDJSON frames. Every write goes
+    /// through this one serial queue. It never hops onto `queue`, so the only
+    /// deadlock rule stays the existing one: never send from inside `onEvent`.
+    private let writeQueue = DispatchQueue(label: "continuum.pi-rpc-transport.write")
     private var child: ProcessGroupChild?
     private var buffer = Data()
     private var nextRequestId = 0
@@ -234,7 +242,7 @@ public final class PiRpcTransport: @unchecked Sendable {
         let data = try JSONSerialization.data(withJSONObject: object)
         var line = data
         line.append(0x0A)
-        stdin.write(line)
+        writeQueue.sync { stdin.write(line) }
     }
 
     // MARK: - queue-confined line assembly

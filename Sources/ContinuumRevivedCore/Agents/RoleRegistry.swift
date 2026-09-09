@@ -68,6 +68,25 @@ public struct RoleRegistry: Sendable {
         }
     }
 
+    /// CX-01 (`.plans/59`, §15): Array's host tool bridge tools, appended to
+    /// every ROLED pi agent's `--tools` allowlist regardless of depth — reading
+    /// your own context and opening a file are not delegation. A roleless agent
+    /// sends no `--tools` and already has them.
+    public static func hostToolNames(for harness: AgentHarness) -> [String] {
+        switch harness {
+        case .pi: return ["array_workspace_context", "array_open_document",
+                          "array_find_agent", "array_inspect_agent",
+                          "array_canvas_query", "array_canvas_apply",
+                          // Delegation is authorized per request by the host grant
+                          // table, not by withholding the tool.
+                          "array_delegate", "array_reveal_agent", "array_get_operation",
+                          // Messaging is scoped to the caller's OWN children and
+                          // authorized per request, like delegation.
+                          "array_message_agent"]
+        case .claudeCode, .codex: return []
+        }
+    }
+
     private let ordered: [HarnessRole]
     private let byID: [String: HarnessRole]
     private let harness: AgentHarness
@@ -111,7 +130,11 @@ public struct RoleRegistry: Sendable {
     /// unknown role, or one that names no tools, is what Pi ran with before roles
     /// carried a list.
     public func toolsArguments(roleId: String?) -> [String] {
-        toolsArguments(roleId: roleId, allowingSpawn: false)
+        // The role's OWN list, verbatim: this is what `resolve` and the documented
+        // run builder report. Array's additions (spawn verbs below the cap, the
+        // CX-01 host bridge tools) belong to the runner path below.
+        guard let roleId, let tools = byID[roleId]?.tools else { return [] }
+        return ["--tools", tools]
     }
 
     /// `allowingSpawn` is C8's fix for the reason pi subagents were unreachable
@@ -131,13 +154,16 @@ public struct RoleRegistry: Sendable {
     /// to invent, and it already includes spawning.
     public func toolsArguments(roleId: String?, allowingSpawn: Bool) -> [String] {
         guard let roleId, let tools = byID[roleId]?.tools else { return [] }
-        let spawnTools = RoleRegistry.spawnToolNames(for: harness)
-        guard allowingSpawn, !spawnTools.isEmpty else { return ["--tools", tools] }
         let declared = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        var missing: [String] = []
         // ALL missing spawn verbs, not just the first: pi's two are different
         // tools from different extensions, and appending only one silently denies
         // the other. A role that already declares one keeps its own ordering.
-        let missing = spawnTools.filter { !declared.contains($0) }
+        if allowingSpawn {
+            missing += RoleRegistry.spawnToolNames(for: harness).filter { !declared.contains($0) }
+        }
+        // CX-01: the host bridge tools are not depth-gated.
+        missing += RoleRegistry.hostToolNames(for: harness).filter { !declared.contains($0) && !missing.contains($0) }
         guard !missing.isEmpty else { return ["--tools", tools] }
         return ["--tools", (declared + missing).joined(separator: ", ")]
     }

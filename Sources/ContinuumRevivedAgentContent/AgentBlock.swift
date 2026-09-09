@@ -188,42 +188,121 @@ public struct AgentPlanPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// What one file-change operation did to one file. Presentation vocabulary
+/// only: it decides the words on a row ("Deleted", "Renamed"), never a
+/// filesystem capability.
+public enum AgentDiffFileAction: String, Codable, Equatable, Sendable {
+    case add, edit, write, delete, rename, unknown
+}
+
 /// Safe, provider-supplied display metadata for one changed file. This is not a
 /// filesystem path capability and the transcript renderer never resolves it.
+///
+/// TR-01: the two counts are INDEPENDENTLY optional. A claude `Write` knows how
+/// many lines it wrote and cannot know how many it replaced without reading the
+/// file it overwrote; collapsing that into one `lineCountsAreKnown` bit forced a
+/// real, measured addition count to render as "counts unavailable". `nil` means
+/// nobody measured it — zero is a legitimate measured value and must never be
+/// inferred from an absent one.
 public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
     public var displayName: String
-    public var addedLineCount: UInt
-    public var removedLineCount: UInt
-    /// False when a provider/detail source named the affected file but did not
-    /// supply a line diff. Zero is a legitimate measured count, so availability
-    /// must not be inferred from the two numeric values.
-    public var lineCountsAreKnown: Bool
+    public var addedLineCount: UInt?
+    public var removedLineCount: UInt?
+    /// The counts were derived from a BOUNDED provider preview (the detail
+    /// store truncates a diff at 80 lines / 2 000 chars), so they are a floor,
+    /// not a measurement. Rendered "≥ +42 −7"; promoting a floor to a count is
+    /// the same false precision as reporting +0/−0 for an unmeasured file.
+    public var countsAreLowerBound: Bool
+    public var action: AgentDiffFileAction?
+
+    /// Both counts measured. Kept as a computed property so no caller can set
+    /// availability independently of the values it describes.
+    public var lineCountsAreKnown: Bool { addedLineCount != nil && removedLineCount != nil }
+    /// At least one count measured — the row has a number worth printing.
+    public var hasAnyKnownCount: Bool { addedLineCount != nil || removedLineCount != nil }
+
+    /// The counts as a sentence, for VoiceOver and for copied text. Lives here
+    /// rather than on the view so the spoken form, the copied form and the
+    /// drawn form cannot drift into claiming different precision.
+    public var countsDescription: String {
+        let bound = countsAreLowerBound ? "at least " : ""
+        switch (addedLineCount, removedLineCount) {
+        case let (added?, removed?):
+            return "\(bound)\(added) additions, \(bound)\(removed) removals"
+        case let (added?, nil):
+            return "\(bound)\(added) additions, removals unknown"
+        case let (nil, removed?):
+            return "additions unknown, \(bound)\(removed) removals"
+        case (nil, nil):
+            switch action {
+            case .delete: return "deleted, line counts unavailable"
+            case .add: return "added, line counts unavailable"
+            case .rename: return "renamed, line counts unavailable"
+            default: return "line counts unavailable"
+            }
+        }
+    }
 
     public init(
         displayName: String,
         addedLineCount: UInt? = nil,
-        removedLineCount: UInt? = nil
+        removedLineCount: UInt? = nil,
+        countsAreLowerBound: Bool = false,
+        action: AgentDiffFileAction? = nil
     ) {
         self.displayName = displayName
-        self.addedLineCount = addedLineCount ?? 0
-        self.removedLineCount = removedLineCount ?? 0
-        lineCountsAreKnown = addedLineCount != nil && removedLineCount != nil
+        self.addedLineCount = addedLineCount
+        self.removedLineCount = removedLineCount
+        self.countsAreLowerBound = countsAreLowerBound
+        self.action = action
     }
 
     private enum CodingKeys: String, CodingKey {
         case displayName, addedLineCount, removedLineCount, lineCountsAreKnown
+        case countsSchema, countsAreLowerBound, action
     }
+
+    /// Bumped when a writer states each count's availability by PRESENCE. A v2
+    /// payload cannot be read under the v1 rule: v1 encodes
+    /// `lineCountsAreKnown: false` for a partially-known row (so an old build
+    /// degrades to "counts unavailable" rather than reading a placeholder zero
+    /// as a measurement), and that same `false` would otherwise make this
+    /// decoder throw away the one count it does have.
+    private static let currentCountsSchema = 2
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         displayName = try values.decode(String.self, forKey: .displayName)
-        addedLineCount = try values.decodeIfPresent(UInt.self, forKey: .addedLineCount) ?? 0
-        removedLineCount = try values.decodeIfPresent(UInt.self, forKey: .removedLineCount) ?? 0
-        // Old payloads always encoded the numeric defaults and had no
-        // availability bit. Preserve useful non-zero history, but treat legacy
-        // +0/−0 as unknown rather than continuing to assert false precision.
-        lineCountsAreKnown = try values.decodeIfPresent(Bool.self, forKey: .lineCountsAreKnown)
-            ?? (addedLineCount > 0 || removedLineCount > 0)
+        let added = try values.decodeIfPresent(UInt.self, forKey: .addedLineCount)
+        let removed = try values.decodeIfPresent(UInt.self, forKey: .removedLineCount)
+        let schema = try values.decodeIfPresent(Int.self, forKey: .countsSchema) ?? 1
+        if schema >= 2 {
+            addedLineCount = added
+            removedLineCount = removed
+        } else {
+            // Old payloads always encoded the numeric defaults and had no
+            // availability bit. Preserve useful non-zero history, but treat
+            // legacy +0/−0 as unknown rather than continuing to assert false
+            // precision. A payload that explicitly said "not known" keeps
+            // saying it: its numbers were placeholders, not measurements.
+            let known = try values.decodeIfPresent(Bool.self, forKey: .lineCountsAreKnown)
+                ?? ((added ?? 0) > 0 || (removed ?? 0) > 0)
+            addedLineCount = known ? added : nil
+            removedLineCount = known ? removed : nil
+        }
+        countsAreLowerBound = try values.decodeIfPresent(Bool.self, forKey: .countsAreLowerBound) ?? false
+        action = try values.decodeIfPresent(AgentDiffFileAction.self, forKey: .action)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encodeIfPresent(addedLineCount, forKey: .addedLineCount)
+        try container.encodeIfPresent(removedLineCount, forKey: .removedLineCount)
+        try container.encode(Self.currentCountsSchema, forKey: .countsSchema)
+        try container.encode(lineCountsAreKnown, forKey: .lineCountsAreKnown)
+        if countsAreLowerBound { try container.encode(true, forKey: .countsAreLowerBound) }
+        try container.encodeIfPresent(action, forKey: .action)
     }
 }
 
@@ -235,6 +314,12 @@ public struct AgentDiffPayload: Codable, Equatable, Sendable {
     public var summary: String?
     public var files: [AgentDiffFileSummary]
     public var canOpenReview: Bool
+    /// TR-01 — the operation is still running, so an empty `files` means "not
+    /// yet", not "nothing". Presentation-only and excluded from CodingKeys for
+    /// the same reason as `AgentToolCallPayload.presented*`: it is composed on
+    /// the ephemeral rendered copy from the host-local detail store and is
+    /// never document state (I5).
+    public var presentedFilesArePending: Bool = false
 
     public init(
         text: String,
@@ -264,6 +349,26 @@ public struct AgentDiffPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// TR-06 — the LOCAL delivery lifecycle of a response Array sent to an open
+/// provider request.
+///
+/// Deliberately SEPARATE from `AgentRequestPayload.status`, which is the
+/// PROVIDER's truth about the request and moves only on a real
+/// `requestResolved`/`userInputResolved` event. This field only ever says what
+/// Array did with the user's press. Collapsing the two would let a local
+/// dispatch — or a local transport failure — look like the provider had
+/// answered, which is the exact fabrication the request system is built to
+/// prevent.
+public enum AgentRequestResponseState: String, Codable, Equatable, Sendable {
+    /// Nothing has been dispatched. The request is the provider's to hold.
+    case idle
+    /// A response left Array; the provider has not resolved the request yet.
+    case submitting
+    /// The transport refused or errored. The request is STILL OPEN — a delivery
+    /// failure is not a resolution, and the user may try again.
+    case failed
+}
+
 public struct AgentRequestPayload: Codable, Equatable, Sendable {
     /// Opaque provider request identity. Without it a request remains readable
     /// history but cannot acquire response controls.
@@ -271,20 +376,26 @@ public struct AgentRequestPayload: Codable, Equatable, Sendable {
     public var prompt: [AgentInline]
     public var status: AgentItemStatus
     public var choices: [String]
+    /// See `AgentRequestResponseState`. Local delivery state, never provider truth.
+    public var responseState: AgentRequestResponseState
 
     public init(
         requestID: String? = nil,
         prompt: [AgentInline],
         status: AgentItemStatus,
-        choices: [String] = []
+        choices: [String] = [],
+        responseState: AgentRequestResponseState = .idle
     ) {
         self.requestID = requestID
         self.prompt = prompt
         self.status = status
         self.choices = choices
+        self.responseState = responseState
     }
 
-    private enum CodingKeys: String, CodingKey { case requestID, prompt, status, choices }
+    private enum CodingKeys: String, CodingKey {
+        case requestID, prompt, status, choices, responseState
+    }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -292,6 +403,10 @@ public struct AgentRequestPayload: Codable, Equatable, Sendable {
         prompt = try values.decode([AgentInline].self, forKey: .prompt)
         status = try values.decode(AgentItemStatus.self, forKey: .status)
         choices = try values.decodeIfPresent([String].self, forKey: .choices) ?? []
+        // A document written before TR-06 has no local delivery state, and the
+        // honest reading of "absent" is "nothing was dispatched".
+        responseState = try values.decodeIfPresent(
+            AgentRequestResponseState.self, forKey: .responseState) ?? .idle
     }
 }
 

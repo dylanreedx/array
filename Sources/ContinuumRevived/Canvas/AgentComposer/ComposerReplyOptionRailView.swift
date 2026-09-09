@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
 /// The chips a settled turn's question offers, sitting above the editor.
@@ -31,7 +32,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
 
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
-    private var options: [String] = []
+    private var options: [AgentReplyOption] = []
 
     var onSelect: ((String) -> Void)?
 
@@ -48,7 +49,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
         NSSize(width: NSView.noIntrinsicMetric, height: options.isEmpty ? 0 : railHeight)
     }
 
-    func setOptions(_ newOptions: [String]) {
+    func setOptions(_ newOptions: [AgentReplyOption]) {
         guard newOptions != options else { return }
         options = newOptions
         for view in stack.arrangedSubviews {
@@ -59,7 +60,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
         for option in newOptions {
             // A chip minted after a zoom apply is born scaled: the rail's own
             // rung is handed to the initializer.
-            let chip = ComposerReplyOptionChipButton(title: option, zoom: pageZoom)
+            let chip = ComposerReplyOptionChipButton(option: option, zoom: pageZoom)
             chip.target = self
             chip.action = #selector(chipPressed(_:))
             chip.applyTokens(theme: theme)
@@ -141,15 +142,26 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
 
     @objc private func chipPressed(_ sender: NSButton) {
         guard let chip = sender as? ComposerReplyOptionChipButton,
-              options.contains(chip.optionValue) else { return }
+              options.contains(where: { $0.label == chip.optionValue }) else { return }
         onSelect?(chip.optionValue)
     }
 
     // MARK: - QA seams
 
-    var qaOptions: [String] { options }
+    var qaOptions: [String] { options.map(\.label) }
     var qaChipTitles: [String] {
         stack.arrangedSubviews.compactMap { ($0 as? ComposerReplyOptionChipButton)?.title }
+    }
+    var qaChipAccessibilityLabels: [String] {
+        stack.arrangedSubviews.compactMap {
+            ($0 as? ComposerReplyOptionChipButton)?.accessibilityLabel()
+        }
+    }
+    /// Non-empty AND every chip focusable: an empty rail must not read as
+    /// "accessible" by vacuous truth.
+    var qaChipsAcceptFocus: Bool {
+        let chips = stack.arrangedSubviews.compactMap { $0 as? ComposerReplyOptionChipButton }
+        return !chips.isEmpty && chips.allSatisfy(\.acceptsFirstResponder)
     }
 
     @discardableResult
@@ -170,11 +182,11 @@ final class ComposerReplyOptionChipButton: NSButton {
     private var tracking: NSTrackingArea?
     private(set) var pageZoom: AgentPageZoom
 
-    init(title: String, zoom: AgentPageZoom = .default) {
-        optionValue = title
+    init(option: AgentReplyOption, zoom: AgentPageZoom = .default) {
+        optionValue = option.label
         pageZoom = zoom
         super.init(frame: .zero)
-        self.title = title
+        self.title = option.label
         isBordered = false
         bezelStyle = .inline
         focusRingType = .exterior
@@ -185,8 +197,16 @@ final class ComposerReplyOptionChipButton: NSButton {
         layer?.masksToBounds = false
         setButtonType(.momentaryChange)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Reply \"\(title)\"")
-        toolTip = "Write \"\(title)\" into the composer"
+        // The reasoning the reply gave for this option, carried onto the control
+        // rather than dropped. When the question is "which approach", the
+        // tradeoff is the half you decide on, and the label alone has lost it.
+        if let detail = option.detail {
+            setAccessibilityLabel("Reply \"\(option.label)\" — \(detail)")
+            toolTip = "\(detail)\n\nWrites \"\(option.label)\" into the composer"
+        } else {
+            setAccessibilityLabel("Reply \"\(option.label)\"")
+            toolTip = "Write \"\(option.label)\" into the composer"
+        }
         identifier = NSUserInterfaceItemIdentifier("agent.composer.replyOption")
     }
 

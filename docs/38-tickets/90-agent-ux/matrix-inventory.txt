@@ -1,7 +1,9 @@
 check --add-zone-check
+check --agent-account-quota-check
 check --agent-awareness-check
 check --agent-compaction-check
 check --agent-compaction-ui-check
+check --agent-completion-semantic-check
 check --agent-display-name-check
 check --agent-fanout-check
 check --agent-first-paint-check
@@ -60,6 +62,7 @@ check --editor-navigation-check
 check --editor-web-bridge-check
 check --empty-workspace-creation-check
 check --exact-rebase-performance-check
+check --file-card-check
 check --file-document-session-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
@@ -108,11 +111,13 @@ check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --perf-budget-zoom-check
 check --persistence-crash-safe-check
+check --pi-extension-load-check
 check --project-file-operation-check
 check --project-lock-check
 check --project-picker-resolution-check
 check --project-root-resolution-check
 check --provider-model-picker-check
+check --provider-request-response-check
 check --push-payload-dump-check
 check --relationship-geometry-check
 check --reserved-dispatch-check
@@ -149,6 +154,7 @@ check --tile-drag-grab-check
 check --tile-reveal-work-check
 check --tile-surface-residency-check
 check --tile-world-bounds-check
+check --tool-detail-check
 check --topology-migration-check
 check --transcript-delta-index-oracle-check
 check --transcript-provider-parity-check
@@ -162,6 +168,12 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
+check --workspace-api-agents-check
+check --workspace-api-canvas-check
+check --workspace-api-delegation-check
+check --workspace-api-grants-check
+check --workspace-api-open-check
+check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
@@ -198,13 +210,13 @@ check --zone-tile-hydration-check
 check --zone-unacquired-project-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
-leg run scripts/check-app-bundle.sh --configuration debug
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-awareness-check
 leg run_app_check .build/debug/Array --agent-compaction-ui-check
+leg run_app_check .build/debug/Array --agent-completion-semantic-check
 leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-fanout-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
@@ -260,6 +272,7 @@ leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
+leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
@@ -306,11 +319,13 @@ leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
+leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --project-file-operation-check
 leg run_app_check .build/debug/Array --project-lock-check
 leg run_app_check .build/debug/Array --project-picker-resolution-check
 leg run_app_check .build/debug/Array --project-root-resolution-check
 leg run_app_check .build/debug/Array --provider-model-picker-check
+leg run_app_check .build/debug/Array --provider-request-response-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
@@ -347,6 +362,7 @@ leg run_app_check .build/debug/Array --tile-drag-grab-check
 leg run_app_check .build/debug/Array --tile-reveal-work-check
 leg run_app_check .build/debug/Array --tile-surface-residency-check
 leg run_app_check .build/debug/Array --tile-world-bounds-check
+leg run_app_check .build/debug/Array --tool-detail-check
 leg run_app_check .build/debug/Array --topology-migration-check
 leg run_app_check .build/debug/Array --transcript-delta-index-oracle-check
 leg run_app_check .build/debug/Array --transcript-provider-parity-check
@@ -360,6 +376,12 @@ leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
+leg run_app_check .build/debug/Array --workspace-api-agents-check
+leg run_app_check .build/debug/Array --workspace-api-canvas-check
+leg run_app_check .build/debug/Array --workspace-api-delegation-check
+leg run_app_check .build/debug/Array --workspace-api-grants-check
+leg run_app_check .build/debug/Array --workspace-api-open-check
+leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
@@ -395,6 +417,7 @@ leg run_app_check .build/debug/Array --zone-tile-detach-sweep-check
 leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
@@ -402,6 +425,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run_leg scripts/check-color-hygiene.sh
 leg run_leg scripts/check-matrix-inventory.sh
 leg run_leg scripts/check-root-docs.sh
@@ -426,7 +450,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 122
+count ContinuumRevivedCoreChecks 139
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

@@ -377,8 +377,16 @@ private func runCodexRunnerArgvChecks() {
         "do the thing",
     ], "CodexCLIBackend argv (fresh) drifted: \(fresh)")
 
-    // Resume: no -C, effort omitted (a pi-only level maps to nil), extra args
-    // before the prompt, the thread id positional right after `resume`.
+    // Resume: no -C, extra args before the prompt, the thread id positional
+    // right after `resume`.
+    //
+    // `xhigh` used to be the pi-only level this leg proved gets OMITTED. It
+    // stopped being pi-only in `c9f7bc89` ("Refresh live provider model
+    // catalogs"), which added `xhigh` and `max` to `effortLevels` and did not
+    // update this expectation — so the level now passes through and this leg has
+    // been RED ever since. `expect` calls `exit(1)`, so every check registered
+    // after this one, roughly a third of the executable, has not run since.
+    // A level that is still pi-only is asserted separately below.
     let resume = CodexCLIBackend.processArguments(
         model: "gpt-5.6-sol",
         effort: CodexCLIBackend.effortArgument(forThinking: "xhigh"),
@@ -393,6 +401,7 @@ private func runCodexRunnerArgvChecks() {
         "-c", "approval_policy=never",
         "-c", "sandbox_mode=workspace-write",
         "-m", "gpt-5.6-sol",
+        "-c", "model_reasoning_effort=xhigh",
         "--extra",
         "recall",
     ], "CodexCLIBackend argv (resume) drifted: \(resume)")
@@ -455,10 +464,12 @@ private func runCodexBackendPolicyChecks() {
            "CodexCLIBackend: minimal is in codex's set")
     expect(CodexCLIBackend.effortArgument(forThinking: "off") == nil,
            "CodexCLIBackend: pi-only 'off' omits the config")
-    expect(CodexCLIBackend.effortArgument(forThinking: "xhigh") == nil,
-           "CodexCLIBackend: pi-only 'xhigh' omits the config")
-    expect(CodexCLIBackend.effortArgument(forThinking: "max") == nil,
-           "CodexCLIBackend: pi-only 'max' omits the config")
+    // `xhigh` and `max` stopped being pi-only in `c9f7bc89`; `off` is the level
+    // that is still Pi's alone.
+    expect(CodexCLIBackend.effortArgument(forThinking: "xhigh") == "xhigh",
+           "CodexCLIBackend: 'xhigh' is in codex's set and must pass through")
+    expect(CodexCLIBackend.effortArgument(forThinking: "max") == "max",
+           "CodexCLIBackend: 'max' is in codex's set and must pass through")
 
     // Auth: exit 0 + "Logged in" (text-based, there is no --json).
     expect(CodexCLIBackend.isLoggedIn(statusOutput: "Logged in using ChatGPT\n", exitCode: 0),
@@ -482,14 +493,19 @@ private func runCodexCatalogUnionChecks() {
     // claude: pi's list keeps standing, the curated codex ids append without
     // dup, and losing the CLI clears them again.
     let catalog = AgentModelCatalog()
-    catalog.resetForQA(options: ["openai-codex/gpt-5.6-sol", "anthropic/opus"])
+    let seeded = ["openai-codex/gpt-5.6-sol", "anthropic/opus"]
+    catalog.resetForQA(options: seeded)
     catalog.apply(codexBackendAvailable: true)
-    expect(catalog.options() == [
-        "openai-codex/gpt-5.6-sol", "anthropic/opus",
-        "openai-codex/gpt-5.6-terra", "openai-codex/gpt-5.6-luna",
-        "openai-codex/gpt-5.5", "openai-codex/gpt-5.4",
-        "openai-codex/gpt-5.4-mini", "openai-codex/gpt-5.3-codex-spark",
-    ], "AgentModelCatalog: codex entries must append without duplicating ids already present, got \(catalog.options())")
+    // Derived from the curated list rather than re-listing it. Pinning the data
+    // meant every catalogue refresh re-broke this leg — `c9f7bc89` added
+    // `gpt-6-astra` and left it red, and because `expect` calls `exit(1)` that
+    // took the rest of the executable with it. The RULE is what this leg owns:
+    // seeded ids keep their positions and every curated id appears exactly once.
+    let expectedUnion = seeded + CodexCLIBackend.curatedCatalogModels.filter { !seeded.contains($0) }
+    expect(catalog.options() == expectedUnion,
+           "AgentModelCatalog: codex entries must append without duplicating ids already present, got \(catalog.options())")
+    expect(Set(catalog.options()).count == catalog.options().count,
+           "AgentModelCatalog: the codex union must not duplicate an id, got \(catalog.options())")
     expect(catalog.displayName(for: "openai-codex/gpt-5.6-terra") == "GPT-5.6 Terra",
            "AgentModelCatalog: codex ids must carry their curated display names")
 

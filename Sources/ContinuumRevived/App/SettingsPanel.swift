@@ -1008,6 +1008,27 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         return find(in: stack)
     }
+    /// ST-01 — the rendered checkbox bound to one exact defaults key.
+    /// `firstToggleControlForQA` cannot express "the 5-hour account window's
+    /// toggle specifically", and a witness that flips whichever toggle happens
+    /// to be first would pass while a named element was missing entirely.
+    func toggleControlForQA(key: String) -> NSButton? {
+        guard let stack = detailStack else { return nil }
+        func find(in view: NSView) -> NSButton? {
+            if let button = view as? NSButton,
+               let field = bindings[ObjectIdentifier(button)],
+               case .toggle = field,
+               field.key == key {
+                return button
+            }
+            for child in view.subviews {
+                if let match = find(in: child) { return match }
+            }
+            return nil
+        }
+        return find(in: stack)
+    }
+
     func firstSliderControlForQA() -> NSSlider? {
         guard let stack = detailStack else { return nil }
         return firstDescendant(of: stack, ofType: NSSlider.self)
@@ -1308,6 +1329,60 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 guard defaults.string(forKey: AgentModelConfig.modelKey) == target else {
                     throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picker choice did not write \(AgentModelConfig.modelKey)")
                 }
+            }
+        }
+
+        // 3b-ST01. Every compact-status element renders its OWN toggle in the
+        // agents section, and flipping one reaches the row's config.
+        //
+        // This replaces a witness that only asserted the element was present in
+        // `BuiltInSettingRegistry.all()`. That registry feeds
+        // `registeredDefinitions()` — a metadata/search bridge — and NOT the
+        // panel, which renders `SettingsSchema.sections()`. So the toggles were
+        // registered, honoured by the row, and impossible to reach from the UI,
+        // while the check stayed green. Assert the control, not the record.
+        if let agentsIndex = sections.firstIndex(where: { $0.id == "agents" }) {
+            panel.selectSectionForQA(agentsIndex)
+            for element in AgentStatusElement.presentationOrder {
+                guard let toggle = panel.toggleControlForQA(key: element.settingKey) else {
+                    throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                        "agents: no rendered toggle for status element \(element.rawValue) (key \(element.settingKey))")
+                }
+                // The checkbox must start from the element's real default, or a
+                // never-configured element would read as switched off.
+                let expected = element.defaultVisible
+                guard (toggle.state == .on) == expected else {
+                    throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                        "agents: \(element.rawValue) toggle rendered \(toggle.state == .on) but its default is \(expected)")
+                }
+            }
+            // Round-trip ONE element end to end: flip the control the user
+            // actually clicks, and read it back through the same accessor the
+            // status row consults. A write that lands in defaults but that
+            // `AgentStatusElementConfig` disagrees with is the bug this catches.
+            let subject = AgentStatusElement.quotaFiveHour
+            guard let toggle = panel.toggleControlForQA(key: subject.settingKey) else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: 5-hour toggle vanished")
+            }
+            // One bare click, the same idiom as the General round-trip above: the
+            // checkbox already renders the current value, so pre-setting `state`
+            // makes the click flip it straight back.
+            toggle.performClick(nil)
+            guard !AgentStatusElementConfig.isVisible(subject, defaults: defaults),
+                  !AgentStatusElementConfig.visibleElements(defaults: defaults).contains(subject) else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                    "agents: turning the 5-hour element off did not reach AgentStatusElementConfig")
+            }
+            toggle.performClick(nil)
+            guard AgentStatusElementConfig.isVisible(subject, defaults: defaults) else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                    "agents: turning the 5-hour element back on did not reach AgentStatusElementConfig")
+            }
+            // Independence: one element's toggle must not move another's.
+            guard AgentStatusElementConfig.isVisible(.contextMeter, defaults: defaults),
+                  !AgentStatusElementConfig.isVisible(.cost, defaults: defaults) else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered(
+                    "agents: flipping one status element disturbed another")
             }
         }
 

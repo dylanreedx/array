@@ -73,6 +73,43 @@ if CommandLine.arguments.contains("--agent-compaction-check") {
     Foundation.exit(0)
 }
 
+// CX-01 (`.plans/59`): targeted arms so the two new sections can run without the
+// process-spawning legs of the full run.
+if CommandLine.arguments.contains("--workspace-api-contract-check") {
+    runWorkspaceAPIContractChecks()
+    Foundation.exit(0)
+}
+if CommandLine.arguments.contains("--workspace-api-canvas-contract-check") {
+    runWorkspaceAPICanvasContractChecks()
+    Foundation.exit(0)
+}
+if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
+    runPiHostToolBridgeChecks()
+    Foundation.exit(0)
+}
+// CX-01 hardening: the transport's write serialisation, runnable without the
+// load-sensitive legs ahead of it in the full run.
+if CommandLine.arguments.contains("--pi-rpc-transport-check") {
+    runPiRpcTransportChecks()
+    Foundation.exit(0)
+}
+// CX-01 Phase 2a: agent.find / agent.inspect contracts and the pure ranker.
+if CommandLine.arguments.contains("--workspace-api-agents-contract-check") {
+    runWorkspaceAPIAgentsContractChecks()
+    Foundation.exit(0)
+}
+// CX-01 Phase 2b (§10.3): the pure operation store behind agent.delegate.
+if CommandLine.arguments.contains("--workspace-operation-store-check") {
+    runWorkspaceOperationStoreChecks()
+    Foundation.exit(0)
+}
+// CX-01 grew the roled-pi `--tools` allowlist; this arm runs the RoleRegistry
+// section on its own because the real-tmux legs ahead of it in the full run are
+// load-sensitive and stop the run before it is reached in a headless shell.
+if CommandLine.arguments.contains("--role-registry-check") {
+    try runRoleRegistryChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--canvas-background-model-check") {
     runCanvasBackgroundChecks()
     print("CanvasBackgroundModelChecks passed")
@@ -278,6 +315,11 @@ if CommandLine.arguments.contains("--agent-prompt-file-reference-contract-check"
 
 if CommandLine.arguments.contains("--agent-context-occupancy-check") {
     runAgentContextOccupancyChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-account-quota-check") {
+    runAgentAccountQuotaChecks()
     Foundation.exit(0)
 }
 
@@ -11511,6 +11553,11 @@ runAgentPromptImageContractChecks()
 runAgentPromptFileReferenceContractChecks()
 runAgentContextOccupancyChecks()
 
+// ST-01 — ACCOUNT quota telemetry (claude rate_limit_event, codex
+// account/rateLimits/updated) and the compact-status element toggles. Replayed
+// from committed sanitized fixtures; no credentials, no live provider.
+runAgentAccountQuotaChecks()
+
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()
 
@@ -11519,6 +11566,10 @@ runCodexAgentBackendChecks()
 
 // Plan: .plans/03-transcript-rehydration.md (transcript rehydration on resume)
 runTranscriptRehydrationChecks()
+
+// TR-01 — measured-or-absent line counts, the codex `changes[]` reader shared by
+// both transports, and the per-operation file projection behind the change card.
+runAgentFileCardChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
 runAgentModelConfigChecks()
@@ -12334,6 +12385,8 @@ runSpawnRequestChecks()
 // and a spawn's role decides what it runs with.
 try runItemKindLenientDecodingChecks()
 try runAgentCommandExecutionPlannerChecks()
+try runAgentCommandSurfaceTruthChecks()
+try runAgentCommandDiscoveryChecks()
 runClaudeSubagentSupplyChecks()
 runPiDelegateSupplyChecks()
 try runRoleRegistryChecks()
@@ -12442,5 +12495,31 @@ runCanvasBackgroundChecks()
 
 runFileDocumentSessionChecks()
 runEditorPreferencesChecks()
+
+// CX-01 (`.plans/59`) — the frozen v1 workspace API contracts: checkout/artifact
+// handles, presentation intersection, the tolerant open-request decoder, result
+// round trips, the grant evaluator, and the pi bridge envelope parse/encode.
+runWorkspaceAPIContractChecks()
+
+// CX-01 Phase 2a — agent.find / agent.inspect DTO round trips, the pure §11
+// ranker (exact id/name first, lexical then supporting evidence, ties are
+// ambiguous), the excerpt byte bound, and the agent-scope grant evaluator.
+runWorkspaceAPIAgentsContractChecks()
+// CX-01 Phase 4 — the pure geometry surface: the paging cursor and its expiry,
+// the byte-bounded page, the move/resize constraint planner, the revision
+// compare, and the grant preset that deliberately excludes canvas.apply.
+runWorkspaceAPICanvasContractChecks()
+
+// CX-01 — the pi host tool bridge driven end to end against a scripted fake
+// `pi --mode rpc`: an Array-owned `extension_ui_request` reaches the host handler
+// bound to the runner, the host's structured reply lands in the TOOL RESULT the
+// fake returns to its model, and cancellation, deadline, late replies, runner
+// replacement, concurrency and foreign dialogs behave per §15.
+runPiHostToolBridgeChecks()
+
+// CX-01 Phase 2b (§10.3) — the pure operation store behind visible delegation:
+// dedupe by (caller, key), payload binding, caller scoping, bounded retention
+// and explicit expiry, plus the delegation wire contracts.
+runWorkspaceOperationStoreChecks()
 
 print("ContinuumRevivedCoreChecks passed")

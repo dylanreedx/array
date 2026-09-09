@@ -199,29 +199,67 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
     }
 }
 
+public extension AgentTileOperationalState {
+    /// Every state in which a prose reply offer must be withdrawn, with a
+    /// representative payload for the two that carry one.
+    ///
+    /// Enumerated HERE, next to the enum, so adding a case forces a decision
+    /// about the chips rather than silently defaulting them to "keep showing".
+    static var qaNonIdleStatesForChecks: [AgentTileOperationalState] {
+        [
+            .starting,
+            .working,
+            .compacting,
+            .queued,
+            .needsAction(AgentPendingRequest(
+                requestID: "qa-request",
+                prompt: "Allow the requested command?",
+                responseMode: .fixedChoice([]),
+                kind: .approval
+            ))
+        ]
+    }
+
+    var qaLabel: String { kindName }
+}
+
 /// Provider-neutral facts about what the bound runtime can execute now.
 public struct AgentTurnCapabilities: Equatable, Sendable {
     public var canSend: Bool
     public var canStop: Bool
     public var canSteer: Bool
     public var canQueue: Bool
+    /// Whether the BOUND RUNNER can carry a response back to a provider request
+    /// it opened. Same sourcing rule as `canSteer`: read off the runner that will
+    /// actually execute the intent, never off `record.harness`.
+    ///
+    /// This is what stops a request block from painting buttons that resolve
+    /// nothing. Before it existed, `AgentRequestView` rendered its choices
+    /// whenever the payload was pending, and the press dispatched into an unbound
+    /// `onProviderResponse` — a control that looked live and did nothing.
+    public var canRespondToRequests: Bool
 
     public init(
         canSend: Bool = false,
         canStop: Bool = false,
         canSteer: Bool = false,
-        canQueue: Bool = false
+        canQueue: Bool = false,
+        canRespondToRequests: Bool = false
     ) {
         self.canSend = canSend
         self.canStop = canStop
         self.canSteer = canSteer
         self.canQueue = canQueue
+        self.canRespondToRequests = canRespondToRequests
     }
 
     /// The conservative capability floor for today's send/stop runtime. Future
-    /// provider seams must opt into steer or queue explicitly.
+    /// provider seams must opt into steer, queue or respond explicitly.
     public static func sendStop(canSend: Bool, canStop: Bool) -> Self {
-        Self(canSend: canSend, canStop: canStop, canSteer: false, canQueue: false)
+        Self(
+            canSend: canSend, canStop: canStop, canSteer: false, canQueue: false,
+            canRespondToRequests: false
+        )
     }
 }
 

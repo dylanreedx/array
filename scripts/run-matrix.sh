@@ -335,6 +335,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # precision semantics. Standalone so unrelated long-running CoreChecks failures
 # cannot prevent this contract from running.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+# ST-01. Standalone for the same reason as the compaction leg above: the bare
+# CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
+# and a witness only counts if the gate reports IT rather than the first red
+# thing ahead of it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
@@ -376,6 +381,10 @@ run_app_check .build/debug/Array --palette-duplicate-root-check
 # everything after it never runs. A witness the gate cannot reach never runs at all.
 run_app_check .build/debug/Array --strict-agent-harness-check
 run_app_check .build/debug/Array --managed-agent-model-spawn-check
+# CX-01 (.plans/59): the pi host tool bridge through the real supervisor runner
+# factory against a fake pi on PATH. Ordered here for the same reason as the two
+# legs above: a witness the gate cannot reach never runs at all.
+run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
 run_app_check .build/debug/Array --agent-awareness-check
@@ -441,6 +450,13 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
+# TR-04: the completion/dispatch seam driven through the REAL composer, popover
+# and synthetic key events — a typed payload (command, file, directory) must
+# never degrade into literal text in the draft. This check has existed since it
+# was written and was invoked by nothing; `.plans/44` recorded it as unregistered
+# on 2026-08-21 and it was still unregistered at 0.7.15. Offline and
+# display-independent, so it belongs in the gate like any other app leg.
+run_app_check .build/debug/Array --agent-completion-semantic-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
@@ -562,6 +578,14 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# TR-06: responding to a request the provider is HOLDING. Drives the real
+# `wireManagedAgentTile` and asserts the response transport is bound by
+# production — the seam sat declared-and-unbound through every release of the
+# request system, and the one check that touched it bound the closure itself.
+# Also gates the rules that keep a press honest: a runner with no transport
+# offers no controls at all, a press dispatches exactly once, dispatching is
+# never resolving, and a failed delivery leaves the request open and answerable.
+run_app_check .build/debug/Array --provider-request-response-check
 # WS5: per-managed-agent-tile page zoom. Six discrete rungs reflowing REAL AppKit
 # geometry — the tile's composition constraints, the transcript's measurement
 # identity and prepared layout, the composer and every rail — while the tile's
@@ -639,6 +663,32 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # drives mountWorkspaceSceneAtBoot, the method applicationDidFinishLaunching
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
+# CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
+# production dispatch entry. Same-named file in two checkouts, dirty draft
+# preserved, world frames at a non-zero zone origin, partial relationship
+# failure, unhydrated/duplicate refusals; then grants, trusted approval,
+# forgery, revocation and all five presentation dimensions under user input.
+run_app_check .build/debug/Array --workspace-api-open-check
+run_app_check .build/debug/Array --workspace-api-grants-check
+# CX-01 Phase 2a: agent.find / agent.inspect — ranking, ambiguity, self-inspect
+# preset, other-agent approval, byte caps, zero lifecycle side effects.
+run_app_check .build/debug/Array --workspace-api-agents-check
+# CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through
+# the drag's own owner route — the persisted WORLD frame, untouched and
+# unhydrated tiles surviving, and every conflict (stale revision, live gesture,
+# unhydrated or foreign target) applying nothing.
+run_app_check .build/debug/Array --workspace-api-canvas-check
+# CX-01 Phase 2b (.plans/59, §10): visible delegation with safe retry — create
+# once under retry, idempotency conflict, the child tile inside the parent's zone,
+# a presentation failure repaired by agent.reveal, operation.get per step, and
+# cancellation reporting the child truthfully.
+run_app_check .build/debug/Array --workspace-api-delegation-check
+# CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
+# in the repo ever asks pi to PARSE these files, which is how a merge-spliced
+# syntax error in continuum-workspace-tools.ts reached the branch with every leg
+# green. Carries a positive control (a deliberately broken copy must be
+# rejected); SKIPS loudly, exit 0, when pi is not on PATH.
+run_app_check .build/debug/Array --pi-extension-load-check
 # M1.0 (.plans/46): a project's canvas.json must only ever receive that project's
 # tiles. setZones never updates the flat canvasState, and retireFlatCompatibilityScene
 # deliberately leaves canvasState.tiles alone, so it keeps the DEPARTED project's
@@ -723,6 +773,21 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
 run_app_check .build/debug/Array --transcript-provider-parity-check
+# TR-01 — the change card's file list and counts. Drives the RESTORE path
+# (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
+# stay two cards, and pins that no card prints a count it did not measure.
+run_app_check .build/debug/Array --file-card-check
+# The host-local tool-detail supply: immutable scope, expiry, and the real
+# translator sequences (claude search + delegation, pi delegation, codex exit
+# code) driven through the host's own capture path.
+#
+# This leg has existed since `.plans/45` and was registered NOWHERE — called out
+# in `.plans/44`, and found independently by TR-01 (which leans on the store for
+# its file counts) and TR-03 (whose tool rows are entirely fed by it) while they
+# were running in parallel. Two tickets tripping over the same hole is the
+# clearest evidence there is that a witness the gate does not report is not a
+# witness (CLAUDE.md, non-negotiable #2).
+run_app_check .build/debug/Array --tool-detail-check
 # Directory-aware Markdown: a real title-bar mouse click reaches Preview/Edit;
 # unsaved preview, explicit atomic save, clean reload, and conflict overwrite are witnessed.
 run_app_check .build/debug/Array --file-markdown-preview-check
@@ -925,7 +990,13 @@ else
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then
-  run scripts/check-app-bundle.sh --configuration debug
+  # `run_leg`, not `run`: a red bundle probe used to abort the whole script under
+  # `set -e`, so `matrix_report` never ran. A real 216-leg run therefore printed
+  # NO summary at all — no leg count, no KNOWN-RED tally, no failure list — and
+  # the two legs after this one never executed. That is the "matrix halts hide
+  # legs" hazard, which classify-and-continue already fixed everywhere else.
+  # The bundle probe is a leg like any other: it must be REPORTED, not fatal.
+  run_leg scripts/check-app-bundle.sh --configuration debug
 else
   printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
 fi

@@ -209,6 +209,18 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.appendNotice(id: id, title: title, text: text)
     }
 
+    /// TR-06 — forwards the LOCAL delivery state of a response to an open
+    /// request. The projection owns the document; this is a pass-through for the
+    /// same reason `appendNotice` is one, and it returns the projection's own
+    /// answer so a caller can tell a real write from a refused no-op.
+    @discardableResult
+    public mutating func markRequestResponseState(
+        requestID: String,
+        _ state: AgentRequestResponseState
+    ) -> Bool {
+        semanticProjection.markRequestResponseState(requestID: requestID, state)
+    }
+
     @discardableResult
     public mutating func flushPendingStreamingMarkupIfDue() -> Bool {
         semanticProjection.flushPendingStreamingMarkupIfDue()

@@ -67,6 +67,50 @@ public enum AgentDisplayNameSource: String, Codable, Sendable {
     /// child ordinal. It is still automatic text at the sync boundary: a parent
     /// name may itself have come from a prompt or source item.
     case parent
+    /// The provider CLI's own conversation title, read from its session store —
+    /// today that is claude's `ai-title` line. It is a MODEL-AUTHORED SUMMARY of
+    /// the conversation, not a slice of the user's text, which is what makes it
+    /// a better subject line than any prefix of a first prompt.
+    case harness
+    /// A model was asked, on this conversation, for a short name for it.
+    case generated
+
+    /// How strong a claim this provenance has on the title.
+    ///
+    /// An automatic namer may replace a title only when its own authority is at
+    /// least as high — never `.manual`, which is absolute. This is the whole
+    /// mechanism that lets a good name arrive LATE. Before it, `.prompt` was
+    /// terminal: the funnel demanded the sentinel, so the first thing that ever
+    /// named an agent was also the last, and an agent whose work pivoted kept
+    /// the opening words of its first prompt forever.
+    ///
+    /// Equal authority replaces deliberately: `.harness` tracks a conversation
+    /// that is still moving, and a second explicit Generate Name must be able to
+    /// supersede the first.
+    ///
+    /// NOTE that this is NOT the order `resolveDerivedDisplayName` seeds in.
+    /// Seeding asks "which candidate best describes this agent right now", and
+    /// there a prompt beats a ticket id. Authority asks "may this be replaced",
+    /// and there `.sourceItem` ranks near the top: it is the one automatic source
+    /// a CALLER chose for this specific agent rather than derived from text. For
+    /// an overnight ticket loop the ticket id *is* the name, and quietly
+    /// upgrading `P4.5-generated-name-oneshot` to some prettier prose would lose
+    /// the only key that ties the row back to the queue.
+    public var authority: Int {
+        switch self {
+        case .sentinel: return 0
+        case .parent: return 1
+        case .prompt: return 2
+        case .harness: return 3
+        case .generated: return 4
+        case .sourceItem: return 5
+        case .manual: return .max
+        }
+    }
+
+    /// Whether this title was chosen by a person. Everything else is a proposal
+    /// some later, better proposal may replace.
+    public var isManual: Bool { self == .manual }
 }
 
 /// The result of the one precedence ladder used by every derived spawn path.
@@ -274,6 +318,14 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// decode-tolerant — the `snoozedAt`/`sourceItemId` convention, no schema
     /// bump.
     public var spawnResultHandle: String? = nil
+    /// CX-01 (§14.1): whether this agent may use Array's workspace tools
+    /// (bounded self context, open/reveal within its own checkout). Persisted
+    /// POLICY, read by the host grant table; the model can neither read nor
+    /// assert it. Legacy records decode `false` — nothing migrates silently.
+    /// Lives on the record, not on `AgentCapabilities`: that struct falls back
+    /// to `.managed` on ANY decode failure, so a new field there would reset
+    /// legacy capabilities.
+    public var workspaceToolsEnabled: Bool = false
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -686,11 +738,19 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// The local, human-facing title. Prompt provenance is intentionally retained
     /// here for the desktop row; `syncDisplayName` is the boundary-safe twin.
     public var humanDisplayName: String {
-        guard let label = AgentName.normalizedLabel(displayName),
+        guard let label = AgentName.displayLabel(displayName),
               displayNameSource == .manual || !displayNameIsIdentifier else {
             return Self.defaultAgentName
         }
         return label
+    }
+
+    /// The full stored title, uncut. Only a namer that needs the user's original
+    /// words as SOURCE MATERIAL should read this — never a painting surface,
+    /// which must take `humanDisplayName` so one display cap governs every
+    /// surface.
+    public var storedDisplayName: String {
+        AgentName.normalizedLabel(displayName) ?? Self.defaultAgentName
     }
 
     /// The only name projection allowed into an activity/sync snapshot. Prompt,
@@ -702,6 +762,18 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             // `.sentinel` means the provenance is not permissioned for a human
             // title. Keep even a malformed sentinel record redacted at the
             // boundary; a decoded unknown source is normalized to this case.
+            return Self.defaultAgentName
+        case .harness, .generated:
+            // OPEN DECISION, deliberately fail-closed for now.
+            //
+            // Both of these ARE model-authored summaries rather than slices of
+            // the user's own text, which is the distinction I5 actually cares
+            // about — so there is a real argument that they may cross where a
+            // truncated prompt may not. Publishing them is a one-line move to
+            // the `.manual` arm below. It is not made here because widening the
+            // boundary is a privacy decision, not a naming one, and the cost of
+            // being wrong is asymmetric: a redundant "New agent" on the phone is
+            // an annoyance, a leaked summary is not retractable.
             return Self.defaultAgentName
         case .manual:
             return humanDisplayName
@@ -728,6 +800,47 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Adopt an automatic title that did not come through the CAS — a provider's
+    /// own conversation title, read from its session store.
+    ///
+    /// The authority ladder is the entire guard. `.manual` is never replaced;
+    /// nor is a source that outranks the incoming one, so an explicit Generate
+    /// Name is not undone by the next harness poll. Equal authority DOES replace,
+    /// because a harness title tracks a conversation that is still moving.
+    ///
+    /// Returns whether the record changed. Re-reading the same title is a no-op
+    /// rather than a write — this runs on every turn completion, and a record
+    /// that persists on each one would rewrite the store for nothing.
+    @discardableResult
+    public mutating func adoptAutomaticName(
+        _ rawName: String,
+        source: AgentDisplayNameSource
+    ) -> Bool {
+        guard !source.isManual, !displayNameSource.isManual else { return false }
+        guard source.authority >= displayNameSource.authority else { return false }
+        guard let normalized = AgentName.normalizedLabel(rawName),
+              !AgentName.isIdentifier(normalized, model: model, role: role, id: id.rawValue) else {
+            return false
+        }
+        guard displayName != normalized || displayNameSource != source else { return false }
+        displayName = normalized
+        displayNameSource = source
+        // Any proposal in flight is now dead: its `expectedName` was the title
+        // this call just replaced, so its CAS can never succeed again. Clearing
+        // the marker is bookkeeping, not policy — leaving it armed strands the
+        // record with a request no completion can ever consume.
+        namingRequest = nil
+        return true
+    }
+
+    /// Whether an automatic namer should bother running at all. False once a
+    /// person has named the agent, and once a namer of equal or greater
+    /// authority has already produced a title.
+    public func acceptsAutomaticName(from source: AgentDisplayNameSource) -> Bool {
+        guard !source.isManual, !displayNameSource.isManual else { return false }
+        return source.authority >= displayNameSource.authority
+    }
+
     /// Arm one automatic name proposal and capture the exact title it is allowed
     /// to replace. A later call supersedes the earlier request by id.
     @discardableResult
@@ -740,8 +853,12 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// Complete an automatic proposal only through the request's compare-and-swap.
     /// The marker and the expected title are checked together on the way out; a
     /// check made only before starting the work leaves a human rename vulnerable
-    /// to a late completion. Generated names are automatic/prompt-derived for the
-    /// sync boundary even though they were authored by a provider.
+    /// to a late completion.
+    ///
+    /// The landed source is `.generated`, which outranks every other automatic
+    /// source. It used to be `.prompt`, and that was wrong in both directions: it
+    /// claimed the text came from the user when a model wrote it, and it left an
+    /// explicitly requested name no stronger than the truncation it replaced.
     @discardableResult
     public mutating func applyGeneratedName(_ generatedName: String, for request: NamingRequest) -> Bool {
         guard namingRequest?.id == request.id,
@@ -752,7 +869,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             return false
         }
         displayName = normalized
-        displayNameSource = .prompt
+        displayNameSource = .generated
         namingRequest = nil
         return true
     }
@@ -769,7 +886,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
-        case spawnResultHandle
+        case spawnResultHandle, workspaceToolsEnabled
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -837,6 +954,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             AgentCapabilities.self, forKey: .capabilities)) ?? .managed
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
         spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
+        workspaceToolsEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .workspaceToolsEnabled)) ?? false
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
@@ -927,6 +1045,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         }
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
         try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
+        if workspaceToolsEnabled { try container.encode(true, forKey: .workspaceToolsEnabled) }
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)

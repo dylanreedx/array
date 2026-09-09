@@ -21,6 +21,17 @@ struct AgentBlockMeasureKey: Hashable {
     let appearance: TokenTheme
     let contentSizePolicy: AgentContentSizePolicy
     let presentationRevision: UInt64
+    /// TR-06 — a request block reserves an action row only when the bound runner
+    /// can carry a response, so this capability changes MEASURED HEIGHT without
+    /// changing the block's semantic revision. Keyed for exactly the reason
+    /// `appearance` and `contentSizePolicy` are: it is a non-semantic input that
+    /// nonetheless moves layout.
+    ///
+    /// Leaving it out is not theoretical — it reuses a stale height precisely
+    /// when the capability flips, which is when a runner dies with a request
+    /// open, or a session binds and the buttons should appear. The row would
+    /// keep the old height and clip or strand them.
+    let canRespondToRequests: Bool
 }
 
 /// Width-aware renderer measurement cache. Measurements are semantic-revision
@@ -54,7 +65,8 @@ final class AgentBlockMeasurementCache {
             appearance: context.appearance,
             entryRole: entryRole,
             contentSizePolicy: contentSizePolicy,
-            presentationRevision: context.actions.presentationRevision(blockID: block.id)
+            presentationRevision: context.actions.presentationRevision(blockID: block.id),
+            canRespondToRequests: context.canRespondToRequests
         )
         if let cached = heights[key] { return cached }
         measurementMissCount += 1
@@ -79,7 +91,8 @@ final class AgentBlockMeasurementCache {
         appearance: TokenTheme,
         entryRole: AgentEntryRole,
         contentSizePolicy: AgentContentSizePolicy,
-        presentationRevision: UInt64
+        presentationRevision: UInt64,
+        canRespondToRequests: Bool
     ) -> AgentBlockMeasureKey {
         let finiteWidth = width.isFinite ? max(0, width) : 0
         return AgentBlockMeasureKey(
@@ -90,7 +103,8 @@ final class AgentBlockMeasurementCache {
             widthBucket: Int((finiteWidth / widthQuantum).rounded()),
             appearance: appearance,
             contentSizePolicy: contentSizePolicy,
-            presentationRevision: presentationRevision
+            presentationRevision: presentationRevision,
+            canRespondToRequests: canRespondToRequests
         )
     }
 }

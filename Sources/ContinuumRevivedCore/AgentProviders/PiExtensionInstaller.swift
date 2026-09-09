@@ -19,6 +19,16 @@ import Foundation
 public enum PiExtensionInstaller {
     public static let extensionFileName = "continuum-spawn-agent.ts"
 
+    /// CX-01 (`.plans/59`, §15): the host tool bridge extension. NOT installed to
+    /// `~/.pi` — it is loaded by `-e <bundled path>` only, so its tools exist
+    /// solely in Array-managed pi sessions and nothing is written to the user's
+    /// global pi configuration. See `PiAgentRunner.installedExtensionPaths`.
+    public static let workspaceToolsExtensionFileName = "continuum-workspace-tools.ts"
+
+    public static func bundledWorkspaceToolsExtensionPath(fileManager: FileManager = .default) -> String? {
+        bundledExtensionURL(fileName: workspaceToolsExtensionFileName, fileManager: fileManager)?.path
+    }
+
     /// `~/.pi/agent/extensions` — see the file-level comment for the source.
     public static func defaultExtensionsDirectory(homeDirectory: String = NSHomeDirectory()) -> URL {
         URL(fileURLWithPath: homeDirectory, isDirectory: true)
@@ -101,9 +111,20 @@ public enum PiExtensionInstaller {
         return try? Data(contentsOf: url)
     }
 
-    static func bundledExtensionURL(fileManager: FileManager = .default) -> URL? {
+    /// Every extension file shipped in the Core resource bundle. The load gate
+    /// (`--pi-extension-load-check`) enumerates this and asks the real `pi` to
+    /// parse each one, so a new bundled extension is covered by adding it here.
+    public static let bundledExtensionFileNames: [String] = [
+        extensionFileName, workspaceToolsExtensionFileName,
+    ]
+
+    public static func bundledExtensionURL(fileManager: FileManager = .default) -> URL? {
+        bundledExtensionURL(fileName: extensionFileName, fileManager: fileManager)
+    }
+
+    public static func bundledExtensionURL(fileName: String, fileManager: FileManager = .default) -> URL? {
         let resourceBundleName = "continuum-revived_ContinuumRevivedCore.bundle"
-        let relativePath = "PiExtensions/\(extensionFileName)"
+        let relativePath = "PiExtensions/\(fileName)"
         var candidates: [URL] = []
         if let resourcesURL = Bundle.main.resourceURL {
             candidates.append(
