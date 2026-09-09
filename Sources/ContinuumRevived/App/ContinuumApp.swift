@@ -3205,6 +3205,21 @@ enum ContinuumApp {
             }
         }
 
+        // `--terminal-theme-fidelity-check` asserts that the shell Ghostty spawns is
+        // handed THIS bundle's terminfo and shell integration. libghostty resolves its
+        // resources directory from an inherited GHOSTTY_RESOURCES_DIR before it ever
+        // looks beside its own executable (ghostty src/os/resourcesdir.zig), and it
+        // resolves it once, inside the `ghostty_init()` below — so the scrub has to
+        // happen here, not in the check body. Run from a Ghostty window (an Array
+        // terminal included) the bundled leg otherwise measured the HOST terminal's
+        // resources and failed, while the same inheritance could just as easily have
+        // satisfied the assertion for the wrong reason.
+        if CommandLine.arguments.contains("--terminal-theme-fidelity-check") {
+            for inherited in ["GHOSTTY_RESOURCES_DIR", "TERMINFO", "GHOSTTY_SHELL_FEATURES"] {
+                unsetenv(inherited)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "Array"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [

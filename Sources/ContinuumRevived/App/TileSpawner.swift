@@ -4525,6 +4525,22 @@ final class TileSpawner {
         else {
             throw CheckError.failed("spawned terminal tile missing from real canvas path")
         }
+
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            terminalTile.hostView.detachRuntime()
+            try? pump(context, seconds: 0.2)
+        }
+        defer { tearDownRuntime() }
+
         try pump(context, seconds: 0.8)
         guard let terminalView = runtime.qaTerminalView, terminalView.surface != nil else {
             throw CheckError.failed("spawned terminal surface missing")
@@ -4598,9 +4614,7 @@ final class TileSpawner {
         try expect(theme.foregroundHex != nil, "Ghostty config should expose a resolved foreground color")
         try expect(theme.paletteHex.count >= 16, "Ghostty config should expose at least ANSI palette colors 0-15")
 
-        runtime.terminate(policy: .force)
-        terminalTile.hostView.detachRuntime()
-        try pump(context, seconds: 0.2)
+        tearDownRuntime()
 
         var tmuxCleanup: [String: Any] = ["attempted": false]
         if tmuxWrapped {
