@@ -124,6 +124,13 @@ if [[ -d "$APP/Contents/Frameworks" ]]; then
     codesign "${nested_flags[@]}" "$nested" >>"$LOG" 2>&1
   done < <(find "$APP/Contents/Frameworks" -depth \( -name '*.framework' -o -name '*.dylib' -o -name '*.xpc' -o -name '*.app' -o -name 'Autoupdate' \) -print0)
 fi
+# Array-owned helper executables are nested code too. They must carry the same
+# Developer ID, secure timestamp, and hardened runtime as the outer app or
+# notarization rejects the archive even when the deep local verification passes.
+if [[ -x "$APP/Contents/MacOS/array-workspace-mcp" ]]; then
+  log "    signing nested: $APP/Contents/MacOS/array-workspace-mcp"
+  codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/array-workspace-mcp" >>"$LOG" 2>&1
+fi
 codesign "${SIGN_FLAGS[@]}" "$APP" >>"$LOG" 2>&1
 codesign --verify --deep --strict --verbose=2 "$APP" >>"$LOG" 2>&1
 log "codesign verify: OK"
