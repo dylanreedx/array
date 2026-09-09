@@ -1,6 +1,6 @@
 # Claude/Codex workspace tools
 
-Status: implemented; release in progress.
+Status: shipped in 0.7.18/build 69.
 
 ## Goal
 
