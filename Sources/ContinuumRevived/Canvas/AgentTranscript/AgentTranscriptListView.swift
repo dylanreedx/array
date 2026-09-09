@@ -3291,6 +3291,17 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
               case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
         return payload.summary
     }
+    /// Production-route probe: the presented row's TITLE (the action
+    /// sentence `collapsed(_:).actionLine` composes into, or the tool-name
+    /// fallback when there is nothing to say) — distinct from
+    /// `qaPresentedToolSummary`'s disclosure body, so a witness can tell
+    /// "the sentence rendered as the title" apart from "the same words showed
+    /// up echoed as a body argument line".
+    func qaPresentedToolTitle(for blockID: AgentNodeID) -> String? {
+        guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
+              case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
+        return payload.name
+    }
     /// TR-01 — the whole presented diff payload, so a witness can drive the real
     /// renderer with it and assert the SENTENCE the user reads, not just the
     /// array behind it.

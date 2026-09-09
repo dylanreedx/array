@@ -7010,16 +7010,28 @@ enum UIProbeGeometry {
         let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
         // `.plans/45` S3 — the presented row's TITLE is now the action sentence,
         // so the disclosure's first line (which repeats it) no longer counts as
-        // expandable content. The exit code keeps this record's disclosure at
-        // two additional lines, which is what the click/remeasure assertions
-        // below exist to witness.
+        // expandable content. The exit code alone leaves a single body line,
+        // which is not enough to arm the disclosure control
+        // (`hasDisclosureDetail` requires `lineCount > 1 || outputText !=
+        // nil`); the captured `output` below is what the click/remeasure
+        // assertions exist to witness expanding.
+        //
+        // The argument is `description`, not `command`: TR-03 (`35ff1c58`)
+        // removed the dead "Ran <command>" branch because no production
+        // translator ever forwards a shell command body — claude drops
+        // `Bash.command` on purpose, pi carries no command key, and codex's
+        // shell start carries no arguments at all. `description` is the
+        // field claude's Bash tool actually publishes, and it is already
+        // capitalized the way a real one is, so the dedupe against the title
+        // (`echoNamesFile`'s sibling exact-match check) does not double it.
         let record = AgentToolDetailRecord(
             identity: identity,
             toolName: "bash",
             arguments: [AgentToolDetailArgument(
-                key: "command",
-                value: AgentToolDetailBoundedText(text: String(repeating: "inspect safe output ", count: 12))
+                key: "description",
+                value: AgentToolDetailBoundedText(text: "List files in the build directory")
             )],
+            output: AgentToolDetailBoundedText(text: "Listing complete: 42 files found"),
             status: .completed,
             exitCode: 0,
             updatedAt: Date(timeIntervalSinceReferenceDate: 10)
@@ -7059,7 +7071,13 @@ enum UIProbeGeometry {
         list.collectionView.layoutSubtreeIfNeeded()
 
         var assertions = 0
-        guard list.qaPresentedToolSummary(for: blockID)?.contains("Ran") == true else {
+        // Pinned on the TITLE, not just the disclosure summary: the sentence
+        // must compose into `payload.name` (what `collapsed(_:).actionLine`
+        // produces), not merely show up somewhere in the disclosure body as
+        // an echoed argument line — a regression that drops the sentence from
+        // the title but leaves the raw argument in the body would still
+        // contain this text if only the summary were checked.
+        guard list.qaPresentedToolTitle(for: blockID) == "List files in the build directory" else {
             throw fail("host-local tool composition did not reflow the sanitized terminal summary")
         }
         assertions += 1
