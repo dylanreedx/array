@@ -33,6 +33,12 @@ func runWorkspaceMCPChecks() {
         prompt: AgentPrompt("hello"), workspaceMCP: config)
     expect(claudeArgs.contains("--strict-mcp-config") && claudeArgs.contains(config.claudeMCPConfigPath),
            "Claude launch argv did not include the isolated MCP configuration file path")
+    if let separator = claudeArgs.firstIndex(of: "--") {
+        expect(separator + 1 < claudeArgs.count && claudeArgs[separator + 1] == "hello",
+               "Claude prompt was not placed after the option terminator")
+    } else {
+        expect(false, "Claude launch argv omitted the option terminator before the prompt")
+    }
     let codexArgs = CodexCLIBackend.processArguments(
         model: "gpt", effort: Optional<String>.none, sessionMode: CodexCLIBackend.SessionMode.fresh, threadId: nil,
         cwdPath: "/tmp/project", extraArgs: [], prompt: AgentPrompt("hello"), workspaceMCP: config)

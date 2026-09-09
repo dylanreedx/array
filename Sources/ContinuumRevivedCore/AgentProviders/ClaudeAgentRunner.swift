@@ -227,7 +227,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         if let workspaceMCP {
             args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
-        return args + [promptArgument(prompt)]
+        // `--mcp-config` accepts a variadic list. Terminate option parsing so
+        // Claude cannot interpret the user's prompt as another config path.
+        return args + ["--", promptArgument(prompt)]
     }
 
     /// Claude takes ONE positional prompt (pi takes segments). The visible
