@@ -920,7 +920,13 @@ else
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then
-  run scripts/check-app-bundle.sh --configuration debug
+  # `run_leg`, not `run`: a red bundle probe used to abort the whole script under
+  # `set -e`, so `matrix_report` never ran. A real 216-leg run therefore printed
+  # NO summary at all — no leg count, no KNOWN-RED tally, no failure list — and
+  # the two legs after this one never executed. That is the "matrix halts hide
+  # legs" hazard, which classify-and-continue already fixed everywhere else.
+  # The bundle probe is a leg like any other: it must be REPORTED, not fatal.
+  run_leg scripts/check-app-bundle.sh --configuration debug
 else
   printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
 fi

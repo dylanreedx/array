@@ -198,7 +198,7 @@ check --zone-tile-hydration-check
 check --zone-unacquired-project-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
-leg run scripts/check-app-bundle.sh --configuration debug
+leg run_leg scripts/check-app-bundle.sh --configuration debug
 leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift run ContinuumRevivedSyncIntegrationChecks
