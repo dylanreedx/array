@@ -26492,6 +26492,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         host.attach(runtime: runtime)
         host.layoutSubtreeIfNeeded()
 
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            host.detachRuntime()
+            try? tickTerminal(context: context, seconds: 0.2)
+        }
+        defer { tearDownRuntime() }
+
         // Wait for shell to be ready.
         runtime.sendInput(Data("printf 'con13-ready\\n'\n".utf8))
         try tickTerminal(context: context, timeout: 6.0) { runtime.visibleText().contains("con13-ready") }
@@ -26595,8 +26610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(migratedDescriptor.cwd == termRoot.path, "A3 FAIL: v1 descriptor cwd not decoded correctly")
 
         // A4: Terminate old runtime — old PID dies.
-        runtime.terminate(policy: .force)
-        host.detachRuntime()
+        tearDownRuntime()
         try tickTerminal(context: context, seconds: 0.5)
         let oldPidDead = runtime.isProcessExitedForSnapshotCheck
         try expect(oldPidDead, "A4 FAIL: old runtime PID should be dead after terminate(.force)")
@@ -26621,6 +26635,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         defer { window2.close() }
         host2.attach(runtime: restartedRuntime)
         host2.layoutSubtreeIfNeeded()
+
+        // Same reasoning as tearDownRuntime above, for the restarted runtime's surface.
+        var restartedRuntimeTornDown = false
+        func tearDownRestartedRuntime() {
+            guard !restartedRuntimeTornDown else { return }
+            restartedRuntimeTornDown = true
+            restartedRuntime.terminate(policy: .force)
+            host2.detachRuntime()
+            try? tickTerminal(context: context, seconds: 0.2)
+        }
+        defer { tearDownRestartedRuntime() }
 
         // A5: Distinct instance.
         try expect(
@@ -26681,8 +26706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "A7 FAIL: cwd should be persisted even when scrollback toggle is off"
         )
 
-        restartedRuntime.terminate(policy: .force)
-        host2.detachRuntime()
+        tearDownRestartedRuntime()
 
         // Clean up terminal temp dir.
         try? fm.removeItem(at: termRoot)

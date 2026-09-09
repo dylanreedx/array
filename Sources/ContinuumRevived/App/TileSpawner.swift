@@ -4339,6 +4339,24 @@ final class TileSpawner {
         guard let tile = canvas.canvasState.tiles.first(where: { $0.id == runtime.tileId }) else {
             throw CheckError.failed("spawned terminal tile missing from canvas state")
         }
+
+        // Every exit path has to leave the surface detached before `context.shutdown()`
+        // runs. A throw used to unwind straight into that defer, and ghostty_app_free
+        // faulted in Surface.deinit on the still-attached surface — killing the process
+        // before ContinuumApp's catch could print WHY the check failed, so a real failure
+        // read as exit 1 with no output at all.
+        var runtimeTornDown = false
+        func tearDownRuntime() {
+            guard !runtimeTornDown else { return }
+            runtimeTornDown = true
+            runtime.terminate(policy: .force)
+            if let terminalTile = canvas.tileView(for: tile.id) as? TerminalTileNSView {
+                terminalTile.hostView.detachRuntime()
+            }
+            try? pump(context, seconds: 0.2)
+        }
+        defer { tearDownRuntime() }
+
         let expectedSize = CanvasEngine.defaultFrame(for: .terminal)
         try expect(tile.frame.width == Double(expectedSize.width) && tile.frame.height == Double(expectedSize.height), "spawned shell should use terminal default size \(expectedSize), got \(tile.frame)")
         let screenFrame = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvas.viewport)
@@ -4371,11 +4389,7 @@ final class TileSpawner {
             try expect(tmuxWrapped, "default shell should start through tmux when tmux is available at \(tmuxPath); descriptor command=\(descriptor.command)")
         }
 
-        runtime.terminate(policy: .force)
-        if let terminalTile = canvas.tileView(for: tile.id) as? TerminalTileNSView {
-            terminalTile.hostView.detachRuntime()
-        }
-        try pump(context, seconds: 0.2)
+        tearDownRuntime()
 
         var tmuxCleanup: [String: Any] = ["attempted": false]
         if tmuxWrapped {
