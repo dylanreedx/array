@@ -225,7 +225,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             + sessionArgs
             + extraArgs
         if let workspaceMCP {
-            args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigJSON]
+            args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         return args + [promptArgument(prompt)]
     }

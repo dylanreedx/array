@@ -5,12 +5,26 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public let endpoint: String
     public let agentID: String
     public let token: String
+    /// Claude's `--mcp-config` flag takes a filesystem path, unlike Codex's
+    /// inline `-c` overrides. Materialize the private per-agent file before
+    /// Claude validates its strict configuration.
+    public let claudeMCPConfigPath: String
 
     public init(serverExecutable: String, endpoint: String, agentID: String, token: String) {
         self.serverExecutable = serverExecutable
         self.endpoint = endpoint
         self.agentID = agentID
         self.token = token
+        let filenameID = agentID.map { character in
+            character.isLetter || character.isNumber ? String(character) : "_"
+        }.joined()
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-workspace-mcp-\(filenameID).json")
+        self.claudeMCPConfigPath = path.path
+        let object: [String: Any] = ["mcpServers": ["array_workspace": ["command": serverExecutable]]]
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
+            try? data.write(to: path, options: [.atomic])
+        }
     }
 
     public var environment: [String: String] {
