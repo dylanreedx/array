@@ -102,7 +102,11 @@ public enum AgentQuotaWindowKind: Equatable, Hashable, Sendable, Codable {
         switch self {
         case .fiveHour: return "5h"
         case .sevenDay: return "7d"
-        case .spendLimit: return "spend"
+        // NOT "spend". A spend limit is reported as a PERCENTAGE of a cap, and
+        // labelling it "spend" next to the session-cost pill put two
+        // money-looking readings in one row — one an amount, one a fraction.
+        // "cap" says which of the two this is.
+        case .spendLimit: return "cap"
         case .unknown(let raw): return raw
         }
     }

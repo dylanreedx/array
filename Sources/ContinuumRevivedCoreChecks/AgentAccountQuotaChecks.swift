@@ -343,5 +343,46 @@ func runAgentAccountQuotaChecks() {
     expect(!AgentStatusElement.contextMeter.isAccountScoped,
            "context occupancy is per-agent, not account state")
 
-    print("AgentAccountQuota checks passed: claude rate_limit_event (unifiedWindows fractions and the flat legacy shape) and codex account/rateLimits/updated (percent normalized, windows named by duration, credits verbatim) publish account readings on the observation channel and NO runtime event; unknown stays unknown, an elapsed window reads expired, a spend limit is not clamped, an unrecognised window name survives; cost carries a metered vs list-price basis; status elements toggle independently with a registered setting each and drop lowest-priority-first with location never dropped")
+    // MARK: - persistence: real numbers after a relaunch, never a stale one
+
+    // The store is what stops a relaunched row reading `5h — 7d —`. It is only
+    // allowed to bring back a reading that is still inside its own window.
+    let storeDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("st01-quota-store-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: storeDir) }
+    let store = AgentAccountQuotaStore(applicationSupportDirectory: storeDir)
+
+    let liveWindow = AgentQuotaWindow(
+        kind: .fiveHour, utilization: 0.18, resetsAt: observedAt.addingTimeInterval(3_600))
+    let elapsedWindow = AgentQuotaWindow(
+        kind: .sevenDay, utilization: 0.67, resetsAt: observedAt.addingTimeInterval(-60))
+    let undatedWindow = AgentQuotaWindow(kind: .spendLimit, utilization: 0.5, resetsAt: nil)
+    store.save([
+        .claudeCode: AgentAccountQuotaSnapshot(
+            harness: .claudeCode,
+            windows: [liveWindow, elapsedWindow, undatedWindow],
+            observedAt: observedAt,
+            source: .claudeRateLimitEvent),
+    ])
+
+    let restored = store.restore(now: observedAt.addingTimeInterval(60))
+    expect(restored[.claudeCode]?.window(.fiveHour)?.utilization == 0.18,
+           "a window still inside its own reset must come back with its real number")
+    // The two that must NOT come back, each for its own reason.
+    expect(restored[.claudeCode]?.window(.sevenDay) == nil,
+           "a window past its reset must be dropped, not restored as a stale percentage")
+    expect(restored[.claudeCode]?.window(.spendLimit) == nil,
+           "a window with no reset instant cannot be validated and must be dropped")
+    // Past every reset: the harness disappears rather than restoring an empty
+    // shell that would render a row of dashes.
+    let allElapsed = store.restore(now: observedAt.addingTimeInterval(86_400 * 30))
+    expect(allElapsed[.claudeCode] == nil,
+           "a snapshot with nothing valid left must not be restored at all")
+    expect(AgentAccountQuotaStore(applicationSupportDirectory: storeDir
+            .appendingPathComponent("absent", isDirectory: true))
+            .restore(now: observedAt).isEmpty,
+           "a missing store restores nothing and does not throw")
+
+    print("AgentAccountQuota checks passed: claude rate_limit_event (unifiedWindows fractions and the flat legacy shape) and codex account/rateLimits/updated (percent normalized, windows named by duration, credits verbatim) publish account readings on the observation channel and NO runtime event; unknown stays unknown, an elapsed window reads expired, a spend limit is not clamped, an unrecognised window name survives; cost carries a metered vs list-price basis; status elements toggle independently with a registered setting each and drop lowest-priority-first with location never dropped; the store returns a reading still inside its window and drops every elapsed or undated one")
 }

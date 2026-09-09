@@ -879,11 +879,13 @@ enum UIProbeGeometry {
         try require(wide.qaQuotaText(.quotaSevenDay).contains("94%")
                         && wide.qaQuotaState(.quotaSevenDay) == .critical,
                     "a critical account window must be marked and stated, got \"\(wide.qaQuotaText(.quotaSevenDay))\" state \(String(describing: wide.qaQuotaState(.quotaSevenDay)))")
-        // UNKNOWN IS NOT ZERO. The provider reported no spend limit; the chip
-        // must say so with a dash.
-        try require(wide.qaQuotaText(.quotaSpendLimit) == "spend —"
-                        && wide.qaQuotaState(.quotaSpendLimit) == .unknown,
-                    "an unreported window must render a dash, never 0%, got \"\(wide.qaQuotaText(.quotaSpendLimit))\"")
+        // AN UNREPORTED WINDOW DRAWS NOTHING. The provider named no spend limit,
+        // so no reading is ever coming for it, and `cap —` would be a promise
+        // the app cannot keep. A dash is reserved for a window that exists and
+        // is momentarily unknown — see the expired case below.
+        try require(wide.qaQuotaPill(.quotaSpendLimit) == nil
+                        && wide.qaQuotaText(.quotaSpendLimit).isEmpty,
+                    "a window the provider never reported must draw nothing, got \"\(wide.qaQuotaText(.quotaSpendLimit))\"")
         try require(wide.qaQuotaText(.cost).contains("est"),
                     "a list-price cost estimate must be labelled as one, got \"\(wide.qaQuotaText(.cost))\"")
         try require(wide.qaDroppedElements.isEmpty,
@@ -905,15 +907,14 @@ enum UIProbeGeometry {
 
         // DISTINCT GLYPHS. Three chips sharing one icon was half of why the row
         // read as a single string: a repeated mark implies sameness.
-        let glyphs = [AgentStatusElement.quotaFiveHour, .quotaSevenDay, .quotaSpendLimit]
+        let glyphs = [AgentStatusElement.quotaFiveHour, .quotaSevenDay]
             .compactMap { wide.qaQuotaPill($0)?.qaSymbolName }
-        try require(glyphs.count == 3 && Set(glyphs).count == 3,
+        try require(glyphs.count == 2 && Set(glyphs).count == 2,
                     "each account pill needs its own glyph, got \(glyphs)")
         // The capsules must not touch. Adjacent pills with no gap read as one
         // wide chip, which is the grouping failure again in a new shape.
         for (lhs, rhs) in [
             (AgentStatusElement.quotaFiveHour, AgentStatusElement.quotaSevenDay),
-            (.quotaSevenDay, .quotaSpendLimit),
         ] {
             guard let a = wide.qaQuotaFrame(lhs), let b = wide.qaQuotaFrame(rhs) else {
                 throw fail("compactStatusRow.accountElements: \(lhs.rawValue)/\(rhs.rawValue) pill frames missing")
@@ -1034,11 +1035,19 @@ enum UIProbeGeometry {
             accountQuota: nil,
             enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour]))
         noQuota.layoutSubtreeIfNeeded()
-        try require(noQuota.qaQuotaText(.quotaFiveHour) == "5h —"
-                        && noQuota.qaQuotaState(.quotaFiveHour) == .unknown,
-                    "with no telemetry the chip must read unknown, got \"\(noQuota.qaQuotaText(.quotaFiveHour))\"")
-        try require(noQuota.qaToolTip.contains("No account quota telemetry has been observed"),
-                    "an unknown quota must state that nothing was observed")
+        // NO TELEMETRY AT ALL draws nothing — this is the fresh-launch state and
+        // pi's permanent one. A row of `5h — 7d — cap —` was three promises for
+        // numbers that were not coming; the setting's description carries the
+        // explanation instead.
+        try require(noQuota.qaQuotaPill(.quotaFiveHour) == nil
+                        && noQuota.qaQuotaText(.quotaFiveHour).isEmpty,
+                    "with no telemetry the row must draw no account pill at all, got \"\(noQuota.qaQuotaText(.quotaFiveHour))\"")
+        try require(!noQuota.qaAccessibilityLabel.contains("Account"),
+                    "a metric that draws nothing must not be announced either")
+        // The rest of the row is unaffected: an absent quota is not an excuse to
+        // lose the per-agent reading beside it.
+        try require(!noQuota.qaContextText.isEmpty,
+                    "an absent account reading must not disturb per-agent occupancy")
 
         return assertions
     }
@@ -6173,11 +6182,11 @@ enum UIProbeGeometry {
         guard fivePill.qaIconHasImage, fivePill.qaLabelText == "5h", fivePill.qaValueText == "18%" else {
             throw fail("\(label): the pill must carry an icon, its own label and its own value; got icon \(fivePill.qaIconHasImage) label \"\(fivePill.qaLabelText)\" value \"\(fivePill.qaValueText)\"")
         }
-        // The context reading wears the same capsule, so the metrics cluster is
-        // one visual language rather than a bare number beside a pill.
-        guard quotaRow.qaContextPill.qaHasFill,
-              quotaRow.qaContextPill.qaCornerRadius == quotaRow.qaContextPill.bounds.height / 2 else {
-            throw fail("\(label): the context reading must wear the same pill as the account readings")
+        // The context ring is NOT a pill: it is a shape already carrying its own
+        // reading, and a circle inside a capsule is two containers for one
+        // number. Its meter and label stay bare beside the account pills.
+        guard quotaRow.qaContextMeterFrame != nil, !quotaRow.qaContextText.isEmpty else {
+            throw fail("\(label): the context ring and its reading must stay visible beside the account pills")
         }
 
         // A zero-turn session is empty for ANY window size: the seeded

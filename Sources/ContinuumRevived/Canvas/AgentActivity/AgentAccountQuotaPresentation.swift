@@ -69,33 +69,38 @@ enum AgentAccountQuotaPresenter {
         switch kind {
         case .fiveHour: return "clock"
         case .sevenDay: return "calendar"
-        case .spendLimit: return "creditcard"
-        case .unknown: return "gauge.with.dots.needle.bottom.50percent"
+        // A gauge, not a credit card: the reading is how much of a cap is used,
+        // and a payment glyph beside the cost pill implied a second price.
+        case .spendLimit: return "gauge.with.dots.needle.bottom.50percent"
+        case .unknown: return "questionmark.circle"
         }
     }
 
+    /// Nil means DRAW NOTHING.
+    ///
+    /// An em dash is a promise that a number is coming. For a provider that
+    /// reports no quota at all (pi), or a window this plan does not have (a
+    /// gateway spend limit on an account with no gateway), no number is ever
+    /// coming — and a row of `5h — 7d — spend —` is three promises the app
+    /// cannot keep. Absence is the honest rendering there, and the setting's
+    /// own description is where the explanation belongs.
+    ///
+    /// A dash is still correct for the narrow case where the provider NAMED a
+    /// window and withheld its value, or where a window we did have a reading
+    /// for has passed its reset: those are real "unknown right now" states with
+    /// a reading expected, and blanking them would hide that we are waiting.
     static func present(
         _ snapshot: AgentAccountQuotaSnapshot?,
         element: AgentStatusElement,
         now: Date
-    ) -> AgentQuotaElementPresentation {
-        guard let kind = windowKind(for: element) else {
-            return unknown(element: element, reason: "Not an account quota element.")
-        }
-        guard let snapshot else {
-            return unknown(
-                element: element,
-                reason: "No account quota telemetry has been observed for this provider.")
-        }
-        guard let window = snapshot.window(kind) else {
-            // The provider reported OTHER windows but not this one. On claude
-            // that is documented to mean the window expired or the plan has no
-            // such limit — never that it is empty.
-            return unknown(
-                element: element,
-                reason: "The provider did not report a \(kind.spokenLabel) window. It may not apply to this plan, or it may have already reset.",
-                snapshot: snapshot)
-        }
+    ) -> AgentQuotaElementPresentation? {
+        guard let kind = windowKind(for: element) else { return nil }
+        // Never observed: no pill. This is the state a fresh launch is in before
+        // the first reading arrives, and the state pi stays in forever.
+        guard let snapshot else { return nil }
+        // The provider reported other windows but not this one, so this plan
+        // does not have it. Not unknown — absent.
+        guard let window = snapshot.window(kind) else { return nil }
 
         let observed = Self.observedLine(snapshot)
         let resetLine = window.resetsAt.map { "Resets: \(absolute($0)) (\(relative($0, from: now)))" }
@@ -203,28 +208,6 @@ enum AgentAccountQuotaPresenter {
         case .quotaSpendLimit: return .spendLimit
         case .location, .activity, .contextMeter, .cost: return nil
         }
-    }
-
-    private static func unknown(
-        element: AgentStatusElement,
-        reason: String,
-        snapshot: AgentAccountQuotaSnapshot? = nil
-    ) -> AgentQuotaElementPresentation {
-        let kind = windowKind(for: element)
-        let kindLabel = kind?.shortLabel ?? "—"
-        let spoken = kind?.spokenLabel ?? "usage"
-        var lines = ["Account \(spoken): unknown", reason]
-        if let snapshot { lines.append(observedLine(snapshot)) }
-        lines.append(scopeNote)
-        return AgentQuotaElementPresentation(
-            element: element,
-            state: .unknown,
-            fraction: nil,
-            symbolName: kind.map(symbolName(for:)) ?? "questionmark.circle",
-            shortLabel: kindLabel,
-            valueText: "—",
-            accessibilityLabel: "Account \(spoken) unknown.",
-            detailText: lines.joined(separator: "\n"))
     }
 
     private static func observedLine(_ snapshot: AgentAccountQuotaSnapshot) -> String {

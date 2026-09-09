@@ -50,8 +50,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     private let activityLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let contextMeter = AgentRadialContextMeterView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
-    /// The capsule the ring and its percentage live in.
-    private let contextPill: AgentStatusPillView
+    private let contextLabel = NSTextField(labelWithString: "")
     /// Absorbs the row's leftover width.
     ///
     /// Without it `locationGroup` was the only low-hugging view, so it swallowed
@@ -94,13 +93,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         self.thinkingIndicator = thinkingIndicatorFactory?()
         locationGroup = NSStackView(views: [locationIcon, locationLabel, actionButton])
         activityGroup = NSStackView(views: [])
-        // The context reading joins the pill language: the ring IS its glyph, so
-        // it becomes the capsule's leading view. Leaving it as a bare ring and a
-        // bare number beside three pills is what made the metrics cluster read as
-        // one run of digits. `contextMeter` and `contextLabel` are the same views
-        // as before, so every existing meter witness still finds them.
-        contextPill = AgentStatusPillView(leadingView: contextMeter)
-        contextGroup = NSStackView(views: [contextPill])
+        // The context ring is NOT a pill. It is already a shape carrying its own
+        // reading, and wrapping a circle in a capsule reads as two nested
+        // containers for one number. The pills exist to group a label with a
+        // value; the ring has no label to group.
+        contextGroup = NSStackView(views: [contextMeter, contextLabel])
         quotaGroup = NSStackView(views: [])
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
@@ -120,6 +117,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         configureIcon(activityIcon)
         configureLabel(locationLabel, role: .label)
         configureLabel(activityLabel, role: .label)
+        configureLabel(contextLabel, role: .captionMono)
         configureLabel(elapsedLabel, role: .captionMono)
 
         locationLabel.lineBreakMode = .byTruncatingMiddle
@@ -150,6 +148,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.lineBreakMode = .byClipping
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
         elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        contextLabel.lineBreakMode = .byClipping
+        contextLabel.setContentHuggingPriority(.required, for: .horizontal)
+        contextLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
 
         // The meter is a fixed-size glyph, so pin it rather than leaving its
@@ -349,11 +351,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
         thinkingSlot.isHidden = !next.activity.showsThinkingIndicator || thinkingIndicator == nil
         contextMeter.apply(next.context)
-        contextPill.setAccessibilityLabel(next.context.accessibilityLabel)
-        contextPill.apply(
-            valueText: next.context.label,
-            state: Self.pillState(for: next.context.state),
-            detailText: next.context.detailText)
+        contextLabel.stringValue = next.context.label
+        contextLabel.toolTip = next.context.detailText
+        contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
         applyQuotaElements(next)
         actionButton.toolTip = next.location.detailText + "\nLocation actions"
         // Everything the row can drop under width pressure survives here, so a
@@ -509,8 +509,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         contextMeter.applyTokens()
         // Each pill owns its own fill and value tint; the row only has to ask.
+        contextLabel.textColor = contextLabelColor(for: presentation?.context.state ?? .unknown, theme: theme)
         for pill in quotaPills.values { pill.applyTokens() }
-        contextPill.applyTokens()
     }
 
     /// Re-derives every metric this row owns from `zoom`. Same contract as
@@ -524,8 +524,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         locationLabel.font = .token(.label, zoom: pageZoom)
         activityLabel.font = .token(.label, zoom: pageZoom)
         elapsedLabel.font = .token(.captionMono, zoom: pageZoom)
+        contextLabel.font = .token(.captionMono, zoom: pageZoom)
         for pill in quotaPills.values { pill.applyPageZoom(pageZoom) }
-        contextPill.applyPageZoom(pageZoom)
         quotaGroup.spacing = CGFloat(pageZoom.scaled(Space.m))
         locationGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
         activityGroup.spacing = CGFloat(pageZoom.scaled(Space.xs))
@@ -678,6 +678,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
     }
 
+
+    /// Account chips reuse the context meter's colour ladder so one row does not
+    /// teach two colour languages. `expired` is deliberately the same subdued
+    /// treatment as `unknown` — both mean "no number you can trust right now" —
+    /// while the tooltip keeps them distinct in words.
     private func contextLabelColor(for state: AgentRadialContextMeterState, theme: TokenTheme) -> NSColor {
         switch state {
         case .known:
@@ -691,24 +696,6 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
     }
 
-    /// Account chips reuse the context meter's colour ladder so one row does not
-    /// teach two colour languages. `expired` is deliberately the same subdued
-    /// treatment as `unknown` — both mean "no number you can trust right now" —
-    /// while the tooltip keeps them distinct in words.
-    /// The context meter's own state ladder, mapped onto the pill's. `stale` is
-    /// a qualifier on a real measurement rather than a fifth colour, so it lands
-    /// on `expired`'s subdued treatment — the same "a number you cannot trust
-    /// right now" rendering, with the tooltip keeping the two distinct in words.
-    private static func pillState(for state: AgentRadialContextMeterState) -> AgentQuotaElementState {
-        switch state {
-        case .known: return .known
-        case .warning: return .warning
-        case .critical: return .critical
-        case .unknown: return .unknown
-        case .stale: return .expired
-        }
-    }
-
     private func frame(of view: NSView) -> NSRect? {
         view.superview.map { $0.convert(view.frame, to: self) }
     }
@@ -719,10 +706,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaActivityPhase: AgentCompactActivityPhase { presentation?.activity.phase ?? .ready }
     var qaActivitySymbolName: String { presentation?.activity.symbolName ?? "" }
     var qaElapsedText: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
-    /// Read off the PILL, which is the view on screen. Reading a field that is
-    /// no longer in the hierarchy is how a witness ends up describing a surface
-    /// nobody sees.
-    var qaContextText: String { contextPill.qaValueText }
+    var qaContextText: String { contextLabel.stringValue }
     /// ST-01 QA surface: what each account/cost chip is currently drawing, the
     /// elements the width pass dropped, and which elements are enabled at all.
     func qaQuotaText(_ element: AgentStatusElement) -> String {
@@ -750,7 +734,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaContextDetail: String { contextMeter.qaDetail }
     var qaThinkingSlotVisible: Bool { !thinkingSlot.isHidden }
     var qaHasVisiblePrefixes: Bool {
-        [locationLabel.stringValue, activityLabel.stringValue, contextPill.qaValueText].contains { text in
+        [locationLabel.stringValue, activityLabel.stringValue, contextLabel.stringValue].contains { text in
             text.hasPrefix("Home") || text.hasPrefix("Where") || text.hasPrefix("What")
         }
     }
@@ -762,8 +746,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaLocationFrame: NSRect? { frame(of: locationGroup) }
     var qaLocationLabelFrame: NSRect? { frame(of: locationLabel) }
     var qaActivityLabelFrame: NSRect? { frame(of: activityLabel) }
-    var qaContextLabelFrame: NSRect? { contextPill.qaValueFrame(in: self) }
-    var qaContextPill: AgentStatusPillView { contextPill }
+    var qaContextLabelFrame: NSRect? { frame(of: contextLabel) }
     /// What the phase label NEEDS, against what the row gave it. The gap
     /// between those two numbers was one point, and one point is a visible
     /// ellipsis.
@@ -792,12 +775,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// is ambient and stays put.
     var qaContextVisibleWhileActivitySilent: Bool {
         guard let context = qaContextFrame else { return false }
-        return context.width > 0 && bounds.contains(context) && !contextPill.qaValueText.isEmpty
+        return context.width > 0 && bounds.contains(context) && !contextLabel.stringValue.isEmpty
     }
     var qaActivityAndContextVisible: Bool {
         guard let activity = qaActivityFrame, let context = qaContextFrame else { return false }
         return activity.width > 0 && context.width > 0 && bounds.contains(activity) && bounds.contains(context)
-            && !activityLabel.stringValue.isEmpty && !contextPill.qaValueText.isEmpty
+            && !activityLabel.stringValue.isEmpty && !contextLabel.stringValue.isEmpty
     }
     var qaProtectedDrawableWidths: Bool {
         let minimumTextWidth: CGFloat = 6

@@ -1855,7 +1855,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 context: AgentRadialContextMeterPresenter.present(contextWindow),
                 quotas: AgentStatusElementConfig.visibleElements()
                     .filter(\.isAccountScoped)
-                    .map { AgentAccountQuotaPresenter.present(
+                    .compactMap { AgentAccountQuotaPresenter.present(
                         accountQuota ?? currentAccountQuota(), element: $0, now: now) },
                 cost: currentCostPresentation(),
                 enabledElements: AgentStatusElementConfig.visibleElements())))
@@ -1879,7 +1879,7 @@ final class ManagedAgentTileNSView: TileNSView {
         let quota = currentAccountQuota()
         return AgentStatusElementConfig.visibleElements()
             .filter(\.isAccountScoped)
-            .map { AgentAccountQuotaPresenter.present(quota, element: $0, now: now) }
+            .compactMap { AgentAccountQuotaPresenter.present(quota, element: $0, now: now) }
     }
 
     private func currentCostPresentation() -> AgentCostElementPresentation? {

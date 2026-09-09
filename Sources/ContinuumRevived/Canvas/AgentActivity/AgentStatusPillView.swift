@@ -45,15 +45,8 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
     private var heightConstraint: NSLayoutConstraint?
     private var iconSize: [NSLayoutConstraint] = []
 
-    /// `leadingView` replaces the glyph when a metric already owns a richer
-    /// mark of its own — the context ring is the obvious case, and putting it in
-    /// the same capsule is what keeps the row from mixing one bare number in
-    /// with three pills.
-    private let leadingView: NSView?
-
-    init(leadingView: NSView? = nil) {
-        self.leadingView = leadingView
-        stack = NSStackView(views: [leadingView ?? icon, labelField, valueField])
+    init() {
+        stack = NSStackView(views: [icon, labelField, valueField])
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -64,16 +57,11 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        // Only OUR glyph is pinned. A supplied leading view owns its own size —
-        // pinning the context ring to 10pt here would silently shrink a meter
-        // that has its own zoom-scaled side.
-        if leadingView == nil {
-            iconSize = [
-                icon.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(10))),
-                icon.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(10))),
-            ]
-            NSLayoutConstraint.activate(iconSize)
-        }
+        iconSize = [
+            icon.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(10))),
+            icon.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(10))),
+        ]
+        NSLayoutConstraint.activate(iconSize)
 
         // The label is prose-weight metadata; the value must not reflow as its
         // digits change, which is exactly what `captionMono` is for.
@@ -97,11 +85,8 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        // A MINIMUM, not a fixed height. The context ring is 20pt and its size
-        // is pinned by a witness at 18-20pt, so a hard 18pt pill made its own
-        // inner stack spill by 1pt top and bottom — which `--ui-geometry-check`
-        // caught. Content drives the height upward; the row's 28pt with 4pt
-        // insets leaves exactly 20pt for it.
+        // A MINIMUM, not a fixed height: content drives it upward rather than
+        // spilling out of a hard constant.
         let height = heightAnchor.constraint(
             greaterThanOrEqualToConstant: Self.preferredHeight(zoom: pageZoom))
         height.isActive = true
@@ -135,18 +120,6 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         labelField.stringValue = presentation.shortLabel
         valueField.stringValue = presentation.valueText
         toolTip = presentation.detailText
-        applyTokens()
-    }
-
-    /// For a metric whose mark is its `leadingView` (the context ring): set the
-    /// value and the state, leave the glyph alone.
-    func apply(valueText: String, state: AgentQuotaElementState, detailText: String) {
-        self.state = state
-        hasReading = true
-        labelField.stringValue = ""
-        labelField.isHidden = true
-        valueField.stringValue = valueText
-        toolTip = detailText
         applyTokens()
     }
 
@@ -216,7 +189,7 @@ final class AgentStatusPillView: NSView, TokenThemed, AgentPageZoomScalable {
         heightConstraint?.constant = Self.preferredHeight(zoom: zoom)
         for constraint in iconSize { constraint.constant = CGFloat(zoom.scaled(10)) }
         // Symbols are rasterized at a point size, so re-make rather than re-pin.
-        if leadingView == nil { applySymbol(currentSymbolName) }
+        applySymbol(currentSymbolName)
         applyTokens()
         invalidateIntrinsicContentSize()
         needsLayout = true

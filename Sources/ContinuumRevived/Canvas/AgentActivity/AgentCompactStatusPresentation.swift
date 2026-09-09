@@ -146,7 +146,7 @@ struct AgentCompactStatusPresentation: Equatable {
         let locationDetail = AgentLocationStatusPresenter.present(snapshot, projectName: projectName)
         let quotas = enabledElements
             .filter(\.isAccountScoped)
-            .map { AgentAccountQuotaPresenter.present(accountQuota, element: $0, now: now) }
+            .compactMap { AgentAccountQuotaPresenter.present(accountQuota, element: $0, now: now) }
         let cost = enabledElements.contains(.cost)
             ? AgentAccountQuotaPresenter.presentCost(contextWindow)
             : nil

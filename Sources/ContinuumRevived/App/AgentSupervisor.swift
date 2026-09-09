@@ -955,10 +955,16 @@ final class AgentSupervisor {
     /// resurrect whichever stale copy happened to load first on relaunch. One
     /// login has one allowance; this dictionary is that shape.
     ///
-    /// In-memory only, for the same reason the reading is `.live` or nothing: a
-    /// quota is a wall-clock fact that expires on its own schedule, so a
-    /// persisted copy is a number that goes wrong while the app is closed.
+    /// Persisted per harness and validated on restore against each window's own
+    /// `resets_at`, so a relaunch shows the last real percentages instead of a
+    /// row of em dashes. See `AgentAccountQuotaStore` for why checking the reset
+    /// is the right answer rather than discarding the reading.
     private var accountQuotas: [AgentHarness: AgentAccountQuotaSnapshot] = [:]
+    private lazy var accountQuotaStore: AgentAccountQuotaStore? = {
+        guard let directory = AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
+        else { return nil }
+        return AgentAccountQuotaStore(applicationSupportDirectory: directory)
+    }()
     /// Live views of an agent's identity. Names are record state rather than
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
@@ -1601,6 +1607,7 @@ final class AgentSupervisor {
         // then still fan the observation out so their tiles repaint.
         if case let .accountQuota(snapshot) = observation {
             accountQuotas[snapshot.harness] = snapshot
+            accountQuotaStore?.save(accountQuotas)
             runtimeObservationObservers.values.forEach { observers in
                 observers.values.forEach { $0(observation) }
             }
@@ -1626,7 +1633,22 @@ final class AgentSupervisor {
     /// either way, because both are unknown and neither is zero.
     func accountQuota(for id: AgentID) -> AgentAccountQuotaSnapshot? {
         guard let harness = records[id]?.harness else { return nil }
+        restoreAccountQuotasIfNeeded()
         return accountQuotas[harness]
+    }
+
+    /// Loads the persisted readings once per process, on first ask rather than
+    /// at boot: an empty row is only a problem when something is looking at it,
+    /// and this keeps a disk read off the launch path.
+    private var didRestoreAccountQuotas = false
+    private func restoreAccountQuotasIfNeeded() {
+        guard !didRestoreAccountQuotas else { return }
+        didRestoreAccountQuotas = true
+        guard let restored = accountQuotaStore?.restore(now: Date()), !restored.isEmpty else { return }
+        // A live reading observed this session always wins over a restored one.
+        for (harness, snapshot) in restored where accountQuotas[harness] == nil {
+            accountQuotas[harness] = snapshot
+        }
     }
 
     /// QA seam: deliver a quota observation without a live provider.
