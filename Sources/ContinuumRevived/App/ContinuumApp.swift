@@ -2137,6 +2137,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--window-chrome-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWindowChromeSelfCheck()
+                print("ContinuumRevivedWindowChromeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-sidebar-shell-check") {
             do {
                 _ = NSApplication.shared
@@ -4775,11 +4787,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                styleMask: Self.workspaceWindowStyleMask,
                 backing: .buffered,
                 defer: false
             )
+            // The title is still set: it is what Mission Control, the Window menu
+            // and the dock preview read. It is just no longer DRAWN — see
+            // `applyMergedTitlebarChrome`.
             window.title = Self.mainWindowTitle(for: project, registry: updatedRegistry)
+            Self.applyMergedTitlebarChrome(to: window)
             window.center()
             let contentFrame = window.contentRect(forFrameRect: window.frame)
             window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
@@ -10037,7 +10053,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func makeWorkspaceContentView(canvasView: CanvasNSView, frame: NSRect) -> NSView {
-        let splitView = NSSplitView(frame: frame)
+        // The top bar is no longer a row inside the content pane. With
+        // `.fullSizeContentView` it IS the window's titlebar strip: full width,
+        // above the split, with the traffic lights sitting inside it. The split
+        // view owns everything below.
+        let topBarHeight = Self.workspaceTopBarHeight
+        let splitFrame = NSRect(x: 0, y: 0, width: frame.width, height: max(0, frame.height - topBarHeight))
+
+        let splitView = NSSplitView(frame: splitFrame)
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.autoresizingMask = [.width, .height]
@@ -10045,7 +10068,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let width = CGFloat(WorkspaceSidebarConfig.resolveWidth())
         let divider = splitView.dividerThickness
-        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: splitFrame.height))
         sidebar.autoresizingMask = [.height]
         configureWorkspaceSidebar(sidebar)
 
@@ -10055,9 +10078,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // returned below prevents that overlay regression while preserving this
         // actual workspace surface.
 
-        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
+        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, splitFrame.width - width - divider), height: splitFrame.height))
         contentPane.autoresizingMask = [.width, .height]
-        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 38), width: contentPane.bounds.width, height: 38))
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - topBarHeight), width: frame.width, height: topBarHeight))
+        topBar.autoresizingMask = [.width, .minYMargin]
+        topBar.trafficLightInset = Self.workspaceTrafficLightInset
         configureWorkspaceTopBar(topBar)
         let shortcutRail = CanvasShortcutRailView(frame: .zero)
         shortcutRail.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
@@ -10067,30 +10092,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         gettingStarted.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
         gettingStarted.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
 
-        topBar.translatesAutoresizingMaskIntoConstraints = false
         canvasView.translatesAutoresizingMaskIntoConstraints = false
-        contentPane.addSubview(topBar)
         contentPane.addSubview(canvasView)
         shortcutRail.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(shortcutRail, positioned: .above, relativeTo: canvasView)
         gettingStarted.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(gettingStarted, positioned: .above, relativeTo: canvasView)
         NSLayoutConstraint.activate([
-            topBar.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
-            topBar.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
-            topBar.topAnchor.constraint(equalTo: contentPane.topAnchor),
-            topBar.heightAnchor.constraint(equalToConstant: 38),
-
             canvasView.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
             canvasView.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
-            canvasView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            canvasView.topAnchor.constraint(equalTo: contentPane.topAnchor),
             canvasView.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor),
 
             shortcutRail.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor, constant: -12),
             shortcutRail.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor, constant: -12),
 
             gettingStarted.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor, constant: 12),
-            gettingStarted.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 12),
+            gettingStarted.topAnchor.constraint(equalTo: contentPane.topAnchor, constant: 12),
         ])
 
         splitView.addSubview(sidebar)
@@ -10117,11 +10135,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //
         // A plain NSView does not lay out its children, so an overlay keeps the
         // frame it asked for.
+        //
+        // The bar is a SIBLING of the split view in that same plain container, not
+        // a child of either pane: it has to clear the sidebar to reach the traffic
+        // lights, and it must not be laid out as a third split pane. Autoresizing
+        // masks only — the container deliberately runs no layout pass.
         let container = NSView(frame: frame)
         container.autoresizingMask = [.width, .height]
-        splitView.frame = container.bounds
+        splitView.frame = NSRect(
+            x: 0, y: 0,
+            width: container.bounds.width,
+            height: max(0, container.bounds.height - topBarHeight))
         container.addSubview(splitView)
+        topBar.frame = NSRect(
+            x: 0, y: max(0, container.bounds.height - topBarHeight),
+            width: container.bounds.width, height: topBarHeight)
+        container.addSubview(topBar)
         return container
+    }
+
+    /// The merged titlebar, in one place so the boot path and
+    /// `--window-chrome-check` cannot drift apart.
+    ///
+    /// Before this, Array stacked an empty 28pt system titlebar (traffic lights and
+    /// a title string, nothing else) on top of a 38pt app bar that did not even span
+    /// the window — it started right of the sidebar divider. 66pt of chrome for one
+    /// row of controls.
+    static let workspaceWindowStyleMask: NSWindow.StyleMask =
+        [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+
+    /// The height of the titlebar this bar replaces, measured rather than assumed:
+    /// it is 28pt through macOS 15 and 32pt on Tahoe and later, and the bar has to
+    /// coincide with it or the traffic lights sit off-centre in their own row.
+    static let systemTitlebarHeight: CGFloat = {
+        let contentRect = NSRect(x: 0, y: 0, width: 100, height: 100)
+        let frameRect = NSWindow.frameRect(
+            forContentRect: contentRect,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable])
+        return frameRect.height - contentRect.height
+    }()
+
+    /// The strip itself, with a floor so the `.small` controls still fit on the
+    /// shorter pre-Tahoe titlebar.
+    static var workspaceTopBarHeight: CGFloat { max(30, systemTitlebarHeight) }
+
+    /// Clearance for close/miniaturize/zoom. They end at x=69 on Tahoe (61 before
+    /// it); this leaves a deliberate gap rather than tucking the workspace name up
+    /// against the zoom button. `--window-chrome-check` measures the real buttons
+    /// and fails if that gap closes.
+    static let workspaceTrafficLightInset: CGFloat = 76
+
+    static func applyMergedTitlebarChrome(to window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
     }
 
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
@@ -11170,6 +11238,188 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               !isApplyingWorkspaceSidebarVisibility,
               !sidebar.isHidden else { return }
         WorkspaceSidebarConfig.setWidth(Double(sidebar.frame.width))
+    }
+
+    /// Witness for the merged titlebar (0.7.21).
+    ///
+    /// RED before the merge on three counts, each a thing a user could see: the
+    /// window's content rect was 28pt shorter than its frame because the system
+    /// drew an empty titlebar above it; the top bar was not a subview of the
+    /// window's content container at all but buried inside the right-hand split
+    /// pane, so it began at the sidebar divider instead of the window edge; and it
+    /// reserved no clearance, so hoisting it without one would have run the
+    /// workspace name under the traffic lights.
+    ///
+    /// Asserts frames and window metrics, never the presence of a call.
+    static func runWindowChromeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-window-chrome-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceId, name: "Chrome Workspace", projectIds: [],
+                           createdAt: Date(timeIntervalSince1970: 0),
+                           updatedAt: Date(timeIntervalSince1970: 0)),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            .save(WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [],
+                zoneZOrder: [],
+                lastActiveZoneId: nil,
+                ambientTiles: []))
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(
+            registry: try registryStore.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil))
+
+        // Built exactly the way boot builds it: production style mask, production
+        // chrome call, production content view.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: workspaceWindowStyleMask,
+            backing: .buffered,
+            defer: false)
+        window.title = "Chrome Workspace — Array"
+        applyMergedTitlebarChrome(to: window)
+        let contentSize = window.contentRect(forFrameRect: window.frame).size
+        window.contentView = app.makeWorkspaceContentView(
+            canvasView: canvas, frame: NSRect(origin: .zero, size: contentSize))
+        window.delegate = app
+        app.window = window
+
+        guard let content = window.contentView else {
+            throw CheckError.failed("window has no content view")
+        }
+        content.layoutSubtreeIfNeeded()
+
+        guard let topBar = app.workspaceTopBarView, let splitView = app.workspaceSplitView else {
+            throw CheckError.failed("workspace mount did not retain the top bar and split view")
+        }
+
+        // 1. The content occupies the WHOLE frame — no system titlebar strip above it.
+        let frameHeight = window.frame.height
+        let contentHeight = window.contentRect(forFrameRect: window.frame).height
+        let legacyContentHeight = NSWindow.contentRect(
+            forFrameRect: window.frame,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable]).height
+        let recoveredTitlebarHeight = contentHeight - legacyContentHeight
+        try expect(abs(contentHeight - frameHeight) < 0.5,
+                   "content must span the full frame; frame \(frameHeight) content \(contentHeight)")
+        try expect(recoveredTitlebarHeight > 0,
+                   "the merge must recover the system titlebar strip, recovered \(recoveredTitlebarHeight)")
+        try expect(window.titleVisibility == .hidden, "the drawn window title must be hidden")
+        try expect(window.titlebarAppearsTransparent, "the titlebar must be transparent")
+        try expect(!window.title.isEmpty,
+                   "the title string must survive for Mission Control and the Window menu")
+
+        // 2. The bar is the window's own top strip, not a row inside a split pane.
+        try expect(!(content is NSSplitView),
+                   "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane")
+        try expect(topBar.superview === content,
+                   "the top bar must be a direct subview of the content container, not of a split pane")
+        let barFrame = topBar.frame
+        try expect(abs(barFrame.width - content.bounds.width) < 0.5,
+                   "the bar must span the full window width, got \(barFrame.width) of \(content.bounds.width)")
+        try expect(abs(barFrame.minX) < 0.5, "the bar must start at the window's leading edge, got \(barFrame.minX)")
+        try expect(abs(barFrame.maxY - content.bounds.maxY) < 0.5,
+                   "the bar must touch the top of the content, got maxY \(barFrame.maxY) of \(content.bounds.maxY)")
+        try expect(abs(barFrame.height - workspaceTopBarHeight) < 0.5,
+                   "the bar must be \(workspaceTopBarHeight)pt tall, got \(barFrame.height)")
+
+        // 3. Everything else lives strictly below it, and the total top chrome is
+        //    now the bar alone rather than the bar stacked on a titlebar.
+        try expect(abs(splitView.frame.maxY - barFrame.minY) < 0.5,
+                   "the split view must end where the bar begins; split maxY \(splitView.frame.maxY), bar minY \(barFrame.minY)")
+        let topChromeHeight = frameHeight - splitView.frame.height
+        // What it cost before: the same system strip, plus the old 38pt app row.
+        let legacyTopChromeHeight = recoveredTitlebarHeight + 38
+        try expect(abs(topChromeHeight - workspaceTopBarHeight) < 0.5,
+                   "top chrome must be the bar alone, got \(topChromeHeight)")
+        try expect(topChromeHeight < legacyTopChromeHeight,
+                   "top chrome must shrink; got \(topChromeHeight) against \(legacyTopChromeHeight)")
+
+        // 4. The workspace identity clears the traffic lights instead of hiding under them.
+        guard let closeButton = window.standardWindowButton(.closeButton),
+              let zoomButton = window.standardWindowButton(.zoomButton) else {
+            throw CheckError.failed("the merged titlebar must keep the standard window buttons")
+        }
+        let buttonsRight = max(
+            closeButton.convert(closeButton.bounds, to: nil).maxX,
+            zoomButton.convert(zoomButton.bounds, to: nil).maxX)
+        let identityLeft = topBar.convert(topBar.identityFrameForQA, to: nil).minX
+        let trafficLightGap = identityLeft - buttonsRight
+        try expect(trafficLightGap >= 12,
+                   "the workspace name must start clear of the traffic lights by at least 12pt; identity at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
+        try expect(topBar.mouseDownCanMoveWindow, "dragging the bar must move the window")
+
+        // 5. Full screen retires the clearance and leaving it restores it, driven
+        //    through the real delegate callbacks.
+        let insetWindowed = topBar.identityLeadingForQA
+        app.windowDidEnterFullScreen(
+            Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        let insetFullScreen = topBar.identityLeadingForQA
+        app.windowDidExitFullScreen(
+            Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        let insetRestored = topBar.identityLeadingForQA
+        try expect(insetFullScreen < insetWindowed,
+                   "full screen must drop the traffic-light clearance, \(insetWindowed) -> \(insetFullScreen)")
+        try expect(abs(insetRestored - insetWindowed) < 0.5,
+                   "leaving full screen must restore the clearance, got \(insetRestored)")
+
+        window.orderOut(nil)
+        window.delegate = nil
+        app.window = nil
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("window-chrome", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "window-chrome",
+            "frameHeight": Double(frameHeight),
+            "contentHeight": Double(contentHeight),
+            "recoveredTitlebarHeight": Double(recoveredTitlebarHeight),
+            "topChromeHeight": Double(topChromeHeight),
+            "legacyTopChromeHeight": Double(legacyTopChromeHeight),
+            "barWidth": Double(barFrame.width),
+            "barHeight": Double(barFrame.height),
+            "identityLeftInWindow": Double(identityLeft),
+            "trafficLightsRightInWindow": Double(buttonsRight),
+            "trafficLightGap": Double(trafficLightGap),
+            "systemTitlebarHeight": Double(systemTitlebarHeight),
+            "identityLeadingWindowed": Double(insetWindowed),
+            "identityLeadingFullScreen": Double(insetFullScreen),
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runWorkspaceSidebarShellSelfCheck() throws -> URL {
@@ -16780,6 +17030,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         focusBroker.applicationDidResignActive()
         refreshAgentSurfaces()
+    }
+
+    /// Full screen moves the traffic lights into the auto-hiding overlay, so the
+    /// clearance the bar reserves for them becomes a 62pt hole at the leading edge.
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        workspaceTopBarView?.trafficLightInset = 0
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        workspaceTopBarView?.trafficLightInset = Self.workspaceTrafficLightInset
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
