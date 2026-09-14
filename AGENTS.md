@@ -311,6 +311,43 @@ cost a session to learn:
    signature changes on every rebuild, so that modal returns every launch — the
    app just sits there, apparently booting to nothing.
 
+## Benches
+
+A **bench** is one ticket's isolated workspace: a worktree, its `.build`, its
+`qa-runs`, any preview bundle it minted. Benches are how parallel work stays
+safe here. Nothing reclaims them, so returning the bench is the last step of
+the ticket rather than a chore after it.
+
+`scripts/benches.sh` reports every bench and whether it is safe to return. Run
+it when you pick work up, and again before calling a ticket done.
+
+- **Benches live at `<repo>/.worktrees/<slug>`**, slug named for the ticket
+  (`tr04-slash-dispatch`). One home means one inventory. Spreading them over
+  sibling `Array-*` directories, `/tmp`, and a tool's own `worktrees/` is how
+  55 benches and ~185GB accumulated unnoticed by 0.7.20.
+- **`git worktree add`, never `git clone`.** A worktree shares the canonical
+  object store, so its commits survive in the repo even if the directory is
+  deleted. A clone's do not — delete it and the history is gone, with no
+  reflog and nothing dangling to recover. Two clones still sit in
+  `.worktrees/` holding commits this repo has never seen.
+- **A ticket is done when `git worktree remove` succeeds.** It refuses on a
+  dirty tree; treat the refusal as the finding it is and resolve the work,
+  rather than reaching for `--force`.
+- **Confirm landing by subject, not by `git cherry`.** Patch-ids change under
+  cherry-pick, squash and adapted rebase, so `git cherry` and `--no-merged`
+  keep calling landed work unmerged: all eight commits on
+  `array/transcript-renovation` read as orphaned for three weeks after every
+  one had shipped. `scripts/benches.sh` matches subjects against
+  `origin/array/integration`.
+- **One shared preview bundle.** `~/Desktop/Array Dev.app` is rebuilt in place
+  by `scripts/dev-app.sh` — reuse it. A program that genuinely needs its own
+  (`capture-sidebar-96.sh`) points `DEV_APP_PATH` into `~/array-scratch/apps/`
+  and removes it when the program closes. Per-ticket bundles left on the
+  Desktop reached ten copies at 130MB each.
+- **`qa-runs/` is disposable and grows without limit** — 5,398 runs and 17GB
+  before its first prune. Keep the run you are reading, drop the rest:
+  `find qa-runs -maxdepth 1 -mindepth 1 -mtime +7 -exec rm -rf {} +`.
+
 ## Verifying
 
 ### Never touch the live tmux server from automated checks
