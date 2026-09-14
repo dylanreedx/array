@@ -22,3 +22,6 @@ Tools/CodeEditor/node_modules/
 # Local Pi generated artifacts
 .pi/tmux-shell-persistence-artifacts.md
 .pi/tmux-shell-persistence-p4-artifact.md
+
+# Array app runtime workspace state (live dogfood data, never commit)
+.array/
