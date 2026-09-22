@@ -641,6 +641,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var managementMessageForQA: String { managementMessageLabel.stringValue }
     // P3.14: the same question, asked of the menu item the buttons became.
     var deleteEnabledForQA: Bool { inboxView.isWorkspaceManagementEnabledForQA(.delete) }
+    /// The Delete item's rendered title, which carries the reason when it is greyed.
+    var deleteMenuTitleForQA: String { inboxView.renderedWorkspaceManagementTitleForQA(.delete) }
     var renameEnabledForQA: Bool { inboxView.isWorkspaceManagementEnabledForQA(.rename) }
     var workspaceManagementTitlesForQA: [String] { inboxView.workspaceManagementTitlesForQA }
     var isWorkspaceManagementSeparatedForQA: Bool { inboxView.isWorkspaceManagementSeparatedForQA }
@@ -746,9 +748,28 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             guard let workspaceId = workspaceIdForManagementAction() else { return }
             onRenameWorkspace?(workspaceId)
         case .delete:
-            guard let workspaceId = workspaceIdForManagementAction(), tree.workspaces.count > 1 else { return }
+            // 0721: a refusal that returns nothing is indistinguishable from a broken
+            // verb. Both refusals are intended; the silence was not.
+            guard let workspaceId = workspaceIdForManagementAction(), tree.workspaces.count > 1 else {
+                setManagementMessage(deleteDisabledReason().map { "Can't delete a workspace: \($0)." })
+                return
+            }
             onDeleteWorkspace?(workspaceId)
         }
+    }
+
+    /// Why Delete is unavailable, in the user's terms, or nil when it is available.
+    private func deleteDisabledReason() -> String? {
+        if tree.workspaces.isEmpty { return "no workspaces are loaded" }
+        if tree.workspaces.count == 1 { return "this is your only workspace — create another first" }
+        if workspaceIdForManagementAction() == nil {
+            if case let .workspace(name) = inboxView.scope,
+               tree.workspaces.filter({ $0.name == name }).count > 1 {
+                return "two workspaces are named “\(name)”, so this one is ambiguous — rename one first"
+            }
+            return "no workspace is selected"
+        }
+        return nil
     }
 
     /// Which workspace a verb lands on.
@@ -791,7 +812,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         let workspaceId = workspaceIdForManagementAction()
         inboxView.setWorkspaceManagement(
             canRename: workspaceId != nil,
-            canDelete: workspaceId != nil && tree.workspaces.count > 1
+            canDelete: workspaceId != nil && tree.workspaces.count > 1,
+            deleteDisabledReason: deleteDisabledReason()
         )
     }
 
