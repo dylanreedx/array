@@ -38,7 +38,13 @@ enum ChoiceGeometryChecks {
     private static func requiredLabelWidth(_ title: String, font: NSFont) -> CGFloat {
         let field = NSTextField(labelWithString: title)
         field.font = font
-        return ceil(field.intrinsicContentSize.width)
+        // `intrinsicContentSize` is itself the under-reporting quantity — it omits
+        // the cell's horizontal inset, so a gate built on it declared a label that
+        // elides at four points too narrow to be "wide enough". Ask the cell.
+        let unbounded = NSRect(
+            x: 0, y: 0, width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        return ceil(max(field.intrinsicContentSize.width,
+                        field.cell?.cellSize(forBounds: unbounded).width ?? 0))
     }
 
     /// Titles of the length the live catalogue actually produces.

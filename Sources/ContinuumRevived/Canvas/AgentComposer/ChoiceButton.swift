@@ -333,8 +333,13 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
     var qaTitleFrameWidth: CGFloat { titleLabel.frame.width }
     var qaMeasuredTitleWidth: CGFloat { measuredTitleWidth }
+    /// What the installed label's OWN cell says it needs to draw its string in
+    /// full. Deliberately not `measuredTitleWidth`: that is the expression the
+    /// button sized the label with, so comparing the two agreed by construction
+    /// and stayed green while every trigger elided ("Hi…" for "High").
+    var qaTitleDrawingWidth: CGFloat { ChoiceLabelMetrics.drawingWidth(of: titleLabel) }
     var qaTitleDrawsWithoutTruncation: Bool {
-        titleLabel.frame.width + 0.5 >= qaMeasuredTitleWidth
+        titleLabel.frame.width + 0.5 >= qaTitleDrawingWidth
     }
 
     private func updatePresentation() {

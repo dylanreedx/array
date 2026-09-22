@@ -23,6 +23,14 @@ enum ChoiceLabelMetrics {
     /// Measured from two probe strings of different lengths and taking the
     /// larger difference: the inset is a per-cell constant, so two probes both
     /// witness it and neither can be mistaken for a per-character effect.
+    ///
+    /// The probe reads `NSCell.cellSize(forBounds:)`, NOT the field's
+    /// `intrinsicContentSize`. `intrinsicContentSize` is the very quantity that
+    /// under-reports the cell inset (the `HonestWidthLabel` finding), so probing
+    /// it measured the inset as ~0 and `ceil` turned that into 1pt while the cell
+    /// actually wanted 4 — every trigger title was handed three points less than
+    /// it needed and elided at EVERY width, which is what "Hi…" for "High" on a
+    /// 1250pt row was.
     static func cellInset(for font: NSFont) -> CGFloat {
         let key = "\(font.fontName)|\(font.pointSize)|\(font.fontDescriptor.symbolicTraits.rawValue)"
         if let cached = insetCache[key] { return cached }
@@ -31,11 +39,20 @@ enum ChoiceLabelMetrics {
             let field = NSTextField(labelWithString: probe)
             field.font = font
             let glyphs = (probe as NSString).size(withAttributes: [.font: font]).width
-            inset = max(inset, field.intrinsicContentSize.width - glyphs)
+            inset = max(inset, drawingWidth(of: field) - glyphs)
         }
         let rounded = max(0, ceil(inset))
         insetCache[key] = rounded
         return rounded
+    }
+
+    /// What a label's own cell says it needs to draw its current string in full,
+    /// asked of AppKit rather than derived from the glyph run.
+    static func drawingWidth(of field: NSTextField) -> CGFloat {
+        let unbounded = NSRect(
+            x: 0, y: 0, width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        return max(field.intrinsicContentSize.width,
+                   field.cell?.cellSize(forBounds: unbounded).width ?? 0)
     }
 
     /// The width a label must be given to draw `title` at `font` in full.

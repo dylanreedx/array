@@ -95,6 +95,12 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = CGFloat(pageZoom.scaled(Space.m))
+        // The trailing spacer is not a control, so it gets no gap: with one the
+        // row costs THREE gaps while `requiredWidth`/`qaFitsCurrentTitles` cost
+        // two, and the fit decision approves a tier that is exactly one gap too
+        // wide — the stack then takes that 8pt out of the flexible model trigger,
+        // which elides with the spacer sitting at zero width beside it.
+        stack.setCustomSpacing(0, after: effortButton)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         buttonRow = stack
@@ -135,6 +141,7 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
         buttonRow?.spacing = CGFloat(pageZoom.scaled(Space.m))
+        buttonRow?.setCustomSpacing(0, after: effortButton)
         for constraint in buttonHeightConstraints {
             constraint.constant = Self.height(zoom: pageZoom)
         }
@@ -408,6 +415,9 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
             return view.subviews.contains(where: containsVisibleContext)
         }
         return containsVisibleContext(self)
+    }
+    var qaFitTiersDescription: String {
+        "compact=\(usesCompactLabels) condensedModel=\(usesCondensedModelTrigger) hidesEffort=\(hidesEffort) reqFull=\(requiredWidth(usingCompactLabels: false)) reqCompact=\(requiredWidth(usingCompactLabels: true, condenseModelTrigger: false)) reqNoEffort=\(requiredWidth(usingCompactLabels: true, condenseModelTrigger: false, includeEffort: false))"
     }
     var qaModelTitles: [String] { modelButton.items.map(\.title) }
     var qaEffortTitles: [String] { effortButton.items.map(\.title) }

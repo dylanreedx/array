@@ -334,6 +334,7 @@ enum UIProbeGeometry {
         try checkAgentTileHeaderShell()
         let compactStatusAssertions = try checkCompactStatusRow()
         print("UIProbeGeometry: compact bottom status row held \(compactStatusAssertions) geometry, appearance, contrast, state, accessibility, and compression assertions at 320/480/560/wide in both appearances")
+        try checkWideTileFooterTriggers()
         try checkLiveV2AgentTileLayout()
         try checkManagedAgentStreamingTeardown()
         try checkThinkingTailProductionSeams()
@@ -5859,6 +5860,74 @@ enum UIProbeGeometry {
         }
     }
 
+    /// The gap that let "GPT-5.6…" / "Hi…" ship on a 1250pt row: the tile gate
+    /// ran 320–900pt only, and the Lab catalogue carries no display names, so the
+    /// footer was never probed on a WIDE row showing the human model names the
+    /// live pi catalogue supplies. Both conditions are required — a wide row is
+    /// where truncation is most obviously wrong, and the long title is what makes
+    /// the deficit visible.
+    private static func checkWideTileFooterTriggers() throws {
+        let previousPi = AgentModelCatalog.shared.snapshot(for: .pi)
+        defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPi) }
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready,
+            models: ["openai-codex/gpt-5.6-sol", "anthropic/claude-fable-5"],
+            displayNames: [
+                "openai-codex/gpt-5.6-sol": "GPT-5.6 Sol",
+                "anthropic/claude-fable-5": "Claude Fable 5",
+            ]))
+        for width in [CGFloat(900), 1250] {
+            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                let label = "managedAgent.wideFooter@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try UIProbe.render(
+                    .init(id: label, size: NSSize(width: width, height: 560), appearance: appearanceName)
+                ) {
+                    LabCatalog.makeManagedAgentFixtureView(includeApproval: false)
+                }
+                guard let tile = probe.view as? ManagedAgentTileNSView else {
+                    throw fail("\(label): wide footer probe did not build a managed agent tile")
+                }
+                for percent in AgentPageZoom.steps {
+                    _ = tile.setPageZoom(AgentPageZoom(percent: percent))
+                    tile.applyLaunchSelection(AgentLaunchSelection(
+                        harness: .pi, model: "openai-codex/gpt-5.6-sol", thinking: "high"))
+                    tile.layoutSubtreeIfNeeded()
+                    let footer = tile.qaProviderFooterView
+                    footer.layoutSubtreeIfNeeded()
+                    let zoomLabel = "\(label).zoom=\(percent)"
+                    // The row has hundreds of points to spare here, so the tier
+                    // must be the full one: the human display name on the model
+                    // trigger, the spelled-out effort, and a visible harness.
+                    guard footer.qaFitsCurrentTitles, !footer.effortButton.isHidden else {
+                        throw fail("\(zoomLabel): a 3-control footer on a \(Int(footer.bounds.width))pt row hid a control or rejected its own titles")
+                    }
+                    guard footer.modelButton.qaRenderedTitle == "GPT-5.6 Sol",
+                          footer.effortButton.qaRenderedTitle == "High",
+                          footer.harnessButton.qaRenderedTitle == "Pi" else {
+                        throw fail("\(zoomLabel): wide row abbreviated its trigger titles (harness '\(footer.harnessButton.qaRenderedTitle)', model '\(footer.modelButton.qaRenderedTitle)', effort '\(footer.effortButton.qaRenderedTitle)'); \(footer.qaFitTiersDescription)")
+                    }
+                    // The finding itself: each label's own cell must be able to
+                    // draw that title inside the frame the button granted it.
+                    for (name, button) in [
+                        ("provider", footer.harnessButton),
+                        ("model", footer.modelButton),
+                        ("effort", footer.effortButton),
+                    ] {
+                        try checkChoiceTitleDrawsWithoutTruncation(button, name: name, label: zoomLabel)
+                    }
+                    // And the row really did have room: a truncating control with
+                    // surplus space beside it is the user-visible defect.
+                    let used = footer.harnessButton.frame.width
+                        + footer.modelButton.frame.width + footer.effortButton.frame.width
+                    guard footer.bounds.width - used > 200 else {
+                        throw fail("\(zoomLabel): the wide-row probe no longer has surplus width (row \(footer.bounds.width), controls \(used)) and cannot witness truncation-with-room-to-spare")
+                    }
+                }
+                _ = tile.setPageZoom(.default)
+            }
+        }
+    }
+
     /// P5.4 geometry gate for the actual migrated composition root. The committed
     /// Component Lab baseline intentionally remains on the rollback tile until P5.5,
     /// so this non-pixel gate covers the live v2 seam at all required widths/themes.
@@ -6304,7 +6373,7 @@ enum UIProbeGeometry {
     private static func checkChoiceTitleDrawsWithoutTruncation(_ button: ChoiceButton, name: String, label: String) throws {
         button.layoutSubtreeIfNeeded()
         guard button.qaTitleDrawsWithoutTruncation else {
-            throw fail("\(label): \(name) picker's title frame \(button.qaTitleFrameWidth)pt is narrower than measured title '\(button.qaRenderedTitle)' need \(button.qaMeasuredTitleWidth)pt — the cell will draw an ellipsis")
+            throw fail("\(label): \(name) picker's title frame \(button.qaTitleFrameWidth)pt is narrower than what the label's own cell needs to draw '\(button.qaRenderedTitle)' (\(button.qaTitleDrawingWidth)pt; the button sized it from \(button.qaMeasuredTitleWidth)pt) — the cell will draw an ellipsis")
         }
     }
 
