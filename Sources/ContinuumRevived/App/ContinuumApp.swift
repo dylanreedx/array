@@ -1916,6 +1916,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--choice-geometry-check") {
+            do {
+                _ = NSApplication.shared
+                try ChoiceGeometryChecks.run()
+                print("ContinuumRevivedChoiceGeometryChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--provider-model-picker-check") {
             do {
                 _ = NSApplication.shared
