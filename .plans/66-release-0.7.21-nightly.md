@@ -118,3 +118,60 @@ which was pinned flat at the leading edge.
   `array/0721-transcript` was deliberately NOT folded in, so the review surface
   is exactly these seven items. Patch B of the transcript bench (the line pitch)
   was carried over; its Patch A (a Component Lab state chooser) was not.
+
+## Gate result (2026-09-22, 03:22)
+
+`CONTINUUM_UPDATE_MATRIX_INVENTORY=1 ./scripts/run-matrix.sh` — **235 legs ran.**
+
+- **9 KNOWN-RED, all expected**, none unexpectedly passing.
+- **9 FAILED — every one of them pre-existing.** Reproduced on a clean detached
+  worktree at `2cec73ff` (the commit this branch is based on), rebuilt from
+  scratch, same isolated project/app-support roots, same tmux-disabled args.
+  **Zero regressions from this work.**
+
+| Leg | Baseline reproduction |
+|---|---|
+| `--agent-supervisor-check` | exit 139, SIGSEGV, both |
+| `--note-click-focus-check` | `keyDown should edit note text; got ""` |
+| `--agent-tile-click-focus-check` | `padding click alone should focus the editor` |
+| `--workspace-api-open-check` | `capabilities from the preset grant` |
+| `--file-tile-zoom-check` | `title compositor drift; difference 2.439717294900222` — identical to the digit |
+| `--session-resume-check` | `A12 FAIL: browser URL must be the specific persisted URL` |
+| `--terminal-tmux-observer-check` | host toolchain: `ld: tapi error: malformed file`, `MacOSX27.0.sdk` `libSystem.B.tbd` has an unknown `arm64e.x1-macos` architecture |
+| `--terminal-tmux-observer-wiring-check` | same linker failure |
+| `npm test --prefix Tools/TaskEditor` | `ERR_MODULE_NOT_FOUND: Cannot find package 'jsdom'` — a missing dev dependency |
+
+**This is the finding, not a footnote.** The gate has NINE failing legs that are
+not in `MATRIX_KNOWN_RED` and that nobody owns. Two are host toolchain damage
+(the command-line-tools SDK's `libSystem.B.tbd` is malformed for this
+toolchain), one is a missing npm dependency, and six are real product legs.
+`--ui-geometry-check` was a tenth until this branch fixed it. A gate carrying
+unowned reds is how the workspace-delete and zone-delete defects survived —
+both had witnesses that never ran or never watched behaviour.
+
+They should be triaged and either fixed or documented in `MATRIX_KNOWN_RED`
+with a reason. They are NOT this release's regressions and should not block it.
+
+## Preview build
+
+`~/array-scratch/apps/Array 0721 Preview.app`, DEV channel
+(`dev.arrayapp.macos.dev`, "Array Dev"), pinned to
+`~/array-scratch/0721-preview-root` — its own project root, so it cannot touch
+`~/Documents/personal` or the prod copy in `/Applications`. Bundle check passed
+(identity, Sparkle embedding, launch smoke, pollution guards, codesign verify).
+
+**Do not run it at the same time as `~/Desktop/Array Dev.app`** if that ever
+comes back: both are DEV channel and would share the "Array Dev" app-support
+store and defaults domain. Their project roots differ, so `.array/` is safe.
+
+## To ship, on "go"
+
+Nothing below has been done. `Packaging/Info.plist` is untouched, per the rule
+that a commit never carries a version bump.
+
+1. `scripts/release-app.sh --identity "Developer ID Application: Dylan Reed (46TTB6J9DZ)" --notary-profile array-notary --set-version 0.7.21 --set-build 72`
+2. Archive the DMG into `releases/`.
+3. `gh release create v0.7.21 --repo dylanreedx/array-releases` with BOTH assets.
+4. `scripts/generate-appcast.sh`.
+5. Append the 0.7.21 row to `docs/VERSIONING.md`, commit with the appcast, push
+   `array/integration`, fast-forward `main`.
