@@ -2197,6 +2197,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-delete-failure-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceDeleteFailureSelfCheck()
+                print("ContinuumRevivedWorkspaceDeleteFailureChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-switch-polish-check") {
             do {
                 _ = NSApplication.shared
@@ -10224,12 +10236,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let registry = try registryStore.loadOrEmpty()
         guard let currentWorkspaceId = currentWorkspaceIdForSidebar() ?? registry.lastActiveWorkspaceId else { return nil }
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        let document: WorkspaceDocument
+        // 0721: a missing or corrupt `canvas.json` for the CURRENT workspace used to
+        // throw out of here, `reloadWorkspaceTopBar` swallowed it to stderr, and the
+        // top bar kept a nil `currentWorkspaceId` — so Delete did nothing, forever,
+        // with no way to find out why. The document is only a counts/save-state
+        // ornament on this model; the registry is what the verbs act on. Degrade the
+        // ornament, keep the chrome loaded.
+        var document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), zones: [], zoneZOrder: [], lastActiveZoneId: nil)
+        var documentLoadFailed = false
         if let workspaceRuntime, workspaceRuntime.workspaceId == currentWorkspaceId {
             document = workspaceRuntime.document
         } else {
             let store = WorkspaceStore(workspaceId: currentWorkspaceId, applicationSupportDirectory: appSupport)
-            document = try store.load()
+            do {
+                document = try store.load()
+            } catch {
+                fputs("Workspace top bar document load failed: \(error)\n", stderr)
+                documentLoadFailed = true
+            }
         }
         let entry = registry.workspaces.first(where: { $0.id == currentWorkspaceId })
         return WorkspaceTopBarModel(
@@ -10237,7 +10262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             currentWorkspaceName: entry?.name ?? "Workspace",
             projectCount: entry?.projectIds.count ?? 0,
             zoneCount: document.zones.count,
-            saveState: workspaceDocumentSaveState(workspaceId: currentWorkspaceId, liveDocument: document),
+            saveState: documentLoadFailed
+                ? .saveFailed
+                : workspaceDocumentSaveState(workspaceId: currentWorkspaceId, liveDocument: document),
             workspaces: registry.workspaces,
             managementMessage: workspaceManagementMessage
         )
@@ -10260,9 +10287,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             if let model = try buildWorkspaceTopBarModel() {
                 topBar.reload(model)
+            } else {
+                // 0721: no registry store, or no current workspace at all. The chrome
+                // stays unloaded either way — say which, rather than leaving a live
+                // looking Delete over nothing.
+                topBar.setManagementMessage("Workspace list isn't available yet, so workspace actions are off.")
             }
         } catch {
             fputs("Workspace top bar reload failed: \(error)\n", stderr)
+            topBar.setManagementMessage("Workspace list failed to load: \(error.localizedDescription)")
         }
     }
 
@@ -10467,7 +10500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } catch {
             fputs("Workspace sidebar reload failed: \(error)\n", stderr)
             sidebar.reload(tree: SidebarTree(workspaces: []), currentWorkspaceId: nil)
-            sidebar.setManagementMessage(workspaceManagementMessage)
+            // 0721: an empty tree disables every workspace verb. Without this the
+            // sidebar looks normal and Delete is simply dead.
+            sidebar.setManagementMessage("Workspace list failed to load: \(error.localizedDescription)")
         }
     }
 
@@ -12524,6 +12559,256 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             "deleteSemantics": Self.workspaceDeleteSemanticsCopy,
             "duplicateNamePolicy": "allowed: Registry.createWorkspace and Registry.renameWorkspace already allow duplicate names",
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// 0721 — "i can't delete a work space".
+    ///
+    /// Four ways that report reached the user, all of them silent, all driven here
+    /// through the SAME production entry points the click uses
+    /// (`configureWorkspaceTopBar` -> `deleteButton` action -> `deleteWorkspaceAndRelaunch`,
+    /// and `reloadWorkspaceSidebar` -> the scope menu's Delete item):
+    ///
+    ///   1. The top bar's Delete was AppKit-default-enabled before the first model
+    ///      landed, so a failed `buildWorkspaceTopBarModel` left a live-looking button
+    ///      over a nil `currentWorkspaceId` and the click fell out of a bare `guard`.
+    ///   2. A corrupt `canvas.json` for the CURRENT workspace threw out of that build
+    ///      to stderr, which is the state above — permanently, for that user.
+    ///   3. The registry was saved BEFORE `switchWorkspace`, so a throw reported
+    ///      "Delete workspace failed" over a workspace that was already gone.
+    ///   4. The last-workspace and duplicate-name refusals are correct and were
+    ///      invisible: a greyed item with no reason on it.
+    static func runWorkspaceDeleteFailureSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func emptyDocument() -> WorkspaceDocument {
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1), zones: [], zoneZOrder: [], lastActiveZoneId: nil)
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_600_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-delete-failure-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000F601")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000F602")!
+
+        /// One fresh app-support directory holding A (current) and B.
+        func makeFixture(_ name: String) throws -> (URL, RegistryStore) {
+            let appSupport = tempRoot.appendingPathComponent(name, isDirectory: true)
+            try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            var registry = Registry.empty()
+            registry.lastActiveWorkspaceId = workspaceA
+            registry.workspaces = [
+                WorkspaceEntry(id: workspaceA, name: "Alpha Workspace", projectIds: [], createdAt: now, updatedAt: now),
+                WorkspaceEntry(id: workspaceB, name: "Beta Workspace", projectIds: [], createdAt: now, updatedAt: now),
+            ]
+            let store = RegistryStore(applicationSupportDirectory: appSupport)
+            try store.save(registry)
+            try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(emptyDocument())
+            try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(emptyDocument())
+            return (appSupport, store)
+        }
+
+        // ---------------------------------------------------------------- (1)
+        // An UNLOADED top bar. Wired exactly as `AppDelegate` wires it, and never
+        // reloaded — which is every moment before the first successful model, and
+        // every moment after a failed one.
+        let (unloadedSupport, unloadedRegistryStore) = try makeFixture("unloaded")
+        _ = unloadedSupport
+        let unloadedApp = AppDelegate()
+        unloadedApp.registryStore = unloadedRegistryStore
+        let unloadedTopBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        unloadedApp.workspaceTopBarView = unloadedTopBar
+        unloadedApp.configureWorkspaceTopBar(unloadedTopBar)
+        unloadedTopBar.layoutSubtreeIfNeeded()
+        var unloadedDeliveries = 0
+        unloadedTopBar.onDeleteWorkspace = { _ in unloadedDeliveries += 1 }
+        let unloadedDeleteIsDead = !unloadedTopBar.deleteEnabledForQA
+            && unloadedTopBar.deleteToolTipForQA.contains("loading")
+        try expect(unloadedDeleteIsDead,
+                   "an unloaded top bar must not draw a live Delete — enabled=\(unloadedTopBar.deleteEnabledForQA) tooltip='\(unloadedTopBar.deleteToolTipForQA)'")
+        // The real @objc action, not a re-derivation of its guard.
+        unloadedTopBar.invokeDeleteActionForQA()
+        unloadedTopBar.layoutSubtreeIfNeeded()
+        let unloadedClickExplains = unloadedDeliveries == 0
+            && !unloadedTopBar.managementMessageForQA.isEmpty
+        try expect(unloadedClickExplains,
+                   "a Delete with nothing to act on must say so — message='\(unloadedTopBar.managementMessageForQA)'")
+
+        // ---------------------------------------------------------------- (2)
+        // A CORRUPT `canvas.json` for the current workspace. The registry is intact,
+        // so Delete has everything it needs; only the counts ornament is unavailable.
+        let (corruptSupport, corruptRegistryStore) = try makeFixture("corrupt-document")
+        let corruptFile = WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: corruptSupport).layout.canvasFile
+        try Data("{ not json".utf8).write(to: corruptFile, options: .atomic)
+        let corruptApp = AppDelegate()
+        corruptApp.registryStore = corruptRegistryStore
+        let corruptTopBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        corruptApp.workspaceTopBarView = corruptTopBar
+        corruptApp.configureWorkspaceTopBar(corruptTopBar)
+        corruptApp.reloadWorkspaceTopBar()
+        corruptTopBar.layoutSubtreeIfNeeded()
+        let corruptTopBarStillLoaded = corruptTopBar.deleteEnabledForQA
+            && corruptTopBar.workspaceNameForQA == "Alpha Workspace"
+        try expect(corruptTopBarStillLoaded,
+                   "an unreadable canvas.json must not disarm the workspace verbs — enabled=\(corruptTopBar.deleteEnabledForQA) name='\(corruptTopBar.workspaceNameForQA)'")
+        var corruptRequests = 0
+        corruptApp.workspaceDeleteConfirmationProvider = { _ in corruptRequests += 1; return true }
+        let corruptDeleteDelivered = corruptTopBar.clickDeleteForQA()
+        corruptTopBar.layoutSubtreeIfNeeded()
+        let afterCorruptDelete = try corruptRegistryStore.loadOrEmpty()
+        let corruptDeleteWorked = corruptDeleteDelivered
+            && corruptRequests == 1
+            && !afterCorruptDelete.workspaces.contains(where: { $0.id == workspaceA })
+            && corruptTopBar.managementMessageForQA.contains("not deleted")
+        try expect(corruptDeleteWorked,
+                   "the button must really delete over a broken document — delivered=\(corruptDeleteDelivered) message='\(corruptTopBar.managementMessageForQA)'")
+
+        // ---------------------------------------------------------------- (3)
+        // ATOMICITY. A `WorkspaceRuntime` that never adopted a canvas throws
+        // `WorkspaceSwitchError.noCanvas` out of `switchWorkspace` — the same throw
+        // `documentNotFound` and `projectAppearsInBothWorkspaces` make. The registry
+        // must be exactly as it was, and the message must not claim otherwise.
+        let (atomicSupport, atomicRegistryStore) = try makeFixture("atomic")
+        let atomicApp = AppDelegate()
+        atomicApp.registryStore = atomicRegistryStore
+        let atomicBrowserEngine = BrowserEngineContext()
+        defer { atomicBrowserEngine.shutdown() }
+        let canvaslessRuntime = WorkspaceRuntime(
+            workspaceId: workspaceA,
+            document: emptyDocument(),
+            registry: ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+                throw CheckError.failed("workspace delete failure check should not acquire project controllers")
+            }),
+            focusBroker: atomicApp.focusBroker,
+            registryStore: atomicRegistryStore,
+            ghostty: nil,
+            browserEngine: atomicBrowserEngine
+        )
+        atomicApp.workspaceRuntime = canvaslessRuntime
+        let atomicTopBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        atomicApp.workspaceTopBarView = atomicTopBar
+        atomicApp.configureWorkspaceTopBar(atomicTopBar)
+        atomicApp.reloadWorkspaceTopBar()
+        atomicTopBar.layoutSubtreeIfNeeded()
+        atomicApp.workspaceDeleteConfirmationProvider = { _ in true }
+        let atomicDelivered = atomicTopBar.clickDeleteForQA()
+        atomicTopBar.layoutSubtreeIfNeeded()
+        let afterFailedDelete = try atomicRegistryStore.loadOrEmpty()
+        let atomicDocumentDirectory = WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: atomicSupport).layout.workspaceDirectory
+        let failedDeleteChangedNothing = atomicDelivered
+            && afterFailedDelete.workspaces.contains(where: { $0.id == workspaceA })
+            && afterFailedDelete.workspaces.count == 2
+            && fm.fileExists(atPath: atomicDocumentDirectory.path)
+            && atomicTopBar.managementMessageForQA.contains("was kept")
+        try expect(failedDeleteChangedNothing,
+                   "a delete that cannot switch away must leave the registry untouched and say the workspace was kept — workspaces=\(afterFailedDelete.workspaces.count) message='\(atomicTopBar.managementMessageForQA)'")
+
+        // ---------------------------------------------------------------- (4a)
+        // THE LAST WORKSPACE. The refusal stands; it now carries its reason on the
+        // control, and the ⌘K row — which is not gated by any enablement — says it
+        // in words.
+        let (lastSupport, lastRegistryStore) = try makeFixture("last-workspace")
+        var lastRegistry = try lastRegistryStore.loadOrEmpty()
+        lastRegistry.workspaces.removeAll { $0.id == workspaceB }
+        try lastRegistryStore.save(lastRegistry)
+        let lastApp = AppDelegate()
+        lastApp.registryStore = lastRegistryStore
+        try lastApp.reconciledManagedSessionSource.reconcile(registry: lastRegistry, reason: .continuumRestarted, now: now)
+        let lastTopBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        let lastSidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        lastApp.workspaceTopBarView = lastTopBar
+        lastApp.workspaceSidebarView = lastSidebar
+        lastApp.configureWorkspaceTopBar(lastTopBar)
+        lastApp.configureWorkspaceSidebar(lastSidebar)
+        lastSidebar.configureInboxScope(.all) { _ in }
+        lastApp.reloadWorkspaceSidebar()
+        lastTopBar.layoutSubtreeIfNeeded()
+        lastSidebar.layoutSubtreeIfNeeded()
+        var lastConfirmations = 0
+        lastApp.workspaceDeleteConfirmationProvider = { _ in lastConfirmations += 1; return true }
+        // The ⌘K row's dispatch target, which no enablement guards.
+        let paletteRefused = !lastApp.deleteWorkspaceAndRelaunch(workspaceId: workspaceA)
+        lastTopBar.layoutSubtreeIfNeeded()
+        let lastRegistryAfter = try lastRegistryStore.loadOrEmpty()
+        let lastWorkspaceExplained = paletteRefused
+            && lastConfirmations == 0
+            && lastRegistryAfter.workspaces.count == 1
+            && lastTopBar.managementMessageForQA.contains("Cannot delete the last workspace")
+            && !lastTopBar.deleteEnabledForQA
+            && lastTopBar.deleteToolTipForQA.contains("only workspace")
+            && !lastSidebar.deleteEnabledForQA
+            && lastSidebar.deleteMenuTitleForQA.contains("only workspace")
+        try expect(lastWorkspaceExplained,
+                   "the last-workspace refusal must be explained on both controls — tooltip='\(lastTopBar.deleteToolTipForQA)' menu='\(lastSidebar.deleteMenuTitleForQA)' message='\(lastTopBar.managementMessageForQA)'")
+        _ = lastSupport
+
+        // ---------------------------------------------------------------- (4b)
+        // DUPLICATE NAMES. `Registry.createWorkspace` allows them, so a workspace
+        // scope naming two of them has no target and Delete is greyed. It now says
+        // which ambiguity greyed it, on the item itself.
+        let (twinSupport, twinRegistryStore) = try makeFixture("duplicate-names")
+        _ = twinSupport
+        var twinRegistry = try twinRegistryStore.loadOrEmpty()
+        twinRegistry.workspaces[1].name = twinRegistry.workspaces[0].name
+        try twinRegistryStore.save(twinRegistry)
+        let twinApp = AppDelegate()
+        twinApp.registryStore = twinRegistryStore
+        try twinApp.reconciledManagedSessionSource.reconcile(registry: twinRegistry, reason: .continuumRestarted, now: now)
+        let twinSidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        twinApp.workspaceSidebarView = twinSidebar
+        twinApp.configureWorkspaceSidebar(twinSidebar)
+        twinApp.reloadWorkspaceSidebar()
+        twinSidebar.configureInboxScope(.workspace("Alpha Workspace")) { _ in }
+        twinSidebar.layoutSubtreeIfNeeded()
+        let duplicateNameExplained = !twinSidebar.deleteEnabledForQA
+            && twinSidebar.deleteMenuTitleForQA.contains("ambiguous")
+        try expect(duplicateNameExplained,
+                   "an ambiguous workspace scope must say why Delete is greyed — menu='\(twinSidebar.deleteMenuTitleForQA)'")
+
+        // ---------------------------------------------------------------- (5)
+        // NO REGISTRY STORE AT ALL. The earliest `guard` on the path returned false
+        // with no message and no log.
+        let storelessApp = AppDelegate()
+        let storelessTopBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        storelessApp.workspaceTopBarView = storelessTopBar
+        storelessApp.configureWorkspaceTopBar(storelessTopBar)
+        let storelessRefused = !storelessApp.deleteWorkspaceAndRelaunch(workspaceId: workspaceA)
+        storelessTopBar.layoutSubtreeIfNeeded()
+        let storelessExplained = storelessRefused && !storelessTopBar.managementMessageForQA.isEmpty
+        try expect(storelessExplained,
+                   "a delete with no registry store must explain itself — message='\(storelessTopBar.managementMessageForQA)'")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-delete-failure", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-delete-failure",
+            "path": "WorkspaceTopBarView delete button / AgentInboxView scope menu -> AppDelegate.deleteWorkspaceAndRelaunch -> RegistryStore/WorkspaceStore/WorkspaceRuntime.switchWorkspace",
+            "unloadedDeleteIsDead": unloadedDeleteIsDead,
+            "unloadedClickExplains": unloadedClickExplains,
+            "corruptTopBarStillLoaded": corruptTopBarStillLoaded,
+            "corruptDeleteWorked": corruptDeleteWorked,
+            "failedDeleteChangedNothing": failedDeleteChangedNothing,
+            "lastWorkspaceExplained": lastWorkspaceExplained,
+            "duplicateNameExplained": duplicateNameExplained,
+            "storelessExplained": storelessExplained,
+            "atomicity": "every throwing step runs before the registry save; a failed switch leaves registry.json and the workspace document untouched",
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
@@ -14894,9 +15179,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return alert.runModal() == .alertSecondButtonReturn
     }
 
+    /// Delete a workspace, or leave everything exactly as it was.
+    ///
+    /// 0721: the ordering here is the fix, not a tidy-up. This used to save the
+    /// registry FIRST and then call `switchWorkspace`, which throws on `noCanvas`,
+    /// `documentNotFound` and `projectAppearsInBothWorkspaces`. A throw landed in the
+    /// catch below, told the user "Delete workspace failed", and skipped
+    /// `deleteDocument()` — while the workspace was already gone from `registry.json`
+    /// and stayed gone on the next launch. Every step that can fail now runs BEFORE
+    /// the registry is committed: the deletion is computed on a copy, the switch is
+    /// driven against the still-intact registry, and only then is the removal saved.
     @discardableResult
     private func deleteWorkspaceAndRelaunch(workspaceId: UUID) -> Bool {
-        guard let registryStore else { return false }
+        guard let registryStore else {
+            // 0721: no message, no log — the click looked like nothing happened.
+            setWorkspaceManagementMessage("Workspace storage isn't available, so this workspace can't be deleted.")
+            return false
+        }
         do {
             var registry = try registryStore.loadOrEmpty()
             guard let target = registry.workspaces.first(where: { $0.id == workspaceId }) else {
@@ -14926,26 +15225,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let deletingCurrent = workspaceRuntime?.workspaceId == workspaceId || registry.lastActiveWorkspaceId == workspaceId
             workspaceRuntime?.flushAll()
-            killAmbientTmuxSessionForDeletedWorkspace(workspaceId: workspaceId)
-            guard registry.deleteWorkspace(id: workspaceId, now: Date()) else {
+
+            // Compute the removal on a COPY first. It names the replacement workspace
+            // (`deleteWorkspace` moves `lastActiveWorkspaceId` onto it) without
+            // committing anything, so a refusal here costs nothing and the switch
+            // below can be driven before the registry on disk changes at all.
+            var pending = registry
+            guard pending.deleteWorkspace(id: workspaceId, now: Date()) else {
                 setWorkspaceManagementMessage("Workspace could not be deleted.")
                 return false
             }
-            try registryStore.save(registry)
-            if deletingCurrent, let nextWorkspaceId = registry.lastActiveWorkspaceId {
+
+            // The one step that can throw. It runs while the registry on disk still
+            // holds every workspace, so a failure leaves nothing half-done.
+            if deletingCurrent,
+               let nextWorkspaceId = pending.lastActiveWorkspaceId ?? pending.workspaces.first?.id {
                 try workspaceRuntime?.switchWorkspace(to: nextWorkspaceId)
             }
+
+            // `switchWorkspace` saves the registry itself (it commits the selected
+            // workspace), so re-read and re-apply the removal to the freshest copy
+            // rather than writing back the one loaded before the switch.
+            var committed = try registryStore.loadOrEmpty()
+            guard committed.deleteWorkspace(id: workspaceId, now: Date()) else {
+                setWorkspaceManagementMessage("Workspace could not be deleted.")
+                return false
+            }
+            try registryStore.save(committed)
+
+            // Past the commit point: the workspace IS deleted. Anything that fails
+            // from here is cleanup, and must not be reported as a failed delete.
+            killAmbientTmuxSessionForDeletedWorkspace(workspaceId: workspaceId)
             if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
-                try store.deleteDocument()
+                do {
+                    try store.deleteDocument()
+                } catch {
+                    fputs("Delete Workspace: document cleanup failed: \(error)\n", stderr)
+                }
             }
             setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.")
             reloadWorkspaceSidebar()
             return true
         } catch {
             fputs("Delete Workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Delete workspace failed: \(error.localizedDescription)")
+            // The registry has not been written on this path, so say so: the
+            // workspace is still there and the next launch will still show it.
+            setWorkspaceManagementMessage("Delete workspace failed, so “\(workspaceNameForMessage(workspaceId: workspaceId))” was kept: \(error.localizedDescription)")
+            reloadWorkspaceSidebar()
             return false
         }
+    }
+
+    /// The name to put in a delete-failure message, re-read so the message can be
+    /// built inside the catch without carrying state across the throw.
+    private func workspaceNameForMessage(workspaceId: UUID) -> String {
+        guard let registryStore,
+              let entry = (try? registryStore.loadOrEmpty())?.workspaces.first(where: { $0.id == workspaceId })
+        else { return "this workspace" }
+        return entry.name
     }
 
     private func killAmbientTmuxSessionForDeletedWorkspace(workspaceId: UUID) {

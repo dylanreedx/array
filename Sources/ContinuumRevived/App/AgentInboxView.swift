@@ -679,6 +679,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// always available, which is the guard the header buttons had too.
     private var canRenameWorkspace = false
     private var canDeleteWorkspace = false
+    /// Why Delete is greyed, shown in the item's own title (see `setWorkspaceManagement`).
+    private var workspaceDeleteDisabledReason: String?
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// The parents you have folded. VIEW-LOCAL: no defaults key, nothing in the
     /// change set, nothing on the row — collapsing a group is a thing you did to
@@ -2227,10 +2229,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Which workspace verbs are available. Told by the host on every reload, since
     /// both answers come off the registry (`rename` needs a target at all; `delete`
     /// additionally needs a second workspace to fall back to).
-    func setWorkspaceManagement(canRename: Bool, canDelete: Bool) {
-        guard canRename != canRenameWorkspace || canDelete != canDeleteWorkspace else { return }
+    /// 0721: `deleteDisabledReason` is why the verb is greyed. A disabled item with
+    /// no explanation is the whole of "i can't delete a work space" from the user's
+    /// side — the refusal may be correct and still has to be legible.
+    func setWorkspaceManagement(canRename: Bool, canDelete: Bool, deleteDisabledReason: String? = nil) {
+        guard canRename != canRenameWorkspace || canDelete != canDeleteWorkspace
+                || deleteDisabledReason != workspaceDeleteDisabledReason else { return }
         canRenameWorkspace = canRename
         canDeleteWorkspace = canDelete
+        workspaceDeleteDisabledReason = deleteDisabledReason
         applyManagementEnablement()
     }
 
@@ -2274,8 +2281,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // contract depend on the current workspace count.
         items.append(ChoiceItem(id: "management-separator", title: "────────", enabled: false))
         for action in WorkspaceManagementAction.allCases {
-            let item = ChoiceItem(id: "management:\(action.title)", title: action.title,
-                                  enabled: action == .create || (action == .rename ? canRenameWorkspace : canDeleteWorkspace))
+            let enabled = action == .create || (action == .rename ? canRenameWorkspace : canDeleteWorkspace)
+            // The id keeps the bare title, so every existing lookup still resolves.
+            var title = action.title
+            if action == .delete, !enabled, let reason = workspaceDeleteDisabledReason, !reason.isEmpty {
+                title = "\(action.title) — \(reason)"
+            }
+            let item = ChoiceItem(id: "management:\(action.title)", title: title,
+                                  enabled: enabled)
             managementItems[action] = item
             items.append(item)
         }
@@ -4429,6 +4442,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     func isWorkspaceManagementEnabledForQA(_ action: WorkspaceManagementAction) -> Bool {
         managementItems[action]?.enabled ?? false
+    }
+
+    /// The title AppKit is really drawing for a verb, reason suffix and all.
+    func renderedWorkspaceManagementTitleForQA(_ action: WorkspaceManagementAction) -> String {
+        managementItems[action]?.title ?? ""
     }
 
     /// Whether the separator really sits between the scopes and the verbs — the

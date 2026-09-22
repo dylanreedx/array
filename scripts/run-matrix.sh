@@ -643,6 +643,12 @@ run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 run_app_check .build/debug/Array --workspace-sidebar-actions-check
 run_app_check .build/debug/Array --workspace-sidebar-live-status-check
 run_app_check .build/debug/Array --workspace-top-bar-check
+# 0721: the workspace create/rename/delete verbs and the ways deleting one can
+# fail. `--workspace-management-polish-check` has existed since P3.14 and was
+# never a matrix leg, so a witness the gate never reported was guarding the
+# delete path; registered here with the delete-failure leg beside it.
+run_app_check .build/debug/Array --workspace-management-polish-check
+run_app_check .build/debug/Array --workspace-delete-failure-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check

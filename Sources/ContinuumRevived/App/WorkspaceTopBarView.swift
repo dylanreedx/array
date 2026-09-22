@@ -73,11 +73,18 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         renameButton.bezelStyle = .rounded
         renameButton.controlSize = .small
         renameButton.toolTip = "Rename workspace"
+        renameButton.isEnabled = false
 
         deleteButton = NSButton(title: "Delete", target: nil, action: nil)
         deleteButton.bezelStyle = .rounded
         deleteButton.controlSize = .small
-        deleteButton.toolTip = "Delete workspace"
+        deleteButton.toolTip = Self.deleteUnloadedToolTip
+        // 0721: enablement must come from a model that really loaded. `NSButton`
+        // defaults `isEnabled` to true, so before the first `reload(_:)` — and after
+        // any reload that failed to build a model — Delete used to LOOK live over a
+        // nil `currentWorkspaceId`, and the click fell straight out of the guard in
+        // `deleteWorkspaceClicked`. "The button does nothing" was exactly this.
+        deleteButton.isEnabled = false
 
         toggleSidebarButton = NSButton(title: "☰", target: nil, action: nil)
         toggleSidebarButton.bezelStyle = .rounded
@@ -195,6 +202,21 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         createButton.isEnabled = true
         renameButton.isEnabled = currentWorkspaceId != nil
         deleteButton.isEnabled = model.workspaces.count > 1 && currentWorkspaceId != nil
+        // 0721: a greyed Delete with the generic tooltip reads as "I can't delete a
+        // workspace". The refusal is intended; being unable to find out why is not.
+        deleteButton.toolTip = Self.deleteToolTip(
+            workspaceCount: model.workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
+    }
+
+    /// The four readings of the Delete button, as the tooltip states them.
+    static let deleteUnloadedToolTip =
+        "Delete workspace — unavailable until this workspace finishes loading"
+    static let lastWorkspaceToolTip =
+        "Delete workspace — you can't delete your only workspace. Create another one first."
+
+    static func deleteToolTip(workspaceCount: Int, hasCurrentWorkspace: Bool) -> String {
+        guard hasCurrentWorkspace else { return deleteUnloadedToolTip }
+        return workspaceCount > 1 ? "Delete workspace" : lastWorkspaceToolTip
     }
 
     func setManagementMessage(_ message: String?) {
@@ -214,6 +236,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     var saveStateTextForQA: String { saveStateLabel.stringValue }
     var managementMessageForQA: String { managementMessageLabel.stringValue }
     var deleteEnabledForQA: Bool { deleteButton.isEnabled }
+    var deleteToolTipForQA: String { deleteButton.toolTip ?? "" }
+
+    /// Drive the real `@objc` action regardless of enablement, so a witness can
+    /// assert the handler itself explains a refusal instead of returning silently.
+    func invokeDeleteActionForQA() {
+        deleteWorkspaceClicked(deleteButton)
+    }
     var switchWorkspaceNamesForQA: [String] { switchWorkspaceButton.itemArray.map(\.title) }
 
     @discardableResult
@@ -278,9 +307,17 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     }
 
     @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
-        guard let currentWorkspaceId else { return }
+        // 0721: say so. Reaching here with no loaded workspace used to return in
+        // silence, which is indistinguishable from a broken button.
+        guard let currentWorkspaceId else {
+            setManagementMessage(Self.deleteUnloadedMessage)
+            return
+        }
         onDeleteWorkspace?(currentWorkspaceId)
     }
+
+    static let deleteUnloadedMessage =
+        "This workspace hasn't finished loading, so it can't be deleted yet."
 
     @objc private func toggleSidebarClicked(_ sender: NSButton) {
         onToggleSidebar?()
