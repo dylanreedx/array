@@ -83,11 +83,17 @@ public enum AgentHarnessConfig {
         return parts.count == 2 ? String(parts[0]) : "other"
     }
 
+    /// Whether `harness` may be OFFERED `model`. Pi is the multi-provider
+    /// harness, but anthropic is excluded from it (`PiCatalogPolicy`): those
+    /// models belong to the user's own claude CLI, and offering one id under two
+    /// harnesses with different billing is a choice nobody can make correctly.
+    /// A record already persisted on such a pairing is not re-pointed by this —
+    /// see `AgentSupervisor.sendRefusal`.
     public static func isProviderCompatible(model: String, harness: AgentHarness) -> Bool {
         switch harness {
         case .claudeCode: return provider(forID: model) == "anthropic"
         case .codex: return provider(forID: model) == "openai-codex"
-        case .pi: return model.contains("/")
+        case .pi: return model.contains("/") && !PiCatalogPolicy.excludes(model)
         }
     }
 }

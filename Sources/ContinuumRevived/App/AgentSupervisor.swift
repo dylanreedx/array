@@ -1750,10 +1750,11 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
-    /// The concrete `provider/model` the harness resolved this agent's alias to,
-    /// as the harness reported it. The context meter's denominator key: the
-    /// Claude harness offers aliases (`anthropic/opus`) that are not catalogue
-    /// keys, so without this a claude agent has no window and an empty ring.
+    /// The concrete `provider/model` the harness resolved this agent's model to,
+    /// as the harness reported it. The context meter's denominator key. It
+    /// mattered most while the Claude harness offered aliases (`anthropic/opus`)
+    /// that were not catalogue keys; the catalogue is explicit ids now, but a
+    /// harness-reported id still beats the record's stored one.
     func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
 
     /// The account quota for THIS agent's harness, or nil when the provider has
@@ -1920,10 +1921,18 @@ final class AgentSupervisor {
                 // agent: every send refused, forever, for a record that ran fine
                 // yesterday. Pi is the multi-provider harness and is what these
                 // records ran under before ownership existed, so it takes them back.
+                // Pi first — it is the multi-provider harness and is what these
+                // records ran under before ownership existed — then the harness
+                // that actually owns the model's provider. The ladder matters
+                // now that Pi no longer owns anthropic (`PiCatalogPolicy`): an
+                // `anthropic/*` legacy record with a stored Codex preference
+                // would otherwise keep a harness that can never run it.
                 if let resolved = record.harness,
                    !AgentHarnessConfig.isProviderCompatible(model: record.model, harness: resolved),
-                   AgentHarnessConfig.isProviderCompatible(model: record.model, harness: .pi) {
-                    record.harness = .pi
+                   let rescue = [AgentHarness.pi, .claudeCode, .codex].first(where: {
+                       AgentHarnessConfig.isProviderCompatible(model: record.model, harness: $0)
+                   }) {
+                    record.harness = rescue
                 }
                 if record.harness != nil { persistBeforeAdoption(record) }
             }
@@ -3002,7 +3011,15 @@ final class AgentSupervisor {
                 return nil
             }
         }
-        guard snapshot.models.contains(record.model) else {
+        // A model Array RETIRED from a harness's offer list is not a model that
+        // harness cannot run. Pi still speaks anthropic; Array simply stopped
+        // offering it (`PiCatalogPolicy`). An agent already persisted on such a
+        // pairing keeps working — the alternative is a record that ran fine
+        // yesterday refusing every prompt forever, and CLAUDE.md forbids
+        // silently re-pointing it at another CLI. It is absent from the picker,
+        // so moving off it is one-way.
+        guard snapshot.models.contains(record.model)
+                || PiCatalogPolicy.isRetiredSelection(model: record.model, harness: harness) else {
             return "\(harness.rawValue) cannot run \(record.model). Pick a model this harness owns."
         }
         return nil
@@ -12365,7 +12382,7 @@ func runAgentRestoreChecks() async throws {
         ].joined(separator: "\n").write(to: claudeURL, atomically: true, encoding: .utf8)
 
         let claudeInputs = ManagedTranscriptRehydrator.Inputs(
-            agentUUID: claudeAgent.rawValue, cwd: liveCwd, model: "anthropic/opus", harness: .claudeCode,
+            agentUUID: claudeAgent.rawValue, cwd: liveCwd, model: "anthropic/claude-opus-5", harness: .claudeCode,
             claudeCLIAvailable: true, homeURL: rehydrateHome)
         guard let claudeTranscript = ManagedTranscriptRehydrator.rehydrate(claudeInputs) else {
             throw fail("a restored claude agent with a session file did not rehydrate")
@@ -17928,10 +17945,10 @@ private func checkPerAgentProviderSettings(
     }
     AgentModelCatalog.shared.resetForQA(snapshot: .init(
         harness: .pi, readiness: .ready, models: [sharedModel],
-        displayNames: [sharedModel: "Claude Opus (latest)"]))
+        displayNames: [sharedModel: "Claude Opus 5"]))
     AgentModelCatalog.shared.resetForQA(snapshot: .init(
         harness: .claudeCode, readiness: .ready, models: [sharedModel],
-        displayNames: [sharedModel: "Claude Opus (latest)"]))
+        displayNames: [sharedModel: "Claude Opus 5"]))
 
     let harnessTileID = UUID()
     let harnessAgentID = supervisor.spawn(
