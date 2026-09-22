@@ -112,17 +112,20 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// P5.5 live finding, `plan-P5.5-review-corrections.md` defect 4). One
     /// expression for both `intrinsicContentSize` and `layout()`, so the two
     /// cannot disagree by a chevron metric again.
+    ///
+    /// The inset used to be a hard-coded `+ 4` at the rung, which `scaled`
+    /// quantizes to a half point and can therefore round BELOW what the cell
+    /// needs. `ChoiceLabelMetrics` measures it from a real label instead.
     private var measuredTitleWidth: CGFloat {
-        ceil((titleLabel.stringValue as NSString).size(
-            withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width) + CGFloat(pageZoom.scaled(4))
+        ChoiceLabelMetrics.labelWidth(
+            for: titleLabel.stringValue, font: .token(.label, zoom: pageZoom))
     }
 
     /// What a button showing `title` needs, measured the way the button measures
     /// itself — for callers (the footer's fit decision) that must reason about a
     /// title BEFORE installing it.
     static func fittingWidth(forTitle title: String, zoom: AgentPageZoom = .default) -> CGFloat {
-        let titleWidth = ceil((title as NSString).size(
-            withAttributes: [.font: NSFont.token(.label, zoom: zoom)]).width) + CGFloat(zoom.scaled(4))
+        let titleWidth = ChoiceLabelMetrics.labelWidth(for: title, font: .token(.label, zoom: zoom))
         return horizontalPadding(zoom: zoom) * 2 + titleWidth + CGFloat(zoom.scaled(Space.m))
             + chevronSize(zoom: zoom)
     }
@@ -329,10 +332,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         return true
     }
     var qaTitleFrameWidth: CGFloat { titleLabel.frame.width }
-    var qaMeasuredTitleWidth: CGFloat {
-        ceil((titleLabel.stringValue as NSString).size(
-            withAttributes: [.font: NSFont.token(.label, zoom: pageZoom)]).width) + CGFloat(pageZoom.scaled(4))
-    }
+    var qaMeasuredTitleWidth: CGFloat { measuredTitleWidth }
     var qaTitleDrawsWithoutTruncation: Bool {
         titleLabel.frame.width + 0.5 >= qaMeasuredTitleWidth
     }

@@ -142,25 +142,38 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     override var acceptsFirstResponder: Bool { items.contains(where: \.enabled) }
 
     override var intrinsicContentSize: NSSize {
+        // What a row's LABEL needs, measured the way a label draws (the cell's own
+        // inset included), not the way `NSString.size` measures a glyph run.
         let textWidth = items.map { item -> CGFloat in
-            let title = ceil((item.title as NSString).size(
-                withAttributes: [.font: NSFont.token(.body, zoom: pageZoom)]).width)
+            let title = ChoiceLabelMetrics.labelWidth(
+                for: item.title, font: .token(.body, zoom: pageZoom))
             let detail = item.detail.map {
-                ceil(($0 as NSString).size(
-                    withAttributes: [.font: NSFont.token(.caption, zoom: pageZoom)]).width)
+                ChoiceLabelMetrics.labelWidth(for: $0, font: .token(.caption, zoom: pageZoom))
             } ?? 0
             return max(title, detail)
         }.max() ?? 0
-        let hasLeadingSlot = ![.commands, .slashCommands].contains(presentation)
-            || items.contains { $0.icon != nil }
-        let leadingWidth: CGFloat = hasLeadingSlot ? CGFloat(pageZoom.scaled(26)) : 0
         let minimumWidth = presentation == .commands
             ? CGFloat(pageZoom.scaled(184)) : Self.minimumWidth(zoom: pageZoom)
         return NSSize(
-            width: max(minimumWidth, textWidth + renderedHorizontalPadding * 2 + leadingWidth),
+            width: max(minimumWidth, textWidth + rowChromeWidth),
             height: CGFloat(items.count) * renderedRowHeight + renderedVerticalPadding * 2
                 + destructiveSeparatorGap
         )
+    }
+
+    /// Everything between the panel's edges and a row's label, taken from the
+    /// SAME expressions `layout()` and `ChoiceRowView.layout()` use. Sizing the
+    /// panel from a separately invented padding pair (`horizontalPadding * 2` plus
+    /// a 26pt leading slot) left each row's label about 8pt short of its own
+    /// title, so every row ellipsized at every panel width.
+    private var rowChromeWidth: CGFloat {
+        renderedRowInset * 2
+            + ChoiceRowView.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom)
+            + ChoiceRowView.trailingInset(zoom: pageZoom)
+    }
+
+    private var reservesLeadingSlot: Bool {
+        ![.commands, .slashCommands].contains(presentation) || items.contains { $0.icon != nil }
     }
 
     override func layout() {
@@ -204,8 +217,6 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     /// VERTICAL padding token (not `horizontalPadding`); the name is preserved
     /// here so the scaled form cannot quietly change which token it reads.
     private var renderedRowInset: CGFloat { Self.verticalPadding(zoom: pageZoom) }
-
-    private var renderedHorizontalPadding: CGFloat { Self.horizontalPadding(zoom: pageZoom) }
 
     private var destructiveSeparatorIndex: Int? {
         guard [.commands, .slashCommands].contains(presentation),
@@ -376,8 +387,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private func rebuildRows() {
         rows.forEach { $0.removeFromSuperview() }
-        let reservesLeadingSlot = ![.commands, .slashCommands].contains(presentation)
-            || items.contains { $0.icon != nil }
+        let reservesLeadingSlot = self.reservesLeadingSlot
         rows = items.map { item in
             let row = ChoiceRowView(
                 item: item, presentation: presentation,
@@ -466,15 +476,22 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// The row's leading text inset. Static so the LIST can size its panel from
+    /// the same number the row lays its label out with.
+    static func textInset(reservesLeadingSlot: Bool, zoom: AgentPageZoom) -> CGFloat {
+        reservesLeadingSlot ? CGFloat(zoom.scaled(30)) : CGFloat(zoom.scaled(10))
+    }
+
+    static func trailingInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
+
     override func layout() {
         super.layout()
         let glyphSide = CGFloat(pageZoom.scaled(14))
         let leadingX = CGFloat(pageZoom.scaled(8))
         leadingImageView.frame = NSRect(
             x: leadingX, y: floor((bounds.height - glyphSide) / 2), width: glyphSide, height: glyphSide)
-        let textX: CGFloat = reservesLeadingSlot
-            ? CGFloat(pageZoom.scaled(30)) : CGFloat(pageZoom.scaled(10))
-        let trailingInset = CGFloat(pageZoom.scaled(8))
+        let textX = Self.textInset(reservesLeadingSlot: reservesLeadingSlot, zoom: pageZoom)
+        let trailingInset = Self.trailingInset(zoom: pageZoom)
         let textWidth = max(0, bounds.width - textX - trailingInset)
         if detailLabel.isHidden {
             let singleHeight = CGFloat(pageZoom.scaled(20))
