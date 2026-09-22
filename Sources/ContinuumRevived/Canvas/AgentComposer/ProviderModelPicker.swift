@@ -731,8 +731,53 @@ extension ProviderModelButton {
                        AgentHarnessConfig.isProviderCompatible(model: $0, harness: .claudeCode)
                    },
                    "Claude Code offered a model it does not own: \(AgentModelConfig.modelOptions(for: .claudeCode))")
+        // Pi is the multi-provider harness and still shows every provider it is
+        // ALLOWED to offer. Anthropic is not one of them any more: those models
+        // run on the user's own claude CLI (`PiCatalogPolicy`). The fixture above
+        // seeds the snapshot directly, which is not the production seam, so the
+        // exclusion itself is witnessed where production writes it —
+        // `apply(listModelsOutput:)`, in CoreChecks' runAgentModelPolicyChecks.
+        // What this leg owns is the picker consequence: an anthropic id must not
+        // survive the Pi ownership filter the composer rail applies.
         try expect(AgentModelConfig.modelOptions(for: .pi) == ["openai-codex/gpt-a", "openai-codex/gpt-b", "anthropic/claude-x"],
-                   "pi backend must show every provider, got \(AgentModelConfig.modelOptions(for: .pi))")
+                   "pi backend must serve its own snapshot verbatim, got \(AgentModelConfig.modelOptions(for: .pi))")
+        try expect(AgentModelConfig.modelOptions(for: .pi).filter {
+                       AgentHarnessConfig.isProviderCompatible(model: $0, harness: .pi)
+                   } == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
+                   "Pi must not own an anthropic id, got \(AgentModelConfig.modelOptions(for: .pi).filter { AgentHarnessConfig.isProviderCompatible(model: $0, harness: .pi) })")
+
+        // 6b. The REAL claude catalogue, in a real picker. It went from 3 aliases
+        //     to 11 explicit ids, and `ChoiceListView` does not scroll — a pane
+        //     that does not grow with its tallest group draws rows nobody can
+        //     reach (the 0.4.7 regression). Drive the shipping list, not a
+        //     two-row fixture.
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(
+            harness: .claudeCode,
+            readiness: .ready,
+            models: ClaudeCLIBackend.curatedCatalogModels,
+            displayNames: ClaudeCLIBackend.curatedCatalogDisplayNames))
+        let claudeFooter = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 520, height: AgentComposerFooterView.height))
+        window.contentView?.addSubview(claudeFooter)
+        defer { claudeFooter.removeFromSuperview() }
+        claudeFooter.apply(AgentLaunchSelection(
+            harness: .claudeCode, model: AgentModelConfig.defaultModel, thinking: "medium"))
+        claudeFooter.layoutSubtreeIfNeeded()
+        guard let claudeButton = claudeFooter.modelButton as? ProviderModelButton else {
+            throw SelfCheckError.message("claude footer's model trigger must be the ProviderModelButton")
+        }
+        claudeButton.presentPopover()
+        guard let claudePicker = claudeButton.qaPickerView else {
+            throw SelfCheckError.message("presenting the claude catalogue must install the picker surface")
+        }
+        defer { claudeButton.dismissPresentedPopover() }
+        try expect(claudePicker.qaVisibleModelIDs == ClaudeCLIBackend.curatedCatalogModels,
+                   "the claude pane must list every offered id, in catalogue order, got \(claudePicker.qaVisibleModelIDs)")
+        try expect(claudePicker.qaListContentFitsPane,
+                   "the claude pane clips \(ClaudeCLIBackend.curatedCatalogModels.count) rows — ChoiceListView does not scroll, so the rows past the fold are unreachable")
+        try expect(claudePicker.qaVisibleModelTitles.allSatisfy { !$0.lowercased().contains("latest") },
+                   "a rendered claude row says 'latest', got \(claudePicker.qaVisibleModelTitles)")
+        try expect(claudePicker.qaVisibleModelTitles.first == "Claude Opus 5",
+                   "the claude pane must render curated display names, got \(claudePicker.qaVisibleModelTitles)")
 
         let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
         AgentBackendConfig.store(.codex)

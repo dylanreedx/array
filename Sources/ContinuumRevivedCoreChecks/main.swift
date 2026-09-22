@@ -403,6 +403,12 @@ runAgentContextGravityChecks()
 try runLocationSessionIndexP5Checks()
 runCanvasEntityIndexP7Checks()
 runBoardChecks()
+// Registered HERE, not beside runAgentModelConfigChecks() near the end of this
+// file, on purpose. `swift run ContinuumRevivedCoreChecks` is a KNOWN-RED matrix
+// leg (the arm64 seed-1 canonical-byte baseline, ~line 10980) and `expect` calls
+// exit(1), so everything registered after that point never runs in a real matrix
+// run. A witness the gate never reports is not a witness (CLAUDE.md #2).
+runAgentModelPolicyChecks()
 try runAsyncCheck {
     try await runAgentToolDetailStoreChecks()
 }

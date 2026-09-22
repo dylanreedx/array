@@ -32,7 +32,7 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     case providerSessionId(String)
     /// The CONCRETE model claude resolved an alias to, echoed on `system/init`
     /// (`"model":"claude-opus-5"`). The Claude harness offers three aliases —
-    /// `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and the context
+    /// `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` (retired) — and the context
     /// window catalogue is keyed by concrete ids, so the alias never matched and
     /// claude agents had no denominator: the context ring was empty for every
     /// claude agent, always. It rides this host-local side channel for the same

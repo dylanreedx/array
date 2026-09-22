@@ -22,7 +22,7 @@ func runStrictAgentHarnessChecks() throws {
     func launch(_ record: AgentRecord, spawnDepth: Int = 0) -> AgentRunnerLaunch {
         AgentRunnerLaunch(record: record, spawnDepth: spawnDepth)
     }
-    let claude = AgentSupervisor.productionRunner(for: launch(record(.claudeCode, model: "anthropic/opus")))
+    let claude = AgentSupervisor.productionRunner(for: launch(record(.claudeCode, model: "anthropic/claude-opus-5")))
     let codex = AgentSupervisor.productionRunner(for: launch(record(.codex, model: "openai-codex/gpt-5.6-sol")))
     let piRecord = record(.pi, model: "openai-codex/gpt-5.6-sol")
     let pi = AgentSupervisor.productionRunner(for: launch(piRecord))
@@ -113,10 +113,10 @@ func runStrictAgentHarnessChecks() throws {
                "a roleless pi agent must still send no --tools, or this change narrows it")
 
     let catalog = AgentModelCatalog()
-    catalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/opus"], displayNames: ["anthropic/opus": "Claude"], contextWindows: ["anthropic/opus": 1]))
+    catalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/claude-opus-5"], displayNames: ["anthropic/claude-opus-5": "Claude Opus 5"], contextWindows: ["anthropic/claude-opus-5": 1]))
     catalog.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: ["openai-codex/gpt-5.6-sol"], displayNames: ["openai-codex/gpt-5.6-sol": "Codex"], contextWindows: ["openai-codex/gpt-5.6-sol": 2]))
     catalog.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: ["google/gemini"], displayNames: ["google/gemini": "Gemini"], contextWindows: ["google/gemini": 3]))
-    try expect(catalog.snapshot(for: .claudeCode).models == ["anthropic/opus"], "Claude catalogue leaked")
+    try expect(catalog.snapshot(for: .claudeCode).models == ["anthropic/claude-opus-5"], "Claude catalogue leaked")
     try expect(catalog.snapshot(for: .codex).readiness == .loggedOut, "Codex readiness leaked")
     try expect(catalog.snapshot(for: .pi).displayNames == ["google/gemini": "Gemini"], "Pi metadata leaked")
 
@@ -135,9 +135,18 @@ func runStrictAgentHarnessChecks() throws {
     try expect(AgentModelCatalog.parseCodexModelListResponse(codexRPC)?.models == ["openai-codex/gpt-6-astra"],
                "Codex app-server model/list did not remain the visible account-aware source")
 
-    let claudeHelp = "  --model <model>                       Model for the current session. Provide\n                                        an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a\n                                        model's full name (e.g. 'claude-fable-5').\n  -n, --name <name>"
-    try expect(AgentModelCatalog.parseClaudeModelAliases(helpOutput: claudeHelp) == ["anthropic/fable", "anthropic/opus", "anthropic/sonnet"],
-               "Claude's live aliases were not read from its own help output")
+    // The claude catalogue used to be SCRAPED out of `claude --help`: the quoted
+    // words in its `--model` paragraph, prefixed with `anthropic/`. By
+    // construction those are the aliases the paragraph itself calls "an alias for
+    // the latest model" — a name that renames itself under the user, is not a key
+    // in the context-window map, and can never select a previous model. The scrape
+    // is gone; the harness serves `ClaudeCLIBackend.curatedCatalogModels`, and the
+    // probe no longer runs `--help` at all (see the launch count below).
+    for id in AgentModelCatalog().snapshot(for: .claudeCode).models {
+        let argument = ClaudeCLIBackend.modelArgument(forCatalogId: id)
+        try expect(argument.hasPrefix("claude-") && argument.contains(where: \.isNumber),
+                   "the claude harness served the alias \(id) — only a model's full name may be offered")
+    }
 
     try expect(LegacyAgentHarnessMigration.resolve(
         evidence: .init(hasCodexThread: false, hasClaudeConversation: true, hasPiSession: true),
@@ -149,11 +158,11 @@ func runStrictAgentHarnessChecks() throws {
     // is not the harness's. Each was silent before: `send` returned false, the
     // caller returned, and the prompt simply did not go.
     let refusalCatalog = AgentModelCatalog()
-    refusalCatalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/opus"]))
+    refusalCatalog.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/claude-opus-5"]))
     refusalCatalog.resetForQA(snapshot: .init(harness: .codex, readiness: .checking, models: ["openai-codex/gpt-5.6-sol"]))
     refusalCatalog.resetForQA(snapshot: .init(harness: .pi, readiness: .loggedOut, models: ["google/gemini"]))
 
-    var unresolved = record(.claudeCode, model: "anthropic/opus")
+    var unresolved = record(.claudeCode, model: "anthropic/claude-opus-5")
     unresolved.harness = nil
     func refusal(_ probe: AgentRecord) -> String {
         AgentSupervisor.sendRefusal(record: probe, catalog: refusalCatalog) ?? "<accepted>"
@@ -166,14 +175,13 @@ func runStrictAgentHarnessChecks() throws {
                "a logged-out harness refused without saying so: \(refusal(record(.pi, model: "google/gemini")))")
     try expect(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")).contains("cannot run"),
                "a model the harness does not own refused without saying so: \(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")))")
-    try expect(AgentSupervisor.sendRefusal(record: record(.claudeCode, model: "anthropic/opus"), catalog: refusalCatalog) == nil,
+    try expect(AgentSupervisor.sendRefusal(record: record(.claudeCode, model: "anthropic/claude-opus-5"), catalog: refusalCatalog) == nil,
                "a ready harness holding its own model was refused")
 
     let countable = AgentModelCatalog(probeExecutor: { _, arguments, _ in
         switch arguments {
         case ["--list-models"]: return "provider model context max-out thinking images\nopenai-codex gpt-test 1 1 yes no"
         case ["auth", "status", "--json"]: return #"{"loggedIn":true}"#
-        case ["--help"]: return claudeHelp
         case ["login", "status"]: return "Logged in using ChatGPT"
         default: return nil
         }
@@ -182,7 +190,9 @@ func runStrictAgentHarnessChecks() throws {
     try expect(!countable.requestRefresh(), "an in-flight catalogue refresh was not coalesced")
     for _ in 0..<100 where countable.refreshInFlightForQA { Thread.sleep(forTimeInterval: 0.01) }
     let completedProbeCount = countable.probeLaunchCountForQA
-    try expect(completedProbeCount == 4, "one refresh did not run the Pi list, Claude auth/help and Codex auth probes: \(completedProbeCount)")
+    // Three, not four: dropping the `claude --help` scrape dropped a subprocess
+    // off every catalogue refresh.
+    try expect(completedProbeCount == 3, "one refresh did not run exactly the Pi list, Claude auth and Codex auth probes: \(completedProbeCount)")
     try expect(!countable.requestRefresh(now: Date()), "the 15-second refresh throttle was bypassed")
     _ = countable.snapshot(for: .claudeCode)
     _ = countable.snapshot(for: .codex)

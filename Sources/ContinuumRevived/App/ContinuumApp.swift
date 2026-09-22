@@ -5425,16 +5425,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // real validated setter.
             AgentModelCatalog.shared.apply(claudeBackendAvailable: true)
             guard let agentId = self.agentSupervisor.agent(forTile: tileId),
-                  self.agentSupervisor.setProviderSettings(agentID: agentId, model: "anthropic/haiku", thinking: "low")
+                  self.agentSupervisor.setProviderSettings(agentID: agentId, model: "anthropic/claude-haiku-4-5", thinking: "low")
             else {
-                report("FAIL: could not move the spawned agent onto anthropic/haiku"); Foundation.exit(2)
+                report("FAIL: could not move the spawned agent onto anthropic/claude-haiku-4-5"); Foundation.exit(2)
             }
             guard let record = self.agentSupervisor.records[agentId],
                   AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: record, spawnDepth: 0)) is ClaudeAgentRunner
             else {
-                report("FAIL: anthropic/haiku did not route to ClaudeAgentRunner"); Foundation.exit(2)
+                report("FAIL: anthropic/claude-haiku-4-5 did not route to ClaudeAgentRunner"); Foundation.exit(2)
             }
-            report("spawned tile \(tileId), routed to claude (model anthropic/haiku)")
+            report("spawned tile \(tileId), routed to claude (model anthropic/claude-haiku-4-5)")
 
             let deadline = Date().addingTimeInterval(180)
             view.qaSubmitPrompt("Remember this codeword: \(codeword). Reply with just: OK")
