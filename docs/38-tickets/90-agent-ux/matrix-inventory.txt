@@ -53,6 +53,7 @@ check --canvas-persistence-model-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
+check --choice-geometry-check
 check --companion-sync-health-check
 check --completion-awareness-check
 check --component-lab-check
@@ -173,12 +174,15 @@ check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
 check --workspace-api-agents-check
+check --workspace-api-board-check
 check --workspace-api-canvas-check
 check --workspace-api-delegation-check
 check --workspace-api-grants-check
 check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
+check --workspace-delete-failure-check
+check --workspace-management-polish-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
 check --workspace-runtime-install-check
@@ -268,6 +272,7 @@ leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
+leg run_app_check .build/debug/Array --choice-geometry-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
@@ -384,12 +389,15 @@ leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --workspace-api-agents-check
+leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
 leg run_app_check .build/debug/Array --workspace-api-delegation-check
 leg run_app_check .build/debug/Array --workspace-api-grants-check
 leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
+leg run_app_check .build/debug/Array --workspace-delete-failure-check
+leg run_app_check .build/debug/Array --workspace-management-polish-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
 leg run_app_check .build/debug/Array --workspace-runtime-install-check
@@ -459,7 +467,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 142
+count ContinuumRevivedCoreChecks 145
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
