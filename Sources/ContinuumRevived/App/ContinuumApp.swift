@@ -30860,6 +30860,226 @@ extension AppDelegate {
     try expect(folding.rowIdsForQA == foldedIds && folding.disclosureGlyphsForQA[foldedParentIndex] == "▸",
                "…and a child arriving under a folded parent puts the triangle back — got '\(folding.disclosureGlyphsForQA[foldedParentIndex])'")
 
+    // MARK: A4c · a subagent group reads as ONE group, and it visibly ENDS
+    //
+    // THE REPORTED DEFECT, in Dylan's words: "the expanding of subagents for a main
+    // agent looks weird, makes the next subsequent agent under the other look like a
+    // sub agent in itself". Nesting was drawn by exactly ONE thing — a 16 pt card
+    // inset — and by nothing else: no rail, no separator, no perimeter (P1.1 is
+    // explicit that a resting row paints none), and a 2 pt gap between every card
+    // whether or not the two rows were related. So an expanded group was an unbroken
+    // column of identical unfilled cards, the only structural signal was "this one
+    // starts a bit further right", and the first root drawn after a nested child read
+    // as one more member of whatever was above it. The parent's disclosure triangle
+    // made it worse: it sat INSIDE the already-indented card, 2 pt from where its own
+    // child's title starts.
+    //
+    // WHAT IS ASSERTED HERE IS THE OUTCOME, never a constant. Every number below is
+    // read off laid-out views — the connector `draw` will paint, the rect the table
+    // gave each row, the frame the card actually got — and compared BETWEEN rows,
+    // because "where does this group stop" is a fact about two rows and no per-row
+    // accessor can state it.
+    let treeRoot = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000600")!,
+        title: "orchestrator", state: .working,
+        createdAt: LabFixtures.inboxNow, parentId: nil)
+    let treeChildA = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!,
+        title: "worker a", state: .working,
+        createdAt: LabFixtures.inboxNow.addingTimeInterval(60), parentId: treeRoot.id)
+    let treeGrandchild = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000602")!,
+        title: "worker a1", state: .working,
+        createdAt: LabFixtures.inboxNow.addingTimeInterval(120), parentId: treeChildA.id)
+    let treeChildB = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000603")!,
+        title: "worker b", state: .working,
+        createdAt: LabFixtures.inboxNow.addingTimeInterval(180), parentId: treeRoot.id)
+    // THE ROW THE WHOLE TICKET IS ABOUT: an unrelated agent at depth 0, drawn
+    // immediately under a nested child. Oldest, so the frozen newest-first root order
+    // puts it last.
+    let treeSibling = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000604")!,
+        title: "unrelated root", state: .working,
+        createdAt: LabFixtures.inboxNow.addingTimeInterval(-600), parentId: nil)
+    let tree = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    tree.clock = { LabFixtures.inboxNow }
+    let treeWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    treeWindow.contentView = tree
+    tree.reload(rows: [treeRoot, treeChildA, treeGrandchild, treeChildB, treeSibling])
+    tree.layoutForQA()
+
+    // VACUITY FIRST. Every assertion below is about a two-level group followed by an
+    // unrelated root; if the fixture did not draw one, they are all about a flat list.
+    let treeDepths = tree.nestingsForQA.map(\.depth)
+    try expect(tree.rowIdsForQA.count == 5 && treeDepths.count == 5,
+               "the tree fixture must draw five rows — got \(tree.rowIdsForQA.count)/\(treeDepths.count)")
+    try expect(treeDepths.first == 0 && treeDepths.contains(1) && treeDepths.contains(2),
+               "…rooted, two levels deep — got \(treeDepths)")
+    let siblingRow = tree.rowIdsForQA.firstIndex(of: treeSibling.id)!
+    try expect(siblingRow == 4 && treeDepths[siblingRow] == 0 && treeDepths[siblingRow - 1] > 0,
+               "…with an unrelated ROOT drawn immediately under a nested child, which is the defect — depths \(treeDepths), root at \(siblingRow)")
+
+    let treePainting = tree.spinePaintingForQA
+    let treeRowRects = tree.tableRowRectsForQA
+    let siblingRect = treeRowRects[siblingRow]
+    // 1 · THE GROUP IS DRAWN AS A GROUP. Every row of it carries connector ink.
+    let treeInkedRows = Set(treePainting.map(\.tableRow))
+    try expect(treeInkedRows == Set(0..<siblingRow),
+               "exactly the rows of the group draw the connector — inked \(treeInkedRows.sorted()), group is \(Array(0..<siblingRow))")
+    // 2 · AND IT STOPS. Not one point of it reaches the unrelated root: the row below
+    // a group is visibly outside it. This is the assertion the reported bug fails.
+    let lowestInk = treePainting.map { $0.rect.maxY }.max() ?? 0
+    try expect(lowestInk <= siblingRect.minY + 0.5,
+               "the group's ink stops above the next top-level agent — lowest ink \(lowestInk), that row starts at \(siblingRect.minY)")
+    try expect(lowestInk >= treeRowRects[siblingRow - 1].minY,
+               "…and it reaches the LAST member of the group, or it stops early and says nothing — lowest ink \(lowestInk), last member starts at \(treeRowRects[siblingRow - 1].minY)")
+    // 3 · THE ROOT'S LANE IS CONTINUOUS: a reader follows one unbroken line from the
+    // parent's triangle to its last child. Drawn by three different rows, so a gap
+    // here is a real seam on screen.
+    let rootLane = treePainting.filter { $0.segment.kind == .vertical && $0.segment.level == 0 }
+        .map(\.rect).sorted { $0.minY < $1.minY }
+    try expect(rootLane.count >= 2, "the root's lane must be drawn by more than one row — got \(rootLane.count)")
+    try expect(rootLane[0].minY > treeRowRects[0].minY && rootLane[0].minY < treeRowRects[0].maxY,
+               "…starting inside the parent's own row, under its triangle — \(rootLane[0].minY) against \(treeRowRects[0])")
+    var laneGap: Double?
+    for index in 1..<rootLane.count where rootLane[index].minY > rootLane[index - 1].maxY + 0.5 {
+        laneGap = Double(rootLane[index].minY - rootLane[index - 1].maxY)
+    }
+    // …AND THE PIXELS AGREE. The lane crosses `AgentInboxView.rowSpacing` of table
+    // that belongs to no cell, painted out of a subview deliberately taller than the
+    // cell that owns it — and `clipsToBounds` changed default in the macOS 14 SDK,
+    // so "the rects are contiguous" is exactly the claim that can be true while what
+    // you see is a dashed line. Sampled off an offscreen render of the real table.
+    let laneSampleX = Double(rootLane[1].midX)
+    // Sampled NEAR THE TOP of the row, deliberately clear of the elbow the same lane
+    // turns out of at the card's vertical centre — otherwise the "nothing is painted
+    // beside the lane" control is measured on top of the elbow.
+    let insideRow = NSPoint(x: laneSampleX, y: treeRowRects[1].minY + Space.m)
+    let besideLane = NSPoint(x: laneSampleX + Space.m, y: treeRowRects[1].minY + Space.m)
+    let crossing = NSPoint(x: laneSampleX, y: treeRowRects[1].maxY)
+    let ink = tree.tableInkForQA(at: [insideRow, besideLane, crossing])
+    func inkDiffers(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
+        guard let lhs = lhs?.usingColorSpace(.sRGB), let rhs = rhs?.usingColorSpace(.sRGB)
+        else { return false }
+        let delta = abs(lhs.redComponent - rhs.redComponent)
+            + abs(lhs.greenComponent - rhs.greenComponent)
+            + abs(lhs.blueComponent - rhs.blueComponent)
+        return delta > 0.01
+    }
+    try expect(inkDiffers(ink[0], ink[1]),
+               "the lane must be VISIBLE inside a row before its continuity means anything — lane \(String(describing: ink[0])) against the gutter beside it \(String(describing: ink[1]))")
+    try expect(inkDiffers(ink[2], ink[1]),
+               "…and it is painted across the intercell spacing too, not clipped to the cell — at the row boundary \(String(describing: ink[2])), gutter \(String(describing: ink[1]))")
+    try expect(laneGap == nil,
+               "…and unbroken from there down — a \(laneGap ?? 0)pt seam in the lane \(rootLane) over rows \(treeRowRects) depths \(treeDepths)")
+    // 4 · EVERY CHILD TURNS INTO ITS OWN CARD. The elbow is what makes an indented
+    // card a MEMBER rather than a card that happens to start further right, and it
+    // has to meet the card's real leading edge — the card's x is computed in
+    // `layout()`, the elbow's in `InboxSpine`, and these are the two meeting.
+    let treeCardFrames = tree.cardFramesInTableForQA
+    for row in 0..<siblingRow where treeDepths[row] > 0 {
+        let elbows = treePainting.filter { $0.tableRow == row && $0.segment.kind == .elbow }
+        try expect(elbows.count == 1 && elbows[0].segment.level == treeDepths[row] - 1,
+                   "row \(row) at depth \(treeDepths[row]) turns out of its own parent's lane exactly once — got \(elbows.map(\.segment.level))")
+        let cardLeading = treeCardFrames[row]!.minX
+        try expect(abs(elbows[0].rect.maxX - cardLeading) <= 0.5,
+                   "…and meets that row's card at \(cardLeading)pt — the elbow ends at \(elbows[0].rect.maxX)pt")
+        try expect(elbows[0].rect.midY > treeCardFrames[row]!.minY
+                       && elbows[0].rect.midY < treeCardFrames[row]!.maxY,
+                   "…level with the card, not with the gap between rows — \(elbows[0].rect.midY) against \(treeCardFrames[row]!)")
+    }
+    // 5 · THE CONTROL IS OUT OF THE TEXT COLUMN. A parent's triangle used to sit
+    // inside its own indented card, ending 2 pt from where its child's title starts.
+    let treeDisclosureFrames = tree.disclosureFramesInTableForQA
+    let treeTitleFrames = tree.titleFramesInTableForQA
+    try expect(treeDisclosureFrames.count >= 2,
+               "the fixture must draw at least two triangles, or the clearance below is one measurement — got \(treeDisclosureFrames.count)")
+    var worstClearance: Double?
+    for (parentIndex, control) in treeDisclosureFrames {
+        for (childIndex, title) in treeTitleFrames where treeDepths[childIndex] > treeDepths[parentIndex] {
+            let clearance = Double(title.minX - control.maxX)
+            if worstClearance == nil || clearance < worstClearance! { worstClearance = clearance }
+        }
+    }
+    try expect((worstClearance ?? 0) >= Space.m,
+               "no disclosure control comes within \(Space.m)pt of a deeper row's title — worst clearance \(worstClearance ?? 0)pt")
+    // 6 · THE GROUP ENDS IN SPACE AS WELL AS IN INK. The last row of a group is
+    // taller than a card; the unrelated root is exactly a card.
+    // Measured BETWEEN rows, so the table's own intercell spacing cannot be mistaken
+    // for the terminator: the claim is that a group's last row keeps more room than a
+    // row that ends nothing, and that is a difference.
+    let cardPitch = AgentInbox96CellView.rowHeight(for: .a)
+    let lastMemberHeight = Double(treeRowRects[siblingRow - 1].height)
+    let siblingHeight = Double(siblingRect.height)
+    try expect(abs((lastMemberHeight - siblingHeight) - Space.s) <= 0.5,
+               "a group's last row keeps \(Space.s)pt more room than a row that ends nothing — \(lastMemberHeight)pt against \(siblingHeight)pt")
+    try expect(abs(siblingHeight - (cardPitch + AgentInboxView.rowSpacing)) <= 0.5,
+               "…and that row is exactly one card pitch — \(siblingHeight)pt, wanted \(cardPitch + AgentInboxView.rowSpacing)pt")
+    try expect(abs(Double(treeCardFrames[siblingRow - 1]!.height) - Double(treeCardFrames[siblingRow]!.height)) <= 0.5,
+               "…and that room is UNDER the card, never inside it — \(treeCardFrames[siblingRow - 1]!.height)pt against \(treeCardFrames[siblingRow]!.height)pt")
+    // 7 · FOLDING TAKES THE WHOLE CONNECTOR WITH IT. A lane left behind would point
+    // at rows that are no longer there.
+    try expect(tree.clickDisclosureForQA(id: treeRoot.id), "the group must fold")
+    tree.layoutForQA()
+    try expect(tree.spinePaintingForQA.isEmpty,
+               "a folded list draws no connector at all — got \(tree.spinePaintingForQA.count) segments")
+    try expect(tree.tableRowRectsForQA.allSatisfy {
+        abs(Double($0.height) - (cardPitch + AgentInboxView.rowSpacing)) <= 0.5 },
+               "…and no row keeps a terminator gap for a group that is not open — \(tree.tableRowRectsForQA.map(\.height))")
+    try expect(tree.clickDisclosureForQA(id: treeRoot.id), "unfold it again")
+    tree.layoutForQA()
+    try expect(tree.spinePaintingForQA.count == treePainting.count,
+               "…and unfolding draws the same connector back — \(tree.spinePaintingForQA.count) segments, was \(treePainting.count)")
+
+    // 8 · THE `N more` ROW IS A CHILD ROW. It was pinned flat to `Inset.row.left`
+    // with no indent at all, so the hidden children of a NESTED parent advertised
+    // themselves at the leading edge — a "3 more" that read as a top-level agent.
+    let cappedParent = AgentInboxRow(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000610")!,
+        title: "capped middle", state: .working,
+        createdAt: LabFixtures.inboxNow.addingTimeInterval(60), parentId: treeRoot.id)
+    var cappedRows: [AgentInboxRow] = [treeRoot, cappedParent, treeSibling]
+    for index in 0...InboxSort.maxVisibleChildren {
+        cappedRows.append(AgentInboxRow(
+            id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000006%02d", 20 + index))!,
+            title: "leaf \(index)", state: .working,
+            createdAt: LabFixtures.inboxNow.addingTimeInterval(Double(120 + index)),
+            parentId: cappedParent.id))
+    }
+    let capped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 1200))
+    capped.clock = { LabFixtures.inboxNow }
+    let cappedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 1200),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    cappedWindow.contentView = capped
+    capped.reload(rows: cappedRows)
+    capped.layoutForQA()
+    let remainderFrames = capped.remainderLabelFramesForQA
+    try expect(remainderFrames.count == 1,
+               "the capped fixture must draw exactly one remainder row — got \(remainderFrames.count)")
+    let remainderRow = remainderFrames.keys.first!
+    let remainderNesting = capped.nesting(atTableRow: remainderRow)
+    try expect(remainderNesting.depth == 2,
+               "the remainder of a NESTED parent's children is two levels in — got \(remainderNesting.depth)")
+    // Stated as the LANE the words land in rather than an exact x, because an
+    // `NSTextField`'s frame is 2pt wider than the text it pins (that is the same
+    // correction `Metrics.cellTextInset` exists for). The claim is that the words
+    // start inside their own nesting level and not at the list's leading edge.
+    let remainderX = Double(remainderFrames[remainderRow]!.minX)
+    let remainderLane = AgentInbox96CellView.spineMetrics.cardLeading(depth: 2)
+    let rootLaneStart = AgentInbox96CellView.spineMetrics.cardLeading(depth: 0)
+    try expect(remainderX >= remainderLane
+                   && remainderX < remainderLane + AgentInboxView.indentPerLevel,
+               "…and its words are DRAWN in the depth-2 lane — \(remainderX)pt, lane starts at \(remainderLane)pt")
+    try expect(remainderX - rootLaneStart >= 2 * AgentInboxView.indentPerLevel - 0.5,
+               "…a full two levels off the leading edge, which is the defect — \(remainderX - rootLaneStart)pt in")
+    let remainderInk = capped.spinePaintingForQA.filter { $0.tableRow == remainderRow }
+    try expect(remainderInk.contains { $0.segment.kind == .elbow && $0.segment.level == 1 },
+               "…carrying its group's connector like any other member — got \(remainderInk.map { "\($0.segment.kind.rawValue)@\($0.segment.level)" })")
+
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
     empty.reload(rows: [])
     try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
