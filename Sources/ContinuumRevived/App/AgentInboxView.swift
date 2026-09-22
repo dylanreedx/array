@@ -546,6 +546,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// card rather than a hairline shift.
     static let indentPerLevel = Space.xl
 
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// The table's own vertical intercell spacing — room between two rows that
+    /// belongs to NEITHER cell. Named because the tree connector has to cross it:
+    /// a lane drawn only inside the cells is a dashed line with a \(Space.s)pt break
+    /// at every row, and the whole point of the lane is that you can follow it.
+    static let rowSpacing = Space.s
+
     /// Shown when there is nothing to show. A list that renders as an empty
     /// rectangle reads as broken; it also renders as a uniform fill, which the
     /// phase-0 blankness floor is right to call a failure.
@@ -720,6 +727,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// works in agent terms; the two index spaces meet at `tableRow(forRowIndex:)`
     /// and `rowIndex(forTableRow:)` and nowhere else.
     private var items: [InboxListItem] = []
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// One `InboxNesting` per table row, in step with `items`. See `nestings(for:)`.
+    private var nestingByTableRow: [InboxNesting] = []
     /// Whether the shelf is open. VIEW-LOCAL and COLLAPSED BY DEFAULT, exactly like
     /// `collapsedParents` and for the same reason the packet gives ("local UI state,
     /// not persisted per-agent"): whether you have the shelf open on this Mac right
@@ -1162,7 +1172,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // from tokens.
         tableView.style = .plain
         tableView.rowHeight = AgentInboxView.rowHeight
-        tableView.intercellSpacing = NSSize(width: 0, height: Space.s)
+        tableView.intercellSpacing = NSSize(width: 0, height: AgentInboxView.rowSpacing)
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
@@ -2051,9 +2061,54 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Take a new drawn model, and build the two index maps WITH it — one
     /// assignment, so `rows`, `items` and the mapping between them cannot be left
     /// disagreeing by a path that updated only some of them.
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// Where every drawn row sits in the tree, in one pass over the list.
+    ///
+    /// DERIVED HERE AND NOWHERE ELSE, because two things consume it and they must
+    /// not be able to disagree: `heightOfRow` (a group's last row is taller) and the
+    /// cell (which draws the connector into that same extra room). Computing it
+    /// twice is how the extra space ends up under a row that draws no terminator.
+    ///
+    /// A HEADING IS DEPTH 0 AND THAT IS THE POINT: `Snoozed (3)` between two agents
+    /// ends every open group, because nothing below a section heading belongs to
+    /// anything above it.
+    ///
+    /// A remainder is its parent's child: "3 more" lists rows that would have been
+    /// drawn at `parent.depth + 1`, capped by `AgentInboxRow.maxDepth` for the same
+    /// reason `InboxSort.nest` caps a real child.
+    static func nestings(for items: [InboxListItem]) -> [InboxNesting] {
+        var depths: [Int] = []
+        depths.reserveCapacity(items.count)
+        var depthByAgent: [UUID: Int] = [:]
+        for item in items {
+            switch item {
+            case .agent(let row):
+                let depth = max(0, row.depth)
+                depthByAgent[row.id] = depth
+                depths.append(depth)
+            case .fanoutRemainder(let remainder):
+                depths.append(min((depthByAgent[remainder.parentId] ?? 0) + 1,
+                                  AgentInboxRow.maxDepth))
+            case .shelfHeader, .historyHeader, .settledMore:
+                depths.append(0)
+            }
+        }
+        return depths.indices.map { index in
+            InboxNesting(
+                depth: depths[index],
+                nextDepth: index + 1 < depths.count ? depths[index + 1] : 0)
+        }
+    }
+
+    /// What the row at this table index draws of the tree.
+    func nesting(atTableRow row: Int) -> InboxNesting {
+        nestingByTableRow.indices.contains(row) ? nestingByTableRow[row] : .none
+    }
+
     private func setItems(_ next: [InboxListItem]) {
         items = next
         rows = next.compactMap(\.agentRow)
+        nestingByTableRow = AgentInboxView.nestings(for: next)
         rowIndexByTableRow = []
         tableRowByRowIndex = []
         rowIndexByTableRow.reserveCapacity(next.count)
@@ -2342,10 +2397,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the list never branches on state, attention, or lifecycle importance.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         lastHeightQueryColumnWidth = column.width
+        // The room under the LAST row of a group. Added here and reserved by the
+        // cell out of the same function, so the card cannot grow into it.
+        let groupEndGap = CGFloat(
+            AgentInbox96CellView.trailingGap(for: nesting(atTableRow: row)))
         guard let item = item(at: row) else { return AgentInboxView.shelfHeaderHeight }
         guard let model = item.agentRow else {
             switch item {
-            case .fanoutRemainder: return AgentInboxView.slimRowHeight
+            case .fanoutRemainder: return AgentInboxView.slimRowHeight + groupEndGap
             case .shelfHeader, .historyHeader, .settledMore:
                 return AgentInboxView.shelfHeaderHeight
             case .agent: return AgentInboxView.shelfHeaderHeight
@@ -2356,7 +2415,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // content-derived ladder below. Cards only: a slim row is queue-94's and
         // stays queue-94's.
         if let override = cardStyleOverride, model.variant == .card {
-            return CGFloat(override.cardHeight(model))
+            return CGFloat(override.cardHeight(model)) + groupEndGap
         }
         let indent = Double(max(0, model.depth)) * AgentInboxView.indentPerLevel
         let available = max(
@@ -2418,6 +2477,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.identifier = NSUserInterfaceItemIdentifier(
                     "agent-inbox-fanout-\(remainder.parentId.uuidString)")
                 cell.onExpand = { [weak self] in self?.expandFanout(parentId: remainder.parentId) }
+                cell.setNesting(nesting(atTableRow: row))
                 cell.apply(remainder: remainder)
                 fanoutRemainderCellsByParent[remainder.parentId] = cell
                 return cell
@@ -2475,6 +2535,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             now: renderNow
         )
         if let redesigned = cell as? AgentInbox96CellView {
+            // The tree connector. Set from the LIST, which is the only thing that
+            // knows what is drawn above and below this row.
+            redesigned.setNesting(nesting(atTableRow: row))
             let nudgeTarget = settleNudgePhaseVisible ? settleNudgeTargetID(now: renderNow) : nil
             redesigned.showSettleNudge(nudgeTarget == model.id) { [weak self] in
                 guard let self else { return }
@@ -4578,6 +4641,109 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// disclosure glyph on it ("" for a row with no children). Read off the laid-out
     /// cells rather than recomputed from `depth`, which would assert nothing.
     var indentsForQA: [Double] { cells().map(\.qaIndent) }
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// THE GROUPING AS DRAWN. Every connector segment the list actually painted,
+    /// in the TABLE's coordinates, tagged with the row that painted it.
+    ///
+    /// Table coordinates and not the cell's, deliberately: the claim this ticket
+    /// makes is about where a group STOPS relative to the row below it, and that is
+    /// a fact about two rows. A per-cell rect cannot state it, and a witness that
+    /// recomputed the geometry from `depth` would be asserting its own arithmetic.
+    var spinePaintingForQA: [(tableRow: Int, segment: InboxSpineSegment, rect: NSRect)] {
+        var out: [(tableRow: Int, segment: InboxSpineSegment, rect: NSRect)] = []
+        for row in 0..<tableView.numberOfRows {
+            guard let view = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+            else { continue }
+            let segments: [InboxSpineSegment]
+            switch view {
+            case let card as AgentInbox96CellView: segments = card.qaSpineSegmentsForQA
+            case let tail as AgentInboxRemainderView: segments = tail.qaSpineSegmentsForQA
+            default: segments = []
+            }
+            for segment in segments {
+                let local = NSRect(x: segment.minX, y: segment.minY,
+                                   width: segment.width, height: segment.height)
+                out.append((row, segment, view.convert(local, to: tableView)))
+            }
+        }
+        return out
+    }
+    /// The rect the table gave each row, so a witness can say "below this row".
+    var tableRowRectsForQA: [NSRect] {
+        (0..<tableView.numberOfRows).map { tableView.rect(ofRow: $0) }
+    }
+    /// The disclosure control and the row title of every materialized card, in the
+    /// TABLE's coordinates — the two things the reported defect put side by side.
+    var disclosureFramesInTableForQA: [Int: NSRect] {
+        var out: [Int: NSRect] = [:]
+        for row in 0..<tableView.numberOfRows {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInbox96CellView,
+                  let frame = cell.qaDisclosureFrameForQA else { continue }
+            out[row] = cell.convert(frame, to: tableView)
+        }
+        return out
+    }
+    var titleFramesInTableForQA: [Int: NSRect] {
+        var out: [Int: NSRect] = [:]
+        for row in 0..<tableView.numberOfRows {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInbox96CellView else { continue }
+            out[row] = cell.convert(cell.qaTitleFrameForQA, to: tableView)
+        }
+        return out
+    }
+    /// Where the `N more` row put its words. The remainder is a CHILD row, and this
+    /// is the accessor that can say whether it was drawn like one.
+    var remainderLabelFramesForQA: [Int: NSRect] {
+        var out: [Int: NSRect] = [:]
+        for row in 0..<tableView.numberOfRows {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInboxRemainderView else { continue }
+            out[row] = cell.qaLabelFrameForQA
+        }
+        return out
+    }
+    /// Where each materialized card's own card view was framed, in the TABLE's
+    /// coordinates — the edge the elbow has to meet.
+    var cardFramesInTableForQA: [Int: NSRect] {
+        var out: [Int: NSRect] = [:]
+        for row in 0..<tableView.numberOfRows {
+            guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? AgentInbox96CellView else { continue }
+            out[row] = cell.convert(cell.qaCardFrameForQA, to: tableView)
+        }
+        return out
+    }
+    /// WHAT THE TABLE ACTUALLY PAINTED at these points, in the table's own
+    /// coordinates. Rendered offscreen with `cacheDisplay` — never to the display,
+    /// which a check may not take (`docs/38-tickets` P0.4 / the runbook).
+    ///
+    /// Geometry accessors cannot answer one question this ticket turns on: the
+    /// connector crosses the table's intercell spacing, which belongs to no cell, by
+    /// drawing out of a subview deliberately larger than the cell that owns it. A
+    /// rect can say that is continuous while `clipsToBounds` quietly makes the
+    /// pixels dashed.
+    func tableInkForQA(at points: [NSPoint]) -> [NSColor?] {
+        let rect = tableView.bounds
+        guard rect.width > 0, rect.height > 0,
+              let rep = tableView.bitmapImageRepForCachingDisplay(in: rect) else {
+            return points.map { _ in nil }
+        }
+        tableView.cacheDisplay(in: rect, to: rep)
+        let scaleX = Double(rep.pixelsWide) / Double(rect.width)
+        let scaleY = Double(rep.pixelsHigh) / Double(rect.height)
+        return points.map { point in
+            let x = Int(((Double(point.x) - Double(rect.minX)) * scaleX).rounded(.down))
+            let y = Int(((Double(point.y) - Double(rect.minY)) * scaleY).rounded(.down))
+            guard x >= 0, y >= 0, x < rep.pixelsWide, y < rep.pixelsHigh else { return nil }
+            return rep.colorAt(x: x, y: y)
+        }
+    }
+    /// The tree the list derived, row for row.
+    var nestingsForQA: [InboxNesting] {
+        (0..<tableView.numberOfRows).map { nesting(atTableRow: $0) }
+    }
     // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
     /// The chord each row is ADVERTISING ("" for a row with no pill), read off the
     /// rendered pill rather than recomputed from the index.
@@ -5472,6 +5638,17 @@ final class AgentInboxRemainderView: NSTableCellView {
     private let button = NSButton(frame: .zero)
     private var remainder: FanoutRemainder?
     var onExpand: (() -> Void)?
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// The connector, and the two constraints the nesting moves.
+    ///
+    /// THIS ROW USED TO LIE ABOUT ITS PLACE. "N more" is the tail of a CHILD set,
+    /// and it was pinned flat to `Inset.row.left` with no indent at all — so the
+    /// hidden children of a nested parent advertised themselves at the leading edge,
+    /// reading as one more top-level agent.
+    private let spine = InboxSpineView()
+    private var labelLeading: NSLayoutConstraint?
+    private var labelCentre: NSLayoutConstraint?
+    private var nesting: InboxNesting = .none
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -5493,14 +5670,20 @@ final class AgentInboxRemainderView: NSTableCellView {
         button.action = #selector(expandClicked)
         addSubview(button)
         addSubview(label)
+        addSubview(spine)
+        let leading = label.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: Inset.row.left)
+        let centre = label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        labelLeading = leading
+        labelCentre = centre
         NSLayoutConstraint.activate([
             button.leadingAnchor.constraint(equalTo: leadingAnchor),
             button.trailingAnchor.constraint(equalTo: trailingAnchor),
             button.topAnchor.constraint(equalTo: topAnchor),
             button.bottomAnchor.constraint(equalTo: bottomAnchor),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            leading,
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Inset.row.right),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            centre,
         ])
         applyTokens()
     }
@@ -5528,6 +5711,37 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     @objc private func expandClicked() { onExpand?() }
 
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// Where this remainder sits in the tree — it is a member of its parent's
+    /// group, so it takes the group's indent and the group's connector, and it can
+    /// be the row a group ENDS on.
+    func setNesting(_ nesting: InboxNesting) {
+        guard nesting != self.nesting else { return }
+        self.nesting = nesting
+        let metrics = AgentInbox96CellView.spineMetrics
+        labelLeading?.constant = Inset.row.left
+            + Double(nesting.depth) * metrics.indentPerLevel
+        // The extra room a group's last row gets is BELOW the content, exactly as
+        // it is on a card, so the words do not drift off the list's rhythm.
+        labelCentre?.constant = -metrics.trailingGap(nesting) / 2
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let metrics = AgentInbox96CellView.spineMetrics
+        let content = Double(bounds.height) - metrics.trailingGap(nesting)
+        let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
+        clipsToBounds = false
+        spine.clipsToBounds = false
+        spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        spine.show(
+            nesting, metrics: metrics, cardTop: Double(bleed), cardHeight: max(1, content),
+            rowHeight: Double(bounds.height) + Double(AgentInboxView.rowSpacing))
+    }
+
+    var qaSpineSegmentsForQA: [InboxSpineSegment] { spine.qaSegmentsForQA }
+    var qaLabelFrameForQA: NSRect { label.convert(label.bounds, to: self) }
     @discardableResult
     func clickForQA() -> Bool {
         guard remainder != nil else { return false }

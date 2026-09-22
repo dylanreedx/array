@@ -276,6 +276,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     let anatomy: SidebarRowAnatomy
 
     private let card = AgentInboxCardView()
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// The tree connector, in the indent gutters to the left of the card.
+    private let spine = InboxSpineView()
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
@@ -317,12 +320,43 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private let statusGlyph = StatusGlyphView()
     private var layoutColumnWidth: Double?
     private var indent: Double = 0
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// Where this row sits in the tree. Set through its OWN call for the reason
+    /// `applyInteraction` is: `apply` paints what the agent IS, and which rows are
+    /// drawn above and below it is a fact about the LIST. It also changes the row's
+    /// height, so the list has to derive it before it answers `heightOfRow` — one
+    /// value, computed once, used by both.
+    private var nesting: InboxNesting = .none
 
     /// The row height this anatomy needs: the card, plus the gap that separates it
     /// from the next one. Every band is always drawn, which is the entire point of
     /// the redesign, so unlike the queue-94 row this does not vary with content.
     static func rowHeight(for proposal: SidebarDensityProposal) -> Double {
         Double(proposal.pitch)
+    }
+
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// The list's outer gutter — where a ROOT card's leading edge sits. Named
+    /// rather than typed at the one call site, because the tree connector has to
+    /// land in the same lanes the cards were pushed into.
+    static let outerGutter: Double = Double(SidebarDensityProposal.outerGutter)
+
+    /// The rhythm the connector shares with the cards. Every term is the list's
+    /// own: the lane IS the indent step, so widening the nesting moves both.
+    static var spineMetrics: InboxSpineMetrics {
+        InboxSpineMetrics(
+            gutter: outerGutter,
+            indentPerLevel: AgentInboxView.indentPerLevel,
+            lineWidth: LineWidth.hairline,
+            endGap: Space.s)
+    }
+
+    /// How much taller than a card a row at this place in the tree is. Read by the
+    /// list to answer `heightOfRow` and by this cell to keep the card the same
+    /// height it would have been anywhere else — one function, so the extra room a
+    /// group's last row gets cannot end up inside its card.
+    static func trailingGap(for nesting: InboxNesting) -> Double {
+        spineMetrics.trailingGap(nesting)
     }
 
     init(
@@ -339,6 +373,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         wantsLayer = true
 
         addSubview(card)
+        // ABOVE the card: a parent's descender crosses its own card's leading
+        // inset, and the card paints a fill while hovered, selected or active.
+        addSubview(spine)
         card.addSubview(decorations)
         card.addSubview(statusGlyph)
 
@@ -399,6 +436,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     func setLayoutWidth(_ width: Double) {
         layoutColumnWidth = width
+        needsLayout = true
+    }
+
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// Tell the row what the rows around it are. See `nesting`.
+    func setNesting(_ nesting: InboxNesting) {
+        guard nesting != self.nesting else { return }
+        self.nesting = nesting
         needsLayout = true
     }
 
@@ -807,23 +852,50 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     override func layout() {
         super.layout()
-        let gutter: CGFloat = 4
+        let gutter = CGFloat(Self.outerGutter)
         let gap = proposal.gapBetweenRows
+        // The last row of a group is TALLER than its card by `endGap`. Space is the
+        // strongest grouping cue a list has and it costs no colour: without it, a
+        // root drawn straight under a child is one more card in an unbroken column.
+        // The card keeps the height it has everywhere else — the room goes below it.
+        let groupEndGap = CGFloat(Self.trailingGap(for: nesting))
         card.frame = NSRect(
             x: gutter + CGFloat(indent), y: gap / 2,
             width: max(0, bounds.width - gutter * 2 - CGFloat(indent)),
-            height: max(0, bounds.height - gap))
+            height: max(0, bounds.height - gap - groupEndGap))
         decorations.frame = card.bounds
+        // THE CONNECTOR BLEEDS INTO THE INTERCELL SPACING, by half of it at each
+        // end, so the lanes of two stacked rows meet exactly. A cell owns its own
+        // height and nothing between it and the next one; a lane confined to the
+        // cell is broken every row by `AgentInboxView.rowSpacing`, and a lane you
+        // cannot follow is not a lane. `clipsToBounds` is off on both views for the
+        // same reason — the default flipped in the macOS 14 SDK.
+        let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
+        clipsToBounds = false
+        spine.clipsToBounds = false
+        spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        spine.show(
+            nesting, metrics: Self.spineMetrics,
+            cardTop: Double(card.frame.minY + bleed), cardHeight: Double(card.frame.height),
+            rowHeight: Double(bounds.height + bleed * 2))
 
         let insetH: CGFloat = 10
         var textLeft = insetH + anatomy.leadingGutter
         let textRight = card.bounds.width - insetH
 
+        // THE TRIANGLE LIVES IN THE CONNECTOR LANE, not in the text column.
+        // It used to sit at `textLeft` inside an already-indented card, which put a
+        // parent's control and its child's title within 2 pt of the same x — the
+        // reported defect: the second group under the first read as nested inside
+        // it. Centred on `spineX(depth)` instead, it is the head of its own
+        // descender and 11 pt clear of any child title.
         if !disclosureButton.isHidden {
             let side: CGFloat = 14
+            let lane = CGFloat(AgentInboxView.indentPerLevel)
+            let laneX = (lane - side) / 2
             disclosureButton.frame = inCard(NSRect(
-                x: textLeft, y: (card.bounds.height - side) / 2, width: side, height: side))
-            textLeft += side + 3
+                x: laneX, y: (card.bounds.height - side) / 2, width: side, height: side))
+            textLeft = max(textLeft, laneX + side + CGFloat(Space.s))
         }
 
         var bandY = proposal.insetV
@@ -1101,6 +1173,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
     var qaGlyphAlpha: Double { Double(statusGlyph.alphaValue) }
     var qaIndent: Double { indent }
+    // Ticket: .plans/0721-subagents-handoff.md
+    /// The connector this row actually painted, and the rect the card actually got
+    /// — both read off the laid-out views, so a witness measures the render.
+    var qaSpineSegmentsForQA: [InboxSpineSegment] { spine.qaSegmentsForQA }
+    var qaCardFrameForQA: NSRect { card.convert(card.bounds, to: self) }
+    var qaDisclosureFrameForQA: NSRect? {
+        disclosureButton.isHidden
+            ? nil : disclosureButton.convert(disclosureButton.bounds, to: self)
+    }
+    var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+    var qaNestingForQA: InboxNesting { nesting }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaJumpHint: String { jumpHint.qaChord }
     var qaJumpHintHitTestPassesThrough: Bool {

@@ -3015,8 +3015,14 @@ enum UIProbeGeometry {
                     throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached parent height at \(phase) was \(transitionProbe.inbox.rowHeightForQA(id: rollupParentID) ?? -1), wanted \(expectedParentHeight) from the live \(projectVisible ? "project+name+rollup" : "name+rollup") bands")
                 }
                 if remainderExpected {
+                    // `.plans/0721-subagents-handoff.md`: the remainder is the LAST
+                    // row of its parent's group, and a group's last row is taller
+                    // than its content by `Space.s` so the next root cannot read as
+                    // one more sibling. Stated as the token, not re-derived through
+                    // the production function this leg exists to watch.
+                    let expectedRemainder = AgentInboxView.slimRowHeight + Space.s
                     guard let remainderHeight = transitionProbe.inbox.fanoutRemainderHeightForQA(parentId: rollupParentID),
-                          abs(remainderHeight - AgentInboxView.slimRowHeight) <= 0.5,
+                          abs(remainderHeight - expectedRemainder) <= 0.5,
                           transitionProbe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rollupParentID],
                           transitionProbe.inbox.tableRowCountForQA
                             == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
