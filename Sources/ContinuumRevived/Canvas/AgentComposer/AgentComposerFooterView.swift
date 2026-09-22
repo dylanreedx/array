@@ -26,6 +26,9 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     private var usesCompactLabels = false
     private var usesCondensedModelTrigger = false
     private var hidesEffort = false
+    /// True only while `layout()` is installing the tier it just decided on, so
+    /// that rebuild does not ask for the very layout pass it is running inside.
+    private var isInstallingFitDecision = false
     private var contrastObservations: [NSKeyValueObservation] = []
     /// WS5: the tile's page-zoom rung, delivered by the subtree walk.
     private(set) var pageZoom: AgentPageZoom = .default
@@ -166,7 +169,9 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
             usesCondensedModelTrigger = condensesModelTrigger
             hidesEffort = shouldHideEffort
             effortButton.isHidden = shouldHideEffort
+            isInstallingFitDecision = true
             rebuildChoices()
+            isInstallingFitDecision = false
         }
     }
 
@@ -190,11 +195,16 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         includeEffort: Bool = true
     ) -> CGFloat {
         let condensed = condenseModelTrigger ?? usesCondensedModelTrigger
+        // `selectedHarness`, not `recordHarness`: `rebuildChoices` installs the
+        // titles from `snapshot(for: selectedHarness)` and shows that harness on
+        // the trigger, so measuring the other one sizes the row against a string
+        // it never draws.
+        let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
         let modelTitle = compact && condensed
             ? "Model"
-            : (compact ? Self.abbreviatedModel(settings.model) : (AgentModelCatalog.shared.displayName(for: settings.model, harness: recordHarness) ?? settings.model))
+            : (compact ? Self.abbreviatedModel(settings.model) : (snapshot.displayNames[settings.model] ?? settings.model))
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
-        let harnessTitle = compact ? Self.abbreviatedHarness(recordHarness) : recordHarness.rawValue
+        let harnessTitle = compact ? Self.abbreviatedHarness(selectedHarness) : selectedHarness.rawValue
         let gap = CGFloat(pageZoom.scaled(Space.m))
         let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle, zoom: pageZoom)
             + gap + ChoiceButton.fittingWidth(forTitle: modelTitle, zoom: pageZoom)
@@ -275,6 +285,16 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: usesCompactLabels ? Self.abbreviatedEffort(effort) : effort.capitalized) }
         modelButton.selectedID = selectedHarness == recordHarness ? settings.model : nil
         effortButton.selectedID = settings.thinking
+        // Installing titles changes what the row NEEDS, so the fit decision owes
+        // a re-run. The async catalogue refresh arrives long after the row last
+        // laid out, and a settings/launch apply can carry a longer or shorter
+        // model name too; without this the footer keeps the tier it chose for the
+        // previous strings — abbreviating on a row that now has room, or drawing
+        // full titles on a row that no longer does.
+        if !isInstallingFitDecision {
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
     }
 
     private func pick(harness: AgentHarness? = nil, model: String? = nil, thinking: String? = nil) {
