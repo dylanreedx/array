@@ -6317,7 +6317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
         // returned silently — closing an agent tile did nothing at all, and the
         // agent it belonged to was never archived out of the inbox.
-        guard let tile = canvasView.projectTiles().first(where: { $0.id == id })
+        // `allWorkspaceTiles()` spans the compatibility canvas AND every zone
+        // layer. `projectTiles()` answers for the ACTIVE zone only, so a tile in
+        // an ambient or non-active group zone was never found and delete
+        // returned silently — the same class of bug, one model further out.
+        guard let tile = canvasView.allWorkspaceTiles().first(where: { $0.id == id })
             ?? canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
 
         fputs("deleteTile entry kind=\(tile.kind.rawValue) id=\(id.uuidString)\n", stderr)
@@ -14201,9 +14205,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
         case .alertFirstButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: true)
-        case .alertSecondButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: false)
+        case .alertSecondButtonReturn: deleteZoneWithTiles(zoneId)
         default: break
         }
+    }
+
+    /// Tiles deleted by the in-flight "Delete Tiles" zone close, read by
+    /// `persistClosedZone` so they leave the WorkspaceDocument rather than being
+    /// demoted to ambient tiles that rehydrate on the next mount.
+    private var zoneCloseDeletedTileIds: Set<UUID> = []
+
+    /// "Delete Tiles" on the zone-close alert.
+    ///
+    /// Every member goes through `deleteTile(id:)` — the same path the tile's own
+    /// close button uses — so the PTY, browser, note store, managed session and
+    /// agent record are torn down exactly once each. `CanvasNSView.closeZone`
+    /// used to do the deletion itself over `canvasState.tiles`, which is empty
+    /// for a hydrated zone, so the loop body never ran and nothing was deleted.
+    private func deleteZoneWithTiles(_ zoneId: UUID) {
+        guard let canvasView else { return }
+        // A project zone's tiles are the PROJECT's: shared, persisted in its own
+        // store, and not this zone's to delete. Closing one keeps them.
+        guard canvasView.isGroupZone(zoneId) else {
+            canvasView.closeZone(zoneId: zoneId, keepTiles: true)
+            return
+        }
+        let memberIds = canvasView.tileIds(inZone: zoneId)
+        for id in memberIds { deleteTile(id: id) }
+        zoneCloseDeletedTileIds = Set(memberIds)
+        defer { zoneCloseDeletedTileIds = [] }
+        canvasView.closeZone(zoneId: zoneId, keepTiles: false)
     }
 
     /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
@@ -14211,7 +14242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func persistClosedZone(_ zoneId: UUID) {
         if let workspaceRuntime {
             do {
-                try workspaceRuntime.commitClosedZone(zoneId)
+                try workspaceRuntime.commitClosedZone(zoneId, deletingTileIds: zoneCloseDeletedTileIds)
                 reloadWorkspaceSidebar()
             } catch {
                 fputs("persistClosedZone failed: \(error)\n", stderr)
@@ -14236,6 +14267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if document.lastActiveZoneId == zoneId {
                 document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId
             }
+            document.removeTiles(ids: zoneCloseDeletedTileIds)
             document.setTiles([], forZone: zoneId)
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)

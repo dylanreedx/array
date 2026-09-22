@@ -135,11 +135,17 @@ final class WorkspaceRuntime {
         try persistWorkspaceDocument()
     }
 
-    func commitClosedZone(_ zoneId: UUID) throws {
+    /// `deletingTileIds` are tiles the user asked to delete along with the zone.
+    /// They must leave the document outright: `setTiles([], forZone:)` only
+    /// clears `zoneId`, so without this they come back as ambient tiles on the
+    /// next mount. The membership write still runs afterwards for the members
+    /// that were KEPT, which spill onto the bare canvas.
+    func commitClosedZone(_ zoneId: UUID, deletingTileIds: Set<UUID> = []) throws {
         guard document.zones.contains(where: { $0.zoneId == zoneId }) else {
             throw WorkspaceMutationError.zoneNotFound(zoneId)
         }
         document.zones.removeAll { $0.zoneId == zoneId }
+        document.removeTiles(ids: deletingTileIds)
         document.setTiles([], forZone: zoneId)
         if document.lastActiveZoneId == zoneId {
             document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId

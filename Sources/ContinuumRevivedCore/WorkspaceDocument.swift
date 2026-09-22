@@ -157,6 +157,18 @@ public struct WorkspaceDocument: Equatable, Sendable {
         }
     }
 
+    /// Delete ambient tiles outright. `setTiles(_:forZone:)` is a MEMBERSHIP
+    /// write: a tile leaving the zone keeps its row and only loses its `zoneId`,
+    /// which is exactly right for a zone that spills its members onto the canvas
+    /// and exactly wrong for one the user asked to delete along with its tiles.
+    /// Closing a zone with "Delete Tiles" used to route through that membership
+    /// write, so every deleted tile rehydrated as an ambient tile on the next
+    /// mount. Witness: `--zone-close-keep-delete-check`.
+    public mutating func removeTiles(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        ambientTiles.removeAll { ids.contains($0.id) }
+    }
+
     /// The LWW register write for one ambient tile — the production sink for
     /// `Op.setTileZone` targeting a tile stored on this document. Mutates ONLY
     /// the `zoneId` field of the addressed tile; every sibling field is

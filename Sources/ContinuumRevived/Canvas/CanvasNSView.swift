@@ -2086,11 +2086,22 @@ final class CanvasNSView: NSView, TokenThemed {
     func closeZone(zoneId: UUID, keepTiles: Bool) {
         guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
         let isGroupZone = liveZones[idx].projectId == nil
-        let memberIds = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }.map { $0.id }
+        let memberIds = tileIds(inZone: zoneId)
         if !keepTiles && isGroupZone {
             for id in memberIds {
                 setTileZone(id, zoneId: nil)
                 removeTile(id: id)
+            }
+            // The layer is empty now that every member has been removed, so drop
+            // it with the zone. A layer left installed keeps its render model and
+            // its (now absent) tile views registered under a zone that no longer
+            // exists.
+            if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }), layer.tiles.isEmpty {
+                removeZoneLayer(zoneId: zoneId)
+                onZoneClosed?(zoneId)
+                layoutAllTiles()
+                delegate?.canvasDidChange(self)
+                return
             }
         } else {
             for id in memberIds { setTileZone(id, zoneId: nil) }  // spill to bare canvas
@@ -2103,6 +2114,13 @@ final class CanvasNSView: NSView, TokenThemed {
         onZoneClosed?(zoneId)
         layoutAllTiles()
         delegate?.canvasDidChange(self)
+    }
+
+    /// Whether `zoneId` is a GROUP zone (no owning project). A project zone's
+    /// tiles belong to the project — shared and persisted in its own store — so
+    /// closing one never deletes them.
+    func isGroupZone(_ zoneId: UUID) -> Bool {
+        liveZones.first(where: { $0.zoneId == zoneId })?.projectId == nil
     }
 
     /// World-space member tile frames for `zone`. Tiles store world frames, so a
@@ -6434,8 +6452,18 @@ final class CanvasNSView: NSView, TokenThemed {
     var installedZoneLayerIds: [UUID] { zoneLayerOrder }
 
     /// Test introspection: the tile ids a layer currently owns.
+    /// Every tile currently in `zoneId`, read from whichever model owns it.
+    ///
+    /// HAZARD 9. This used to answer `[]` for a zone with no installed layer,
+    /// which reads as "the zone is empty" and is indistinguishable from "this
+    /// zone's tiles live in the compatibility scene". Closing a zone believed
+    /// the first, found no members, and deleted nothing at all — "Delete Tiles"
+    /// left every tile on the canvas. Witness: `--zone-close-keep-delete-check`.
     func tileIds(inZone zoneId: UUID) -> [UUID] {
-        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.tiles.map(\.id) ?? []
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            return layer.tiles.map(\.id)
+        }
+        return canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }.map(\.id)
     }
 
     /// The tiles a layer currently owns, in its live in-memory order. This is the
@@ -8010,13 +8038,73 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(cC.canvasState.tiles.contains { $0.id == mC }, "PROJECT close must NOT delete the project's tiles, even on 'delete'")
         try expect(cC.qaZoneMembership(of: mC) == nil, "PROJECT close: member spills to bare")
 
+        // D. THE PRODUCTION SHAPE: a group zone whose tiles live in a ZoneLayer.
+        //
+        // Legs A-C build their fixture with `CanvasState(tiles:)` + `install(tileView:)`,
+        // i.e. the FLAT compatibility model only. A real group zone is hydrated as
+        // a ZoneLayer and `canvasState.tiles` is empty for it, so `closeZone`'s
+        // member filter matched nothing, the delete loop never ran, and every tile
+        // survived — while this check stayed green. Assert the OUTCOME on the model
+        // that actually owns the tiles.
+        let zD = UUID()
+        let mD = UUID()
+        let placementD = ZonePlacement(zoneId: zD, projectId: nil,
+                                       origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300),
+                                       color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "ZD", navKey: nil)
+        let tileD = Tile(id: mD, kind: .note, title: "d", frame: TileFrame(x: 40, y: 40, width: 120, height: 90),
+                         zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let cD = CanvasNSView(
+            canvasState: CanvasState(viewport: vp, tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: placementD,
+            zoneRenderModels: [ZoneRenderModel(placement: placementD, displayName: "ZD")],
+            showsZoneChrome: true)
+        cD.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowD = NSWindow(contentRect: cD.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowD.contentView = cD
+        windowD.orderFrontRegardless()
+        let viewD = DescriptorTileNSView(tile: tileD)
+        let layerD = ZoneLayer(placement: placementD,
+                               renderModel: ZoneRenderModel(placement: placementD, displayName: "ZD"),
+                               tiles: [tileD])
+        layerD.tileViews[mD] = viewD
+        cD.upsertZoneLayer(layerD)
+        cD.layoutSubtreeIfNeeded()
+
+        // Positive control: the fixture really is layer-backed and really is empty
+        // in the flat model. Without this, leg D could pass for the wrong reason.
+        try expect(cD.canvasState.tiles.isEmpty,
+                   "LAYER fixture: the flat model must be empty, or this leg does not exercise the ZoneLayer path")
+        try expect(cD.tileIds(inZone: zD) == [mD],
+                   "LAYER fixture: the zone must report its layer member before the close")
+
+        cD.onZoneCloseRequested = { [weak cD] id in cD?.closeZone(zoneId: id, keepTiles: false) }
+        guard let closeRectD = cD.zoneCloseButtonScreenRect(for: placementD) else {
+            throw CheckError.failed("LAYER: no close-button rect")
+        }
+        let pD = NSPoint(x: closeRectD.midX, y: cH - closeRectD.midY)
+        guard let downD = NSEvent.mouseEvent(with: .leftMouseDown, location: pD, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: windowD.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1)
+        else { throw CheckError.failed("LAYER: could not synthesize close click") }
+        cD.mouseDown(with: downD)
+
+        try expect(!cD.qaLiveZoneIds.contains(zD), "LAYER DELETE: zone must be removed")
+        try expect(cD.tileIds(inZone: zD).isEmpty,
+                   "LAYER DELETE: the zone must own no tiles after the close (got \(cD.tileIds(inZone: zD).count))")
+        try expect(cD.allWorkspaceTiles().allSatisfy { $0.id != mD },
+                   "LAYER DELETE: the member must be gone from EVERY model, not just the flat one")
+        try expect(viewD.superview == nil, "LAYER DELETE: the member's view must leave the canvas")
+        try expect(cD.tileId(at: CGPoint(x: 100, y: 85)) == nil,
+                   "LAYER DELETE: nothing may remain clickable where the member was")
+
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent("zone-close-keep-delete-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
-        try JSONSerialization.data(withJSONObject: ["check": "zone-close-keep-delete", "legs": ["group-keep", "group-delete", "project-delete-keeps"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        try JSONSerialization.data(withJSONObject: ["check": "zone-close-keep-delete", "legs": ["group-keep", "group-delete", "project-delete-keeps", "layer-group-delete"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 
