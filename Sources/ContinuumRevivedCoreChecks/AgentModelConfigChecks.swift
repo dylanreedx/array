@@ -41,9 +41,50 @@ func runAgentModelConfigChecks() {
     // report whatever the operator's own `continuum.agents.backend` happened to
     // say: green on a machine storing "pi (all providers)", red in three places on
     // a clean one. A check that changes verdict with a preference is not a witness.
+    //
+    // Claude Code's ground truth is the anthropic half of the same
+    // `pi --list-models` reading (2026-09-21), verbatim, dated pins included.
+    // It is NOT derived from `curatedCatalogModels` — deriving it would make
+    // the subset rule below circular and would let a hand-typed id that no
+    // provider lists pass as "exact".
+    let anthropicCatalogue: Set<String> = [
+        "anthropic/claude-fable-5",
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-haiku-4-5-20251001",
+        "anthropic/claude-opus-4-5",
+        "anthropic/claude-opus-4-5-20251101",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-4-5",
+        "anthropic/claude-sonnet-4-5-20250929",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-5",
+    ]
+    expect(Set(ClaudeCLIBackend.curatedCatalogModels).isSubset(of: anthropicCatalogue),
+           "the pinned anthropic catalogue snapshot is missing curated claude ids: \(Set(ClaudeCLIBackend.curatedCatalogModels).subtracting(anthropicCatalogue).sorted()) — refresh this literal when the provider catalogue changes")
+
+    // The claude harness must never offer an ALIAS again. `opus`, `sonnet` and
+    // `haiku` are what it used to serve: each renames itself under the user on
+    // every Anthropic release, is not a key in the context-window map (so the
+    // radial ring had no denominator), and can never name a PREVIOUS model.
+    let retiredClaudeAliases = ["anthropic/opus", "anthropic/sonnet", "anthropic/haiku", "anthropic/fable"]
+    for alias in retiredClaudeAliases {
+        expect(!ClaudeCLIBackend.curatedCatalogModels.contains(alias),
+               "the claude catalogue must not offer the alias \(alias)")
+    }
+    for name in ClaudeCLIBackend.curatedCatalogDisplayNames.values {
+        expect(!name.lowercased().contains("latest"),
+               "a claude display name must name a model, never \"latest\": \(name)")
+    }
+    expect(Set(ClaudeCLIBackend.curatedCatalogDisplayNames.keys) == Set(ClaudeCLIBackend.curatedCatalogModels),
+           "every curated claude id needs exactly one display name, and vice versa")
+
     let catalogueByHarness: [AgentHarness: Set<String>] = [
         .pi: catalogue,
-        .claudeCode: ["anthropic/opus", "anthropic/sonnet", "anthropic/haiku"],
+        .claudeCode: anthropicCatalogue,
         .codex: catalogue,
     ]
 
@@ -140,8 +181,7 @@ func runAgentModelConfigChecks() {
     #if os(macOS)
     // Pi's Config defaults from PI's catalogue, not from whichever harness settings
     // currently seed. Under strict ownership the ambient harness can be Claude
-    // Code, and `anthropic/opus` handed to `pi --model` is a PATTERN — the fuzzy
-    // match P0.10 exists to prevent.
+    // Code, whose anthropic ids Pi does not offer at all (`PiCatalogPolicy`).
     let resolved = AgentModelConfig.resolvedFromDefaults(harness: .pi)
     let config = PiAgentRunner.Config(cwd: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
     expect(config.model == resolved.model && config.thinking == resolved.thinking,
@@ -191,7 +231,23 @@ func runAgentModelCatalogChecks() {
     catalog.apply(listModelsOutput: "")
     expect(catalog.options(fallback: ["f/one"]) == ["f/one"], "an empty probe result must not blank the options")
     catalog.apply(listModelsOutput: fixture)
-    expect(catalog.options(fallback: ["f/one"]) == parsed, "a successful probe replaces the fallback")
+    expect(catalog.options(fallback: ["f/one"]) == ["openai-codex/gpt-5.6-sol"],
+           "a successful probe replaces the fallback, minus the providers Pi may not offer, got \(catalog.options(fallback: ["f/one"]))")
+
+    // 2b. THE PI EXCLUSION, at the seam production writes through. The parser
+    //     above reads pi's table honestly — anthropic rows and all — and the
+    //     apply seam is where `PiCatalogPolicy` drops them. Anthropic models run
+    //     on the user's own claude CLI; offering the same id under two harnesses
+    //     with different billing is a choice nobody can make correctly.
+    expect(parsed.contains("anthropic/claude-opus-5") && parsed.contains("anthropic/claude-fable-5"),
+           "the fixture must actually contain anthropic rows, or the exclusion below witnesses nothing")
+    let piOffered = catalog.options(fallback: ["f/one"])
+    expect(piOffered.allSatisfy { AgentHarnessConfig.provider(forID: $0) != "anthropic" },
+           "Pi must not offer an anthropic model, got \(piOffered)")
+    expect(!AgentHarnessConfig.isProviderCompatible(model: "anthropic/claude-opus-5", harness: .pi),
+           "Pi must not own anthropic ids")
+    expect(AgentHarnessConfig.isProviderCompatible(model: "google/gemini-3", harness: .pi),
+           "Pi must still own every other provider")
 
     // 3. The live catalogue is PI's — `resetForQA(options:)` seeds pi's probe
     //    result — so every assertion here names the Pi harness explicitly. Reading
@@ -201,18 +257,18 @@ func runAgentModelCatalogChecks() {
     //
     //    Resolution falls back to the first USABLE model when the default's
     //    provider isn't authed — handing pi an unusable default fails every spawn.
-    AgentModelCatalog.shared.resetForQA(options: ["anthropic/claude-fable-5", "anthropic/claude-opus-5"])
+    AgentModelCatalog.shared.resetForQA(options: ["google/gemini-3", "google/gemini-3-pro"])
     defer { AgentModelCatalog.shared.resetForQA() }
-    expect(AgentModelConfig.modelOptions(for: .pi) == ["anthropic/claude-fable-5", "anthropic/claude-opus-5"],
+    expect(AgentModelConfig.modelOptions(for: .pi) == ["google/gemini-3", "google/gemini-3-pro"],
            "Pi's modelOptions reflects the live catalogue")
     let suiteName = "AgentModelCatalogChecks-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
     let resolved = AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults)
-    expect(resolved.model == "anthropic/claude-fable-5",
+    expect(resolved.model == "google/gemini-3",
            "when the default model is unavailable, resolution falls back to the first usable id, got \(resolved.model)")
-    defaults.set("anthropic/claude-opus-5", forKey: AgentModelConfig.modelKey)
-    expect(AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults).model == "anthropic/claude-opus-5",
+    defaults.set("google/gemini-3-pro", forKey: AgentModelConfig.modelKey)
+    expect(AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults).model == "google/gemini-3-pro",
            "a stored live-catalogue id wins")
     AgentModelCatalog.shared.resetForQA()
     expect(AgentModelConfig.modelOptions(for: .pi) == AgentModelConfig.fallbackModelOptions,

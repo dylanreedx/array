@@ -311,10 +311,12 @@ private func runClaudeCompactBoundaryChecks() {
 
 // The context ring was empty for EVERY claude agent, always. Not a rendering
 // bug: there was no denominator. `AgentModelCatalog`'s window map is keyed by
-// concrete model ids (`anthropic/claude-opus-5`), but the Claude harness offers
-// three ALIASES — `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and
-// the tile looked the window up by the alias, which is not a key. Miss, nil
-// maxTokens, `occupancyFraction` nil, empty ring.
+// concrete model ids (`anthropic/claude-opus-5`), but the Claude harness used to
+// offer three ALIASES — `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku`
+// — and the tile looked the window up by the alias, which is not a key. Miss,
+// nil maxTokens, `occupancyFraction` nil, empty ring. The catalogue now offers
+// explicit ids, so the direct lookup hits; the resolved-id path below remains
+// the authority, because it is what the harness itself reported.
 //
 // Guessing which concrete model an alias means would be worse than an empty
 // ring: `anthropic/claude-opus-4-5` is a 200k window and `anthropic/claude-opus-5`
@@ -357,9 +359,15 @@ private func runClaudeResolvedModelContextWindowChecks() {
     """.utf8)
     let windows = AgentModelCatalog.parse(modelsStoreContextWindows: store)
 
-    // THE BUG, stated as a contrast: the alias the user picks is not a key.
+    // THE OLD BUG, stated as a contrast: an alias is not a key in this map.
     expect(windows["anthropic/opus"] == nil,
            "resolved-model: the fixture must keep the alias unkeyed, or this witnesses nothing")
+    // And the fix at the catalogue level: every id the claude harness now offers
+    // is the SHAPE this map is keyed by, so the direct lookup can hit at all.
+    for id in ClaudeCLIBackend.curatedCatalogModels where id.hasSuffix("claude-opus-5") || id.hasSuffix("claude-opus-4-5") {
+        expect(windows[id] != nil,
+               "resolved-model: \(id) must be a key in a models-store window map — an offered id that cannot be a key is the empty ring, back again")
+    }
     expect(windows["anthropic/claude-fable-5"] == 1_000_000,
            "resolved-model: the production parser must key the concrete id; got \(String(describing: windows["anthropic/claude-fable-5"]))")
     // Two concrete opus ids, 5x apart. This is why an alias is never guessed.
@@ -524,7 +532,13 @@ private func runClaudeBackendPolicyChecks() {
     expect(ClaudeCLIBackend.modelArgument(forCatalogId: "anthropic/claude-opus-5") == "claude-opus-5",
            "ClaudeCLIBackend: the provider prefix must be stripped")
     expect(ClaudeCLIBackend.modelArgument(forCatalogId: "opus") == "opus",
-           "ClaudeCLIBackend: a bare alias passes through")
+           "ClaudeCLIBackend: an unprefixed value passes through")
+    // Routing is prefix-based and model-agnostic, which is why the catalogue
+    // could move from aliases to explicit ids without touching it.
+    for id in ClaudeCLIBackend.curatedCatalogModels {
+        expect(ClaudeCLIBackend.routesToClaude(model: id, claudeCLIAvailable: true),
+               "ClaudeCLIBackend: every curated id must route to the claude CLI, got \(id)")
+    }
 
     // Effort: exact pass-through or omission — never an invented mapping.
     expect(ClaudeCLIBackend.effortArgument(forThinking: "high") == "high",
@@ -541,24 +555,28 @@ private func runClaudeBackendPolicyChecks() {
 
 private func runClaudeCatalogUnionChecks() {
     // The claude backend UNIONS into the catalogue: pi's list (or the frozen
-    // fallback) keeps standing, the curated aliases append, and losing the
+    // fallback) keeps standing, the curated EXPLICIT ids append, and losing the
     // CLI clears them again. QA instances never probe, so this is all
-    // fixture-driven.
+    // fixture-driven. Derived from the curated list rather than re-listing it:
+    // pinning the data meant every catalogue refresh re-broke this leg, and
+    // `expect` calls `exit(1)`, which takes the rest of the executable with it.
     let catalog = AgentModelCatalog()
-    catalog.resetForQA(options: ["openai-codex/gpt-5.6", "anthropic/opus"])
+    let seeded = ["openai-codex/gpt-5.6", "anthropic/claude-opus-5"]
+    catalog.resetForQA(options: seeded)
     catalog.apply(claudeBackendAvailable: true)
-    expect(catalog.options() == ["openai-codex/gpt-5.6", "anthropic/opus", "anthropic/sonnet", "anthropic/haiku"],
+    let expectedUnion = seeded + ClaudeCLIBackend.curatedCatalogModels.filter { !seeded.contains($0) }
+    expect(catalog.options() == expectedUnion,
            "AgentModelCatalog: claude entries must append without duplicating ids already present, got \(catalog.options())")
-    expect(catalog.displayName(for: "anthropic/sonnet") == "Claude Sonnet (latest)",
-           "AgentModelCatalog: claude aliases must carry their curated display names")
+    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-5") == "Claude Sonnet 4.5",
+           "AgentModelCatalog: claude ids must carry their curated display names, got \(String(describing: catalog.displayName(for: "anthropic/claude-sonnet-4-5")))")
 
     // pi's display names win when both know an id (pi's are model-specific).
-    catalog.apply(displayNames: ["anthropic/sonnet": "Sonnet from pi"])
-    expect(catalog.displayName(for: "anthropic/sonnet") == "Sonnet from pi",
+    catalog.apply(displayNames: ["anthropic/claude-sonnet-4-5": "Sonnet from pi"])
+    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-5") == "Sonnet from pi",
            "AgentModelCatalog: pi display names must take precedence over curated ones")
 
     catalog.apply(claudeBackendAvailable: false)
-    expect(catalog.options() == ["openai-codex/gpt-5.6", "anthropic/opus"],
+    expect(catalog.options() == seeded,
            "AgentModelCatalog: an uninstalled/logged-out claude must clear its entries, got \(catalog.options())")
 
     catalog.resetForQA()

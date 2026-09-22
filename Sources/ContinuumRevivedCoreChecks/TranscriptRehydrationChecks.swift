@@ -380,7 +380,7 @@ private func runTranscriptRehydrationDispatchChecks() {
         let home = base.appendingPathComponent("claude-only", isDirectory: true)
         let id = UUID()
         writeClaude(home: home, agentUUID: id, marker: "CLAUDE_MARKER")
-        let t = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "anthropic/opus", claudeCLIAvailable: true))
+        let t = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "anthropic/claude-opus-5", claudeCLIAvailable: true))
         expect(firstUserPrompt(t) == "CLAUDE_MARKER", "dispatch: a claude-only agent must rehydrate from the claude session file, got \(String(describing: firstUserPrompt(t)))")
     }
 
@@ -399,7 +399,7 @@ private func runTranscriptRehydrationDispatchChecks() {
         let id = UUID()
         writeClaude(home: home, agentUUID: id, marker: "CLAUDE_MARKER")
         writePi(home: home, agentUUID: id, marker: "PI_MARKER")
-        let claudeWon = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "anthropic/opus", claudeCLIAvailable: true))
+        let claudeWon = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "anthropic/claude-opus-5", claudeCLIAvailable: true))
         expect(firstUserPrompt(claudeWon) == "CLAUDE_MARKER", "dispatch: both present + anthropic model + claude available must pick claude, got \(String(describing: firstUserPrompt(claudeWon)))")
         let piWon = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: id, model: "openai-codex/gpt-5.6", claudeCLIAvailable: true))
         expect(firstUserPrompt(piWon) == "PI_MARKER", "dispatch: both present + non-anthropic model must pick pi, got \(String(describing: firstUserPrompt(piWon)))")
@@ -409,7 +409,7 @@ private func runTranscriptRehydrationDispatchChecks() {
     do {
         let home = base.appendingPathComponent("neither", isDirectory: true)
         try! fm.createDirectory(at: home, withIntermediateDirectories: true)
-        let t = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: UUID(), model: "anthropic/opus", claudeCLIAvailable: true))
+        let t = ManagedTranscriptRehydrator.rehydrate(inputs(home: home, agentUUID: UUID(), model: "anthropic/claude-opus-5", claudeCLIAvailable: true))
         expect(t == nil, "dispatch: no session file must return nil so the caller shows the notice")
     }
 

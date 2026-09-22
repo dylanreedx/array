@@ -445,9 +445,14 @@ private func runCodexBackendPolicyChecks() {
     // Strict harness identity is independent of installed neighbours.
     expect(AgentHarness.allCases == [.claudeCode, .codex, .pi], "harness order")
     expect(AgentHarnessConfig.defaultHarness == .claudeCode, "Claude Code is the default")
-    expect(AgentHarnessConfig.isProviderCompatible(model: "anthropic/opus", harness: .claudeCode), "Claude owns anthropic")
+    expect(AgentHarnessConfig.isProviderCompatible(model: "anthropic/claude-opus-5", harness: .claudeCode), "Claude owns anthropic")
     expect(AgentHarnessConfig.isProviderCompatible(model: "openai-codex/gpt-5.6-sol", harness: .codex), "Codex owns openai-codex")
     expect(AgentHarnessConfig.isProviderCompatible(model: "openai-codex/gpt-5.6-sol", harness: .pi), "Pi may own the same model id")
+    // …except anthropic. Those run on the user's own claude CLI, and one id
+    // under two harnesses with different billing is a choice nobody can make
+    // correctly (`PiCatalogPolicy`, witnessed in runAgentModelPolicyChecks).
+    expect(!AgentHarnessConfig.isProviderCompatible(model: "anthropic/claude-opus-5", harness: .pi),
+           "Pi must not own an anthropic id")
     expect(LegacyAgentHarnessMigration.resolve(evidence: .init(hasCodexThread: false, hasClaudeConversation: true, hasPiSession: true), storedPreference: nil) == nil, "dual session evidence fails closed")
     expect(LegacyAgentHarnessMigration.resolve(evidence: .init(hasCodexThread: true, hasClaudeConversation: true, hasPiSession: true), storedPreference: nil) == .codex, "stored Codex thread is decisive")
 
@@ -493,7 +498,7 @@ private func runCodexCatalogUnionChecks() {
     // claude: pi's list keeps standing, the curated codex ids append without
     // dup, and losing the CLI clears them again.
     let catalog = AgentModelCatalog()
-    let seeded = ["openai-codex/gpt-5.6-sol", "anthropic/opus"]
+    let seeded = ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-5"]
     catalog.resetForQA(options: seeded)
     catalog.apply(codexBackendAvailable: true)
     // Derived from the curated list rather than re-listing it. Pinning the data
@@ -515,17 +520,17 @@ private func runCodexCatalogUnionChecks() {
            "AgentModelCatalog: pi display names must take precedence over curated codex ones")
 
     catalog.apply(codexBackendAvailable: false)
-    expect(catalog.options() == ["openai-codex/gpt-5.6-sol", "anthropic/opus"],
+    expect(catalog.options() == seeded,
            "AgentModelCatalog: an uninstalled/logged-out codex must clear its entries, got \(catalog.options())")
 
     // The claude and codex stores are independent: applying one must not touch
     // the other.
     catalog.apply(claudeBackendAvailable: true)
     catalog.apply(codexBackendAvailable: true)
-    expect(catalog.options().contains("anthropic/sonnet") && catalog.options().contains("openai-codex/gpt-5.6-terra"),
+    expect(catalog.options().contains("anthropic/claude-sonnet-4-5") && catalog.options().contains("openai-codex/gpt-5.6-terra"),
            "AgentModelCatalog: claude and codex unions must coexist, got \(catalog.options())")
     catalog.apply(codexBackendAvailable: false)
-    expect(catalog.options().contains("anthropic/sonnet") && !catalog.options().contains("openai-codex/gpt-5.6-terra"),
+    expect(catalog.options().contains("anthropic/claude-sonnet-4-5") && !catalog.options().contains("openai-codex/gpt-5.6-terra"),
            "AgentModelCatalog: clearing codex must leave the claude union intact, got \(catalog.options())")
 
     catalog.resetForQA()
