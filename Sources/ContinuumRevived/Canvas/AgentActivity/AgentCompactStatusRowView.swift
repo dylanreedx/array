@@ -47,7 +47,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         return button
     }()
     private let activityIcon = NSImageView()
-    private let activityLabel = NSTextField(labelWithString: "")
+    private let activityLabel = HonestWidthLabel(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let contextMeter = AgentRadialContextMeterView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
     private let contextLabel = NSTextField(labelWithString: "")
@@ -799,5 +799,23 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         return locationAndContext
             && activityIcon.width >= minimumIconWidth
             && activityLabel.width >= minimumTextWidth
+    }
+}
+
+/// An `NSTextField` that reports the width its own text actually needs.
+///
+/// `NSTextField.intrinsicContentSize` under-reports by the cell's inset and by
+/// sub-point rounding, so a stack solves the label a hair narrower than its
+/// string and AppKit ellipsizes it. On the compact status row that was 44.5pt
+/// granted for 45.0pt of text on a 1200pt row: "Waiti…" beside 600pt of empty
+/// space. Rounding the reported width up costs at most a point of layout and
+/// removes a whole class of truncation-with-room-to-spare.
+/// Witness: `--ui-geometry-check`.
+final class HonestWidthLabel: NSTextField {
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width = ceil(max(size.width, cell?.cellSize(forBounds:
+            NSRect(x: 0, y: 0, width: .greatestFiniteMagnitude, height: bounds.height)).width ?? size.width))
+        return size
     }
 }
