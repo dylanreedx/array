@@ -1998,18 +1998,18 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func contextWindowForCurrentModel() -> Int? {
-        // The RESOLVED id first. The Claude harness offers three aliases —
-        // `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku` — and the
-        // catalogue is keyed by concrete ids (`anthropic/claude-opus-5`), so the
-        // alias never matched and every claude agent's ring was empty. The
-        // resolved id is what claude itself reported on `system/init`, and it
-        // rides the record so a relaunch or a workspace switch has a denominator
-        // before the next turn.
+        // The RESOLVED id first — what claude itself reported on `system/init`.
+        // It rides the record, so a relaunch or a workspace switch has a
+        // denominator before the next turn.
         //
-        // Resolving an alias by GUESSING the newest concrete model would be
-        // worse than an empty ring: `anthropic/claude-opus-4-5` is a 200k window
-        // and `anthropic/claude-opus-5` is 1M, so picking wrong misreports
-        // occupancy by 5x. Only a harness-reported id is used.
+        // The fallback below used to be dead for every claude agent: the harness
+        // offered three aliases (`anthropic/opus`, …) and this map is keyed by
+        // concrete ids, so the lookup always missed and the ring was empty. The
+        // claude catalogue is explicit ids now, so the fallback can hit — but
+        // only when pi's models-store is on disk, which is where the windows come
+        // from. A window is never GUESSED from a family name:
+        // `anthropic/claude-opus-4-5` is 200k and `anthropic/claude-opus-5` is
+        // 1M, so a wrong guess misreports occupancy by 5x.
         if let id = projectedAgentID,
            let resolved = agentSource?.resolvedModelId(for: id),
            let window = AgentModelCatalog.shared.contextWindow(for: resolved) {

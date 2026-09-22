@@ -140,7 +140,8 @@ public struct ClaudeEventTranslator {
                 // `--fork-session` (B7.2) mints an id Array could not predict.
                 onRuntimeObservation?(.providerSessionId(id))
             }
-            // The alias the user picked (`anthropic/opus`) is not a key in the
+            // The model the user picked is not necessarily what ran, and an alias
+            // (`anthropic/opus`, which the catalogue no longer offers) is not a key in the
             // context-window catalogue; the id claude reports here is. Without
             // it there is no denominator and the ring stays empty.
             if let model = (object["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),

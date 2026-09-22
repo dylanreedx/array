@@ -57,19 +57,47 @@ public enum ClaudeCLIBackend {
     }
 
     /// The catalogue entries the claude backend contributes when the CLI is
-    /// present and logged in. These are claude's own documented ALIASES —
-    /// deterministic names the CLI resolves to its latest models — not
-    /// patterns, so the exact-id rule holds. pi's fully-qualified anthropic
-    /// ids (when pi is also installed) route to the same backend.
+    /// present and logged in.
+    ///
+    /// These used to be claude's three moving ALIASES (`opus`, `sonnet`,
+    /// `haiku`). An alias is not a model: it renames itself under the user
+    /// every time Anthropic ships, so "what did this agent run" had no answer,
+    /// a previous model could not be chosen at all, and — because the context
+    /// window map is keyed by concrete ids — every claude agent's radial ring
+    /// had no denominator. The list is now EXPLICIT and includes previous
+    /// models, newest first.
+    ///
+    /// Every id is verbatim from a provider catalogue (`pi --list-models`,
+    /// probed 2026-09-21) and `claude --help` documents that `--model` takes
+    /// "a model's full name", so `modelArgument(forCatalogId:)` hands the CLI
+    /// a name it accepts. The dated pins (`claude-opus-4-5-20251101`, …) are
+    /// deliberately omitted: they name the same weights as the undated id and
+    /// would double the picker for no user-visible choice.
     public static let curatedCatalogModels: [String] = [
-        "anthropic/opus",
-        "anthropic/sonnet",
-        "anthropic/haiku",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-fable-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-opus-4-5",
+        "anthropic/claude-sonnet-4-5",
+        "anthropic/claude-haiku-4-5",
     ]
     public static let curatedCatalogDisplayNames: [String: String] = [
-        "anthropic/opus": "Claude Opus (latest)",
-        "anthropic/sonnet": "Claude Sonnet (latest)",
-        "anthropic/haiku": "Claude Haiku (latest)",
+        "anthropic/claude-opus-5": "Claude Opus 5",
+        "anthropic/claude-fable-5-1": "Claude Fable 5.1",
+        "anthropic/claude-fable-5": "Claude Fable 5",
+        "anthropic/claude-sonnet-5": "Claude Sonnet 5",
+        "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+        "anthropic/claude-opus-4-7": "Claude Opus 4.7",
+        "anthropic/claude-opus-4-6": "Claude Opus 4.6",
+        "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
+        "anthropic/claude-opus-4-5": "Claude Opus 4.5",
+        "anthropic/claude-sonnet-4-5": "Claude Sonnet 4.5",
+        "anthropic/claude-haiku-4-5": "Claude Haiku 4.5",
     ]
 
     /// `claude auth status --json` → is a subscription login present. Pure —

@@ -25,7 +25,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// fully-qualified id. Empty when the store is absent — the meter then
     /// shows no percentage rather than a guessed one.
     private var liveContextWindows: [String: Int] = [:]
-    /// Models the claude CLI backend contributes (curated aliases, applied
+    /// Models the claude CLI backend contributes (curated EXPLICIT ids, applied
     /// only when a live probe saw the CLI installed AND logged in). Kept
     /// separate from `liveOptions` so a pi probe replacing the list cannot
     /// wipe them, and vice versa.
@@ -225,32 +225,14 @@ public final class AgentModelCatalog: @unchecked Sendable {
             harness: .codex, readiness: .ready, models: models, displayNames: names)
     }
 
-    /// Claude Code has no model-list command, but it advertises the live exact
-    /// aliases accepted by `--model` in its own help output.
-    public static func parseClaudeModelAliases(helpOutput: String) -> [String] {
-        guard let start = helpOutput.range(of: "--model <model>")?.lowerBound else { return [] }
-        // Commander wraps an option description across terminal-width lines.
-        // Stop at the next option so quoted examples elsewhere cannot become
-        // model aliases accidentally.
-        let lines = helpOutput[start...].split(separator: "\n", omittingEmptySubsequences: false)
-        var optionLines: [Substring] = []
-        for line in lines {
-            if !optionLines.isEmpty, line.trimmingCharacters(in: .whitespaces).hasPrefix("-") { break }
-            optionLines.append(line)
-        }
-        let text = optionLines.joined(separator: "\n")
-        let normalized = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        guard normalized.contains("Provide an alias") else { return [] }
-        let aliasText = normalized.components(separatedBy: " or a model's full name").first ?? normalized
-        guard let regex = try? NSRegularExpression(pattern: "'([^']+)'") else { return [] }
-        let range = NSRange(aliasText.startIndex..<aliasText.endIndex, in: aliasText)
-        return regex.matches(in: aliasText, range: range).compactMap { match in
-            guard let capture = Range(match.range(at: 1), in: aliasText) else { return nil }
-            let alias = String(aliasText[capture])
-            guard !alias.isEmpty, !alias.contains("/") else { return nil }
-            return "anthropic/\(alias)"
-        }
-    }
+    // `parseClaudeModelAliases(helpOutput:)` lived here: it scraped the quoted
+    // words out of `claude --help`'s `--model` paragraph and offered them as
+    // catalogue ids. By construction those are ALIASES ("opus", "sonnet") — the
+    // one thing this catalogue must not serve, because an alias renames itself
+    // under the user, is not a key in the context-window map, and can never name
+    // a previous model. The claude harness now serves
+    // `ClaudeCLIBackend.curatedCatalogModels` — explicit ids only — and the
+    // probe no longer runs `--help` at all.
 
     /// The model's published context window, or nil when the store has no entry
     /// (pi not installed, or a model it does not list). Callers must degrade to
@@ -265,8 +247,16 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     /// A non-empty parse replaces the current options; an empty or failed
     /// probe changes nothing (the picker must never go blank).
+    ///
+    /// `PiCatalogPolicy` is applied HERE rather than in `parse` so the parser
+    /// stays an honest reading of pi's table, and rather than at the serving
+    /// seam so the invariant is a property of the stored value: `liveOptions`
+    /// never holds a provider Pi may not offer. The display-name and
+    /// context-window maps read from pi's models-store are deliberately NOT
+    /// filtered — they are keyed by id and the claude harness resolves its own
+    /// `anthropic/*` windows through them.
     public func apply(listModelsOutput: String) {
-        let parsed = Self.parse(listModelsOutput: listModelsOutput)
+        let parsed = PiCatalogPolicy.offerable(Self.parse(listModelsOutput: listModelsOutput))
         guard !parsed.isEmpty else { return }
         lock.withLock { liveOptions = parsed; readinessByHarness[.pi] = .ready; refreshedAtByHarness[.pi] = Date() }
     }
@@ -283,21 +273,6 @@ public final class AgentModelCatalog: @unchecked Sendable {
             claudeBackendModels = available ? ClaudeCLIBackend.curatedCatalogModels : []
             claudeBackendDisplayNames = available ? ClaudeCLIBackend.curatedCatalogDisplayNames : [:]
             readinessByHarness[.claudeCode] = available ? .ready : .loggedOut
-            refreshedAtByHarness[.claudeCode] = Date()
-        }
-    }
-
-    public func apply(claudeBackendModels models: [String]) {
-        guard !models.isEmpty else { return }
-        lock.withLock {
-            var union = ClaudeCLIBackend.curatedCatalogModels
-            union += models.filter { !union.contains($0) }
-            claudeBackendModels = union
-            claudeBackendDisplayNames = Dictionary(uniqueKeysWithValues: union.map { id in
-                let alias = id.split(separator: "/").last.map(String.init) ?? id
-                return (id, "Claude \(alias.prefix(1).uppercased())\(alias.dropFirst()) (latest)")
-            })
-            readinessByHarness[.claudeCode] = .ready
             refreshedAtByHarness[.claudeCode] = Date()
         }
     }
@@ -491,11 +466,10 @@ public final class AgentModelCatalog: @unchecked Sendable {
         let output = boundedProbeOutput(
             command: command, arguments: ["auth", "status", "--json"], timeout: timeout)
         let loggedIn = output.map { ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data($0.utf8)) } ?? false
+        // Readiness is the whole probe. The catalogue itself is the curated
+        // explicit-id list; there is nothing live to scrape (claude has no
+        // model-list command, and its help text advertises only aliases).
         apply(claudeBackendAvailable: loggedIn)
-        if loggedIn,
-           let help = boundedProbeOutput(command: command, arguments: ["--help"], timeout: timeout) {
-            apply(claudeBackendModels: Self.parseClaudeModelAliases(helpOutput: help))
-        }
     }
 
     /// The codex CLI backend's catalogue contribution: entries appear when the
