@@ -53,6 +53,28 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         return textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
     }
 
+    /// The line fragments produced by this view's real TextKit layout manager.
+    /// Rhythm witnesses read these rather than paragraph-style declarations so a
+    /// style that is discarded before layout cannot report a false pass.
+    var qaLineFragmentRectsForChecks: [NSRect] {
+        guard let layoutManager, let textContainer, layoutManager.numberOfGlyphs > 0 else { return [] }
+        layoutManager.ensureLayout(for: textContainer)
+        var rects: [NSRect] = []
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: NSRange(location: 0, length: layoutManager.numberOfGlyphs)
+        ) { rect, _, _, _, _ in
+            rects.append(rect)
+        }
+        return rects
+    }
+
+    /// The used rect from the same TextKit layout that paints the view.
+    var qaUsedRectForChecks: NSRect? {
+        guard let layoutManager, let textContainer, textStorage?.length ?? 0 > 0 else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        return layoutManager.usedRect(for: textContainer)
+    }
+
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
         configureNativeTextView()
@@ -82,6 +104,7 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         isVerticallyResizable = true
         textContainerInset = .zero
         textContainer?.lineFragmentPadding = 0
+        layoutManager?.usesFontLeading = true
         linkTextAttributes = [
             .underlineStyle: NSUnderlineStyle.single.rawValue,
             .cursor: NSCursor.pointingHand
@@ -169,12 +192,21 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
             style: style,
             zoom: context.pageZoom
         )
-        let rect = attributed.boundingRect(
-            with: NSSize(width: availableWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
+        // Use the same TextKit stack as the painted RichInlineTextView. A
+        // boundingRect can disagree with line fragments after a fixed line pitch
+        // or hanging indent is applied, and that disagreement is how wrapped rows
+        // get clipped despite apparently generous measured heights.
+        let storage = NSTextStorage(attributedString: attributed)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: availableWidth, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layoutManager.usesFontLeading = true
+        storage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(container)
+        layoutManager.ensureLayout(for: container)
+        let usedHeight = ceil(layoutManager.usedRect(for: container).height)
         let font = NSFont.token(textRole, zoom: context.pageZoom)
-        return max(ceil(rect.height), ceil(font.ascender - font.descender + font.leading))
+        return max(usedHeight, ceil(font.ascender - font.descender + font.leading))
     }
 
     /// Re-resolves every attribute against the new theme while retaining the

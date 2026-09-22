@@ -43,6 +43,7 @@ enum TranscriptRhythmChecks {
     static func run() throws {
         try checkUserTurnIsRuledNotFilled()
         try checkHeadingLadder()
+        try checkWrappedBodyProseLinePitch()
         try checkHangingIndents()
         try checkThematicBreak()
         try checkTurnSeparation()
@@ -71,7 +72,7 @@ enum TranscriptRhythmChecks {
         try checkASettledRowKeepsItsDuration()
         try checkAToolRowsIdentitySurvivesDisclosure()
         print(
-            "TranscriptRhythmChecks: heading ladder, hanging indents, thematic break, "
+            "TranscriptRhythmChecks: heading ladder, candidate body leading, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
             + "the replayed real claude turn, tool-run clustering, one line per fact, "
             + "a glyph vocabulary that distinguishes row kinds, rows measured at the height they draw, "
@@ -149,6 +150,57 @@ enum TranscriptRhythmChecks {
     }
 
     // MARK: - T4
+
+    /// Review candidate: body prose uses a deliberate 18pt line pitch at 100%,
+    /// with the pitch scaled by page zoom. This reads the line fragments from the
+    /// actual TextKit layout rather than trusting a paragraph-style declaration,
+    /// and checks the measured used rect fits the native text view frame.
+    private static func checkWrappedBodyProseLinePitch() throws {
+        let (_, views) = try render(.mixed, width: 320)
+        guard let body = textViews(views).first(where: {
+            $0.string.contains("prose remains the reading path")
+        }) else {
+            throw fail("body prose leading: no wrapped body fixture reached TextKit")
+        }
+        let rects = body.qaLineFragmentRectsForChecks
+        guard rects.count >= 2 else {
+            throw fail("body prose leading: fixture did not wrap into at least two TextKit line fragments")
+        }
+        let pitches = zip(rects, rects.dropFirst()).map { next, current in
+            current.minY - next.minY
+        }
+        let expected = AssistantProseView.bodyLinePitch(zoom: .default)
+        guard pitches.allSatisfy({ abs($0 - expected) <= 0.5 }) else {
+            throw fail("body prose leading: TextKit pitches \(pitches) did not resolve to the \(expected)pt candidate")
+        }
+        guard let usedRect = body.qaUsedRectForChecks,
+              usedRect.height <= body.bounds.height + 0.5 else {
+            throw fail("body prose leading: TextKit used rect exceeded its native frame and would clip wrapped prose")
+        }
+
+        let zoomedContext = AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: .dark,
+            pageZoom: AgentPageZoom(percent: 150))
+        let zoomed = RichInlineTextView(frame: NSRect(x: 0, y: 0, width: 320, height: 100))
+        zoomed.apply(
+            runs: [.text("A wrapped body sentence long enough to make TextKit expose its line pitch at the zoomed rung.")],
+            blockID: AgentNodeID(rawValue: "rhythm-zoomed-body")!,
+            context: zoomedContext,
+            textRole: .body,
+            style: AgentProseTextStyle(linePitch: AssistantProseView.bodyLinePitch(zoom: zoomedContext.pageZoom))
+        )
+        zoomed.layoutSubtreeIfNeeded()
+        let zoomedRects = zoomed.qaLineFragmentRectsForChecks
+        guard zoomedRects.count >= 2 else {
+            throw fail("body prose leading: zoomed fixture did not wrap")
+        }
+        let zoomedPitch = zoomedRects[1].minY - zoomedRects[0].minY
+        let expectedZoomed = AssistantProseView.bodyLinePitch(zoom: zoomedContext.pageZoom)
+        guard abs(zoomedPitch - expectedZoomed) <= 0.5,
+              expectedZoomed > expected else {
+            throw fail("body prose leading: page zoom did not scale the TextKit pitch from \(expected)pt to \(expectedZoomed)pt")
+        }
+    }
 
     /// A wrapped list item must hang: the second line aligns under the text, not
     /// under the bullet. The marker is concatenated into the text run today, so
@@ -241,6 +293,9 @@ enum TranscriptRhythmChecks {
         let gaps = layout.qaRowGapsForChecks
         guard AgentTranscriptLayout.interTurnSpacing == 24 else {
             throw fail("turn separation: expected the locked 24pt inter-turn rhythm, got \(AgentTranscriptLayout.interTurnSpacing)pt")
+        }
+        guard layout.rowSpacing == 8 else {
+            throw fail("turn separation: expected the locked 8pt same-turn row spacing, got \(layout.rowSpacing)pt")
         }
         guard gaps.count >= 4 else {
             throw fail(

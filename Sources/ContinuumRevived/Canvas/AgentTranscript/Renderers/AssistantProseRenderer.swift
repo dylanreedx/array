@@ -57,6 +57,15 @@ final class AssistantProseView: NSView {
     static func horizontalReadingInset(zoom: AgentPageZoom) -> CGFloat {
         CGFloat(zoom.scaled(0))
     }
+    /// Review candidate only: 13pt body prose gets an intentional 18pt line
+    /// pitch at 100%. It is local to this renderer, not a global typography
+    /// token, and scales with the managed-agent page zoom.
+    static let bodyLinePitchAt100: CGFloat = 18
+
+    static func bodyLinePitch(zoom: AgentPageZoom) -> CGFloat {
+        CGFloat(zoom.scaled(Double(bodyLinePitchAt100)))
+    }
+
     private static func blockSpacing(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
 
     private(set) var textFields: [RichInlineTextView] = []
@@ -302,7 +311,7 @@ final class AssistantProseView: NSView {
                 role: itemNumber == nil ? .staticText : listItemRole,
                 headingLevel: nil,
                 textRole: .body,
-                style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
+                style: bodyProseStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
                 marker: marker
             )] + block.children.flatMap { rows(for: $0, zoom: zoom, listDepth: listDepth) }
         case let .heading(level, content):
@@ -331,7 +340,7 @@ final class AssistantProseView: NSView {
                     role: listItemRole,
                     headingLevel: nil,
                     textRole: .body,
-                    style: listStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
+                    style: bodyProseStyle(depth: listDepth, hasMarker: !marker.isEmpty, zoom: zoom),
                     marker: marker
                 )]
             }
@@ -371,6 +380,12 @@ final class AssistantProseView: NSView {
     /// Indents for a list row. `firstLineHeadIndent` and `headIndent` are equal
     /// because the marker is drawn in the gutter to the LEFT of both, so the
     /// first line and every wrapped line share one left edge.
+    private static func bodyProseStyle(depth: Int, hasMarker: Bool, zoom: AgentPageZoom) -> AgentProseTextStyle {
+        var style = listStyle(depth: depth, hasMarker: hasMarker, zoom: zoom)
+        style.linePitch = bodyLinePitch(zoom: zoom)
+        return style
+    }
+
     private static func listStyle(depth: Int, hasMarker: Bool, zoom: AgentPageZoom) -> AgentProseTextStyle {
         guard depth > 0 else { return .plain }
         // `AgentProseTextStyle`'s indents are CGFloats this caller computes, so

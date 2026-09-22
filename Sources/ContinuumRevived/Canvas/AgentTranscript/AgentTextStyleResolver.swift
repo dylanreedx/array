@@ -261,17 +261,24 @@ struct AgentProseTextStyle: Equatable {
     /// under the text instead of under the bullet.
     var headIndent: CGFloat = 0
     var firstLineHeadIndent: CGFloat = 0
+    /// Candidate line pitch for wrapped prose. This is carried in the same style
+    /// value as hanging indents so TextKit measurement and paint cannot diverge.
+    var linePitch: CGFloat = 0
 
     static let plain = AgentProseTextStyle()
 
     var isPlain: Bool { self == .plain }
 
     var paragraphStyle: NSParagraphStyle? {
-        guard headIndent > 0 || firstLineHeadIndent > 0 else { return nil }
+        guard headIndent > 0 || firstLineHeadIndent > 0 || linePitch > 0 else { return nil }
         let style = NSMutableParagraphStyle()
         style.headIndent = headIndent
         style.firstLineHeadIndent = firstLineHeadIndent
         style.lineBreakMode = .byWordWrapping
+        if linePitch > 0 {
+            style.minimumLineHeight = linePitch
+            style.maximumLineHeight = linePitch
+        }
         return style
     }
 }
