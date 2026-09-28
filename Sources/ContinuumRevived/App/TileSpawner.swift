@@ -2142,7 +2142,7 @@ final class TileSpawner {
         if let existing {
             (canvasView.tileView(for: existing.id) as? FileTileNSView)?.refreshFromDisk()
             canvasView.removeTile(id: tileId)
-            do { try persistCanvasForCurrentModel(zoneId: sourceZoneId, canvasView: canvasView) }
+            do { try persistCanvasForCurrentModel(canvasView: canvasView) }
             catch {
                 restoreNoteView(
                     originalTile, noteId: noteId, body: noteView.textView.string,
@@ -2222,16 +2222,21 @@ final class TileSpawner {
         }
     }
 
-    private func persistCanvasForCurrentModel(zoneId: UUID?, canvasView: CanvasNSView) throws {
-        if let zoneId, let tiles = canvasView.tiles(inZone: zoneId) {
-            var state = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
-                viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil
-            )
-            state.tiles = tiles
-            try projectStore.saveCanvas(state)
-        } else {
-            try projectStore.saveCanvas(canvasView.canvasState)
-        }
+    /// Persist this project's canvas after the note conversion removed a tile.
+    ///
+    /// Through the one persistence projection, merged over the file: a persisted
+    /// tile vanishes only when its own zone is installed and it is gone from
+    /// there, and every frame written is WORLD. This used to store one layer's
+    /// tiles as the whole file — ZONE-LOCAL frames, so every survivor moved by
+    /// the zone origin, and every other zone of the project dropped out of it.
+    /// The read throws rather than defaulting: an unreadable file is not an empty
+    /// one. Witness: `--note-conversion-writer-check`.
+    private func persistCanvasForCurrentModel(canvasView: CanvasNSView) throws {
+        let persisted = try projectStore.tryLoadCanvas() ?? CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil
+        )
+        try projectStore.saveCanvas(canvasView.canvasStateForPersistence(
+            projectId: project.id, base: persisted, persistedTiles: persisted.tiles))
     }
 
     /// Writes the current text body and updates the note's `updatedAt` timestamp.

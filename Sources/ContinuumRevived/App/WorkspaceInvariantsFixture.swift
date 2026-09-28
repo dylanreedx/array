@@ -42,11 +42,17 @@ final class WorkspaceInvariantsFixture {
     static let projectB2 = UUID(uuidString: "00000000-0000-0000-0000-0000000067B2")!
     static let zoneA1 = UUID(uuidString: "00000000-0000-0000-0000-000000067A11")!
     static let zoneA2 = UUID(uuidString: "00000000-0000-0000-0000-000000067A21")!
+    /// A second zone of project A1: a project's canvas file spans its zones.
+    static let zoneA3 = UUID(uuidString: "00000000-0000-0000-0000-000000067A31")!
     static let zoneB1 = UUID(uuidString: "00000000-0000-0000-0000-000000067B11")!
     static let zoneB2 = UUID(uuidString: "00000000-0000-0000-0000-000000067B21")!
     static let noteA1a = UUID(uuidString: "00000000-0000-0000-0000-0000067A1A01")!
     static let noteA1b = UUID(uuidString: "00000000-0000-0000-0000-0000067A1B01")!
     static let noteA2a = UUID(uuidString: "00000000-0000-0000-0000-0000067A2A01")!
+    static let noteA3a = UUID(uuidString: "00000000-0000-0000-0000-0000067A3A01")!
+    /// An open file tile in zone A1, for `fileA1Name` at project A1's root.
+    static let fileA1 = UUID(uuidString: "00000000-0000-0000-0000-0000067A1F01")!
+    static let fileA1Name = "field-notes.md"
     static let noteB1a = UUID(uuidString: "00000000-0000-0000-0000-0000067B1A01")!
     static let noteB2a = UUID(uuidString: "00000000-0000-0000-0000-0000067B2A01")!
 
@@ -66,16 +72,18 @@ final class WorkspaceInvariantsFixture {
     }
 
     static let seed: SeedScene = {
-        func zone(_ id: UUID, project: UUID, x: Double, y: Double, name: String, color: String) -> ZonePlacement {
+        func zone(_ id: UUID, project: UUID, x: Double, y: Double, name: String, color: String,
+                  height: Double = 700) -> ZonePlacement {
             ZonePlacement(
                 zoneId: id, projectId: project,
-                origin: ZonePoint(x: x, y: y), size: ZoneSize(width: 900, height: 700),
+                origin: ZonePoint(x: x, y: y), size: ZoneSize(width: 900, height: height),
                 color: color, collapsed: false, hydrationPolicy: .automatic, name: name)
         }
         let zones = [
             zoneA1: zone(zoneA1, project: projectA1, x: 600, y: 200, name: "Roots", color: "blue"),
             // Empty name: the header derives it from the project.
             zoneA2: zone(zoneA2, project: projectA2, x: 1700, y: 260, name: "", color: "green"),
+            zoneA3: zone(zoneA3, project: projectA1, x: 600, y: 1000, name: "Annex", color: "teal", height: 280),
             zoneB1: zone(zoneB1, project: projectB1, x: 400, y: 300, name: "Canopy", color: "purple"),
             zoneB2: zone(zoneB2, project: projectB2, x: 1500, y: 340, name: "", color: "orange")
         ]
@@ -83,6 +91,8 @@ final class WorkspaceInvariantsFixture {
             noteA1a: TileFrame(x: 640, y: 280, width: 240, height: 160),
             noteA1b: TileFrame(x: 920, y: 480, width: 240, height: 160),
             noteA2a: TileFrame(x: 1760, y: 340, width: 240, height: 160),
+            noteA3a: TileFrame(x: 640, y: 1060, width: 240, height: 160),
+            fileA1: TileFrame(x: 1200, y: 280, width: 240, height: 200),   // a file tile's minimum height
             noteB1a: TileFrame(x: 450, y: 380, width: 240, height: 160),
             noteB2a: TileFrame(x: 1560, y: 420, width: 240, height: 160)
         ]
@@ -90,9 +100,10 @@ final class WorkspaceInvariantsFixture {
             zones: zones,
             tiles: tiles,
             tileProject: [noteA1a: projectA1, noteA1b: projectA1, noteA2a: projectA2, noteB1a: projectB1,
-                          noteB2a: projectB2],
-            tileZone: [noteA1a: zoneA1, noteA1b: zoneA1, noteA2a: zoneA2, noteB1a: zoneB1, noteB2a: zoneB2],
-            zonesByWorkspace: [workspaceA: [zoneA1, zoneA2], workspaceB: [zoneB1, zoneB2]]
+                          noteB2a: projectB2, noteA3a: projectA1, fileA1: projectA1],
+            tileZone: [noteA1a: zoneA1, noteA1b: zoneA1, noteA2a: zoneA2, noteB1a: zoneB1, noteB2a: zoneB2,
+                       noteA3a: zoneA3, fileA1: zoneA1],
+            zonesByWorkspace: [workspaceA: [zoneA1, zoneA2, zoneA3], workspaceB: [zoneB1, zoneB2]]
         )
     }()
 
@@ -163,14 +174,31 @@ final class WorkspaceInvariantsFixture {
                     terminalClosePolicy: .askWhenRunning)))
             let tiles: [Tile] = seed.tileProject.filter { $0.value == projectId }.keys.sorted { $0.uuidString < $1.uuidString }
                 .enumerated().map { index, tileId in
-                    var tile = Tile(
-                        id: tileId, kind: .note, title: "note \(index)",
-                        frame: seed.tiles[tileId]!, zPosition: .fromLegacyRank(index + 1),
-                        runtimeRef: nil, metadata: TileMetadata(noteId: tileId))
+                    var tile: Tile
+                    if tileId == Self.fileA1 {
+                        let url = projectRoot.appendingPathComponent(Self.fileA1Name)
+                        let location = DocumentLocationResolver.resolve(
+                            fileURL: url, knownRoots: [DocumentLocationRoot(rootURL: projectRoot, projectId: projectId)])
+                        tile = Tile(
+                            id: tileId, kind: .file, title: Self.fileA1Name,
+                            frame: seed.tiles[tileId]!, zPosition: .fromLegacyRank(index + 1),
+                            runtimeRef: nil, metadata: TileMetadata(filePath: location.path, documentLocation: location))
+                    } else {
+                        tile = Tile(
+                            id: tileId, kind: .note, title: "note \(index)",
+                            frame: seed.tiles[tileId]!, zPosition: .fromLegacyRank(index + 1),
+                            runtimeRef: nil, metadata: TileMetadata(noteId: tileId))
+                    }
                     tile.zoneId = seed.tileZone[tileId]
                     return tile
                 }
-            for tile in tiles { try store.saveNoteBody(id: tile.id, text: "seed \(tile.id.uuidString.suffix(4))") }
+            for tile in tiles where tile.kind == .note {
+                try store.saveNoteBody(id: tile.id, text: "seed \(tile.id.uuidString.suffix(4))")
+            }
+            if projectId == Self.projectA1 {
+                try "# Field notes\n".write(
+                    to: projectRoot.appendingPathComponent(Self.fileA1Name), atomically: true, encoding: .utf8)
+            }
             try store.saveCanvas(CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: tiles, groups: [], lastActiveTileId: nil))

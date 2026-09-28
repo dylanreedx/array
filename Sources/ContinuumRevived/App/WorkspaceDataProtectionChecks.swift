@@ -132,6 +132,46 @@ enum WorkspaceDataProtectionChecks {
     }
 }
 
+extension WorkspaceDataProtectionChecks {
+    // MARK: - --note-conversion-writer-check
+
+    /// Converting a note to a document that is already open keeps every other
+    /// record of the project exactly where it was.
+    static func runNoteConversionWriter() throws -> URL {
+        try runScenarios("note-conversion-writer", [("reuse-open-document", noteReusesOpenDocument)])
+    }
+
+    /// A note in zone A1 (origin 600,200) is saved as the Markdown file a file
+    /// tile in the same zone already has open. Project A1 also owns zone A3.
+    /// The process dies right after, before any later canvas save could rewrite
+    /// the file. After the remount: the note is gone, and every other tile of
+    /// the project — its zone-mate and the sibling zone's tile — is still there
+    /// with its WORLD frame.
+    private static func noteReusesOpenDocument(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("note reuse")
+        guard let noteView = m.canvas.tileView(for: Fixture.noteA1a) as? NoteTileNSView else {
+            throw Failure(message: "note A1a is not hydrated as a note view")
+        }
+        let destination = fixture.projectRoots[Fixture.projectA1]!.appendingPathComponent(Fixture.fileA1Name)
+        // The note's own Save-as-Markdown callback, as its menu item fires it.
+        noteView.onSaveAsMarkdownRequested?(destination)
+        try expect(m.canvas.tileView(for: Fixture.noteA1a) == nil, "the note was not converted")
+        try fixture.remount(crash: true)
+
+        var expected = Fixture.seed
+        expected.tiles[Fixture.noteA1a] = nil
+        expected.tileProject[Fixture.noteA1a] = nil
+        expected.tileZone[Fixture.noteA1a] = nil
+        let violations = try fixture.allViolations(expected: expected, invariants: [.geometry, .conservation])
+        let onDisk = fixture.readProjectFile(Fixture.projectA1).canvas?.tiles
+            .map { "\($0.id.uuidString.suffix(4)) \($0.frame)" } ?? []
+        try expect(violations.isEmpty,
+                   "after the conversion and a remount: \(violations.map(\.description)); project A1's file holds \(onDisk)")
+        return ["projectA1": onDisk]
+    }
+}
+
 private extension Optional {
     func orThrow(_ error: Error) throws -> Wrapped {
         guard let value = self else { throw error }

@@ -97,6 +97,7 @@ check --multi-zone-render-check
 check --nav-mode-check
 check --new-tile-cwd-check
 check --note-click-focus-check
+check --note-conversion-writer-check
 check --note-file-tile-spawn-check
 check --observer-sweep-badge-check
 check --onboarding-panel-check
@@ -314,6 +315,7 @@ leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
 leg run_app_check .build/debug/Array --new-tile-cwd-check
 leg run_app_check .build/debug/Array --note-click-focus-check
+leg run_app_check .build/debug/Array --note-conversion-writer-check
 leg run_app_check .build/debug/Array --note-file-tile-spawn-check
 leg run_app_check .build/debug/Array --observer-sweep-badge-check
 leg run_app_check .build/debug/Array --onboarding-panel-check
