@@ -414,3 +414,23 @@ that copy.
   binary once the display was woken; nothing left over. None were added to
   `MATRIX_KNOWN_RED`; matrix runs are now wrapped in `caffeinate -dims`.
   Wall clock: the host slept from about 00:51 to 01:16; that gap is not work.
+- 2026-09-28 — Slice 4 (ARC-4a) on bench `stab-arc4a`, branch
+  `array/stab-arc4a`, off staging `24209573`. `CanvasNSView.installProjectTile`
+  is the spawn; the new `materializeProjectTile` swaps the view of an existing
+  record and keeps its frame, membership and z-position, with no grow, settle or
+  layout commit. The nine swap callers use it (terminal restart, browser
+  snapshot, browser restart, inspector install, profile switch, note convert,
+  note restore, file-tree restore, file-tree error view); eleven spawns keep
+  `installProjectTile`. Tile-view teardown has one owner, `retireTileView`, on
+  all eight removal and replacement paths (two of them, `upsertZoneLayer` and
+  `removeZoneLayer`, never told the view before), and a view is told once per
+  installation (`TileNSView.retireFromScene`). Phase B's
+  `withAutoLayoutSuppressed` and `growZoneOnSpawn` are deleted: the leg stays
+  GREEN without them, and goes RED at the mount if materialize settles.
+  `--tile-materialize-check` was RED at base in 5 of 7 scenarios (budget
+  eviction, pan away/back, terminal restart and note conversion moved the
+  hand-spaced scene; a rolled-back conversion never closed its file view's
+  document). GREEN after, with a palette spawn as the positive control.
+  Placeholder swaps through the flat `install(tileView:)` after a mount
+  (terminal exit, missing command, browser restart placeholder) are not
+  converted; open question. Nothing merged.

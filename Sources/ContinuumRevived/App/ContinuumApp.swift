@@ -3618,6 +3618,20 @@ enum ContinuumApp {
         // M1.3 (`.plans/46`): builds a real `GhosttyRuntimeContext` to drive
         // `restartTerminalTile` through Phase B, so it must sit below
         // `ghostty_init()` for the same reason as the check above.
+        // `.plans/67` ARC-4a: restarts real terminal tiles, so it needs
+        // `ghostty_init()` too.
+        if CommandLine.arguments.contains("--tile-materialize-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileMaterializeChecks.run()
+                print("ContinuumRevivedTileMaterializeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-runtime-duplication-check") {
             do {
                 _ = NSApplication.shared
@@ -16452,6 +16466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
+    func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
     /// QA: host the mounted canvas in `window` and install the keyDown monitor
     /// launch installs, so a check's key events take the production route
     /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown
@@ -17035,10 +17051,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Terminal, browser, browser-inspector and file-tree tiles, which need a
     /// runtime and therefore the layer to be installed first.
     ///
-    /// These go through the `restart*` paths, which end in `installProjectTile` —
-    /// and that fires `arrangeAutoLayoutAfterSpawn`, re-tidying the entire zone.
-    /// Once per tile would shuffle the user's canvas, so auto-layout is suppressed
-    /// for the duration. A hydration is not a spawn.
+    /// These go through the `restart*` paths, which swap each tile's view through
+    /// `materializeProjectTile`: a hydration is not a spawn, and it moves nothing.
+    /// (Until `.plans/67` ARC-4a they ended in `installProjectTile`, which
+    /// re-settled the whole zone, so this block had to suppress auto-layout.)
     private func hydrateRuntimeBackedTiles(
         in layer: CanvasNSView.ZoneLayer,
         controller: ZoneRuntimeController,
@@ -17063,33 +17079,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         guard !candidates.isEmpty else { return }
 
-        canvas.withAutoLayoutSuppressed {
-            for tile in candidates {
-                guard canvas.tileView(for: tile.id) is DescriptorTileNSView else { continue }
-                switch tile.kind {
-                case .terminal:
-                    // M1.3: the controller may already hold a runtime for this tile
-                    // — it survives a switch whenever the project is shared between
-                    // the two workspaces, which `switchWorkspace` is explicitly
-                    // written for. Retire it first; see `retireOrphanedRuntimes`.
-                    retireOrphanedRuntimes(forTile: tile.id, controller: controller)
-                    if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
-                        controller.runtimes.append(runtime)
-                    }
-                case .browser:
-                    retireOrphanedRuntimes(forTile: tile.id, controller: controller)
-                    if case let .restarted(runtime) = spawner.restartBrowserTile(tileId: tile.id) {
-                        controller.browserRuntimes.append(runtime)
-                        wireContentProcessTerminationHandler(runtime)
-                    }
-                case .fileTree:
-                    if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
-                       let view = canvas.tileView(for: tile.id) as? FileTreeTileNSView {
-                        fileTreeViews[tile.id] = view
-                    }
-                default:
-                    continue
+        for tile in candidates {
+            guard canvas.tileView(for: tile.id) is DescriptorTileNSView else { continue }
+            switch tile.kind {
+            case .terminal:
+                // M1.3: the controller may already hold a runtime for this tile
+                // — it survives a switch whenever the project is shared between
+                // the two workspaces, which `switchWorkspace` is explicitly
+                // written for. Retire it first; see `retireOrphanedRuntimes`.
+                retireOrphanedRuntimes(forTile: tile.id, controller: controller)
+                if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
+                    controller.runtimes.append(runtime)
                 }
+            case .browser:
+                retireOrphanedRuntimes(forTile: tile.id, controller: controller)
+                if case let .restarted(runtime) = spawner.restartBrowserTile(tileId: tile.id) {
+                    controller.browserRuntimes.append(runtime)
+                    wireContentProcessTerminationHandler(runtime)
+                }
+            case .fileTree:
+                if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
+                   let view = canvas.tileView(for: tile.id) as? FileTreeTileNSView {
+                    fileTreeViews[tile.id] = view
+                }
+            default:
+                continue
             }
         }
         workspaceRuntime?.enforceBrowserRuntimeBudget()

@@ -1746,6 +1746,12 @@ final class WorkspaceRuntime {
 
     private var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
 
+    /// QA (`.plans/67` ARC-4a): lower the WKWebView cap so a leg can reach a real
+    /// eviction with two browsers instead of seven.
+    func qaSetBrowserRuntimeMaxLive(_ maxLive: Int) {
+        browserRuntimeBudget.maxLive = max(1, maxLive)
+    }
+
     func registerLiveBrowser(tileId: UUID) {
         browserRuntimeBudget.registerLive(tileId: tileId)
     }

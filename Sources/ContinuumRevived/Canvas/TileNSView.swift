@@ -23,6 +23,22 @@ class TileNSView: NSView, TokenThemed {
     /// inside `attach` and the deliberate tile close.
     func prepareForRemovalFromScene() {}
 
+    /// Whether this view has been told it left the scene since the canvas last
+    /// installed it. `.plans/67` ARC-4a: overrides are not idempotent — a file
+    /// view closes its language document — so the canvas tells a view once.
+    private(set) var hasRetiredFromScene = false
+
+    /// The canvas's one route to `prepareForRemovalFromScene`: at most once per
+    /// installation. `CanvasNSView.retireTileView` calls it; `adoptTileView`
+    /// re-arms it when a view is installed again.
+    final func retireFromScene() {
+        guard !hasRetiredFromScene else { return }
+        hasRetiredFromScene = true
+        prepareForRemovalFromScene()
+    }
+
+    final func rejoinScene() { hasRetiredFromScene = false }
+
     // MARK: - Visibility index maintenance
     //
     // A tile's frame is a WORLD frame, and the world plane keeps a spatial index

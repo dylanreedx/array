@@ -52,6 +52,10 @@ final class FocusBroker {
         adapters[adapter.focusSurfaceID] = adapter
     }
 
+    /// QA: the adapter registered for `id`, so a leg can prove a replaced view
+    /// left the broker and its successor took the slot.
+    func qaAdapter(for id: FocusSurfaceID) -> FocusSurfaceAdapter? { adapters[id] }
+
     func unregister(_ id: FocusSurfaceID) {
         if activeSurface == id {
             adapters[id]?.releaseFocus(reason: .recovery)
