@@ -683,6 +683,12 @@ run_app_check .build/debug/Array --zone-save-isolation-check
 run_app_check .build/debug/Array --zone-project-session-naming-check
 run_app_check .build/debug/Array --zone-lazy-resume-check
 run_app_check .build/debug/Array --board-task-workflow-check
+# The TaskEditor tests import its locked devDependencies (jsdom, @tiptap/*),
+# and a fresh worktree has no node_modules, so the test leg used to fail with
+# ERR_MODULE_NOT_FOUND on every bench. Install exactly the lockfile, OFFLINE:
+# npm never touches the network here, and a package missing from the local npm
+# cache fails this leg by name (ENOTCACHED) rather than hiding in the test leg.
+run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 run_leg npm test --prefix Tools/TaskEditor
 run_app_check .build/debug/Array --board-interaction-check
 run_app_check .build/debug/Array --board-tile-lifecycle-check
