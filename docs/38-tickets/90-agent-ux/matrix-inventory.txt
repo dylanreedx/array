@@ -173,6 +173,7 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
+check --window-chrome-check
 check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-canvas-check
@@ -390,6 +391,7 @@ leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
+leg run_app_check .build/debug/Array --window-chrome-check
 leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check

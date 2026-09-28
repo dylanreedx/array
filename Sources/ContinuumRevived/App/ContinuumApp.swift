@@ -4785,21 +4785,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 canvasState: canvasState)
             refreshAgentSurfaces(notify: false)
 
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                styleMask: Self.workspaceWindowStyleMask,
-                backing: .buffered,
-                defer: false
-            )
-            // The title is still set: it is what Mission Control, the Window menu
-            // and the dock preview read. It is just no longer DRAWN — see
-            // `applyMergedTitlebarChrome`.
-            window.title = Self.mainWindowTitle(for: project, registry: updatedRegistry)
-            Self.applyMergedTitlebarChrome(to: window)
-            window.center()
-            let contentFrame = window.contentRect(forFrameRect: window.frame)
-            window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
-            window.delegate = self
+            let window = makeWorkspaceWindow(
+                canvasView: canvasView,
+                title: Self.mainWindowTitle(for: project, registry: updatedRegistry))
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
             self.window = window
@@ -10185,6 +10173,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// and fails if that gap closes.
     static let workspaceTrafficLightInset: CGFloat = 76
 
+    /// The workspace window exactly as launch builds it, so `--window-chrome-check`
+    /// measures the window the user gets rather than a copy of it.
+    func makeWorkspaceWindow(canvasView: CanvasNSView, title: String) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: Self.workspaceWindowStyleMask,
+            backing: .buffered,
+            defer: false
+        )
+        // The title is still set: it is what Mission Control, the Window menu
+        // and the dock preview read. It is just no longer DRAWN — see
+        // `applyMergedTitlebarChrome`.
+        window.title = title
+        Self.applyMergedTitlebarChrome(to: window)
+        window.center()
+        let contentFrame = window.contentRect(forFrameRect: window.frame)
+        window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
+        window.delegate = self
+        return window
+    }
+
     static func applyMergedTitlebarChrome(to window: NSWindow) {
         window.styleMask.insert(.fullSizeContentView)
         window.titlebarAppearsTransparent = true
@@ -11258,8 +11267,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 switch self { case let .failed(message): return message }
             }
         }
-        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
-            if !condition() { throw CheckError.failed(message) }
+        // Every assertion runs and every failure is reported: a RED run names all
+        // of the chrome that regressed, not just the first thing it tripped on.
+        var failures: [String] = []
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+            if !condition() { failures.append(message) }
         }
 
         let fm = FileManager.default
@@ -11296,19 +11308,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [], groups: [], lastActiveTileId: nil))
 
-        // Built exactly the way boot builds it: production style mask, production
-        // chrome call, production content view.
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-            styleMask: workspaceWindowStyleMask,
-            backing: .buffered,
-            defer: false)
-        window.title = "Chrome Workspace — Array"
-        applyMergedTitlebarChrome(to: window)
-        let contentSize = window.contentRect(forFrameRect: window.frame).size
-        window.contentView = app.makeWorkspaceContentView(
-            canvasView: canvas, frame: NSRect(origin: .zero, size: contentSize))
-        window.delegate = app
+        // The window launch builds, through the method launch calls: style mask,
+        // title, chrome, content view and delegate all come from production. Only
+        // the ordering differs — the window is never put on screen.
+        let window = app.makeWorkspaceWindow(canvasView: canvas, title: "Chrome Workspace — Array")
         app.window = window
 
         guard let content = window.contentView else {
@@ -11319,6 +11322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let topBar = app.workspaceTopBarView, let splitView = app.workspaceSplitView else {
             throw CheckError.failed("workspace mount did not retain the top bar and split view")
         }
+        expect(window.delegate === app, "launch's window must report its fullscreen transitions to the app delegate")
 
         // 1. The content occupies the WHOLE frame — no system titlebar strip above it.
         let frameHeight = window.frame.height
@@ -11327,40 +11331,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             forFrameRect: window.frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable]).height
         let recoveredTitlebarHeight = contentHeight - legacyContentHeight
-        try expect(abs(contentHeight - frameHeight) < 0.5,
-                   "content must span the full frame; frame \(frameHeight) content \(contentHeight)")
-        try expect(recoveredTitlebarHeight > 0,
-                   "the merge must recover the system titlebar strip, recovered \(recoveredTitlebarHeight)")
-        try expect(window.titleVisibility == .hidden, "the drawn window title must be hidden")
-        try expect(window.titlebarAppearsTransparent, "the titlebar must be transparent")
-        try expect(!window.title.isEmpty,
-                   "the title string must survive for Mission Control and the Window menu")
+        expect(abs(contentHeight - frameHeight) < 0.5,
+               "content must span the full frame; frame \(frameHeight) content \(contentHeight)")
+        expect(abs(content.frame.height - frameHeight) < 0.5 && abs(content.frame.width - window.frame.width) < 0.5,
+               "the content view must fill the frame; content \(content.frame.size) frame \(window.frame.size)")
+        expect(recoveredTitlebarHeight > 0,
+               "the merge must recover the system titlebar strip, recovered \(recoveredTitlebarHeight)")
+        expect(window.titleVisibility == .hidden, "the drawn window title must be hidden")
+        expect(window.titlebarAppearsTransparent, "the titlebar must be transparent")
+        expect(window.title == "Chrome Workspace — Array",
+               "the title string must survive for Mission Control and the Window menu, got '\(window.title)'")
 
         // 2. The bar is the window's own top strip, not a row inside a split pane.
-        try expect(!(content is NSSplitView),
-                   "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane")
-        try expect(topBar.superview === content,
-                   "the top bar must be a direct subview of the content container, not of a split pane")
+        expect(!(content is NSSplitView),
+               "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane")
+        expect(topBar.superview === content,
+               "the top bar must be a direct subview of the content container, not of a split pane")
+        expect(splitView.superview === content, "the split view must sit beside the bar in the content container")
         let barFrame = topBar.frame
-        try expect(abs(barFrame.width - content.bounds.width) < 0.5,
-                   "the bar must span the full window width, got \(barFrame.width) of \(content.bounds.width)")
-        try expect(abs(barFrame.minX) < 0.5, "the bar must start at the window's leading edge, got \(barFrame.minX)")
-        try expect(abs(barFrame.maxY - content.bounds.maxY) < 0.5,
-                   "the bar must touch the top of the content, got maxY \(barFrame.maxY) of \(content.bounds.maxY)")
-        try expect(abs(barFrame.height - workspaceTopBarHeight) < 0.5,
-                   "the bar must be \(workspaceTopBarHeight)pt tall, got \(barFrame.height)")
+        expect(abs(barFrame.width - content.bounds.width) < 0.5,
+               "the bar must span the full window width, got \(barFrame.width) of \(content.bounds.width)")
+        expect(abs(barFrame.minX) < 0.5, "the bar must start at the window's leading edge, got \(barFrame.minX)")
+        expect(abs(barFrame.maxY - content.bounds.maxY) < 0.5,
+               "the bar must touch the top of the content, got maxY \(barFrame.maxY) of \(content.bounds.maxY)")
+        expect(abs(barFrame.height - workspaceTopBarHeight) < 0.5,
+               "the bar must be \(workspaceTopBarHeight)pt tall, got \(barFrame.height)")
 
         // 3. Everything else lives strictly below it, and the total top chrome is
         //    now the bar alone rather than the bar stacked on a titlebar.
-        try expect(abs(splitView.frame.maxY - barFrame.minY) < 0.5,
-                   "the split view must end where the bar begins; split maxY \(splitView.frame.maxY), bar minY \(barFrame.minY)")
+        expect(abs(splitView.frame.maxY - barFrame.minY) < 0.5,
+               "the split view must end where the bar begins; split maxY \(splitView.frame.maxY), bar minY \(barFrame.minY)")
+        expect(abs(splitView.frame.minY) < 0.5, "the split view must reach the bottom of the window, minY \(splitView.frame.minY)")
         let topChromeHeight = frameHeight - splitView.frame.height
         // What it cost before: the same system strip, plus the old 38pt app row.
         let legacyTopChromeHeight = recoveredTitlebarHeight + 38
-        try expect(abs(topChromeHeight - workspaceTopBarHeight) < 0.5,
-                   "top chrome must be the bar alone, got \(topChromeHeight)")
-        try expect(topChromeHeight < legacyTopChromeHeight,
-                   "top chrome must shrink; got \(topChromeHeight) against \(legacyTopChromeHeight)")
+        expect(abs(topChromeHeight - workspaceTopBarHeight) < 0.5,
+               "top chrome must be the bar alone, got \(topChromeHeight)")
+        expect(topChromeHeight < legacyTopChromeHeight,
+               "top chrome must shrink; got \(topChromeHeight) against \(legacyTopChromeHeight)")
 
         // 4. The workspace identity clears the traffic lights instead of hiding under them.
         guard let closeButton = window.standardWindowButton(.closeButton),
@@ -11372,23 +11380,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zoomButton.convert(zoomButton.bounds, to: nil).maxX)
         let identityLeft = topBar.convert(topBar.identityFrameForQA, to: nil).minX
         let trafficLightGap = identityLeft - buttonsRight
-        try expect(trafficLightGap >= 12,
-                   "the workspace name must start clear of the traffic lights by at least 12pt; identity at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
-        try expect(topBar.mouseDownCanMoveWindow, "dragging the bar must move the window")
+        expect(trafficLightGap >= 12,
+               "the workspace name must start clear of the traffic lights by at least 12pt; identity at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
+        let buttonsMidY = closeButton.convert(closeButton.bounds, to: nil).midY
+        let barInWindow = topBar.convert(topBar.bounds, to: nil)
+        expect(buttonsMidY > barInWindow.minY && buttonsMidY < barInWindow.maxY,
+               "the traffic lights must sit inside the bar's strip; buttons midY \(buttonsMidY), bar \(barInWindow.minY)...\(barInWindow.maxY)")
 
-        // 5. Full screen retires the clearance and leaving it restores it, driven
-        //    through the real delegate callbacks.
-        let insetWindowed = topBar.identityLeadingForQA
-        app.windowDidEnterFullScreen(
-            Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
-        let insetFullScreen = topBar.identityLeadingForQA
-        app.windowDidExitFullScreen(
-            Notification(name: NSWindow.didExitFullScreenNotification, object: window))
-        let insetRestored = topBar.identityLeadingForQA
-        try expect(insetFullScreen < insetWindowed,
-                   "full screen must drop the traffic-light clearance, \(insetWindowed) -> \(insetFullScreen)")
-        try expect(abs(insetRestored - insetWindowed) < 0.5,
-                   "leaving full screen must restore the clearance, got \(insetRestored)")
+        // 5. Window drag. A mouse-down on the bar's empty surface must land on a
+        //    view that lets the window move, and the window itself must be movable.
+        //    (A real drag is a WindowServer tracking loop; see the visual QA.)
+        let identityRightInBar = topBar.identityFrameForQA.maxX
+        let emptyPointInBar = NSPoint(x: identityRightInBar + 5, y: topBar.bounds.midY)
+        let hitView = content.hitTest(topBar.convert(emptyPointInBar, to: content))
+        expect(window.isMovable, "the workspace window must be movable")
+        expect(hitView != nil && hitView!.isDescendant(of: topBar),
+               "a click on the bar's empty surface must hit the bar, hit \(String(describing: hitView))")
+        expect(hitView?.mouseDownCanMoveWindow == true,
+               "dragging the bar's empty surface must move the window; hit \(String(describing: hitView)) mouseDownCanMoveWindow \(String(describing: hitView?.mouseDownCanMoveWindow))")
+
+        // 6. Full screen retires the clearance and leaving it restores it. Delivered
+        //    as the window's own notifications, which reach the delegate only
+        //    through the observation `NSWindow.delegate` sets up — a window launch
+        //    built without the delegate, or a delegate without the handlers, stays
+        //    at 76 and goes RED here. A real `toggleFullScreen(_:)` is not driven:
+        //    it moves the window to its own Space on the user's display.
+        func identityLeftInWindow() -> CGFloat {
+            content.layoutSubtreeIfNeeded()
+            return topBar.convert(topBar.identityFrameForQA, to: nil).minX
+        }
+        let insetWindowed = topBar.trafficLightInset
+        let identityWindowed = identityLeftInWindow()
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: window)
+        let insetFullScreen = topBar.trafficLightInset
+        let identityFullScreen = identityLeftInWindow()
+        NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: window)
+        NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: window)
+        let insetRestored = topBar.trafficLightInset
+        let identityRestored = identityLeftInWindow()
+        expect(abs(insetWindowed - workspaceTrafficLightInset) < 0.5,
+               "windowed, the bar must reserve \(workspaceTrafficLightInset)pt for the traffic lights, got \(insetWindowed)")
+        expect(abs(insetFullScreen) < 0.5,
+               "entering full screen must drop the traffic-light inset to 0, got \(insetFullScreen)")
+        expect(abs(identityFullScreen - WorkspaceTopBarView.identityLeading) < 0.5,
+               "in full screen the workspace name must sit at the bar's own \(WorkspaceTopBarView.identityLeading)pt margin, got \(identityFullScreen)")
+        expect(abs(insetRestored - workspaceTrafficLightInset) < 0.5,
+               "leaving full screen must restore the \(workspaceTrafficLightInset)pt inset, got \(insetRestored)")
+        expect(abs(identityRestored - identityWindowed) < 0.5,
+               "leaving full screen must put the workspace name back at \(identityWindowed), got \(identityRestored)")
+
+        // A notification for some other window must not touch this bar.
+        let stranger = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                styleMask: [.titled], backing: .buffered, defer: true)
+        stranger.delegate = app
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: stranger)
+        expect(abs(topBar.trafficLightInset - workspaceTrafficLightInset) < 0.5,
+               "another window's full screen must not change this bar's inset, got \(topBar.trafficLightInset)")
+        stranger.delegate = nil
+
+        guard failures.isEmpty else {
+            window.delegate = nil
+            app.window = nil
+            throw CheckError.failed("window chrome: \(failures.count) assertion(s) failed:\n  - " + failures.joined(separator: "\n  - "))
+        }
 
         window.orderOut(nil)
         window.delegate = nil
@@ -11414,8 +11469,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "trafficLightsRightInWindow": Double(buttonsRight),
             "trafficLightGap": Double(trafficLightGap),
             "systemTitlebarHeight": Double(systemTitlebarHeight),
-            "identityLeadingWindowed": Double(insetWindowed),
-            "identityLeadingFullScreen": Double(insetFullScreen),
+            "trafficLightInsetWindowed": Double(insetWindowed),
+            "trafficLightInsetFullScreen": Double(insetFullScreen),
+            "trafficLightInsetRestored": Double(insetRestored),
+            "identityLeftWindowed": Double(identityWindowed),
+            "identityLeftFullScreen": Double(identityFullScreen),
+            "identityLeftRestored": Double(identityRestored),
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
