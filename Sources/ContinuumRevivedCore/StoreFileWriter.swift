@@ -46,6 +46,9 @@ public enum StoreFileWriter {
         case failFrom(Int)
         /// Mutations 1...N land; every later one is silently dropped.
         case abortAfter(Int)
+        /// The Nth counted mutation waits `seconds` on its caller's thread, then
+        /// lands: a blocked I/O queue. The gate's lock is not held while it waits.
+        case delayWrite(Int, seconds: Double)
     }
 
     public struct Plan: Sendable {
@@ -123,11 +126,20 @@ public enum StoreFileWriter {
         state.count += 1
         let index = state.count
         let verdict: Outcome
+        var delay: Double = 0
         switch plan.fault {
         case .none: verdict = .landed
         case let .failWrite(n): verdict = index == n ? .failed : .landed
         case let .failFrom(n): verdict = index >= n ? .failed : .landed
         case let .abortAfter(n): verdict = index > n ? .dropped : .landed
+        case let .delayWrite(n, seconds):
+            verdict = .landed
+            if index == n { delay = seconds }
+        }
+        if delay > 0 {
+            state.lock.unlock()
+            Thread.sleep(forTimeInterval: delay)
+            state.lock.lock()
         }
         // Held across the mutation so the trace order is the disk order.
         defer { state.lock.unlock() }

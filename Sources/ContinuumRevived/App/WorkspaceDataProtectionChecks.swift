@@ -306,6 +306,133 @@ extension WorkspaceDataProtectionChecks {
     }
 }
 
+extension WorkspaceDataProtectionChecks {
+    // MARK: - --canvas-save-receipt-check
+
+    /// A canvas save acknowledges only what landed, failure reaches switch and
+    /// quit, and no write outlives the project lock that authorized it.
+    static func runCanvasSaveReceipt() throws -> URL {
+        try runScenarios("canvas-save-receipt", [
+            ("failing-store", failingCanvasStore),
+            ("lock-outlives-write", lockOutlivesQueuedWrite),
+            ("lock-outlives-write-on-switch", lockOutlivesQueuedWriteOnSwitch)
+        ])
+    }
+
+    /// A camera change, as a pan reports it, scheduling project A1's debounced
+    /// canvas save.
+    private static func panAndReport(_ m: Fixture.Mounted, dy: Double) {
+        var viewport = m.canvas.viewport
+        viewport.y += dy
+        m.canvas.setViewport(viewport)
+        m.delegate.canvasDidChange(m.canvas)
+    }
+
+    private static func canvasFilePlan(
+        _ fixture: Fixture, _ fault: StoreFileWriter.Fault, project: UUID = Fixture.projectA1
+    ) -> StoreFileWriter.Plan {
+        let file = ProjectStoreLayout(projectRoot: fixture.projectRoots[project]!).canvasFile
+        return StoreFileWriter.Plan(fault: fault, scope: file.deletingLastPathComponent(),
+                                    matching: { $0.lastPathComponent == file.lastPathComponent })
+    }
+
+    /// Every write of project A1's canvas fails. The debounced save must not
+    /// acknowledge, switch and quit must refuse, and once the store recovers the
+    /// change the user made is still there to save.
+    private static func failingCanvasStore(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("failing store")
+        guard let controller = m.runtime.controller(for: Fixture.projectA1) else { throw Failure(message: "no A1 controller") }
+        var acknowledgements = 0
+        let production = controller.onCanvasStatePersisted
+        controller.onCanvasStatePersisted = { acknowledgements += 1; production?() }
+
+        StoreFileWriter.install(canvasFilePlan(fixture, .failFrom(1)))
+        defer { StoreFileWriter.uninstall() }
+        panAndReport(m, dy: 40)
+        let panned = m.canvas.viewport
+        fixture.drain()
+        let failedWrites = StoreFileWriter.trace.filter { $0.outcome == .failed }.count
+        try expect(failedWrites > 0, "the pan scheduled no canvas write to fail")
+        try expect(acknowledgements == 0, "a failed canvas save was acknowledged \(acknowledgements) time(s)")
+
+        let switched = m.delegate.qaSwitchWorkspaceFromSidebar(Fixture.workspaceB)
+        try expect(!switched && m.runtime.workspaceId == Fixture.workspaceA,
+                   "the switch went ahead over an unsaved canvas; runtime is on \(m.runtime.workspaceId)")
+        let reply = m.delegate.qaQuitForRemount()
+        try expect(reply == .terminateCancel, "quit went ahead over an unsaved canvas")
+
+        StoreFileWriter.uninstall()
+        try fixture.quit()
+        let onDisk = fixture.readProjectFile(Fixture.projectA1).canvas?.viewport
+        try expect(onDisk == panned,
+                   "after the store recovered, quit did not save the change: disk viewport \(String(describing: onDisk)), panned \(panned)")
+        return ["failedWrites": failedWrites, "acknowledgements": acknowledgements]
+    }
+
+    /// As below, but the lock is released by a workspace switch releasing the
+    /// departing project rather than by quit — a project that is no longer the
+    /// active one. The switch re-dirties only the ACTIVE controller's canvas, so
+    /// nothing sends this project's final flush through the save queue by
+    /// accident: pan in zone A2, click zone A1, switch, all inside one slow write.
+    private static func lockOutlivesQueuedWriteOnSwitch(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("lock on switch")
+        try fixture.armByClick(Fixture.zoneA2)
+        fixture.drain(0.3)
+        StoreFileWriter.install(canvasFilePlan(fixture, .delayWrite(1, seconds: 1.5), project: Fixture.projectA2))
+        defer { StoreFileWriter.uninstall() }
+        panAndReport(m, dy: 60)
+        fixture.drain(0.4)
+        try fixture.armByClick(Fixture.zoneA1)
+        try fixture.switchTo(Fixture.workspaceB)
+        let lock = ProjectLock(root: fixture.projectRoots[Fixture.projectA2]!)
+        var lockFree = false
+        do { try lock.acquire(); lockFree = true } catch {}
+        let heldLanded = { StoreFileWriter.trace.contains { $0.index == 1 && $0.outcome == .landed } }
+        let landedAtRelease = heldLanded()
+        let traceAtRelease = StoreFileWriter.trace.map(\.description)
+        if lockFree { lock.release() }
+        fixture.drain(1.6)
+        try expect(heldLanded(), "the held canvas write never landed")
+        try expect(!lockFree || landedAtRelease,
+                   "switching away freed project A2's lock while its canvas write was still queued; trace at release \(traceAtRelease)")
+        return ["lockFreeAfterSwitch": lockFree, "heldWriteLandedByThen": landedAtRelease]
+    }
+
+    /// Project A2's debounced canvas write is held on the save queue, and the
+    /// user quits while it is in flight. The project lock must not come free
+    /// before that write has resolved. Project A2 on purpose: it holds only a
+    /// note, so nothing at quit re-dirties its canvas and sends a synchronous
+    /// write through the queue that would wait behind the held one by accident.
+    private static func lockOutlivesQueuedWrite(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("lock")
+        try fixture.armByClick(Fixture.zoneA2)
+        fixture.drain(0.3)
+        StoreFileWriter.install(canvasFilePlan(fixture, .delayWrite(1, seconds: 1.5), project: Fixture.projectA2))
+        defer { StoreFileWriter.uninstall() }
+        panAndReport(m, dy: 60)
+        // Let the debounce fire and the write start waiting on the save queue.
+        fixture.drain(0.4)
+        try fixture.quit()
+        let lock = ProjectLock(root: fixture.projectRoots[Fixture.projectA2]!)
+        var lockFree = false
+        do { try lock.acquire(); lockFree = true } catch {}
+        // The held write is the plan's first counted mutation.
+        let heldLanded = { StoreFileWriter.trace.contains { $0.index == 1 && $0.outcome == .landed } }
+        let landedAtRelease = heldLanded()
+        let traceAtRelease = StoreFileWriter.trace.map(\.description)
+        if lockFree { lock.release() }
+        fixture.drain(1.6)
+        let trace = StoreFileWriter.trace.map(\.description)
+        try expect(heldLanded(), "the held canvas write never landed; trace \(trace)")
+        try expect(!lockFree || landedAtRelease,
+                   "the project lock was free while its canvas write was still queued; trace at release \(traceAtRelease)")
+        return ["lockFreeAfterQuit": lockFree, "heldWriteLandedByThen": landedAtRelease, "trace": trace]
+    }
+}
+
 private extension Optional {
     func orThrow(_ error: Error) throws -> Wrapped {
         guard let value = self else { throw error }

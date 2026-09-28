@@ -522,9 +522,9 @@ final class WorkspaceRuntime {
     }
 
     /// Drain the debounced arming write (switch, close, and checks that assert on disk).
-    func flushPendingArmingSave() {
+    func flushPendingArmingSave() throws {
         guard documentSaverWorkspaceId == workspaceId else { return }
-        try? documentSaver?.flushPendingSave()
+        try documentSaver?.flushPendingSave()
     }
 
     // MARK: - Zone membership (M1.10, `.plans/46`)
@@ -838,10 +838,15 @@ final class WorkspaceRuntime {
     }
 
     /// Flush every live controller's pending saves (fan-out of `flushPendingSaves`).
-    func flushAll() {
+    /// Every controller is flushed; the first failure is thrown after.
+    func flushAll() throws {
+        var firstFailure: Error?
         for projectId in acquiredProjectIds {
-            registry.controller(for: projectId)?.flushPendingSaves()
+            do { try registry.controller(for: projectId)?.flushPendingSaves() } catch {
+                if firstFailure == nil { firstFailure = error }
+            }
         }
+        if let firstFailure { throw firstFailure }
     }
 
     /// Persist every acknowledged register owned by the mounted scene before
@@ -854,8 +859,8 @@ final class WorkspaceRuntime {
             }
         }
         let focus = departingFocusSnapshot(from: canvasView)
-        flushAll()
-        flushPendingArmingSave()
+        try flushAll()
+        try flushPendingArmingSave()
         try persistDepartingWorkspaceState(focus: focus)
         lifecycleObserver?(.closeFlushCompleted)
     }
@@ -2217,7 +2222,7 @@ final class WorkspaceRuntime {
         Thread.sleep(forTimeInterval: 1.1)
 
         // Flush all controllers through WorkspaceRuntime.
-        runtime.flushAll()
+        try runtime.flushAll()
 
         // Pa should have been rewritten.
         let paCanvasAfter = try storeA.loadCanvas()

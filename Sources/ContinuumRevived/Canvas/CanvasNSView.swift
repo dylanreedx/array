@@ -7523,7 +7523,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
         let controller = ZoneRuntimeController(projectRoot: projectRoot, projectStore: projectStore, project: project)
         controller.canvasView = canvas
-        controller.flushCanvasSave()
+        try controller.flushCanvasSave()
         let roundTripBytes = try Data(contentsOf: projectStore.layout.canvasFile)
         _ = try projectStore.loadCanvas()
         try expect(roundTripBytes == seededCanvasBytes, "project canvas.json should byte-match after single-zone round trip")

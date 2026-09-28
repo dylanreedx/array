@@ -454,7 +454,7 @@ enum ZoneArmingChecks {
         // 6. The arming write is durable.
         // ==================================================================
         delegate.qaActivateZoneByClick(zoneB)
-        runtime.flushPendingArmingSave()
+        try runtime.flushPendingArmingSave()
         let reloaded = try WorkspaceStore(
             workspaceId: workspaceWA, applicationSupportDirectory: appSupport).load()
         try expect(reloaded.lastActiveZoneId == zoneB,

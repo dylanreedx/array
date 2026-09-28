@@ -351,3 +351,15 @@ that copy.
   left for Dylan to correct in `CLAUDE.md`. Staging `array/stab-0722` cut at
   `1451c030` and fast-forwarded to slice 0: real matrix, 231 legs, exactly the
   nine known unowned reds, NOTES printed.
+  Truthful canvas receipts (`--canvas-save-receipt-check`): with every canvas
+  write failing, a failed save was acknowledged twice at base; now it is never
+  acknowledged, stays dirty, and switch and quit refuse until it lands. The
+  synchronous flush is now always a barrier through the last submitted write,
+  with no timeout, so close cannot release the project lock ahead of a queued
+  write. **Its three lock scenarios are regression guards, not RED-at-base
+  witnesses:** quit, switch release, and switch release of a non-active project
+  (a write held 1.5s by a `StoreFileWriter.delayWrite` fault) all found the lock
+  honest at base, because each route re-dirties the canvas before `close()` and
+  the dirty flush waits on the serial queue by accident. A cold-zone release was
+  also considered; reconcile never releases a controller, so no such route
+  exists.

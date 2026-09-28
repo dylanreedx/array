@@ -211,7 +211,7 @@ enum CanvasPersistenceModelChecks {
         // change to `activeController.scheduleCanvasSave()`.
         delegate.canvasDidChange(canvas)
         // Force the 200 ms debounce to land now, through the production flush.
-        runtime.activeController?.flushCanvasSave()
+        try runtime.activeController?.flushCanvasSave()
 
         // === Pb's file must still be Pb's. ===
         let pbAfter = ((try? storePb.tryLoadCanvas()) ?? nil)?.tiles ?? []
@@ -248,7 +248,7 @@ enum CanvasPersistenceModelChecks {
                    + "un-installed zone under test; got \(installedForPa.count) zone(s)")
 
         delegate.canvasDidChange(canvas)
-        runtime.activeController?.flushCanvasSave()
+        try runtime.activeController?.flushCanvasSave()
 
         let paFinal = ((try? storePa.tryLoadCanvas()) ?? nil)?.tiles ?? []
         let paFinalIds = Set(paFinal.map(\.id))

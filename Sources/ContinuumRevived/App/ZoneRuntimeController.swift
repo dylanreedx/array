@@ -41,8 +41,8 @@ final class ZoneRuntimeController {
     /// be the one path that leaves the dock badge/sidebar stale).
     var onAgentStatusWritten: ((UUID, AgentStatus) -> Void)?
     var onObservedAgentStatusesChanged: (([UUID: AgentStatus]) -> Void)?
-    /// Fired after the debounced canvas autosave actually persists — the
-    /// single funnel every canvas mutation passes through. Ticket 86: the
+    /// Fired after a canvas save actually persists, and never after one that
+    /// failed — the single funnel every canvas mutation passes through. Ticket 86: the
     /// companion publish hangs off this so the phone tracks canvas changes
     /// without manual publishes.
     var onCanvasStatePersisted: (() -> Void)?
@@ -71,6 +71,12 @@ final class ZoneRuntimeController {
     /// attach paths apart.
     var qaHoldsProcessWideAttachments: Bool { sessionObserver != nil || sessionPruner != nil }
     private var isCanvasDirty = false
+    /// Canvas writes handed to the save queue, and the outcome of the newest
+    /// one to resolve, recorded on the queue itself so a synchronous flush can
+    /// read it after its barrier without waiting on the main actor.
+    private(set) var canvasSubmittedGeneration: UInt64 = 0
+    private let canvasSaveOutcomes = CanvasSaveOutcomes()
+    var canvasDurableGeneration: UInt64 { canvasSaveOutcomes.snapshot().durable }
     private var isBrowserDirty = false
     private var isNoteDirty = false
     private var isFileTreeDirty = false
@@ -187,7 +193,11 @@ final class ZoneRuntimeController {
         stopReaper()
         sessionObserver?.stop()
         onObservedAgentStatusesChanged?([:])
-        flushPendingSaves()
+        // Drains the canvas save queue before the lock below is released, even
+        // when the flush fails; a failure here has nowhere left to go.
+        do { try flushPendingSaves() } catch {
+            fputs("ZoneRuntimeController: closing with an unsaved canvas: \(error)\n", stderr)
+        }
         detachUI()
 
         let now = Date()
@@ -578,7 +588,7 @@ final class ZoneRuntimeController {
             throw HydrationLifecycleError.focusedZoneMustRemainLive(focusedTileId)
         }
 
-        flushPendingSaves()
+        try flushPendingSaves()
         let liveBrowsers = browserRuntimes
         for runtime in liveBrowsers {
             try tileSpawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: snapshotImageProvider(runtime))
@@ -693,10 +703,19 @@ final class ZoneRuntimeController {
         guard isCanvasDirty, let canvasView else { return }
         let snapshot = canvasStateToPersist(canvasView: canvasView)
         let store = projectStore
+        let outcomes = canvasSaveOutcomes
         isCanvasDirty = false
+        canvasSubmittedGeneration &+= 1
+        let generation = canvasSubmittedGeneration
         Self.canvasSaveQueue.async { [weak self] in
-            try? store.saveCanvas(snapshot)
-            Task { @MainActor [weak self] in self?.onCanvasStatePersisted?() }
+            let error: Error?
+            do { try store.saveCanvas(snapshot); error = nil } catch let failure { error = failure }
+            outcomes.resolve(generation, error: error)
+            Task { @MainActor [weak self] in
+                // A failed write leaves its change unsaved: dirty again, and never
+                // acknowledged. Used to `try?` and acknowledge regardless.
+                if error == nil { self?.onCanvasStatePersisted?() } else { self?.isCanvasDirty = true }
+            }
         }
     }
 
@@ -725,23 +744,47 @@ final class ZoneRuntimeController {
         }
     }
 
-    func flushPendingSaves() {
-        flushCanvasSave()
+    /// Flush every register; throws the canvas failure, if any, after all ran.
+    func flushPendingSaves() throws {
+        var canvasFailure: Error?
+        do { try flushCanvasSave() } catch { canvasFailure = error }
         flushBrowserSave()
         flushNoteSave()
         flushFileTreeSave()
+        if let canvasFailure { throw canvasFailure }
     }
 
-    func flushCanvasSave() {
+    /// Make every submitted canvas change durable, or throw. Always a barrier:
+    /// it drains the save queue through the last submitted write even when
+    /// nothing is dirty here, because a debounced write may still be queued and
+    /// close releases the project lock right after this returns. A failure —
+    /// this write's or a queued one's — leaves the canvas dirty.
+    /// Witness: `--canvas-save-receipt-check`.
+    func flushCanvasSave() throws {
         saveTimer?.invalidate()
         saveTimer = nil
-        guard isCanvasDirty, let canvasView else { return }
-        let snapshot = canvasStateToPersist(canvasView: canvasView)
-        // Serialize behind any in-flight debounced write so the durable copy
-        // on disk is the newest state — project switch and close rely on it.
-        Self.canvasSaveQueue.sync {
-            try? projectStore.saveCanvas(snapshot)
+        if isCanvasDirty, let canvasView {
+            let snapshot = canvasStateToPersist(canvasView: canvasView)
+            let store = projectStore
+            let outcomes = canvasSaveOutcomes
+            canvasSubmittedGeneration &+= 1
+            let generation = canvasSubmittedGeneration
+            // Serialize behind any in-flight debounced write so the durable copy
+            // on disk is the newest state — project switch and close rely on it.
+            Self.canvasSaveQueue.sync {
+                let error: Error?
+                do { try store.saveCanvas(snapshot); error = nil } catch let failure { error = failure }
+                outcomes.resolve(generation, error: error)
+            }
+        } else {
+            Self.canvasSaveQueue.sync {}
         }
+        let outcome = canvasSaveOutcomes.snapshot()
+        if let error = outcome.unresolvedFailure(through: canvasSubmittedGeneration) {
+            isCanvasDirty = true
+            throw error
+        }
+        guard isCanvasDirty else { return }
         isCanvasDirty = false
         onCanvasStatePersisted?()
     }
@@ -1093,8 +1136,8 @@ final class ZoneRuntimeController {
         controllerB.attachUI(canvasView: viewB, tileSpawner: spawnerB, focusBroker: FocusBroker())
         controllerC.attachUI(canvasView: viewC, tileSpawner: spawnerC, focusBroker: FocusBroker())
 
-        controllerB.flushPendingSaves()
-        controllerC.flushPendingSaves()
+        try controllerB.flushPendingSaves()
+        try controllerC.flushPendingSaves()
         let afterBCleanFlush = try bytes(at: storeB.layout.canvasFile)
         let afterBCleanFlushModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
         let afterCCleanFlush = try bytes(at: storeC.layout.canvasFile)
@@ -1108,7 +1151,7 @@ final class ZoneRuntimeController {
 
         viewA.setViewport(CanvasViewport(x: 49, y: 0, zoom: 1))
         controllerA.scheduleCanvasSave()
-        controllerA.flushPendingSaves()
+        try controllerA.flushPendingSaves()
 
         let afterBWhenAFlushed = try bytes(at: storeB.layout.canvasFile)
         let afterBWhenAFlushedModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
@@ -1556,4 +1599,39 @@ private final class ZoneRuntimeControllerNotificationCheckBox: @unchecked Sendab
 
 extension Notification.Name {
     static let continuumManagedSessionRecoveryError = Notification.Name("continuum.managedSession.recoveryError")
+}
+
+/// Where canvas writes resolve, shared between the main actor and the save
+/// queue. The durable generation only moves forward; a failure stays
+/// unresolved until a later generation lands.
+private final class CanvasSaveOutcomes: @unchecked Sendable {
+    struct Snapshot {
+        var durable: UInt64 = 0
+        var failed: UInt64 = 0
+        var failure: Error?
+
+        func unresolvedFailure(through generation: UInt64) -> Error? {
+            guard let failure, failed > durable, failed <= generation else { return nil }
+            return failure
+        }
+    }
+
+    private let lock = NSLock()
+    private var state = Snapshot()
+
+    func resolve(_ generation: UInt64, error: Error?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let error {
+            if generation >= state.failed { state.failed = generation; state.failure = error }
+        } else {
+            state.durable = max(state.durable, generation)
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
+    }
 }

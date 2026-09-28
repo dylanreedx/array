@@ -2221,6 +2221,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--canvas-save-receipt-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceDataProtectionChecks.runCanvasSaveReceipt()
+                print("ContinuumRevivedCanvasSaveReceiptChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--flat-spawn-migration-check") {
             do {
                 _ = NSApplication.shared
@@ -15270,7 +15282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             let deletingCurrent = workspaceRuntime?.workspaceId == workspaceId || registry.lastActiveWorkspaceId == workspaceId
-            workspaceRuntime?.flushAll()
+            try workspaceRuntime?.flushAll()
 
             // Compute the removal on a COPY first. It names the replacement workspace
             // (`deleteWorkspace` moves `lastActiveWorkspaceId` onto it) without
@@ -15453,7 +15465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Switch Project failed: unknown project \(projectId)\n", stderr)
                 return
             }
-            workspaceRuntime?.flushAll()
+            try workspaceRuntime?.flushAll()
             try registryStore.save(registry)
             relaunchApplication(projectRoot: projectRoot)
         } catch {
@@ -16947,7 +16959,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func flushCanvasSave() {
-        workspaceRuntime?.activeController?.flushCanvasSave()
+        // The controller keeps the canvas dirty on failure; say so, never swallow.
+        do { try workspaceRuntime?.activeController?.flushCanvasSave() } catch {
+            fputs("flushCanvasSave failed; the canvas stays unsaved: \(error)\n", stderr)
+        }
     }
 
     private func flushBrowserSave() {
