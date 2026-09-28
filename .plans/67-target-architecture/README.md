@@ -353,3 +353,17 @@ that copy.
   missing-folder zone still cannot mount (`mountableZones` throws, the factory
   refuses); the leg witnesses those two on launch's pre-mount canvas. Nothing
   merged.
+- 2026-09-28 — Slice 2, second part (explicit agent binding), same bench. A
+  managed-agent tile is bound, unbound or unavailable, decided in
+  `wireManagedAgentTile`: a record for the tile binds it; a stale record (its
+  Home is gone) makes it unavailable, which says so and refuses a prompt; no
+  record and no creation memo from this process makes it unbound, which says
+  so, and only a prompt the person sends starts one new agent there. Hydration
+  now wires every managed tile, so the unbound state renders after a switch.
+  New `--agent-tile-binding-check` (fixture mount, switch, remount, act,
+  remount; records counted on disk and through the supervisor; the tile's own
+  transcript text) was RED at base: no state rendered and a prompt in the
+  unbound tile did nothing. GREEN after. The mounted path already minted
+  nothing at base (M1.2b); the launch-only flat boot walk for an unpersisted
+  workspace goes through the same rule but is not driven by this leg.
+  Nothing merged.

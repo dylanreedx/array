@@ -1852,6 +1852,9 @@ final class AgentSupervisor {
     /// Records `restore()` refused to adopt because their project root is gone. Kept
     /// so the Phase 3 inbox can surface them rather than have them silently missing.
     private(set) var staleIDs: Set<AgentID> = []
+    /// tileId → the stale record that names it. A tile listed here HAS an agent
+    /// in this store; it is unavailable, and must never be given a second one.
+    private var staleAgentsByTile: [UUID: AgentID] = [:]
 
     /// Prior transcripts rehydrated from a provider session file, for DISPLAY
     /// ONLY. Deliberately a SEPARATE buffer from `history[id]`: history is
@@ -1974,6 +1977,7 @@ final class AgentSupervisor {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
                 staleIDs.insert(record.id)
+                if let tileId = record.tileId { staleAgentsByTile[tileId] = record.id }
                 report.stale.append(record.id)
                 warn("AgentSupervisor.restore: skipping agent \(record.id.rawValue.uuidString) — its project root \(record.cwd) no longer exists")
                 continue
@@ -1988,6 +1992,7 @@ final class AgentSupervisor {
             // on an earlier sweep would read as both stale and live to the Phase 3
             // inbox (from the cross-review).
             staleIDs.remove(record.id)
+            staleAgentsByTile = staleAgentsByTile.filter { $0.value != record.id }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
         }
@@ -5046,6 +5051,12 @@ final class AgentSupervisor {
     /// spawning a second one over the top of it.
     func agent(forTile tileId: UUID) -> AgentID? {
         records.values.first(where: { $0.tileId == tileId })?.id
+    }
+
+    /// The agent this store holds for `tileId` but could not adopt because its
+    /// Home is gone. Nil for a tile with a live agent or none at all.
+    func staleAgent(forTile tileId: UUID) -> AgentID? {
+        agent(forTile: tileId) == nil ? staleAgentsByTile[tileId] : nil
     }
 
     /// KB-01: the label a board task's assignee chip shows. Read-only, and nil

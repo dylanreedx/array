@@ -716,6 +716,12 @@ run_app_check .build/debug/Array --workspace-invariants-check
 # with the canonical inputs; provisional, unbound, registry-miss and unavailable
 # projects each draw their own Home label.
 run_app_check .build/debug/Array --zone-presentation-check
+# .plans/67 §3.2 / hazard 10: a managed-agent tile with no record in this
+# channel's store renders an explicit unbound state and mints nothing across
+# mount, switch and remount; one whose agent's Home is gone renders
+# unavailable and refuses a prompt; only a prompt the person sends starts a new
+# agent for the unbound tile.
+run_app_check .build/debug/Array --agent-tile-binding-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the

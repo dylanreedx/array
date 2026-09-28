@@ -2233,6 +2233,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-tile-binding-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AgentTileBindingChecks.run()
+                print("ContinuumRevivedAgentTileBindingChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-presentation-check") {
             do {
                 _ = NSApplication.shared
@@ -13433,6 +13445,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Kept on ONE line: `--agent-restore-check` pins this whole signature by exact
     /// line match (`runAgentRestoreChecks`, via `paletteAgentSpawnBranch`), so wrapping
     /// it blinds that scan.
+    /// Tiles whose person asked, by sending a prompt in the unbound state, for a
+    /// new agent. Consumed by the next `wireManagedAgentTile` for that tile.
+    private var managedAgentStartRequests: Set<UUID> = []
+
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
@@ -13466,6 +13482,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // otherwise recurse: the wire-up below replaces this closure.
                 guard !supervisor.isAgentRespawnSuppressed(forTile: tileId) else { return }
                 self.wireManagedAgentTile(tileId)
+                view.onSubmitPrompt?(prompt)
+            }
+            return
+        } else if supervisor.staleAgent(forTile: tileId) != nil {
+            // UNAVAILABLE: this store holds the tile's agent, but its Home is gone
+            // (`restore()` marked it stale). A second agent here would be a
+            // duplicate of one that comes back with its folder, so a prompt is
+            // refused with the same words the tile already shows.
+            view.showUnavailableAgentNotice()
+            view.onSubmitPrompt = { [weak view] _ in
+                view?.showSendRefusedNotice(ManagedAgentTileNSView.unavailableAgentNoticeText)
+            }
+            return
+        } else if initialLaunchSelection == nil,
+                  workspaceRuntime?.managedAgentLaunchSelection(tileId: tileId) == nil,
+                  tileSpawner?.managedAgentLaunchSelection(tileId: tileId) == nil,
+                  managedAgentStartRequests.remove(tileId) == nil {
+            // UNBOUND (hazard 10): no record for this tile in this store, and this
+            // process did not create the tile — every spawn leaves a launch
+            // selection memo, a restored or another install's tile has none. So
+            // this is a restore or a hydration, and neither may mint. The tile says
+            // so; sending a prompt is the person's request for a new agent here.
+            view.showUnboundAgentNotice()
+            view.onSubmitPrompt = { [weak self, weak view] prompt in
+                guard let self, let view else { return }
+                self.managedAgentStartRequests.insert(tileId)
+                self.wireManagedAgentTile(tileId)
+                self.managedAgentStartRequests.remove(tileId)
+                // Bound now, the wire-up replaced this closure; a failed start
+                // left it, and forwarding would recurse.
+                guard supervisor.agent(forTile: tileId) != nil else { return }
                 view.onSubmitPrompt?(prompt)
             }
             return
@@ -16502,14 +16549,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         case .managedAgent:
             let view = ManagedAgentTileNSView(tile: tile)
-            // M1.2b: wire ONLY an agent that already exists. `wireManagedAgentTile`
-            // spawns a brand-new agent when `supervisor.agent(forTile:)` is nil, and
-            // resolves its scope through `tileSpawner.managedAgentCreationScope`,
-            // which is empty on a spawner built for an arriving workspace. Hydrating
-            // an unbound tile would therefore mint an agent in the wrong project on
-            // every switch — hazard 10's duplicate-agent minting, in-process.
-            // An unwired tile still renders; submitting a prompt in it asks for an
-            // agent deliberately, which is the existing respawn-suppressed contract.
+            // M1.2b: wired in Phase B (`hydrateRuntimeBackedTiles`), never here.
+            // `wireManagedAgentTile` mints only for a tile this process created;
+            // a hydrated tile with no record gets the explicit unbound state, and
+            // submitting a prompt in it is how a person asks for an agent there.
             return view
         }
     }
@@ -16529,8 +16572,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
         // be installed before it can find anything.
+        // An unbound or unavailable tile is wired too: `wireManagedAgentTile` gives
+        // it its explicit state and never mints for a tile this process did not
+        // create (hazard 10).
         for tile in layer.tiles where tile.kind == .managedAgent {
-            guard agentSupervisor.agent(forTile: tile.id) != nil else { continue }
             wireManagedAgentTile(tile.id)
         }
 
