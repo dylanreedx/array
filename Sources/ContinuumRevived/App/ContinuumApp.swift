@@ -3618,6 +3618,20 @@ enum ContinuumApp {
         // M1.3 (`.plans/46`): builds a real `GhosttyRuntimeContext` to drive
         // `restartTerminalTile` through Phase B, so it must sit below
         // `ghostty_init()` for the same reason as the check above.
+        // `.plans/67` ARC-4a: restarts real terminal tiles, so it needs
+        // `ghostty_init()` too.
+        if CommandLine.arguments.contains("--tile-materialize-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileMaterializeChecks.run()
+                print("ContinuumRevivedTileMaterializeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-runtime-duplication-check") {
             do {
                 _ = NSApplication.shared
@@ -16447,6 +16461,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
+    func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
     /// QA: host the mounted canvas in `window` and install the keyDown monitor
     /// launch installs, so a check's key events take the production route
     /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown

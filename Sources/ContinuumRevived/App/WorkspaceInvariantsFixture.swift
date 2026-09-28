@@ -133,6 +133,11 @@ final class WorkspaceInvariantsFixture {
 
     private(set) var mounted: Mounted?
     private(set) var receipts: [Receipt] = []
+    /// The terminal engine every mount hands its runtime and spawner. Nil by
+    /// default, so a terminal tile stays a descriptor; a leg that restarts
+    /// terminals sets a real context (headless: runtimes spawn nothing until a
+    /// surface attaches) before mounting.
+    var ghostty: GhosttyRuntimeContext?
     private(set) var actionLog: [String] = []
 
     init(label: String) throws {
@@ -281,7 +286,7 @@ final class WorkspaceInvariantsFixture {
             registry: zoneRegistry,
             focusBroker: delegate.qaFocusBroker,
             registryStore: registryStore,
-            ghostty: nil,
+            ghostty: ghostty,
             browserEngine: browserEngine)
         runtime.lifecycleObserver = { [weak self, weak runtime] event in
             guard let self, let runtime, case let .saveGenerationAcknowledged(generation) = event else { return }
@@ -290,7 +295,7 @@ final class WorkspaceInvariantsFixture {
         delegate.qaPrepareForBootMountCheck(
             canvas: canvas, browserEngine: browserEngine, runtime: runtime, registryStore: registryStore)
         let spawner = TileSpawner(
-            canvasView: canvas, ghostty: nil, browserEngine: browserEngine,
+            canvasView: canvas, ghostty: ghostty, browserEngine: browserEngine,
             projectStore: bootController.projectStore, project: bootController.project)
 
         try delegate.mountWorkspaceSceneAtBoot(

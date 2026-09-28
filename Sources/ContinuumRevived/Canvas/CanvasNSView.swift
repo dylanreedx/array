@@ -6911,6 +6911,12 @@ final class CanvasNSView: NSView, TokenThemed {
         return .zoneLayer(zoneId)
     }
 
+    /// QA: every tile view in the world plane showing `tileId`. More than one is a
+    /// replaced view that was never removed.
+    func qaWorldPlaneTileViews(for tileId: UUID) -> [TileNSView] {
+        worldPlane.subviews.compactMap { $0 as? TileNSView }.filter { $0.tile.id == tileId }
+    }
+
     /// QA (T19): the current stored placement for a ZoneLayer (reflects adaptive-bounds recompute).
     func qaZoneLayerPlacement(for zoneId: UUID) -> ZonePlacement? {
         zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
