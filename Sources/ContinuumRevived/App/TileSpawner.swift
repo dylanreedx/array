@@ -2077,6 +2077,58 @@ final class TileSpawner {
         return .spawned(boardId: boardId, tileId: tileId)
     }
 
+    enum DiffReviewOutcome {
+        case spawned(tileId: UUID)
+        case failure(Error)
+    }
+
+    /// A diff review tile and its comment state, through the `.plans/47`
+    /// contract (one `targetZoneId`). It used to append to the flat
+    /// `canvasState`, which after the mount retired the flat scene was a stale
+    /// boot snapshot, and write that over the project's file.
+    func spawnDiffReview(
+        at worldPoint: CGPoint? = nil,
+        sendCommentsToAgent: @escaping (_ tileId: UUID) -> Void
+    ) -> DiffReviewOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let reviewId = UUID()
+        let tileId = UUID()
+        do {
+            try projectStore.saveReviewCommentState(ReviewCommentState(reviewId: reviewId, comments: []))
+        } catch {
+            return .failure(error)
+        }
+        let targetZoneId = creationScopeProvider?()?.zoneId
+        let frame = makeProjectTilePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .diffReview),
+            in: canvasView,
+            targetZoneId: targetZoneId
+        )
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
+        let tile = Tile(
+            id: tileId,
+            kind: .diffReview,
+            title: "Diff Review",
+            frame: frame,
+            zPosition: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(reviewId: reviewId, diffSource: "workingTreeVsHEAD")
+        )
+        let view = DiffReviewTileNSView(
+            tile: tile,
+            repositoryURL: URL(fileURLWithPath: project.rootPath, isDirectory: true),
+            sendCommentsToAgent: { sendCommentsToAgent(tileId) })
+        view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        do {
+            try persistProjectCanvas(after: target, in: canvasView)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: tileId)
+    }
+
     /// Installs a note tile view for an existing `Tile` (e.g. canvas restore).
     /// If old canvas data lacks a note id, a note id is generated and persisted.
     func installNoteTile(_ tile: Tile, in canvasView: CanvasNSView) {
@@ -2460,16 +2512,18 @@ final class TileSpawner {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let trimmedPath = runDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return .invalidPath }
-        // Still a flat-only spawn (hazard 9). Once the flat scene is retired its
-        // save would write the boot snapshot over this project's file, so refuse.
-        do { _ = try canvasView.flatCanvasStateForPersistence() } catch { return .failure(error) }
-
-        let frame = makePlacement(
+        // The `.plans/47` contract: ONE `targetZoneId` for the placement, the
+        // sibling set it dodges, `zPositionAbove` and `installProjectTile`. This was
+        // the last spawn on the flat path; after the mount retired the flat scene it
+        // wrote that stale boot snapshot over the project's file.
+        let targetZoneId = creationScopeProvider?()?.zoneId
+        let frame = makeProjectTilePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .runArtifacts),
-            in: canvasView
+            in: canvasView,
+            targetZoneId: targetZoneId
         )
-        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
             id: UUID(),
             kind: .runArtifacts,
@@ -2480,10 +2534,11 @@ final class TileSpawner {
             metadata: TileMetadata(filePath: trimmedPath)
         )
         let view = RunArtifactsTileNSView(tile: tile)
-        canvasView.install(tileView: view, for: tile)
-
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+            try persistProjectCanvas(after: target, in: canvasView)
+        } catch {
+            return .failure(error)
         } catch {
             return .failure(error)
         }
@@ -7985,57 +8040,4 @@ final class TileSpawner {
         return canvasView.projectTiles()
     }
 
-    private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
-        if let worldPoint {
-            return TileFrame(
-                x: Double(worldPoint.x) - Double(size.width) / 2,
-                y: Double(worldPoint.y) - Double(size.height) / 2,
-                width: Double(size.width),
-                height: Double(size.height)
-            )
-        }
-        var placementViewport = canvasView.viewport
-        var placementVisibleSize = canvasView.bounds.size
-        if let activeZone = canvasView.activeZone {
-            // Flat `canvasState.tiles` frames are WORLD frames — `layoutTile` renders
-            // them straight against the viewport, with zone membership only an overlay
-            // tag. So the scan window is computed in WORLD space too: the part of the
-            // viewport that lies inside the active zone. This used to convert to
-            // zone-local and clamp to the zone box, then store the result as a world
-            // frame, which put every automatic spawn at world = zone-local — with a
-            // zone origin of (1000,500) and the viewport over it, the new tile landed
-            // 1000pt left and 500pt above the visible canvas.
-            let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-            let visibleWidth = max(Double(canvasView.bounds.width) / zoom, Double(size.width))
-            let visibleHeight = max(Double(canvasView.bounds.height) / zoom, Double(size.height))
-            let viewportWorld = CGRect(
-                x: canvasView.viewport.x,
-                y: canvasView.viewport.y,
-                width: visibleWidth,
-                height: visibleHeight
-            )
-            let zoneWorld = CGRect(
-                x: activeZone.origin.x,
-                y: activeZone.origin.y,
-                width: activeZone.size.width,
-                height: activeZone.size.height
-            )
-            let window = viewportWorld.intersection(zoneWorld)
-            // Panned clean off the zone: place where the user is actually looking
-            // rather than teleporting the tile back into a zone off screen.
-            if !window.isNull, window.width > 0, window.height > 0 {
-                placementViewport = CanvasViewport(x: Double(window.minX), y: Double(window.minY), zoom: zoom)
-                placementVisibleSize = CGSize(
-                    width: max(Double(window.width), Double(size.width)) * zoom,
-                    height: max(Double(window.height), Double(size.height)) * zoom
-                )
-            }
-        }
-        return CanvasEngine.placementFrame(
-            size: size,
-            viewport: placementViewport,
-            visibleSize: placementVisibleSize,
-            existing: canvasView.canvasState.tiles.map(\.frame)
-        )
-    }
 }

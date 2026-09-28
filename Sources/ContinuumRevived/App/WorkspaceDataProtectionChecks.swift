@@ -235,6 +235,77 @@ extension WorkspaceDataProtectionChecks {
     }
 }
 
+extension WorkspaceDataProtectionChecks {
+    // MARK: - --flat-spawn-migration-check
+
+    /// The two spawns that were left on the flat path land in the armed zone's
+    /// layer and its own project's file, in WORLD frames.
+    static func runFlatSpawnMigration() throws -> URL {
+        try runScenarios("flat-spawn-migration", [
+            ("diff-review-from-palette", diffReviewFromPalette),
+            ("run-artifacts", runArtifactsSpawn)
+        ])
+    }
+
+    private static func diffReviewFromPalette(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("diff review")
+        try fixture.armByClick(Fixture.zoneA2)
+        let before = Set(try fixture.modelView().tileWorldFrames.keys)
+        _ = m.delegate.qaPerformPaletteAction(.newDiffReview)
+        return try expectSpawnedInArmedZone(fixture, before: before, kind: .diffReview)
+    }
+
+    private static func runArtifactsSpawn(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("run artifacts")
+        try fixture.armByClick(Fixture.zoneA2)
+        guard let spawner = m.runtime.controller(for: Fixture.projectA2)?.tileSpawner else {
+            throw Failure(message: "project A2 has no live spawner")
+        }
+        let runDirectory = fixture.root.appendingPathComponent("run-0001", isDirectory: true)
+        try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+        let before = Set(try fixture.modelView().tileWorldFrames.keys)
+        switch spawner.spawnRunArtifacts(runDirectoryPath: runDirectory.path) {
+        case .spawned, .alreadyOpen: break
+        case .invalidPath: throw Failure(message: "spawnRunArtifacts rejected a valid path")
+        case let .failure(error): throw Failure(message: "spawnRunArtifacts failed: \(error)")
+        }
+        return try expectSpawnedInArmedZone(fixture, before: before, kind: .runArtifacts)
+    }
+
+    /// Exactly one new tile of `kind`: in zone A2's layer, its WORLD frame inside
+    /// zone A2's WORLD rect, persisted with that frame in project A2's file, which
+    /// holds only project A2's tiles; project A1's file untouched.
+    private static func expectSpawnedInArmedZone(
+        _ fixture: Fixture, before: Set<UUID>, kind: TileKind
+    ) throws -> [String: Any] {
+        let m = try fixture.requireMounted("spawn")
+        let a1Bytes = fixture.readProjectFile(Fixture.projectA1).bytes
+        let frames = try fixture.modelView().tileWorldFrames
+        let new = Set(frames.keys).subtracting(before)
+        try expect(new.count == 1, "expected one new tile in the mounted scene, found \(new.count)")
+        let tileId = new.first!
+        let world = frames[tileId]!
+        try expect(m.canvas.tiles(inZone: Fixture.zoneA2)?.contains { $0.id == tileId } == true,
+                   "the new tile is not in the armed zone's layer (zone A2)")
+        guard let zone = m.canvas.zonePlacement(for: Fixture.zoneA2) else { throw Failure(message: "zone A2 vanished") }
+        let rect = CanvasEngine.zoneWorldFrame(zone)
+        try expect(world.x >= rect.x && world.y >= rect.y
+                   && world.x + world.width <= rect.x + rect.width && world.y + world.height <= rect.y + rect.height,
+                   "the new tile's WORLD frame \(world) is outside zone A2's WORLD rect \(rect)")
+        let fileA2 = fixture.readProjectFile(Fixture.projectA2).canvas?.tiles ?? []
+        let persisted = fileA2.first { $0.id == tileId }
+        try expect(persisted?.kind == kind && persisted?.frame == world,
+                   "project A2's file holds \(String(describing: persisted.map { "\($0.kind) \($0.frame)" })) for the new tile; the scene has \(kind) \(world)")
+        let a2Seed = Set(Fixture.seed.tileProject.filter { $0.value == Fixture.projectA2 }.keys)
+        let foreign = Set(fileA2.map(\.id)).subtracting(a2Seed).subtracting([tileId])
+        try expect(foreign.isEmpty, "project A2's file holds tiles that are not project A2's: \(foreign)")
+        try expect(fixture.readProjectFile(Fixture.projectA1).bytes == a1Bytes, "the spawn rewrote project A1's file")
+        return ["tile": tileId.uuidString, "world": "\(world)", "zone": "\(rect)"]
+    }
+}
+
 private extension Optional {
     func orThrow(_ error: Error) throws -> Wrapped {
         guard let value = self else { throw error }

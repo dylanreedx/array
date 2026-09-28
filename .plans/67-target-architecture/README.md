@@ -278,7 +278,7 @@ the RED witness before the code. Merge order matters more than parallelism:
 | 4 | **ARC-4a materialize ≠ spawn; lifecycle teardown centralized.** | `stab-arc4a` (after 1 merges) | 0.7.23 | Hand-spaced scene survives browser snapshot, restart, budget eviction, terminal restart and file-tree swaps with identical frames, membership, z-order. Old subscriptions retire once. |
 | 5 | **ARC-2 + ARC-1 scene and coordinator** (one slice if D1 = aggregate). Scene nodes with root and storage owner; explicit load states; per-project residency; fenced creation into unavailable zones; session lease released on failed switch; the coordinator with receipts; identity-stamped v10 documents; ownership once; derived quarantine with repair preview; migration of frames into the aggregate with originals preserved. | `stab-scene` | 0.7.23 | Populated zone Home A→B: old members stay in A's store. Close/keep reparents to root without moving; survives remount. Missing store is unavailable, never empty. Fail each acquisition and the registry save: old scene, refcounts, locks unchanged. Migration lossless and idempotent against a copy of Dylan's real prod files. |
 | 6 | **ARC-4b causal layout transactions.** Every growth, resize, spawn, tidy, drag and undo through one transaction; push-never-overlap; containment defined once; non-convergence refuses; undo restores the closure. | `stab-arc4b` | 0.7.24 | Long push chain through far zones carries all members by exact deltas; final containment and non-overlap hold; lifecycle materialization changes zero geometry; jelly trajectory probe reviewed by Dylan. |
-| 7 | **Delete the flat scene.** `spawnRunArtifacts`, `spawnDiffReviewFromPalette`, the `installInitial*` boot walk migrate; `LegacyCanvasImport` runs once before mount. Hazard 9 rewritten. | `stab-flat-delete` | 0.7.24 | Fresh boot, legacy import, every tile kind, populated/bare/group zones and abrupt remount all use one scene path. |
+| 7 | **Delete the flat scene.** The `installInitial*` boot walk migrates (`spawnRunArtifacts` and `spawnDiffReviewFromPalette` moved to the zone path in slice 1); `LegacyCanvasImport` runs once before mount. Hazard 9 rewritten. | `stab-flat-delete` | 0.7.24 | Fresh boot, legacy import, every tile kind, populated/bare/group zones and abrupt remount all use one scene path. |
 
 Dogfood before each release: harness green in a real matrix summary, then the
 three hand scripts in the preview app on `~/array-scratch` with before/after
@@ -335,3 +335,19 @@ that copy.
   tick writes that copy back (complaint 2). Projection is therefore excluded
   from slice 0's clean control, printed as a `MATRIX-NOTE` in the matrix
   report; slice 2 re-enables it in this same leg. Nothing merged.
+- 2026-09-28 — Slice 1 (ARC-0) on bench `stab-fixture`, patches landing one
+  commit each, every directed witness proven RED by reverse-applying only its
+  fix. Saver identity (`--workspace-saver-identity-check`: arming in B wrote B's
+  zones into A's file; a rename inside the debounce was lost; a layout commit
+  reverted the arming) — one saver per mounted workspace, the two mounted
+  reloads now runtime commits. Note reuse (`--note-conversion-writer-check`:
+  the project file took zone-local frames and lost its other zone's tiles).
+  Retired flat writes (`--retired-flat-write-check`: an inspector reveal wrote
+  the boot snapshot over the project file) — the flat state is handed out only
+  while the flat scene is live. The two flat-only spawns, `spawnRunArtifacts`
+  and `spawnDiffReviewFromPalette`, moved to the zone path
+  (`--flat-spawn-migration-check`), so slice 7 no longer carries them; the
+  hazard 9 sentence naming them as remaining flat spawns is now stale and is
+  left for Dylan to correct in `CLAUDE.md`. Staging `array/stab-0722` cut at
+  `1451c030` and fast-forwarded to slice 0: real matrix, 231 legs, exactly the
+  nine known unowned reds, NOTES printed.

@@ -2221,6 +2221,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--flat-spawn-migration-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceDataProtectionChecks.runFlatSpawnMigration()
+                print("ContinuumRevivedFlatSpawnMigrationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--retired-flat-write-check") {
             do {
                 _ = NSApplication.shared
@@ -16704,34 +16716,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnDiffReviewFromPalette() {
-        // M1.11: refuse audibly rather than returning into silence. Its flat-path
-        // install is deliberately left alone — AGENTS hazard 9 names it as one of
-        // the two remaining flat spawns, and that is its own ticket.
-        guard let canvasView, let projectStore, let activeProject else {
+        // Through the creation scope's own spawner, like every other palette spawn
+        // (hazard 9): the tile lands in the armed zone's layer and its project's file.
+        guard let spawner = spawnerForFilesystemCreation() else {
             presentSpawnRefusal("Add a project to this workspace before opening a diff review.")
             return
         }
-        // Still a flat-only spawn (hazard 9). Once the flat scene is retired its
-        // save would write the boot snapshot over the project's file, so refuse.
-        guard (try? canvasView.flatCanvasStateForPersistence()) != nil else {
-            presentSpawnRefusal("Diff review can't open in a zoned workspace yet.")
-            return
-        }
-        let reviewId = UUID()
-        var canvasState = canvasView.canvasState
-        let tile = Self.materializeDiffReviewTile(in: &canvasState, reviewId: reviewId)
-        let reviewState = ReviewCommentState(reviewId: reviewId, comments: [])
-        do {
-            try projectStore.saveReviewCommentState(reviewState)
-            let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
-            let diffView = DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
-                self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
-            })
-            diffView.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
-            canvasView.install(tileView: diffView, for: tile)
-            try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
-            focusSpawnedTile(tile.id)
-        } catch {
+        switch spawner.spawnDiffReview(sendCommentsToAgent: { [weak self] tileId in
+            self?.sendReviewCommentsFromMenu(reviewTileId: tileId)
+        }) {
+        case let .spawned(tileId):
+            focusSpawnedTile(tileId)
+        case let .failure(error):
             fputs("spawnDiffReviewFromPalette failed: \(error)\n", stderr)
         }
     }

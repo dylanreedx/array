@@ -76,6 +76,7 @@ check --file-tile-zoom-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
 check --file-tree-snapshot-coalescing-check
+check --flat-spawn-migration-check
 check --focus-border-check
 check --focus-broker-activation-check
 check --focus-mode-check
@@ -297,6 +298,7 @@ leg run_app_check .build/debug/Array --file-tile-zoom-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
 leg run_app_check .build/debug/Array --file-tree-snapshot-coalescing-check
+leg run_app_check .build/debug/Array --flat-spawn-migration-check
 leg run_app_check .build/debug/Array --focus-border-check
 leg run_app_check .build/debug/Array --focus-broker-activation-check
 leg run_app_check .build/debug/Array --focus-mode-check

@@ -714,6 +714,7 @@ run_app_check .build/debug/Array --workspace-invariants-check
 run_app_check .build/debug/Array --workspace-saver-identity-check
 run_app_check .build/debug/Array --note-conversion-writer-check
 run_app_check .build/debug/Array --retired-flat-write-check
+run_app_check .build/debug/Array --flat-spawn-migration-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
