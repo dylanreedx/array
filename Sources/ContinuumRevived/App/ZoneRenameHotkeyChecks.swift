@@ -21,8 +21,14 @@ import Foundation
 ///  - quit: the field is still open when the app quits.
 ///  - close button: the window's close flush runs with the field still open
 ///    (a titlebar button takes no focus, so nothing blurs the field first).
-///  - zone not found: the mounted document has lost the zone the canvas still
-///    shows, and the rename must still reach the workspace file.
+///  - zone not found: the check removes zone A1 from the mounted runtime's
+///    document while the canvas keeps showing it (a synthetic divergence; no
+///    production path is known to produce it). The name cannot be saved, so the
+///    failure must be visible and the typed name must stay on screen, while the
+///    mounted document is never reloaded from disk and the file is untouched.
+///  - provisional: a zone drawn but not yet given a project is not in the
+///    document either. Renaming it is not a failure: the name must ride its
+///    creation commit into memory and disk, with no failure message.
 @MainActor
 enum ZoneRenameHotkeyChecks {
     typealias Fixture = WorkspaceInvariantsFixture
@@ -50,6 +56,7 @@ enum ZoneRenameHotkeyChecks {
         manifest["quit"] = try runArm("quit", failures: &failures, quitArm)
         manifest["closeButton"] = try runArm("close button", failures: &failures, closeButtonArm)
         manifest["zoneNotFound"] = try runArm("zone not found", failures: &failures, zoneNotFoundArm)
+        manifest["provisional"] = try runArm("provisional", failures: &failures, provisionalArm)
 
         guard failures.isEmpty else {
             throw Failure(message: "zone rename hotkey: \(failures.count) assertion(s) failed:\n  - "
@@ -101,18 +108,9 @@ enum ZoneRenameHotkeyChecks {
     /// Mount, host the canvas in a key window with the production monitor,
     /// open the rename field over zone A1 and type `typedName` into it.
     private static func openRenameAndType(_ fixture: Fixture) throws -> Session {
-        try fixture.mount()
-        let m = try fixture.requireMounted("open rename")
-        let window = KeyableFixtureWindow(
-            contentRect: NSRect(origin: .zero, size: m.canvas.frame.size),
-            styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = m.canvas
-        window.orderFrontOffscreenForChecks()
-        window.makeKey()
-        m.delegate.qaAttachWindowInstallingHotkeyMonitor(window)
-        m.canvas.layoutSubtreeIfNeeded()
-
+        let session = try mountAndHost(fixture)
+        let m = session.mounted
+        let window = session.window
         m.canvas.beginZoneRename(zoneId: Fixture.zoneA1)
         guard m.canvas.qaZoneRenameActiveZoneId == Fixture.zoneA1 else {
             throw Failure(message: "setup: the inline rename field did not open over zone A1")
@@ -127,6 +125,22 @@ enum ZoneRenameHotkeyChecks {
         guard m.canvas.qaZoneRenameFieldText == typedName else {
             throw Failure(message: "setup: typing through NSApp.sendEvent must reach the rename field; it holds '\(m.canvas.qaZoneRenameFieldText ?? "nil")'")
         }
+        return session
+    }
+
+    /// Mount and host the canvas in a key window with the production monitor.
+    private static func mountAndHost(_ fixture: Fixture) throws -> Session {
+        try fixture.mount()
+        let m = try fixture.requireMounted("open rename")
+        let window = KeyableFixtureWindow(
+            contentRect: NSRect(origin: .zero, size: m.canvas.frame.size),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = m.canvas
+        window.orderFrontOffscreenForChecks()
+        window.makeKey()
+        m.delegate.qaAttachWindowInstallingHotkeyMonitor(window)
+        m.canvas.layoutSubtreeIfNeeded()
         return Session(mounted: m, window: window)
     }
 
@@ -238,18 +252,72 @@ enum ZoneRenameHotkeyChecks {
     }
 
     private static func zoneNotFoundArm(_ fixture: Fixture, _ failures: inout [String]) throws -> [String: Any] {
-        try fixture.mount()
-        let m = try fixture.requireMounted("zone not found")
+        let session = try openRenameAndType(fixture)
+        defer { close(session) }
+        let m = session.mounted
         var diverged = m.runtime.document
         diverged.zones.removeAll { $0.zoneId == Fixture.zoneA1 }
         m.runtime.replaceDocument(diverged, for: Fixture.workspaceA)
-        m.canvas.qaRenameZone(Fixture.zoneA1, to: typedName)
-        let memory = memoryName(m)
-        let disk = try diskName(fixture)
-        if disk != typedName || memory != typedName {
-            failures.append("a rename the mounted document cannot place must still reach the workspace file; memory '\(memory ?? "nil")', disk '\(disk ?? "nil")'")
+        let bytesBefore = try fixture.readWorkspaceFile(Fixture.workspaceA).bytes
+
+        NSApp.sendEvent(try key("\r", keyCode: 36, in: session.window))
+        let bytesAfter = try fixture.readWorkspaceFile(Fixture.workspaceA).bytes
+        let documentAfter = m.runtime.document
+        let onScreen = m.canvas.qaZoneDisplayName(Fixture.zoneA1)
+        let message = m.delegate.qaWorkspaceManagementMessage
+
+        if documentAfter != diverged {
+            failures.append("the mounted document must not change (never reloaded from disk); it now holds A1 as '\(memoryName(m) ?? "absent")'")
+        }
+        if bytesAfter != bytesBefore {
+            failures.append("the workspace file must be untouched while its document is mounted; disk now names A1 '\(try diskName(fixture) ?? "absent")'")
+        }
+        if onScreen != typedName {
+            failures.append("the typed name must stay on screen; the header shows '\(onScreen ?? "nil")'")
+        }
+        if message?.contains(typedName) != true {
+            failures.append("the unsaved rename must be reported visibly, naming '\(typedName)'; management message is '\(message ?? "nil")'")
+        }
+        return [
+            "memoryHasZone": documentAfter.zones.contains { $0.zoneId == Fixture.zoneA1 },
+            "diskUnchanged": bytesAfter == bytesBefore,
+            "onScreen": onScreen ?? NSNull(),
+            "message": message ?? NSNull(),
+        ]
+    }
+
+    private static func provisionalArm(_ fixture: Fixture, _ failures: inout [String]) throws -> [String: Any] {
+        let session = try mountAndHost(fixture)
+        defer { close(session) }
+        let m = session.mounted
+        // Launch's handler presents the project picker; the check confirms the
+        // scope itself below, through the call the picker makes.
+        m.canvas.onZoneScopeRequired = { _, _ in }
+        let zoneId = m.canvas.beginProvisionalZone(screenRect: CGRect(x: 40, y: 40, width: 300, height: 200))
+        guard m.canvas.isZoneProvisional(zoneId) else {
+            throw Failure(message: "setup: the drawn zone enclosed tiles and skipped the provisional state")
+        }
+        m.canvas.beginZoneRename(zoneId: zoneId)
+        guard m.canvas.qaZoneRenameActiveZoneId == zoneId else {
+            throw Failure(message: "setup: the rename field did not open over the provisional zone")
+        }
+        for character in typedName {
+            NSApp.sendEvent(try key(String(character), keyCode: 0, in: session.window))
+        }
+        NSApp.sendEvent(try key("\r", keyCode: 36, in: session.window))
+        let messageBeforeScope = m.delegate.qaWorkspaceManagementMessage
+        if messageBeforeScope != nil {
+            failures.append("renaming a provisional zone is not a failure; management message '\(messageBeforeScope!)'")
+        }
+
+        m.canvas.commitProvisionalZone(
+            zoneId: zoneId, projectId: Fixture.projectA1, homeRelativePath: nil, scopeLabel: "Alder / Project Root")
+        let memory = m.runtime.document.zones.first { $0.zoneId == zoneId }?.name
+        let disk = try fixture.readWorkspaceFile(Fixture.workspaceA).document?.zones.first { $0.zoneId == zoneId }?.name
+        if memory != typedName || disk != typedName {
+            failures.append("the provisional zone's typed name must ride its creation commit; memory '\(memory ?? "absent")', disk '\(disk ?? "absent")'")
         }
         try fixture.quit()
-        return ["memory": memory ?? NSNull(), "disk": disk ?? NSNull()]
+        return ["memory": memory ?? NSNull(), "disk": disk ?? NSNull(), "message": messageBeforeScope ?? NSNull()]
     }
 }

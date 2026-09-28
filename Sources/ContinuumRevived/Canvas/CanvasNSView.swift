@@ -4927,6 +4927,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Whether an inline zone rename field is open (and possibly mid-typing).
     var isZoneRenameOpen: Bool { renamingZoneId != nil }
 
+    /// Whether a zone is still provisional: drawn, but not yet given a project
+    /// and so not yet in the workspace document.
+    func isZoneProvisional(_ zoneId: UUID) -> Bool { provisionalZoneIds.contains(zoneId) }
+
     private func teardownZoneRenameField() {
         zoneRenameField?.removeFromSuperview()
         zoneRenameField = nil

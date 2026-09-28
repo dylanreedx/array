@@ -15071,20 +15071,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Persist a zone rename: update the stored zone's name so it survives relaunch.
     /// Mirrors `persistMovedZone` (full document load → mutate → save).
     private func persistRenamedZone(_ zoneId: UUID, name: String) {
-        if let workspaceRuntime, var placement = canvasView?.zonePlacement(for: zoneId) {
+        // While a workspace is mounted its runtime document is the only truth:
+        // never reload it from disk here (README §3.4). A reload reverts whatever
+        // is still inside the save debounce, and the pending snapshot then
+        // overwrites this rename anyway.
+        if let workspaceRuntime {
+            guard var placement = canvasView?.zonePlacement(for: zoneId) else {
+                reportUnsavedZoneRename(zoneId, name: name)
+                return
+            }
             placement.name = name
             do {
                 try workspaceRuntime.commitZonePlacement(placement)
                 reloadWorkspaceSidebar()
-                return
             } catch WorkspaceRuntime.WorkspaceMutationError.zoneNotFound {
-                // The canvas shows a zone the mounted document has lost. The
-                // workspace file may still hold it; do not drop the name.
-                fputs("persistRenamedZone: zone \(zoneId) not in the mounted document; renaming it on disk\n", stderr)
+                // A provisional zone has not reached the document yet; the
+                // creation commit carries the canvas placement, name included.
+                if canvasView?.isZoneProvisional(zoneId) == true { return }
+                reportUnsavedZoneRename(zoneId, name: name)
             } catch {
                 fputs("persistRenamedZone failed: \(error)\n", stderr)
-                return
             }
+            return
         }
         guard let registryStore else { return }
         do {
@@ -15113,6 +15121,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } catch {
             fputs("persistRenamedZone failed: \(error)\n", stderr)
         }
+    }
+
+    /// The canvas shows a zone the mounted document does not hold, so the name
+    /// cannot be saved. Say so where the user is looking, and leave the typed
+    /// name on screen rather than dropping it.
+    private func reportUnsavedZoneRename(_ zoneId: UUID, name: String) {
+        fputs("persistRenamedZone: zone \(zoneId) is not in the mounted workspace; name not saved\n", stderr)
+        setWorkspaceManagementMessage("Couldn't save zone name \u{201C}\(name)\u{201D}: the zone isn't part of this workspace's saved layout.")
     }
 
     private func zoneScopeLabel(_ scope: ZoneScope) -> String {
