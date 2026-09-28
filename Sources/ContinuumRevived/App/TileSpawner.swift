@@ -2520,8 +2520,6 @@ final class TileSpawner {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
-        } catch {
-            return .failure(error)
         }
         return .spawned(tileId: tile.id)
     }
