@@ -124,8 +124,6 @@ final class CanvasNSView: NSView, TokenThemed {
     /// departed workspace and must no longer participate in rendering,
     /// navigation, hit-testing, or document identity.
     private var flatCompatibilitySceneActive = true
-    /// See `withAutoLayoutSuppressed` (M1.2, `.plans/46`).
-    private var _suppressesAutoLayoutForHydration = false
     private var agentLineageOverlay: AgentLineageOverlayView?
     /// C11: N edges, not one — a fan-out reveal shows the parent's whole
     /// visible fan, bounded the same way the inbox bounds visible children
@@ -825,27 +823,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
-    /// Suppresses `arrangeAutoLayoutAfterSpawn` for the duration of `body`.
-    ///
-    /// M1.2 (`.plans/46`): hydrating a zone reinstalls its runtime-backed tiles
-    /// through `installProjectTile`, which ends in `arrangeAutoLayoutAfterSpawn` and
-    /// re-tidies the WHOLE zone. Running that once per tile would move the user's
-    /// tiles on every workspace switch. A hydration restores what was already
-    /// arranged; it is not a spawn and must not arrange anything.
-    func withAutoLayoutSuppressed(_ body: () -> Void) {
-        let previous = suppressesAutoLayoutForHydration
-        suppressesAutoLayoutForHydration = true
-        defer { suppressesAutoLayoutForHydration = previous }
-        body()
-    }
-
-    private var suppressesAutoLayoutForHydration: Bool {
-        get { _suppressesAutoLayoutForHydration }
-        set { _suppressesAutoLayoutForHydration = newValue }
-    }
-
     func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
-        guard !suppressesAutoLayoutForHydration else { return }
         guard isAutoLayoutEnabled else { return }
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(
@@ -1930,14 +1908,6 @@ final class CanvasNSView: NSView, TokenThemed {
         return true
     }
 
-    /// `growZone` for the spawn path, skipped while hydration is replaying a
-    /// persisted scene. A restore must not re-tidy or re-size the zone it is
-    /// rebuilding — the frames it installs are already the ones that were saved.
-    private func growZoneOnSpawn(_ zoneId: UUID, toInclude worldFrame: TileFrame) {
-        guard !suppressesAutoLayoutForHydration else { return }
-        growZone(zoneId, toInclude: worldFrame)
-    }
-
     /// Grow a zone's stored frame to contain its members (union + padding +
     /// header), never shrinking. Called on tile resize (not move). Persists the
     /// new placement via `onZoneMoved` so the grown size survives relaunch.
@@ -2153,22 +2123,11 @@ final class CanvasNSView: NSView, TokenThemed {
         // Replacing an existing tile (e.g. restart placeholder → live terminal)
         // must remove the old NSView; otherwise the prior view stays on top
         // of the new one and intercepts hits.
-        if let existing = tileViews[tile.id] {
-            focusBroker?.unregister(existing.focusSurfaceID)
-            existing.removeFromSuperview()
+        if let existing = tileViews[tile.id], existing !== tileView {
+            retireTileView(existing)
         }
         tileViews[tile.id] = tileView
-        tileView.canvas = self
-        let tileId = tile.id
-        tileView.onClose = { [weak self] in
-            self?.onTileCloseRequested?(tileId)
-        }
-        tileView.onStopRun = { [weak self] in
-            self?.onTileStopRunRequested?(tileId)
-        }
-        wireRelationshipHover(for: tileView, tileId: tileId)
-        worldPlane.addSubview(tileView)
-        focusBroker?.register(tileView)
+        adoptTileView(tileView, tileId: tile.id)
         layoutTile(tile)
         if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
             // Replacing a tile record (restart placeholder → live terminal, etc.)
@@ -3032,10 +2991,7 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         if let view = tileViews[id] {
-            view.prepareForRemovalFromScene()
-            focusBroker?.unregister(view.focusSurfaceID)
-            releaseSurfaceResidency(of: view)
-            view.removeFromSuperview()
+            retireTileView(view)
             tileViews.removeValue(forKey: id)
         }
         canvasState.tiles.removeAll { $0.id == id }
@@ -3045,10 +3001,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // rehydrated on the next load. The layer owns its own view map too.
         for layer in zoneLayers {
             if let view = layer.tileViews[id] {
-                view.prepareForRemovalFromScene()
-                focusBroker?.unregister(view.focusSurfaceID)
-                releaseSurfaceResidency(of: view)
-                view.removeFromSuperview()
+                retireTileView(view)
                 layer.tileViews.removeValue(forKey: id)
             }
             layer.tiles.removeAll { $0.id == id }
@@ -6285,10 +6238,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 // observer tokens and its stale-location timer orphaned on every
                 // switch -- and the flat `turnCapabilityObservers` entry among them
                 // keeps firing for every agent in the app, not just its own.
-                view.prepareForRemovalFromScene()
-                focusBroker?.unregister(view.focusSurfaceID)
-                releaseSurfaceResidency(of: view)
-                view.removeFromSuperview()
+                retireTileView(view)
             }
         }
         zoneLayers = []
@@ -6370,10 +6320,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for (_, view) in tileViews {
             // M1.4: same removal, same contract -- the boot scene's agent tiles
             // leak exactly as a zone layer's do.
-            view.prepareForRemovalFromScene()
-            focusBroker?.unregister(view.focusSurfaceID)
-            releaseSurfaceResidency(of: view)
-            view.removeFromSuperview()
+            retireTileView(view)
         }
         tileViews.removeAll()
         tileZoneMembership.removeAll()
@@ -6393,10 +6340,10 @@ final class CanvasNSView: NSView, TokenThemed {
     func upsertZoneLayer(_ layer: ZoneLayer) {
         let zoneId = layer.placement.zoneId
         if let existing = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
-            // Unregister and remove old layer's tiles.
-            for (_, view) in existing.tileViews {
-                focusBroker?.unregister(view.focusSurfaceID)
-                view.removeFromSuperview()
+            // Retire the old layer's tile views. One the new layer carries over
+            // is re-installed below, not retired.
+            for (tileId, view) in existing.tileViews where layer.tileViews[tileId] !== view {
+                retireTileView(view)
             }
             for tile in existing.tiles { tileZoneMembership.removeValue(forKey: tile.id) }
             zoneLayers.removeAll { $0.placement.zoneId == zoneId }
@@ -6438,8 +6385,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func removeZoneLayer(zoneId: UUID) {
         guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { return }
         for (_, view) in layer.tileViews {
-            focusBroker?.unregister(view.focusSurfaceID)
-            view.removeFromSuperview()
+            retireTileView(view)
         }
         zoneChromeViews.removeValue(forKey: zoneId)?.removeFromSuperview()
         liveZones.removeAll { $0.zoneId == zoneId }
@@ -6862,6 +6808,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// path at boot. Without this, a spawn after a workspace switch appended to the
     /// stale flat `canvasState` and laid the tile out against the DEPARTED zone's
     /// placement, so it never appeared in the zone the user was looking at.
+    ///
+    /// This is the SPAWN: it grows the zone and settles it around the new tile.
+    /// Replacing the view of a tile that already exists is
+    /// `materializeProjectTile`, which moves nothing.
     @discardableResult
     func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil) -> ProjectTileTarget {
         guard let zoneId = targetZoneId ?? activeProjectZoneId,
@@ -6875,14 +6825,13 @@ final class CanvasNSView: NSView, TokenThemed {
             // outside it and the zone only caught up once the tile was dragged.
             // The tile's frame is already WORLD here.
             if let owning = tile.zoneId ?? activeProjectZoneId ?? activeZone?.zoneId {
-                growZoneOnSpawn(owning, toInclude: tile.frame)
+                growZone(owning, toInclude: tile.frame)
             }
             return .flatCanvasState
         }
 
-        if let existing = layer.tileViews[tile.id] {
-            focusBroker?.unregister(existing.focusSurfaceID)
-            existing.removeFromSuperview()
+        if let existing = layer.tileViews[tile.id], existing !== tileView {
+            retireTileView(existing)
         }
         var installed = tile
         installed.zoneId = zoneId
@@ -6892,13 +6841,7 @@ final class CanvasNSView: NSView, TokenThemed {
         } else {
             layer.tiles.append(installed)
         }
-        tileView.canvas = self
-        let tileId = tile.id
-        tileView.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
-        tileView.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
-        wireRelationshipHover(for: tileView, tileId: tileId)
-        worldPlane.addSubview(tileView)
-        focusBroker?.register(tileView)
+        adoptTileView(tileView, tileId: tile.id)
         _layoutLayerTile(installed, in: layer)
         tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
@@ -6906,9 +6849,80 @@ final class CanvasNSView: NSView, TokenThemed {
         // T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`
         // already expands the zone, but only when auto-layout is enabled — with it off,
         // a spawned tile sat outside its zone until someone dragged it.
-        growZoneOnSpawn(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
+        growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
         arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
         return .zoneLayer(zoneId)
+    }
+
+    /// Replaces the VIEW of a tile record that already exists: a browser snapshot
+    /// or restart, a terminal restart, an inspector or file-tree install, a note
+    /// converted to a document or restored. `.plans/67` §3.6 (ARC-4a).
+    ///
+    /// This is not a spawn, and it moves nothing, including its own tile. The
+    /// installed record keeps its frame, zone membership and z-position; `tile`'s
+    /// geometry is ignored and only its content (kind, title, runtime, metadata)
+    /// is taken. No zone grows, nothing settles, no layout commits — the spawn
+    /// path's `arrangeAutoLayoutAfterSpawn` re-settled the whole zone, which is
+    /// how a budget eviction or a restart moved every hand-placed tile around it.
+    /// The replaced view is retired first, while it can still reach the canvas.
+    /// A record no layer holds is the flat boot scene's. A spawn is
+    /// `installProjectTile`.
+    @discardableResult
+    func materializeProjectTile(tileView: TileNSView, for tile: Tile) -> ProjectTileTarget {
+        guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
+              let index = layer.tiles.firstIndex(where: { $0.id == tile.id })
+        else {
+            var record = tile
+            if flatCompatibilitySceneActive, let existing = canvasState.tiles.first(where: { $0.id == tile.id }) {
+                record.frame = existing.frame
+                record.zPosition = existing.zPosition
+                record.zoneId = existing.zoneId
+            }
+            install(tileView: tileView, for: record)
+            return .flatCanvasState
+        }
+        if let existing = layer.tileViews[tile.id], existing !== tileView {
+            retireTileView(existing)
+        }
+        // Read AFTER the retirement: a leaving file view writes its editor state
+        // back into the record.
+        let installed = layer.tiles[index]
+        var record = tile
+        record.frame = installed.frame
+        record.zPosition = installed.zPosition
+        record.zoneId = installed.zoneId
+        layer.tiles[index] = record
+        layer.tileViews[tile.id] = tileView
+        adoptTileView(tileView, tileId: tile.id)
+        _layoutLayerTile(record, in: layer)
+        reorderTileSubviewsByZIndex()
+        delegate?.canvasSidebarModelDidChange(self)
+        return .zoneLayer(layer.placement.zoneId)
+    }
+
+    /// The one installation of a tile view into the scene: every model path
+    /// (flat, a layer, a spawn, a materialization) wires a view here.
+    private func adoptTileView(_ view: TileNSView, tileId: UUID) {
+        view.canvas = self
+        view.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
+        view.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
+        wireRelationshipHover(for: view, tileId: tileId)
+        worldPlane.addSubview(view)
+        focusBroker?.register(view)
+        view.rejoinScene()
+    }
+
+    /// The one teardown of a tile view leaving the scene — a removal, a
+    /// replacement, a zone set or layer swap, the flat scene's retirement. The
+    /// view is told first (once: see `TileNSView.retireFromScene`), then leaves
+    /// the focus broker, gives up its surface residency and leaves the tree.
+    /// Several of these paths used to skip the first step, so a replaced view
+    /// kept its subscriptions and its document open.
+    private func retireTileView(_ view: TileNSView) {
+        view.retireFromScene()
+        focusBroker?.unregister(view.focusSurfaceID)
+        releaseSurfaceResidency(of: view)
+        view.removeFromSuperview()
     }
 
     /// QA: every tile view in the world plane showing `tileId`. More than one is a
@@ -6930,12 +6944,7 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneLayerOrder.append(zoneId)
         }
         for (tileId, view) in layer.tileViews {
-            view.canvas = self
-            view.onClose = { [weak self] in self?.onTileCloseRequested?(tileId) }
-            view.onStopRun = { [weak self] in self?.onTileStopRunRequested?(tileId) }
-            wireRelationshipHover(for: view, tileId: tileId)
-            worldPlane.addSubview(view)
-            focusBroker?.register(view)
+            adoptTileView(view, tileId: tileId)
         }
         // M1.10: chrome belongs to Model B (`zoneChromeViews`), rebuilt by
         // `setZones`. A second set here was the double-draw half of the split, and

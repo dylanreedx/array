@@ -736,6 +736,13 @@ run_app_check .build/debug/Array --zone-presentation-check
 # unavailable and refuses a prompt; only a prompt the person sends starts a new
 # agent for the unbound tile.
 run_app_check .build/debug/Array --agent-tile-binding-check
+# .plans/67 ARC-4a: replacing the view of an existing tile is not a spawn.
+# Budget eviction, panning a zone out and back, terminal restart, file-tree
+# restore, hydration on switch and remount, and note conversion (and its
+# rolled-back save) keep a hand-spaced scene's world frames, membership and
+# z-order identical in the model and on disk; the replaced view retires once.
+# A real palette spawn into the same zone must still move things.
+run_app_check .build/debug/Array --tile-materialize-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the

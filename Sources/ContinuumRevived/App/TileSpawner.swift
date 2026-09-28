@@ -643,11 +643,7 @@ final class TileSpawner {
         let agentDescriptor = agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
-        let target = canvasView.installProjectTile(
-            tileView: view,
-            for: tile,
-            targetZoneId: canvasView.zoneId(containing: tile.id)
-        )
+        let target = canvasView.materializeProjectTile(tileView: view, for: tile)
 
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
@@ -1068,11 +1064,7 @@ final class TileSpawner {
             snapshotImage: snapshotImage,
             urlString: runtime.url
         )
-        let target = canvasView.installProjectTile(
-            tileView: view,
-            for: tile,
-            targetZoneId: canvasView.zoneId(containing: tile.id)
-        )
+        let target = canvasView.materializeProjectTile(tileView: view, for: tile)
         try persistProjectCanvas(after: target, in: canvasView)
         runtime.terminate(policy: .force)
     }
@@ -1120,11 +1112,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        let target = canvasView.installProjectTile(
-            tileView: view,
-            for: tile,
-            targetZoneId: canvasView.zoneId(containing: tile.id)
-        )
+        let target = canvasView.materializeProjectTile(tileView: view, for: tile)
 
         do {
             try upsertBrowserTile(
@@ -1250,7 +1238,7 @@ final class TileSpawner {
                 try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
             }
         }
-        _ = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: tile.zoneId)
+        _ = canvasView.materializeProjectTile(tileView: view, for: tile)
     }
 
     private func configureBrowserInspectorView(_ view: BrowserInspectorTileNSView, inspectorTileId: UUID, browserTileId: UUID) {
@@ -1478,11 +1466,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: selectedProfile.dataStoreIdentifier, profileId: selectedProfile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        let target = canvasView.installProjectTile(
-            tileView: view,
-            for: tile,
-            targetZoneId: canvasView.zoneId(containing: tile.id)
-        )
+        let target = canvasView.materializeProjectTile(tileView: view, for: tile)
 
         do {
             try upsertBrowserTile(
@@ -2190,15 +2174,13 @@ final class TileSpawner {
         }
 
         let originalTile = noteView.tile
-        let sourceZoneId = canvasView.zoneId(containing: tileId)
         if let existing {
             (canvasView.tileView(for: existing.id) as? FileTileNSView)?.refreshFromDisk()
             canvasView.removeTile(id: tileId)
             do { try persistCanvasForCurrentModel(canvasView: canvasView) }
             catch {
                 restoreNoteView(
-                    originalTile, noteId: noteId, body: noteView.textView.string,
-                    zoneId: sourceZoneId, canvasView: canvasView
+                    originalTile, noteId: noteId, body: noteView.textView.string, canvasView: canvasView
                 )
                 return .failure("The file was written, but the note could not be converted: \(error.localizedDescription)")
             }
@@ -2216,13 +2198,12 @@ final class TileSpawner {
         )
         let fileView = FileTileNSView(tile: converted)
         fileEditorConfigurator?(fileView)
-        let target = canvasView.installProjectTile(tileView: fileView, for: converted, targetZoneId: sourceZoneId)
+        let target = canvasView.materializeProjectTile(tileView: fileView, for: converted)
         do {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             restoreNoteView(
-                originalTile, noteId: noteId, body: noteView.textView.string,
-                zoneId: sourceZoneId, canvasView: canvasView
+                originalTile, noteId: noteId, body: noteView.textView.string, canvasView: canvasView
             )
             return .failure("The file was written, but the tile could not be converted: \(error.localizedDescription)")
         }
@@ -2231,7 +2212,7 @@ final class TileSpawner {
     }
 
     private func restoreNoteView(
-        _ tile: Tile, noteId: UUID, body: String, zoneId: UUID?, canvasView: CanvasNSView
+        _ tile: Tile, noteId: UUID, body: String, canvasView: CanvasNSView
     ) {
         let restored = NoteTileNSView(tile: tile, noteId: noteId, initialBody: body)
         restored.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
@@ -2240,7 +2221,7 @@ final class TileSpawner {
                 noteId: noteId, tileId: tile.id, destination: url
             ))
         }
-        _ = canvasView.installProjectTile(tileView: restored, for: tile, targetZoneId: zoneId)
+        _ = canvasView.materializeProjectTile(tileView: restored, for: tile)
     }
 
     private func cleanupNote(noteId: UUID, tileId: UUID) {
@@ -6269,7 +6250,7 @@ final class TileSpawner {
                 existing,
                 fileTreeTile: fileTreeTile,
                 in: canvasView,
-                targetZoneId: targetZoneId
+                replacingExistingView: true
             )
             return .restarted(viewModel)
         case let .recoverableError(fileTreeTile, message):
@@ -6277,8 +6258,7 @@ final class TileSpawner {
                 existing,
                 fileTreeTile: fileTreeTile,
                 message: message,
-                in: canvasView,
-                targetZoneId: targetZoneId
+                in: canvasView
             )
             return .restarted(viewModel)
         }
@@ -6289,11 +6269,14 @@ final class TileSpawner {
         try? upsertFileTreeTile(view.currentFileTreeTile)
     }
 
+    /// A new file tree spawns into `targetZoneId`; a restored one
+    /// (`replacingExistingView`) only swaps the view of its existing record.
     private func installFileTreeView(
         _ tile: Tile,
         fileTreeTile: FileTreeTile,
         in canvasView: CanvasNSView,
-        targetZoneId: UUID? = nil
+        targetZoneId: UUID? = nil,
+        replacingExistingView: Bool = false
     ) -> (FileTreeViewModel, CanvasNSView.ProjectTileTarget) {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
@@ -6311,7 +6294,9 @@ final class TileSpawner {
         view.onOpenFile = { [weak self] path in
             self?.openFileInPreferredEditor(path: path)
         }
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = replacingExistingView
+            ? canvasView.materializeProjectTile(tileView: view, for: tile)
+            : canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         return (viewModel, target)
     }
 
@@ -6319,12 +6304,11 @@ final class TileSpawner {
         _ tile: Tile,
         fileTreeTile: FileTreeTile,
         message: String,
-        in canvasView: CanvasNSView,
-        targetZoneId: UUID? = nil
+        in canvasView: CanvasNSView
     ) -> FileTreeViewModel {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, recoverableErrorMessage: message)
-        _ = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        _ = canvasView.materializeProjectTile(tileView: view, for: tile)
         return viewModel
     }
 
