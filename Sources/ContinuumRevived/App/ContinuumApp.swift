@@ -2221,6 +2221,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-invariants-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceInvariantsChecks.run()
+                print("ContinuumRevivedWorkspaceInvariantsChecks passed: \(artifact.path)")
+                print("MATRIX-NOTE: \(WorkspaceInvariantsChecks.matrixNote)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-switch-polish-check") {
             do {
                 _ = NSApplication.shared
@@ -4629,42 +4642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
 
             let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
-            canvasView.delegate = self
-            canvasView.onTileCloseRequested = { [weak self] tileId in
-                self?.deleteTile(id: tileId)
-            }
-            canvasView.onTileStopRunRequested = { [weak self] tileId in
-                self?.stopHarnessRun(tileId: tileId)
-            }
-            canvasView.onZoneCreated = { [weak self] placement in
-                self?.persistCreatedGroupZone(placement)
-            }
-            canvasView.onZoneMoved = { [weak self] placement in
-                self?.persistMovedZone(placement)
-            }
-            canvasView.onZoneCloseRequested = { [weak self] zoneId in
-                self?.presentZoneCloseConfirm(zoneId)
-            }
-            canvasView.onZoneClosed = { [weak self] zoneId in
-                self?.persistClosedZone(zoneId)
-            }
-            canvasView.onZoneRenamed = { [weak self] zoneId, name in
-                self?.persistRenamedZone(zoneId, name: name)
-                self?.demonstrateOnboarding(.zoneRenamed)
-            }
-            canvasView.onZoneColorChanged = { [weak self] _, _ in self?.demonstrateOnboarding(.zoneColorSelected) }
-            canvasView.filesystemScopeForTile = { [weak self] tileId in
-                self?.filesystemScopeEvidence(forTile: tileId)
-            }
-            canvasView.scopeLabelForZoneScope = { [weak self] scope in
-                self?.zoneScopeLabel(scope) ?? "Needs Project"
-            }
-            canvasView.onZoneScopeRequired = { [weak self] placement, anchor in
-                self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: true)
-            }
-            canvasView.onZoneScopeChangeRequested = { [weak self] placement, anchor in
-                self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: false)
-            }
+            wireCanvasCallbacks(canvasView)
 
             self.ghostty = ghostty
             self.browserEngine = browserEngine
@@ -15978,6 +15956,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// an NSEvent (`postToPid` does not reach a check's canvas).
     func qaActivateZoneByClick(_ zoneId: UUID) { canvasView?.onZoneActivated?(zoneId) }
 
+    /// QA: quit the way the user does — `applicationShouldTerminate`'s flush,
+    /// then `windowWillClose`'s teardown, which releases every controller and
+    /// with it every project lock — minus the process exit, so a leg can mount a
+    /// fresh runtime on the same directories. Returns the terminate reply.
+    func qaQuitForRemount() -> NSApplication.TerminateReply {
+        suppressTerminateOnWindowCloseForQA = true
+        let reply = applicationShouldTerminate(NSApplication.shared)
+        windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        return reply
+    }
+
+    /// QA: the sidebar row click's switch, the production entry every switch
+    /// a user makes goes through. Returns whether the workspace is now mounted.
+    func qaSwitchWorkspaceFromSidebar(_ workspaceId: UUID) -> Bool {
+        switchWorkspaceFromSidebarIfNeeded(workspaceId)
+    }
+
     /// QA (WS9): the project whose spawner a filesystem-backed creation would
     /// actually use. The creation SCOPE and the SPAWNER are resolved separately
     /// -- the scope from the app registry, the spawner from the live controller
@@ -16072,6 +16067,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // need it and passing nil keeps their behaviour identical.
         if let registryStore { self.registryStore = registryStore }
         configureWorkspaceRuntimeHooks()
+    }
+
+    /// The canvas's delegate and its user-gesture callbacks (tile close, zone
+    /// create/move/rename/close, Home picker). Extracted from
+    /// `applicationDidFinishLaunching` so a fixture that drives
+    /// `mountWorkspaceSceneAtBoot` also drives these closures; while they lived
+    /// inline, a leg's rename reached a nil `onZoneRenamed` and persisted nothing.
+    func wireCanvasCallbacks(_ canvasView: CanvasNSView) {
+        canvasView.delegate = self
+        canvasView.onTileCloseRequested = { [weak self] tileId in
+            self?.deleteTile(id: tileId)
+        }
+        canvasView.onTileStopRunRequested = { [weak self] tileId in
+            self?.stopHarnessRun(tileId: tileId)
+        }
+        canvasView.onZoneCreated = { [weak self] placement in
+            self?.persistCreatedGroupZone(placement)
+        }
+        canvasView.onZoneMoved = { [weak self] placement in
+            self?.persistMovedZone(placement)
+        }
+        canvasView.onZoneCloseRequested = { [weak self] zoneId in
+            self?.presentZoneCloseConfirm(zoneId)
+        }
+        canvasView.onZoneClosed = { [weak self] zoneId in
+            self?.persistClosedZone(zoneId)
+        }
+        canvasView.onZoneRenamed = { [weak self] zoneId, name in
+            self?.persistRenamedZone(zoneId, name: name)
+            self?.demonstrateOnboarding(.zoneRenamed)
+        }
+        canvasView.onZoneColorChanged = { [weak self] _, _ in self?.demonstrateOnboarding(.zoneColorSelected) }
+        canvasView.filesystemScopeForTile = { [weak self] tileId in
+            self?.filesystemScopeEvidence(forTile: tileId)
+        }
+        canvasView.scopeLabelForZoneScope = { [weak self] scope in
+            self?.zoneScopeLabel(scope) ?? "Needs Project"
+        }
+        canvasView.onZoneScopeRequired = { [weak self] placement, anchor in
+            self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: true)
+        }
+        canvasView.onZoneScopeChangeRequested = { [weak self] placement, anchor in
+            self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: false)
+        }
     }
 
     /// Everything that turns a freshly built canvas, runtime and spawner into the
@@ -17293,7 +17332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.save(registry)
     }
 
-    private static func selectedWorkspaceOwnsBootProject(
+    static func selectedWorkspaceOwnsBootProject(
         _ projectId: UUID,
         selectedWorkspaceId: UUID?,
         registry: Registry
@@ -17302,7 +17341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return registry.projects.first(where: { $0.id == projectId })?.workspaceId == selectedWorkspaceId
     }
 
-    private static func isolatedBootCanvasState(
+    static func isolatedBootCanvasState(
         projectCanvas: CanvasState,
         bootProjectId: UUID,
         selectedWorkspaceId: UUID?,

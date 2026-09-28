@@ -6451,6 +6451,20 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Test introspection: zoneIds of installed layers in z-order (back-to-front).
     var installedZoneLayerIds: [UUID] { zoneLayerOrder }
 
+    /// QA: the zone ids of the layers actually installed, read from the layer
+    /// set itself rather than the order index, so a layer the index missed
+    /// cannot hide from a wholeness assertion.
+    var qaInstalledLayerZoneIds: [UUID] { zoneLayers.map(\.placement.zoneId) }
+
+    /// QA: the zones that have chrome on the canvas.
+    var qaZoneChromeIds: Set<UUID> { Set(zoneChromeViews.keys) }
+
+    /// QA: the strings a zone's header actually draws, rendered offscreen now.
+    /// Reads what reaches the screen, not the render model it was drawn from.
+    func qaRenderedZoneHeaderText(for zoneId: UUID) -> [String]? {
+        zoneChromeViews[zoneId]?.renderHeaderTextOffscreen()
+    }
+
     /// Test introspection: the tile ids a layer currently owns.
     /// Every tile currently in `zoneId`, read from whichever model owns it.
     ///
@@ -12886,6 +12900,21 @@ final class ZoneChromeNSView: NSView {
         didSet { if isArmed != oldValue { refreshChrome() } }
     }
 
+    /// The text the last `drawHeader` pass drew: title, Home label, QA glyph,
+    /// agent rollup, in draw order.
+    private(set) var drawnHeaderText: [String] = []
+
+    /// QA: draw the header into an offscreen bitmap and return what it drew.
+    func renderHeaderTextOffscreen() -> [String]? {
+        layoutSubtreeIfNeeded()
+        let rect = headerDrawingView.bounds
+        guard rect.width > 0, rect.height > 0,
+              let bitmap = headerDrawingView.bitmapImageRepForCachingDisplay(in: rect)
+        else { return nil }
+        headerDrawingView.cacheDisplay(in: rect, to: bitmap)
+        return drawnHeaderText
+    }
+
     /// Replace the render model (e.g. after a rename) and redraw the header.
     func update(model: CanvasNSView.ZoneRenderModel) {
         self.model = model
@@ -12933,6 +12962,7 @@ final class ZoneChromeNSView: NSView {
     }
 
     private func drawHeader() {
+        drawnHeaderText = []
         let accent = Self.color(named: model.placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
         let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
@@ -12960,6 +12990,7 @@ final class ZoneChromeNSView: NSView {
             in: CGRect(x: 27, y: 8, width: titleWidth, height: 18),
             withAttributes: attributes
         )
+        drawnHeaderText.append(title)
         if let scope = model.scopeLabel {
             let scopeAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: model.isProvisional ? .semibold : .regular),
@@ -12974,6 +13005,7 @@ final class ZoneChromeNSView: NSView {
                 ),
                 withAttributes: scopeAttributes
             )
+            drawnHeaderText.append(scope)
         }
 
         // Close (✕) button — top-right of the header. The canvas owns the click
@@ -13011,6 +13043,7 @@ final class ZoneChromeNSView: NSView {
             let badgeSize = (glyph as NSString).size(withAttributes: badgeAttributes)
             let badgeRect = CGRect(x: headerRect.maxX - badgeSize.width - 12 - closeSize - 6, y: 8, width: badgeSize.width, height: 16)
             glyph.draw(in: badgeRect, withAttributes: badgeAttributes)
+            drawnHeaderText.append(glyph)
             rightInset += badgeSize.width + 10
         }
 
@@ -13027,6 +13060,7 @@ final class ZoneChromeNSView: NSView {
                 height: 16
             )
             rollup.draw(in: rollupRect, withAttributes: rollupAttributes)
+            drawnHeaderText.append(rollup)
         }
         NSGraphicsContext.restoreGraphicsState()
 

@@ -182,6 +182,7 @@ check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
 check --workspace-delete-failure-check
+check --workspace-invariants-check
 check --workspace-management-polish-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
@@ -192,6 +193,7 @@ check --workspace-sidebar-default-visible-check
 check --workspace-sidebar-live-status-check
 check --workspace-sidebar-shell-check
 check --workspace-switch-check
+check --workspace-switch-polish-check
 check --workspace-top-bar-check
 check --zindex-relaunch-hit-test-check
 check --zone-adaptive-bounds-check
@@ -397,6 +399,7 @@ leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-delete-failure-check
+leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check
 leg run_app_check .build/debug/Array --workspace-profile-check
 leg run_app_check .build/debug/Array --workspace-restart-fault-check
@@ -407,6 +410,7 @@ leg run_app_check .build/debug/Array --workspace-sidebar-default-visible-check
 leg run_app_check .build/debug/Array --workspace-sidebar-live-status-check
 leg run_app_check .build/debug/Array --workspace-sidebar-shell-check
 leg run_app_check .build/debug/Array --workspace-switch-check
+leg run_app_check .build/debug/Array --workspace-switch-polish-check
 leg run_app_check .build/debug/Array --workspace-top-bar-check
 leg run_app_check .build/debug/Array --zindex-relaunch-hit-test-check
 leg run_app_check .build/debug/Array --zone-adaptive-bounds-check

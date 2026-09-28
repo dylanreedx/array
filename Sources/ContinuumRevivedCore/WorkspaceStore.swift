@@ -60,7 +60,10 @@ public struct WorkspaceStore: Sendable {
     }
 
     public func save(_ document: WorkspaceDocument) throws {
-        try writer.write(document, to: layout.canvasFile)
+        // `StoreFileWriter` is the QA fault seam; with no plan it is a direct call.
+        try StoreFileWriter.perform(.write, at: layout.canvasFile) {
+            try writer.write(document, to: layout.canvasFile)
+        }
     }
 
     public func load() throws -> WorkspaceDocument {
@@ -78,7 +81,9 @@ public struct WorkspaceStore: Sendable {
     }
 
     public func deleteDocument() throws {
-        try FileManager.default.removeItem(at: layout.workspaceDirectory)
+        try StoreFileWriter.perform(.remove, at: layout.workspaceDirectory) {
+            try FileManager.default.removeItem(at: layout.workspaceDirectory)
+        }
     }
 }
 

@@ -115,10 +115,20 @@ public struct ProjectStore: Sendable {
         )
     }
 
+    // Every mutation goes through `StoreFileWriter`, the QA fault seam; with no
+    // plan installed it is a direct call.
+    private func gatedWrite<T: Codable>(_ value: T, to url: URL) throws {
+        try StoreFileWriter.perform(.write, at: url) { try writer.write(value, to: url) }
+    }
+
+    private func gatedRemove(_ url: URL) throws {
+        try StoreFileWriter.perform(.remove, at: url) { try FileManager.default.removeItem(at: url) }
+    }
+
     // MARK: - Project
 
     public func saveProject(_ project: Project) throws {
-        try writer.write(project, to: layout.projectFile)
+        try gatedWrite(project, to: layout.projectFile)
     }
 
     public func loadProject() throws -> Project {
@@ -135,7 +145,7 @@ public struct ProjectStore: Sendable {
     // MARK: - Canvas
 
     public func saveCanvas(_ canvas: CanvasState) throws {
-        try writer.write(canvas, to: layout.canvasFile)
+        try gatedWrite(canvas, to: layout.canvasFile)
     }
 
     public func loadCanvas() throws -> CanvasState {
@@ -163,7 +173,7 @@ public struct ProjectStore: Sendable {
     // MARK: - Sessions
 
     public func saveSession(_ descriptor: TerminalSessionDescriptor) throws {
-        try writer.write(descriptor, to: layout.sessionFile(id: descriptor.id))
+        try gatedWrite(descriptor, to: layout.sessionFile(id: descriptor.id))
     }
 
     public func loadSession(id: UUID) throws -> TerminalSessionDescriptor {
@@ -179,7 +189,7 @@ public struct ProjectStore: Sendable {
     public func deleteSession(id: UUID) throws {
         let url = layout.sessionFile(id: id)
         if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+            try gatedRemove(url)
         }
     }
 
@@ -194,14 +204,14 @@ public struct ProjectStore: Sendable {
     public func deleteNoteBody(id: UUID) throws {
         let url = layout.noteFile(id: id)
         if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+            try gatedRemove(url)
         }
     }
 
     public func deleteReviewCommentState(reviewId: UUID) throws {
         let url = layout.reviewFile(id: reviewId)
         if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
+            try gatedRemove(url)
         }
     }
 
@@ -235,7 +245,7 @@ public struct ProjectStore: Sendable {
     // MARK: - Browser
 
     public func saveBrowserState(_ state: BrowserState) throws {
-        try writer.write(state, to: layout.browserFile)
+        try gatedWrite(state, to: layout.browserFile)
     }
 
     public func loadBrowserState() throws -> BrowserState {
@@ -252,7 +262,7 @@ public struct ProjectStore: Sendable {
     // MARK: - File Tree
 
     public func saveFileTreeState(_ state: FileTreeState) throws {
-        try writer.write(state, to: layout.fileTreeIndexFile)
+        try gatedWrite(state, to: layout.fileTreeIndexFile)
     }
 
     public func loadFileTreeState() throws -> FileTreeState {
@@ -273,7 +283,7 @@ public struct ProjectStore: Sendable {
             at: layout.boardsDirectory,
             withIntermediateDirectories: true,
             attributes: nil)
-        try writer.write(state, to: layout.boardsIndexFile)
+        try gatedWrite(state, to: layout.boardsIndexFile)
     }
 
     public func loadBoardState() throws -> BoardState {
@@ -295,7 +305,7 @@ public struct ProjectStore: Sendable {
             at: layout.boardsDirectory,
             withIntermediateDirectories: true,
             attributes: nil)
-        try writer.write(board, to: layout.boardFile(id: board.id))
+        try gatedWrite(board, to: layout.boardFile(id: board.id))
     }
 
     public func loadBoard(id: UUID) throws -> Board {
@@ -315,7 +325,7 @@ public struct ProjectStore: Sendable {
     public func deleteBoard(id: UUID) throws {
         let url = layout.boardFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        try gatedRemove(url)
     }
 
     // MARK: - Notes
@@ -325,7 +335,7 @@ public struct ProjectStore: Sendable {
             at: layout.notesDirectory,
             withIntermediateDirectories: true,
             attributes: nil)
-        try writer.write(state, to: layout.notesIndexFile)
+        try gatedWrite(state, to: layout.notesIndexFile)
     }
 
     public func loadNoteState() throws -> NoteState {
@@ -350,7 +360,8 @@ public struct ProjectStore: Sendable {
         guard let data = text.data(using: .utf8) else {
             throw CocoaError(.fileWriteInapplicableStringEncoding)
         }
-        try data.write(to: layout.noteFile(id: id), options: .atomic)
+        let url = layout.noteFile(id: id)
+        try StoreFileWriter.perform(.write, at: url) { try data.write(to: url, options: .atomic) }
     }
 
     public func loadNoteBody(id: UUID) throws -> String {
@@ -375,7 +386,7 @@ public struct ProjectStore: Sendable {
             at: layout.reviewsDirectory,
             withIntermediateDirectories: true,
             attributes: nil)
-        try writer.write(state, to: layout.reviewFile(id: state.reviewId))
+        try gatedWrite(state, to: layout.reviewFile(id: state.reviewId))
     }
 
     public func loadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState {

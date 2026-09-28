@@ -317,3 +317,21 @@ that copy.
 - 2026-09-28 — Program defined. HEAD `1451c030`. No code changed. Board
   published. Decisions D1–D4 pending; defaults assumed as stated in §4. Next:
   slice 0 (fixture) on bench `stab-fixture`.
+- 2026-09-28 — Slice 0 (fixture + fault seam) on bench `stab-fixture`, branch
+  `array/stab-fixture`. `WorkspaceInvariantsFixture` mounts two seeded
+  workspaces through `mountWorkspaceSceneAtBoot` (launch's canvas callbacks
+  now come from `wireCanvasCallbacks`, which the fixture also calls) and reads
+  model, raw disk bytes and the strings each header actually draws.
+  `StoreFileWriter` gates every `WorkspaceStore`/`ProjectStore` mutation: fail
+  write N, fail from N, abort after N. `--workspace-invariants-check` GREEN:
+  seam controls pass in bytes; the clean control (mount, switch B, switch A,
+  quit+remount, crash+remount) reports zero violations; all four negative
+  controls are caught by their own invariant naming the injected subject (1pt
+  shift → geometry, foreign zone in B's file → isolation, ghost layer →
+  wholeness, acknowledged-but-dropped write → durability).
+  `--workspace-switch-polish-check` registered, GREEN. **Open finding, RED at
+  base:** after the real mount every zone header draws its title and no Home
+  label — both runtime render-model builders omit `scopeLabel` and the rollup
+  tick writes that copy back (complaint 2). Projection is therefore excluded
+  from slice 0's clean control, printed as a `MATRIX-NOTE` in the matrix
+  report; slice 2 re-enables it in this same leg. Nothing merged.

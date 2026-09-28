@@ -154,6 +154,7 @@ MATRIX_UNEXPECTED_FAILURES=()
 MATRIX_KNOWN_RED_OBSERVED=()
 MATRIX_KNOWN_RED_UNEXPECTED_PASS=()
 MATRIX_LEGS_RUN=0
+MATRIX_NOTES=()
 
 matrix_leg_name() {
   local arg
@@ -203,12 +204,29 @@ matrix_classify() {
   return 0
 }
 
+# A leg that passes with a caveat prints `MATRIX-NOTE: <text>` on stdout, and the
+# report lists it, so a pass that excludes something cannot read as a clean one.
+matrix_collect_notes() {
+  local leg=$1 log=$2 line
+  while IFS= read -r line; do
+    MATRIX_NOTES+=("$leg: ${line#MATRIX-NOTE: }")
+  done < <(grep -E '^MATRIX-NOTE: ' "$log" || true)
+}
+
 # Prints the verdict and decides the exit code. Known-reds are reported apart from
 # regressions, and a known-red that PASSES is called out too — a stale allowlist
 # silently re-hides whatever it still covers.
 matrix_report() {
   local label=$1
   printf '\n---- %s: %d leg(s) run ----\n' "$label" "$MATRIX_LEGS_RUN"
+
+  if [[ ${#MATRIX_NOTES[@]} -gt 0 ]]; then
+    printf 'NOTES (%d):\n' "${#MATRIX_NOTES[@]}"
+    local note
+    for note in "${MATRIX_NOTES[@]}"; do
+      printf '  - %s\n' "$note"
+    done
+  fi
 
   if [[ ${#MATRIX_KNOWN_RED_OBSERVED[@]} -gt 0 ]]; then
     printf 'KNOWN-RED, expected (%d): %s\n' \
@@ -236,7 +254,7 @@ matrix_report() {
 }
 
 run_app_check() {
-  local project_root app_support status
+  local project_root app_support status stdout_log
   local tmux_args=()
   project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-project.XXXXXX")
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
@@ -255,20 +273,24 @@ run_app_check() {
   fi
   printf '\n'
 
+  # stdout is teed so a leg can surface a MATRIX-NOTE line in the final report;
+  # the leg's own exit status is still the verdict.
+  stdout_log=$(mktemp "${TMPDIR:-/tmp}/continuum-matrix-stdout.XXXXXX")
   set +e
   if [[ ${#tmux_args[@]} -gt 0 ]]; then
     CONTINUUM_PROJECT_ROOT="$project_root" \
       CONTINUUM_APP_SUPPORT="$app_support" \
-      "$@" "${tmux_args[@]}"
+      "$@" "${tmux_args[@]}" | tee "$stdout_log"
   else
     CONTINUUM_PROJECT_ROOT="$project_root" \
       CONTINUUM_APP_SUPPORT="$app_support" \
-      "$@"
+      "$@" | tee "$stdout_log"
   fi
-  status=$?
+  status=${PIPESTATUS[0]}
   set -e
 
-  rm -rf "$project_root" "$app_support"
+  matrix_collect_notes "$(matrix_leg_name "$@")" "$stdout_log"
+  rm -rf "$project_root" "$app_support" "$stdout_log"
 
   matrix_classify "$(matrix_leg_name "$@")" "$status"
 }
@@ -683,6 +705,13 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 # drives mountWorkspaceSceneAtBoot, the method applicationDidFinishLaunching
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
+# .plans/67 slice 0: the workspace invariants fixture every later workspace
+# witness builds on. Two workspaces mounted through mountWorkspaceSceneAtBoot,
+# a StoreFileWriter fault seam, and negative controls (1pt shift, foreign zone,
+# ghost layer, acknowledged-but-dropped write) that must each be caught.
+run_app_check .build/debug/Array --workspace-invariants-check
+# Dispatched since P3 but never registered, so the gate never reported it.
+run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
 # production dispatch entry. Same-named file in two checkouts, dirty draft
 # preserved, world frames at a non-zero zone origin, partial relationship
