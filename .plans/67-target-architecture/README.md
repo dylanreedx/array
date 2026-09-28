@@ -476,3 +476,32 @@ that copy.
   titlebar screenshots are on ARR-1. Board: ARC-0, ARC-3, ARC-5, ARR-1, ARR-9,
   ARR-10 → Review; ARC-4 → In progress (4a landed, 4b is slice 6). Next: slice 5
   needs Dylan's D1–D4 (§4) first; it has not been started.
+- 2026-09-28 02:22 — **Handoff (orchestrating session).** Scope met: slices 0–4
+  landed on staging; slice 5 not started (needs D1–D4, §4); slice 6 not
+  started. Benches, all kept for Dylan's review (return each with
+  `git worktree remove` once merged): `.worktrees/stab-fixture`
+  (`array/stab-fixture` @ `635a1b4a`, slices 0+1), `.worktrees/stab-arc3`
+  (@ `5b670ec9`, slice 2), `.worktrees/stab-titlebar` (@ `86f3ec99`, ARR-1 +
+  ARR-10), `.worktrees/stab-reds` (@ `9c7c34a0`, ARR-9), `.worktrees/stab-arc4a`
+  (@ `94c20f83`, slice 4), `.worktrees/stab-0722` (staging @ this commit).
+  Staging matrix: **243 legs, Matrix passed, 0 failures, 10 KNOWN-RED.** Slice 1
+  bench matrix rerun under the activity assertion: 237 legs, failures exactly
+  the nine known unowned reds (fixed or documented by ARR-9 on staging), zero
+  new. Every directed witness was proven RED on base code by reverse-applying
+  only its fix; the three patch-4 lock scenarios are guards (see above).
+  **Dylan decides:** the three new `MATRIX_KNOWN_RED` entries (focus legs:
+  check process never the active app; zoom drift: alpha only, offset (0,0));
+  the stale hazard 9 sentences in `CLAUDE.md` (`spawnRunArtifacts`/
+  `spawnDiffReviewFromPalette` no longer flat; `withAutoLayoutSuppressed`
+  deleted); ARC-3 label wording; D1–D4 before slice 5. **Dylan does himself,
+  in the preview app on `~/array-scratch`:** the dogfood hand scripts with
+  header before/after screenshots — not driven tonight because it needs
+  frontmost-app keystrokes while `/Applications/Array.app` is open.
+  **Open findings:** Esc commits a zone rename instead of cancelling;
+  placeholder swaps install flat after a mount; restarts in another project's
+  zone use the active project's store; mount grows tiles below a kind's minimum
+  size. **Aside:** one window capture for the header shots picked the prod
+  "Array" window (same owner name as the preview); nothing in the app was
+  touched, the image was deleted unpublished, and captures now select by PID.
+  Host: the machine slept ~00:51–01:16 (not work); `caffeinate` assertions were
+  held for the night's matrix runs and released at handoff.
