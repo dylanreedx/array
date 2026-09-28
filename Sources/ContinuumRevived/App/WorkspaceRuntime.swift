@@ -27,6 +27,10 @@ final class WorkspaceRuntime {
     var lifecycleSnapshotObserver: ((LifecycleEvent, CanvasNSView) -> Void)?
     private(set) var workspaceId: UUID
     private(set) var document: WorkspaceDocument
+    /// Moves on every scene mount: `install(into:)` and every committed switch.
+    /// A callback captured under an older epoch is answering for a scene that is
+    /// no longer on screen and must be refused (`.plans/67` §3.4).
+    private(set) var mountEpoch: UInt64 = 0
     private let registry: ZoneRuntimeRegistry
     private let orchestrator: ZoneHydrationOrchestrator.Type
     private let focusBroker: FocusBroker
@@ -696,6 +700,7 @@ final class WorkspaceRuntime {
     /// via `ZoneHydrationOrchestrator.plan`; only zones whose planned tier is `.live`
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
+        mountEpoch &+= 1
         // Cold launch and an in-process switch must mount the same semantic scene.
         // Preserve legacy foreign placements in the document, but never draw them
         // in a workspace that does not own their project.
@@ -1678,6 +1683,7 @@ final class WorkspaceRuntime {
 
         // 7. Re-establish focus.
         workspaceId = targetWorkspaceId
+        mountEpoch &+= 1
         document = targetDocument
         acquiredProjectIds = newlyAcquired
         refreshDocumentRelationships()

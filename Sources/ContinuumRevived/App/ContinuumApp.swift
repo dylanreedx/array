@@ -2221,6 +2221,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--picker-epoch-fence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceDataProtectionChecks.runPickerEpochFence()
+                print("ContinuumRevivedPickerEpochFenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-save-receipt-check") {
             do {
                 _ = NSApplication.shared
@@ -14912,6 +14924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 recents.append(ProjectHomeSelection(project: project, homeRelativePath: scope.homeRelativePath))
             }
         }
+        let presentedEpoch = workspaceRuntime?.mountEpoch
         let picker = ProjectHomePickerController()
         projectHomePicker?.dismiss(cancelled: false)
         projectHomePicker = picker
@@ -14934,6 +14947,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                     self.projectHomePicker = nil
                     self.setWorkspaceManagementMessage("Couldn't determine the active workspace.")
+                    return
+                }
+                // Fenced by the mount the picker was opened in. The workspace is
+                // read HERE, at confirm, so a pick made for one workspace's zone
+                // after switching to another used to land in the other one.
+                // Witness: `--picker-epoch-fence-check`.
+                guard self.workspaceRuntime?.mountEpoch == presentedEpoch else {
+                    if isNewZone {
+                        canvasView.cancelProvisionalZone(zoneId: placement.zoneId)
+                    }
+                    self.projectHomePicker = nil
+                    self.setWorkspaceManagementMessage("The workspace changed while the picker was open; nothing was changed.")
                     return
                 }
                 do {
@@ -15884,6 +15909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                   let project = registry.projects.first(where: { $0.id == projectId }) else { return nil }
             return ProjectHomeSelection(project: project, homeRelativePath: scope.homeRelativePath)
         }
+        let presentedEpoch = workspaceRuntime?.mountEpoch
         let picker = ProjectHomePickerController()
         projectHomePicker?.dismiss(cancelled: false)
         projectHomePicker = picker
@@ -15897,6 +15923,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onInteractionOwnershipChanged: { [weak canvasView] owned in canvasView?.setZoneScopePickerInteractionOwned(owned) },
             onConfirm: { [weak self] selection in
                 guard let self else { return }
+                guard self.workspaceRuntime?.mountEpoch == presentedEpoch else {
+                    self.projectHomePicker = nil
+                    self.setWorkspaceManagementMessage("The workspace changed while the picker was open; nothing was changed.")
+                    return
+                }
                 let scope = CreationScope(
                     projectId: selection.project.id,
                     projectRoot: selection.project.rootPath,
@@ -16023,6 +16054,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (T2): drive the click-arming route the canvas fires, without synthesizing
     /// an NSEvent (`postToPid` does not reach a check's canvas).
     func qaActivateZoneByClick(_ zoneId: UUID) { canvasView?.onZoneActivated?(zoneId) }
+
+    /// QA: press the presented project/Home picker's row for `projectId` (and
+    /// folder, when `homeRelativePath` is set), reaching the real `onConfirm`.
+    /// False when no picker is presented or it does not offer that project.
+    func qaConfirmProjectHomePicker(projectId: UUID, homeRelativePath: String?) -> Bool {
+        projectHomePicker?.qaConfirm(projectId: projectId, relativePath: homeRelativePath) ?? false
+    }
 
     /// QA: quit the way the user does — `applicationShouldTerminate`'s flush,
     /// then `windowWillClose`'s teardown, which releases every controller and

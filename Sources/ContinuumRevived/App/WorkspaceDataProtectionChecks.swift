@@ -433,6 +433,59 @@ extension WorkspaceDataProtectionChecks {
     }
 }
 
+extension WorkspaceDataProtectionChecks {
+    // MARK: - --picker-epoch-fence-check
+
+    /// A choice made in a picker opened under one mounted scene never lands in
+    /// another: the confirm is fenced by the mount it was opened in.
+    static func runPickerEpochFence() throws -> URL {
+        try runScenarios("picker-epoch-fence", [
+            ("switch-while-open", pickerConfirmAfterSwitch),
+            ("same-mount-lands", pickerConfirmSameMount)
+        ])
+    }
+
+    /// Positive control: a pick confirmed under the mount it was opened in lands,
+    /// so the fence cannot pass by refusing everything.
+    private static func pickerConfirmSameMount(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("picker")
+        m.canvas.requestZoneScopeChange(zoneId: Fixture.zoneA2)
+        let pressed = m.delegate.qaConfirmProjectHomePicker(projectId: Fixture.projectA2, homeRelativePath: nil)
+        fixture.drain()
+        let scope = try fixture.readWorkspaceFile(Fixture.workspaceA).document?.lastExplicitCreationScope
+        try expect(pressed && scope?.projectId == Fixture.projectA2,
+                   "a pick confirmed in the mount it was opened in did not land: pressed \(pressed), A's scope \(String(describing: scope))")
+        return ["scope": "\(String(describing: scope))"]
+    }
+
+    /// Open zone A1's Home picker (the header's Home action), switch to B from
+    /// the sidebar with the picker still open, then press B1's row. Nothing may
+    /// change: not B's file, not A's, not the registry.
+    private static func pickerConfirmAfterSwitch(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("picker")
+        m.canvas.requestZoneScopeChange(zoneId: Fixture.zoneA1)
+        try fixture.switchTo(Fixture.workspaceB)
+        let aBytes = try fixture.readWorkspaceFile(Fixture.workspaceA).bytes
+        let bBytes = try fixture.readWorkspaceFile(Fixture.workspaceB).bytes
+        let registryBytes = try Data(contentsOf: fixture.registryStore.registryFile)
+        let pressed = m.delegate.qaConfirmProjectHomePicker(projectId: Fixture.projectB1, homeRelativePath: nil)
+        fixture.drain()
+        let bAfter = try fixture.readWorkspaceFile(Fixture.workspaceB)
+        try expect(bAfter.bytes == bBytes,
+                   "a pick made for workspace A's zone landed in B's file (pressed: \(pressed)); B's explicit scope is now "
+                   + "\(String(describing: bAfter.document?.lastExplicitCreationScope))")
+        let aAfter = try fixture.readWorkspaceFile(Fixture.workspaceA).bytes
+        let registryAfter = try Data(contentsOf: fixture.registryStore.registryFile)
+        try expect(aAfter == aBytes, "the stale pick changed A's file")
+        try expect(registryAfter == registryBytes, "the stale pick changed the registry")
+        try expect(m.runtime.document.lastExplicitCreationScope == bAfter.document?.lastExplicitCreationScope,
+                   "the stale pick changed B's mounted document")
+        return ["pressed": pressed]
+    }
+}
+
 private extension Optional {
     func orThrow(_ error: Error) throws -> Wrapped {
         guard let value = self else { throw error }

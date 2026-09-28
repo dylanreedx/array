@@ -294,6 +294,15 @@ final class ProjectHomePickerController {
         }
     }
 
+    /// QA: confirm the way a project row (or a folder's "Use") does, through the
+    /// same validating `confirm`. False when the picker does not offer that
+    /// project, so a leg cannot confirm a row the user could not have clicked.
+    func qaConfirm(projectId: UUID, relativePath: String?) -> Bool {
+        guard let project = projects.first(where: { $0.id == projectId }) else { return false }
+        confirm(project: project, relativePath: relativePath)
+        return true
+    }
+
     private func handleDismissalRequest() {
         if confirmsDestructiveCancellation {
             requestCancellationConfirmation()

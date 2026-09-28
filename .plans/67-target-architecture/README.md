@@ -363,3 +363,7 @@ that copy.
   the dirty flush waits on the serial queue by accident. A cold-zone release was
   also considered; reconcile never releases a controller, so no such route
   exists.
+  Picker fenced by epoch (`--picker-epoch-fence-check`: a Home pick opened for
+  A's zone and confirmed after switching to B landed in B's file) — the runtime
+  carries a `mountEpoch`, both pickers capture it when presented and refuse a
+  confirm from an older mount; a same-mount pick still lands (positive control).
