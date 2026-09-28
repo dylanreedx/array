@@ -434,3 +434,45 @@ that copy.
   Placeholder swaps through the flat `install(tileView:)` after a mount
   (terminal exit, missing command, browser restart placeholder) are not
   converted; open question. Nothing merged.
+- 2026-09-28 02:15 — **Staging `array/stab-0722` (cut from `array/integration`
+  at `1451c030`) at `bae7a676` holds slices 0–4.** Merged, each bench reviewed
+  first: `array/stab-fixture` (slices 0 and 1, through `635a1b4a`),
+  `array/stab-arc3` (slice 2, `5b670ec9`), `array/stab-titlebar` (slice 3
+  ARR-1 + ARR-10, `86f3ec99`), `array/stab-reds` (slice 3 ARR-9, `9c7c34a0`),
+  `array/stab-arc4a` (slice 4, `94c20f83`). Nothing is on `array/integration`;
+  nothing is pushed. **Real `scripts/run-matrix.sh` on staging: 243 legs,
+  Matrix passed, 0 failures, 10 KNOWN-RED**, with `CONTINUUM_SKIP_UI_BASELINES=1`
+  under `caffeinate -dims` and `caffeinate -u` — at night the Ghostty-surface
+  legs need the session to register the user as active (`UserIsActive=1`);
+  without it they fail "terminal surface missing" (measured: fails at
+  `UserIsActive=0`, passes right after `caffeinate -u`, on binaries with and
+  without slice 1). Every program witness printed its pass line in that run:
+  invariants (projection re-enabled, no MATRIX-NOTE), switch-polish,
+  saver-identity, note-conversion-writer, retired-flat-write,
+  flat-spawn-migration, canvas-save-receipt, picker-epoch-fence,
+  zone-presentation, agent-tile-binding, window-chrome, workspace-top-bar,
+  zone-rename-hotkey, tile-materialize.
+  **For Dylan to approve or reject:** ARR-9 moved three legs into
+  `MATRIX_KNOWN_RED`, which changes the gate's contract.
+  `--note-click-focus-check` and `--agent-tile-click-focus-check`: the check
+  process is never the active app (measured `NSApp.isActive=false`, no key
+  window, no text input context), identical at `e97b4156`, which was green on
+  2026-09-08 on this OS build. `--file-tile-zoom-check`: drift 2.4397 against 2
+  is alpha only (best alignment of the two header captures at offset (0,0);
+  cached header ~11% less alpha), not a shift; the world-frame assertion it
+  blocked passes. The go-live doc's and `CLAUDE.md`'s KNOWN-RED counts are
+  Dylan's edits. **Stale in `CLAUDE.md`, left for Dylan:** hazard 9 still names
+  `spawnRunArtifacts` and `spawnDiffReviewFromPalette` as flat spawns (moved to
+  the zone path in slice 1) and `withAutoLayoutSuppressed` (deleted in slice 4).
+  **Open, found tonight:** Esc commits a zone rename instead of cancelling;
+  placeholder swaps (terminal exit, missing command, browser restart
+  placeholder) still install flat after a mount; `restartTile` /
+  `restartBrowserTile` use the active controller's spawner, so a restart in
+  another project's zone saves through the wrong store; mount grows tiles below
+  a kind's minimum size (load-time geometry change); ARC-3's label wording
+  ("Project Not Found", "· Unavailable", "Group"/"Zone") awaits Dylan's taste.
+  Dogfood hand scripts with header screenshots were not run tonight (driving
+  the preview needs frontmost-app keystrokes while the prod app is open);
+  titlebar screenshots are on ARR-1. Board: ARC-0, ARC-3, ARC-5, ARR-1, ARR-9,
+  ARR-10 → Review; ARC-4 → In progress (4a landed, 4b is slice 6). Next: slice 5
+  needs Dylan's D1–D4 (§4) first; it has not been started.
