@@ -710,6 +710,12 @@ run_app_check .build/debug/Array --workspace-scene-owner-check
 # a StoreFileWriter fault seam, and negative controls (1pt shift, foreign zone,
 # ghost layer, acknowledged-but-dropped write) that must each be caught.
 run_app_check .build/debug/Array --workspace-invariants-check
+# .plans/67 ARC-3: a zone's header is derived from its placement, registry entry,
+# rollup and provisional state. Mount, rename, Home change through the picker,
+# Create Zone, rollup ticks, switch and remount each compare the DRAWN header text
+# with the canonical inputs; provisional, unbound, registry-miss and unavailable
+# projects each draw their own Home label.
+run_app_check .build/debug/Array --zone-presentation-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the

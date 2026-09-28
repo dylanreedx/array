@@ -2159,12 +2159,8 @@ enum LabCatalog {
         canvas.tileView(for: workingId)?.agentStatus = .working
         canvas.tileView(for: needsId)?.agentStatus = .needsAttention
         canvas.tileView(for: plainId)?.agentStatus = nil
-        canvas.updateZoneRenderModels([
-            CanvasNSView.ZoneRenderModel(
-                placement: zone,
-                displayName: "Agent Status",
-                agentStatusRollup: CanvasNSView.AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0)
-            )
+        canvas.updateZoneAgentRollups([
+            zone.zoneId: CanvasNSView.AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0)
         ])
         canvas.layoutSubtreeIfNeeded()
         return canvas

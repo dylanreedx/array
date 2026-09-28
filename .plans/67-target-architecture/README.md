@@ -335,3 +335,21 @@ that copy.
   tick writes that copy back (complaint 2). Projection is therefore excluded
   from slice 0's clean control, printed as a `MATRIX-NOTE` in the matrix
   report; slice 2 re-enables it in this same leg. Nothing merged.
+- 2026-09-28 — Slice 2 (ARC-3 derived headers) on bench `stab-arc3`, branch
+  `array/stab-arc3`, off slice 0 (`81fc32f5`). `ZonePresentation.make` is the
+  one builder of a zone's title and Home label, over the live placement, the
+  project's registry resolution (`ZoneProjectResolution`, resolved by whoever
+  holds the registry and handed in with the zone), the rollup and the
+  provisional flag. `ZoneRenderModel.scopeLabel`, the stored `zoneRenderModels`
+  array (now computed from `liveZones`) and `zoneDisplayByZoneId` are gone;
+  the status tick calls `updateZoneAgentRollups`, which writes rollups only.
+  Distinct Home labels: provisional "Choose a project to finish", unbound
+  "Needs Project", registry miss "Project Not Found", missing folder
+  "<project> / <home> · Unavailable". RED at base, GREEN after:
+  `--workspace-invariants-check` with projection back in its clean control
+  (the `MATRIX-NOTE` is gone) and the new `--zone-presentation-check` (mount,
+  rename, Home change through the picker's confirm, Create Zone, rollup ticks,
+  switch, quit+remount, and the four states). A registry-miss or
+  missing-folder zone still cannot mount (`mountableZones` throws, the factory
+  refuses); the leg witnesses those two on launch's pre-mount canvas. Nothing
+  merged.

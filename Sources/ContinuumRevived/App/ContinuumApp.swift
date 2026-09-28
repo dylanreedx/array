@@ -2226,7 +2226,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try WorkspaceInvariantsChecks.run()
                 print("ContinuumRevivedWorkspaceInvariantsChecks passed: \(artifact.path)")
-                print("MATRIX-NOTE: \(WorkspaceInvariantsChecks.matrixNote)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--zone-presentation-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZonePresentationChecks.run()
+                print("ContinuumRevivedZonePresentationChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -8294,12 +8305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvas: canvasView,
             signals: agentSignalCenter.currentByTile
         )
-        let updatedModels = canvasView.zoneRenderModels.map { model in
-            var updated = model
-            updated.agentStatusRollup = rollupsByZone[model.placement.zoneId] ?? .empty
-            return updated
-        }
-        canvasView.updateZoneRenderModels(updatedModels)
+        canvasView.updateZoneAgentRollups(rollupsByZone)
     }
 
     private static func dockBadgeLabel(needsAttentionCount count: Int) -> String? {
@@ -14770,14 +14776,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func zoneScopeLabel(_ scope: ZoneScope) -> String {
-        guard let projectId = scope.projectId,
-              let registry = try? registryStore?.loadOrEmpty(),
-              let project = registry.projects.first(where: { $0.id == projectId }) else {
-            return "Needs Project"
-        }
-        return scope.homeRelativePath.map { "\(project.name) / \($0)" }
-            ?? "\(project.name) / Project Root"
+    /// Nil when the registry cannot be read: that is not a registry miss.
+    private func zoneProjectResolution(_ projectId: UUID) -> ZoneProjectResolution? {
+        guard let registry = try? registryStore?.loadOrEmpty() else { return nil }
+        return ZoneProjectResolution(projectId: projectId, in: registry)
     }
 
     private func filesystemScopeEvidence(forTile tileId: UUID) -> ZoneScope? {
@@ -14894,23 +14896,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     )
                     return
                 }
-                let label = self.zoneScopeLabel(ZoneScope(
-                    projectId: selection.project.id,
-                    homeRelativePath: selection.homeRelativePath
-                ))
+                // The picker offered registry entries, so its selection IS one;
+                // the header derives its Home label from it.
+                let project = ZoneProjectResolution.registered(selection.project)
                 if isNewZone {
                     canvasView.commitProvisionalZone(
                         zoneId: placement.zoneId,
                         projectId: selection.project.id,
                         homeRelativePath: selection.homeRelativePath,
-                        scopeLabel: label
+                        project: project
                     )
                 } else {
                     canvasView.setZoneScope(
                         zoneId: placement.zoneId,
                         projectId: selection.project.id,
                         homeRelativePath: selection.homeRelativePath,
-                        scopeLabel: label
+                        project: project
                     )
                     canvasView.showWorkspaceTransitionLabel("Future filesystem tiles will start in \(selection.displayPath)")
                 }
@@ -15956,6 +15957,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// an NSEvent (`postToPid` does not reach a check's canvas).
     func qaActivateZoneByClick(_ zoneId: UUID) { canvasView?.onZoneActivated?(zoneId) }
 
+    /// QA: press the presented project/Home picker's row for `projectId` (and
+    /// folder, when `homeRelativePath` is set), reaching the real `onConfirm`.
+    /// False when no picker is presented or it does not offer that project.
+    func qaConfirmProjectHomePicker(projectId: UUID, homeRelativePath: String?) -> Bool {
+        projectHomePicker?.qaConfirm(projectId: projectId, relativePath: homeRelativePath) ?? false
+    }
+
+    /// QA: the canvas badge and zone rollup refresh every agent status change runs.
+    func qaApplyAgentStatusesToCanvas() { applyAgentStatusesToCanvas() }
+
     /// QA: quit the way the user does — `applicationShouldTerminate`'s flush,
     /// then `windowWillClose`'s teardown, which releases every controller and
     /// with it every project lock — minus the process exit, so a leg can mount a
@@ -16102,8 +16113,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.filesystemScopeForTile = { [weak self] tileId in
             self?.filesystemScopeEvidence(forTile: tileId)
         }
-        canvasView.scopeLabelForZoneScope = { [weak self] scope in
-            self?.zoneScopeLabel(scope) ?? "Needs Project"
+        canvasView.projectResolutionForZoneScope = { [weak self] projectId in
+            self?.zoneProjectResolution(projectId)
         }
         canvasView.onZoneScopeRequired = { [weak self] placement, anchor in
             self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: true)
@@ -17385,20 +17396,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Zone order derives from each placement's zPosition register (ticket 04).
         let orderedZones = document.zonesInZOrder
         return orderedZones.map { zone in
+            let project = zone.projectId.map { ZoneProjectResolution(projectId: $0, in: registry) }
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
-            let name = zone.name.isEmpty ? (projectEntry?.name ?? "Zone") : zone.name
-            let scopeLabel: String
-            if let projectEntry {
-                scopeLabel = zone.homeRelativePath.map { "\(projectEntry.name) / \($0)" }
-                    ?? "\(projectEntry.name) / Project Root"
-            } else {
-                scopeLabel = "Needs Project"
-            }
             let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
             return CanvasNSView.ZoneRenderModel(
                 placement: zone,
-                displayName: name,
-                scopeLabel: scopeLabel,
+                displayName: ZonePresentation.make(placement: zone, project: project).title,
+                project: project,
                 agentStatusRollup: .empty,
                 qaVerdict: qaVerdict
             )
@@ -23572,8 +23576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         createCanvas.commitProvisionalZone(
             zoneId: provisional.zoneId,
             projectId: projectP,
-            homeRelativePath: nil,
-            scopeLabel: "T17 Check Project"
+            homeRelativePath: nil
         )
         if let persistenceError { throw persistenceError }
 

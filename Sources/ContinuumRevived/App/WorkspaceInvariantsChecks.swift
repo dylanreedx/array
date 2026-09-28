@@ -30,23 +30,10 @@ enum WorkspaceInvariantsChecks {
         if !condition() { throw Failure(message: message()) }
     }
 
-    /// The pass line's caveat, printed as a `MATRIX-NOTE` so the matrix report
-    /// shows it: projection is excluded from the clean control until the
-    /// derived-headers slice lands.
-    private(set) static var matrixNote = ""
-
     static func run() throws -> URL {
         var manifest: [String: Any] = [:]
         manifest["seam"] = try runSeamControls()
-        let clean = try runCleanControl()
-        manifest["clean"] = clean
-        let openZones = Set((clean["steps"] as? [[String: Any]] ?? [])
-            .flatMap { $0["openFindings"] as? [String] ?? [] }
-            .compactMap { $0.components(separatedBy: ": ").first })
-        matrixNote = openZones.isEmpty
-            ? "projection excluded from the clean control but saw no open finding; re-enable it"
-            : "PROJECTION EXCLUDED from the clean control, 1 open finding: after mount the zone header "
-              + "draws no Home label (\(openZones.count) zone(s)); the derived-headers slice re-enables it here"
+        manifest["clean"] = try runCleanControl()
         manifest["shift"] = try runShiftControl()
         manifest["foreignZone"] = try runForeignZoneControl()
         manifest["ghostLayer"] = try runGhostLayerControl()
@@ -124,19 +111,13 @@ enum WorkspaceInvariantsChecks {
 
     // MARK: - 2. The clean control
 
-    /// Projection is not asserted by the clean control: at `1451c030` every
-    /// header loses its Home label once the runtime mounts the scene (both
-    /// runtime render-model builders omit `scopeLabel`, and the rollup tick
-    /// writes that copy back). That is a real defect — complaint 2 — owned by
-    /// the derived-headers slice, whose witness asserts it. It is recorded here
-    /// as an open finding so the manifest shows what the fixture sees.
-    static let cleanInvariants = Set(Fixture.Invariant.allCases).subtracting([.projection])
+    /// Every invariant, projection included: the header a mounted zone draws is
+    /// derived from its canonical fields, so a clean scene draws exactly them.
+    static let cleanInvariants = Set(Fixture.Invariant.allCases)
 
     private static func checkClean(_ fixture: Fixture, _ step: String, into steps: inout [[String: Any]]) throws {
         let violations = try fixture.allViolations(invariants: cleanInvariants)
-        let openFindings = try fixture.allViolations(invariants: [.projection])
-        steps.append(["step": step, "violations": violations.map(\.description),
-                      "openFindings": openFindings.map(\.description)])
+        steps.append(["step": step, "violations": violations.map(\.description)])
         try expect(violations.isEmpty, "clean control, after \(step): \(violations.map(\.description))")
     }
 

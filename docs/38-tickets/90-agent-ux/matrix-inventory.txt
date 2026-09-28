@@ -207,6 +207,7 @@ check --zone-create-gesture-check
 check --zone-hydration-lifecycle-check
 check --zone-lazy-resume-check
 check --zone-move-unified-check
+check --zone-presentation-check
 check --zone-project-session-naming-check
 check --zone-registry-refcount-check
 check --zone-rename-inline-check
@@ -424,6 +425,7 @@ leg run_app_check .build/debug/Array --zone-create-gesture-check
 leg run_app_check .build/debug/Array --zone-hydration-lifecycle-check
 leg run_app_check .build/debug/Array --zone-lazy-resume-check
 leg run_app_check .build/debug/Array --zone-move-unified-check
+leg run_app_check .build/debug/Array --zone-presentation-check
 leg run_app_check .build/debug/Array --zone-project-session-naming-check
 leg run_app_check .build/debug/Array --zone-registry-refcount-check
 leg run_app_check .build/debug/Array --zone-rename-inline-check
