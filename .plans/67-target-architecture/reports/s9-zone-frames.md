@@ -1,0 +1,16 @@
+# s9 — Zone frame writers and layout (inline report from agent)
+
+Single persisted writer of zone rects: onZoneMoved → AppDelegate.persistMovedZone / persistCreatedGroupZone → WorkspaceRuntime.commitZonePlacement / commitCreatedZone (mutate in-memory document, sync save) — EXCEPT persistLayoutTransaction (ContinuumApp.swift:14664) which does `var document = try store.load()` (fresh disk re-read), applies only the transaction's zone placements + ambient tile frames, saves, then calls workspaceRuntime.replaceDocument(document) — stomping the runtime's in-memory truth with a reloaded-then-partial snapshot. commitZonePlacement's own comment (WorkspaceRuntime.swift:105-108) says "No reload is permitted here… re-reading disk would race other live zone mutations." Top suspect for zones reverting/overlapping and tiles outside a reverted zone.
+
+growZone (CanvasNSView.swift:1888), growZoneToFitMembers (:1953), expandZoneToContainMembers (:847) can shift a zone's ORIGIN (not just far edge) and rebase members; gated by suppressesAutoLayoutForHydration / withAutoLayoutSuppressed, correctly disarmed during switch hydration.
+
+setZones (CanvasNSView.swift:6232) is the sole rebuilder of liveZones/zoneRenderModels on mount/switch.
+
+CanvasEngine.resolveZoneMembership (ZoneMembershipRepair.swift:51) never moves a tile and never changes an OWNED stamp's geometry → once a zone rect drifts, members with a valid stamp are never geometrically reconciled; "member but outside the rect" persists silently.
+
+No code enforces zone non-overlap; hit-testing tolerates and z-order-resolves overlapping rects. Overlap is an accepted rendering case, not a guarded invariant.
+
+The 2.4397 drift value is not in source; --file-tile-zoom-check's `difference <= 2` (CanvasZoomInvalidationProbeChecks.swift:231) is a title-compositor pixel check, not zone/tile geometry — probably a red herring for this complaint.
+
+## Orchestrator addendum (verified 2026-09-27)
+WorkspaceRuntime.setActiveZone (WorkspaceRuntime.swift:363-429): reasons .focus/.click/.camera do NOT persist immediately; they call armingSaveController.scheduleZoneLayoutSave(document). WorkspaceDocumentSaveController (WorkspaceDocumentSaveController.swift:39-70) stores `pendingDocument = document` — a STRUCT SNAPSHOT of the whole workspace document — and writes it when a Timer fires after AutosaveConfig.defaultDebounceMs = 200ms. Every other save (saveWorkspaceDocument at WorkspaceRuntime.swift:1435, persistLayoutTransaction at ContinuumApp.swift:14732, persistMovedZone/…) creates a FRESH controller per save, so nothing cancels or supersedes the arming controller's pending snapshot. Sequence: arm (snapshot S0) → within 200ms a sync save writes S1 (rename, zone create, zone move, layout transaction) → timer fires → S0 overwrites S1 on disk. In-memory keeps S1 until relaunch, then disk S0 wins: renamed name reverts, new zone vanishes, moved zones snap back while canvas.json tiles keep new world frames (member tiles outside their zone). Focus arming fires on the mouse-down that starts a tile drag, so any drag shorter than 200ms that pushes zones (jelly) is exposed. flushPendingSave on the arming controller is called only from a QA seam (WorkspaceRuntime.swift:483).
