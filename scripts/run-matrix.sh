@@ -589,6 +589,9 @@ run_app_check .build/debug/Array --multi-zone-render-check
 run_app_check .build/debug/Array --zone-create-gesture-check
 run_app_check .build/debug/Array --zone-autoname-check
 run_app_check .build/debug/Array --zone-rename-inline-check
+# A zone rename still being typed survives a consumed app chord, the close
+# button and quit: real field, production keyDown monitor, workspace file bytes.
+run_app_check .build/debug/Array --zone-rename-hotkey-check
 run_app_check .build/debug/Array --zone-create-encloses-check
 run_app_check .build/debug/Array --zone-breakout-check
 run_app_check .build/debug/Array --zone-close-keep-delete-check

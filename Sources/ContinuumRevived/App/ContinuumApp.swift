@@ -2246,6 +2246,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-rename-hotkey-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZoneRenameHotkeyChecks.run()
+                print("ContinuumRevivedZoneRenameHotkeyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-switch-polish-check") {
             do {
                 _ = NSApplication.shared
@@ -7759,6 +7771,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let shortcut = focusBroker.reservedShortcut(for: event)
+        // This monitor runs ahead of the field editor, so an app chord that it
+        // consumes (⌘F, ⌘1…) never reaches an open zone rename, and nothing
+        // else will commit the typed name before a switch or quit drops it.
+        // Commit it first, exactly as losing focus would; ordinary typing and
+        // the field's own editing chords are not app chords and are untouched.
+        if canvasView?.isZoneRenameOpen == true,
+           shortcut != nil || matchesRegisteredGlobalShortcut(event) {
+            canvasView?.commitZoneRename()
+        }
         // Text entry owns ordinary typing, while every app-reserved command and
         // inbox jump is withheld before it can open a modal, spawn, or navigate.
         // Unmatched keys still return false below and reach the field editor.
@@ -8530,6 +8551,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
         return true
+    }
+
+    private func matchesRegisteredGlobalShortcut(_ event: NSEvent) -> Bool {
+        guard let registry = try? CommandRegistry.productRegistry() else { return false }
+        let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
+        let store = ShortcutBindingStore()
+        return registry.shortcuts.contains {
+            $0.contexts.contains(.global)
+                && store.matches(keyCode: event.keyCode, modifiers: modifiers, definition: $0)
+        }
     }
 
     private func registeredShortcutID(for legacy: ReservedShortcut) -> ShortcutID? {
@@ -15045,10 +15076,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             do {
                 try workspaceRuntime.commitZonePlacement(placement)
                 reloadWorkspaceSidebar()
+                return
+            } catch WorkspaceRuntime.WorkspaceMutationError.zoneNotFound {
+                // The canvas shows a zone the mounted document has lost. The
+                // workspace file may still hold it; do not drop the name.
+                fputs("persistRenamedZone: zone \(zoneId) not in the mounted document; renaming it on disk\n", stderr)
             } catch {
                 fputs("persistRenamedZone failed: \(error)\n", stderr)
+                return
             }
-            return
         }
         guard let registryStore else { return }
         do {
@@ -16248,6 +16284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA: host the mounted canvas in `window` and install the keyDown monitor
+    /// launch installs, so a check's key events take the production route
+    /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown
+    /// removes the monitor again.
+    func qaAttachWindowInstallingHotkeyMonitor(_ window: NSWindow) {
+        self.window = window
+        installHotkeyMonitor()
+    }
     /// QA (M1.11): whether a spawner is reachable at all.
     var qaHasTileSpawner: Bool { tileSpawner != nil }
     /// QA (M1.11): live browser runtimes, to prove none was built and dropped.
@@ -17057,6 +17101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // ⌘Q is a menu key equivalent and takes no focus, so a zone name still
+        // being typed would otherwise miss the flush below.
+        canvasView?.commitZoneRename()
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
             closeFlushAcknowledgedWindow = window
@@ -17105,6 +17152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === window else { return true }
+        // The close button takes no focus either; see `applicationShouldTerminate`.
+        canvasView?.commitZoneRename()
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
             closeFlushAcknowledgedWindow = sender

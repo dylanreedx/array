@@ -210,6 +210,7 @@ check --zone-lazy-resume-check
 check --zone-move-unified-check
 check --zone-project-session-naming-check
 check --zone-registry-refcount-check
+check --zone-rename-hotkey-check
 check --zone-rename-inline-check
 check --zone-resize-check
 check --zone-runtime-duplication-check
@@ -428,6 +429,7 @@ leg run_app_check .build/debug/Array --zone-lazy-resume-check
 leg run_app_check .build/debug/Array --zone-move-unified-check
 leg run_app_check .build/debug/Array --zone-project-session-naming-check
 leg run_app_check .build/debug/Array --zone-registry-refcount-check
+leg run_app_check .build/debug/Array --zone-rename-hotkey-check
 leg run_app_check .build/debug/Array --zone-rename-inline-check
 leg run_app_check .build/debug/Array --zone-resize-check
 leg run_app_check .build/debug/Array --zone-runtime-duplication-check
