@@ -842,13 +842,24 @@ final class WorkspaceRuntime {
         }
     }
 
+    /// A project whose pending changes did not reach disk, named for the user.
+    struct UnsavedProjectError: LocalizedError, CustomStringConvertible {
+        let projectName: String
+        let underlying: Error
+        var errorDescription: String? { "\u{201C}\(projectName)\u{201D} couldn't be saved: \(underlying.localizedDescription)" }
+        var description: String { "\(projectName): \(underlying)" }
+    }
+
     /// Flush every live controller's pending saves (fan-out of `flushPendingSaves`).
-    /// Every controller is flushed; the first failure is thrown after.
+    /// Every controller is flushed; the first failure is thrown after, naming its project.
     func flushAll() throws {
         var firstFailure: Error?
         for projectId in acquiredProjectIds {
-            do { try registry.controller(for: projectId)?.flushPendingSaves() } catch {
-                if firstFailure == nil { firstFailure = error }
+            guard let controller = registry.controller(for: projectId) else { continue }
+            do { try controller.flushPendingSaves() } catch {
+                if firstFailure == nil {
+                    firstFailure = UnsavedProjectError(projectName: controller.project.name, underlying: error)
+                }
             }
         }
         if let firstFailure { throw firstFailure }

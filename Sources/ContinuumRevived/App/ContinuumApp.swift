@@ -4298,6 +4298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// P3.15: the same seam for deleting an agent.
     private var agentDeleteConfirmationProvider: ((AgentDeleteConfirmationRequest) -> Bool)?
     private var workspaceManagementMessage: String?
+    /// A quit or close was refused over a failed save; the next one proceeds.
+    private var refusedCloseOverUnsavedChanges = false
+    /// The user closed over a failed save: the teardown must not flush again.
+    private var closingOverUnsavedChanges = false
     private var navSelectedZoneId: UUID?
     private var focusHistory = FocusHistory()
     private var focusModeSession: FocusModeSession?
@@ -10602,6 +10606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return workspaceRuntime.workspaceId == workspaceId
         } catch {
             fputs("Workspace sidebar switch failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Couldn't switch workspaces: \(error.localizedDescription)")
             return false
         }
     }
@@ -16069,7 +16074,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaQuitForRemount() -> NSApplication.TerminateReply {
         suppressTerminateOnWindowCloseForQA = true
         let reply = applicationShouldTerminate(NSApplication.shared)
-        windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        if reply == .terminateNow {
+            windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        }
         return reply
     }
 
@@ -16846,12 +16853,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
+            refusedCloseOverUnsavedChanges = false
             closeFlushAcknowledgedWindow = window
             return .terminateNow
         } catch {
-            fputs("workspace termination flush failed; termination cancelled\n", stderr)
-            return .terminateCancel
+            return closeOverUnsavedChanges(error) ? .terminateNow : .terminateCancel
         }
+    }
+
+    /// A save failed on quit or close. The first attempt refuses and says what
+    /// is unsaved; asking again closes anyway, the change still unsaved and never
+    /// acknowledged — a store that can never be written must not make the app
+    /// impossible to quit. The teardown still drains every queued write before a
+    /// project lock is released. Witness: `--canvas-save-receipt-check`.
+    private func closeOverUnsavedChanges(_ error: Error) -> Bool {
+        if refusedCloseOverUnsavedChanges {
+            fputs("closing with unsaved changes, never acknowledged as saved: \(error)\n", stderr)
+            closingOverUnsavedChanges = true
+            return true
+        }
+        refusedCloseOverUnsavedChanges = true
+        fputs("workspace close flush failed; close cancelled: \(error)\n", stderr)
+        setWorkspaceManagementMessage("\(error.localizedDescription). Quit again to quit without saving it.")
+        return false
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -16882,12 +16906,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard sender === window else { return true }
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
+            refusedCloseOverUnsavedChanges = false
             closeFlushAcknowledgedWindow = sender
             return true
         } catch {
             closeFlushAcknowledgedWindow = nil
-            fputs("workspace close flush failed; close cancelled\n", stderr)
-            return false
+            return closeOverUnsavedChanges(error)
         }
     }
 
@@ -16897,7 +16921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // was already flushed in windowShouldClose and must not save twice.
         let closingWindow = notification.object as? NSWindow
         guard closingWindow == nil || closingWindow === window else { return }
-        if closeFlushAcknowledgedWindow !== closingWindow || closingWindow == nil {
+        if !closingOverUnsavedChanges, closeFlushAcknowledgedWindow !== closingWindow || closingWindow == nil {
             do {
                 try workspaceRuntime?.flushMountedWorkspaceState()
             } catch {
