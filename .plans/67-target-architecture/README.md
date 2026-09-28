@@ -399,3 +399,18 @@ that copy.
   nothing at base (M1.2b); the launch-only flat boot walk for an unpersisted
   workspace goes through the same rule but is not driven by this leg.
   Nothing merged.
+  Quit over an unsavable store (`--canvas-save-receipt-check`,
+  `permanent-failure-quit`; RED before: the switch refused with no message and
+  quit refused forever): the first quit or close refuses with a visible,
+  non-modal message naming the project and the error; a second one goes ahead,
+  the change unsaved and never acknowledged, the teardown drains the queue and
+  releases the lock; a switch refuses with the same message.
+  **Slice 1 bench matrix, 237 legs, 14 failed, classified:** the nine known
+  unowned reds; five display-sleep legs — `--terminal-tmux-live-integration-check`,
+  `--terminal-theme-fidelity-check`, `--terminal-snapshot-tier-check`,
+  `--terminal-fills-tile-check`, `scripts/check-app-bundle.sh` ("spawned terminal
+  surface missing") — `--terminal-fills-tile-check` failed identically on the
+  slice 2 binary, which carries none of slice 1, and passed on the slice 1
+  binary once the display was woken; nothing left over. None were added to
+  `MATRIX_KNOWN_RED`; matrix runs are now wrapped in `caffeinate -dims`.
+  Wall clock: the host slept from about 00:51 to 01:16; that gap is not work.

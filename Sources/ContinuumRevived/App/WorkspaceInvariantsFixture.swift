@@ -366,6 +366,12 @@ final class WorkspaceInvariantsFixture {
         log("crash after \(landed)+\(writes)")
     }
 
+    /// The mounted scene was torn down by the leg itself (e.g. a quit it drove).
+    func forgetMounted() {
+        mounted = nil
+        log("teardown by the leg")
+    }
+
     func remount(crash crashStyle: Bool) throws {
         if crashStyle { crash() } else { try quit() }
         try mount()

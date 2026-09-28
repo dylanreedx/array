@@ -314,6 +314,7 @@ extension WorkspaceDataProtectionChecks {
     static func runCanvasSaveReceipt() throws -> URL {
         try runScenarios("canvas-save-receipt", [
             ("failing-store", failingCanvasStore),
+            ("permanent-failure-quit", permanentFailureQuit),
             ("lock-outlives-write", lockOutlivesQueuedWrite),
             ("lock-outlives-write-on-switch", lockOutlivesQueuedWriteOnSwitch)
         ])
@@ -398,6 +399,47 @@ extension WorkspaceDataProtectionChecks {
         try expect(!lockFree || landedAtRelease,
                    "switching away freed project A2's lock while its canvas write was still queued; trace at release \(traceAtRelease)")
         return ["lockFreeAfterSwitch": lockFree, "heldWriteLandedByThen": landedAtRelease]
+    }
+
+    /// Every write of project A1's canvas fails and never recovers. A switch
+    /// refuses and says why; the first quit refuses and names the project; the
+    /// second quit goes ahead — the change unsaved, never acknowledged, the
+    /// teardown complete and the lock released only after the queue resolved.
+    private static func permanentFailureQuit(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("permanent failure")
+        guard let controller = m.runtime.controller(for: Fixture.projectA1) else { throw Failure(message: "no A1 controller") }
+        var acknowledgements = 0
+        let production = controller.onCanvasStatePersisted
+        controller.onCanvasStatePersisted = { acknowledgements += 1; production?() }
+        let before = fixture.readProjectFile(Fixture.projectA1).bytes
+        StoreFileWriter.install(canvasFilePlan(fixture, .failFrom(1)))
+        defer { StoreFileWriter.uninstall() }
+        panAndReport(m, dy: 40)
+        fixture.drain()
+
+        let switched = m.delegate.qaSwitchWorkspaceFromSidebar(Fixture.workspaceB)
+        let switchMessage = m.delegate.qaWorkspaceManagementMessage ?? ""
+        try expect(!switched && switchMessage.contains("Alder"),
+                   "a switch over the unsaved canvas must refuse visibly; switched \(switched), message '\(switchMessage)'")
+        let first = m.delegate.qaQuitForRemount()
+        let quitMessage = m.delegate.qaWorkspaceManagementMessage ?? ""
+        try expect(first == .terminateCancel && quitMessage.contains("Alder"),
+                   "the first quit must refuse and name the project; got \(first), message '\(quitMessage)'")
+        let second = m.delegate.qaQuitForRemount()
+        try expect(second == .terminateNow, "the second quit must go ahead over the unsavable canvas; got \(second)")
+        m.browserEngine.shutdown()
+        fixture.forgetMounted()
+        let trace = StoreFileWriter.trace
+        try expect(!trace.isEmpty && trace.allSatisfy { $0.outcome == .failed },
+                   "every canvas write was meant to fail and resolve; trace \(trace.map(\.description))")
+        let lock = ProjectLock(root: fixture.projectRoots[Fixture.projectA1]!)
+        var lockFree = false
+        do { try lock.acquire(); lockFree = true; lock.release() } catch {}
+        try expect(lockFree, "after the second quit the project lock is still held; the teardown did not finish")
+        try expect(acknowledgements == 0, "an unsaved canvas was acknowledged \(acknowledgements) time(s)")
+        try expect(fixture.readProjectFile(Fixture.projectA1).bytes == before, "the unsavable change reached disk after all")
+        return ["switchMessage": switchMessage, "quitMessage": quitMessage, "failedWrites": trace.count]
     }
 
     /// Project A2's debounced canvas write is held on the save queue, and the
