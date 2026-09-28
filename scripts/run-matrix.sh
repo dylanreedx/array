@@ -87,8 +87,16 @@ run_leg() {
 # written without anyone noticing. Two documented reds must cost two results, not
 # a hundred and thirty.
 MATRIX_KNOWN_RED=(
+  # Pixel-baseline drift on this host: both compare renders against committed
+  # baselines and fail identically at unmodified HEAD (docs/38-tickets/95-go-live.md,
+  # 2026-08-09 and 2026-08-12). The fix is a supervised re-bless with Dylan
+  # reviewing the diffs; never CONTINUUM_UPDATE_BASELINES=1 from a session.
   --component-lab-check
   --ui-baseline-check
+  # A real product defect, documented in 95-go-live.md: ⌘K ranks its default
+  # row on text alone, so "Create Zone…" outranks a zone named Alpha for "z".
+  # Re-confirmed at 81fc32f5 (2026-09-28): "nav z should default-select the
+  # first jump-to-zone row (Alpha); selected=Create Zone…". Fixed by ranking.
   --nav-mode-check
   # Pre-existing on the 0.7.17 release commit and reproduced byte-for-byte in
   # a clean detached 0.7.17 worktree on this host. The empty-workspace fixture
@@ -143,6 +151,36 @@ MATRIX_KNOWN_RED=(
   # the gate red on any run that is not idle. It leaves this list when the
   # measurement has headroom, not when one run happens to land under.
   --perf-budget-gesture-transition-check
+  # Host-state reds, NOT code (2026-09-28). All three fail byte-for-byte at
+  # 81fc32f5 AND at e97b4156, the commit .plans/62 recorded them green on
+  # 2026-09-08 on this same OS build (macOS 27.0 26A428, SDK 26.5). The code
+  # did not change their outcome; the host did. Measured inside the fixtures:
+  # the process is never the active app (NSApp.isActive=false, window not key,
+  # NSTextInputContext.current=nil). The matrix now runs from agent shells
+  # under a daemonised tmux server; the checks never activate themselves, and
+  # must not, because activating would take Dylan's keyboard focus.
+  #
+  # Focus fixtures: the real hit view IS the target (AgentComposerView at the
+  # padding point) but acceptsFirstMouse is false, so AppKit spends the click on
+  # window activation and never delivers mouseDown: "padding click alone should
+  # focus the editor; firstResponder=<NSWindow>". The note body keeps first
+  # responder but keyDown reaches no text input context: "keyDown should edit
+  # note text; got """. Fix: run them where the checks process can be the
+  # active app (a GUI-launched terminal in the supervised pass), or decide
+  # whether the composer should accept first mouse (a product call).
+  --note-click-focus-check
+  --agent-tile-click-focus-check
+  # "title compositor drift; difference 2.439717294900222" against <= 2. Not a
+  # shift: an offset search over the two captured headers (164x11 px) puts the
+  # best alignment at (0,0), and every 1 px shift is worse (2.46-3.99). The
+  # cached header carries ~11% less alpha (57,530 vs 64,387): shading, not
+  # placement. With this gate bypassed (measurement only, not committed) every
+  # later assertion passes, including "zoom must preserve every tile's world
+  # frame", with pinch p95 24.0 ms. Most likely the same inactive-app state as
+  # the focus fixtures; unconfirmed, since confirming means activating the app
+  # over Dylan's session. Fix: confirm in an active-app run, or split the
+  # metric into placement (offset must be zero) and shading.
+  --file-tile-zoom-check
 
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
