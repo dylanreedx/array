@@ -2221,6 +2221,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-saver-identity-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceDataProtectionChecks.runSaverIdentity()
+                print("ContinuumRevivedWorkspaceSaverIdentityChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-invariants-check") {
             do {
                 _ = NSApplication.shared
@@ -14652,7 +14664,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             let appSupport = registryStore.registryFile.deletingLastPathComponent()
             let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
-            var document = try store.load()
+            // Mounted, the runtime's document is the workspace truth. Reading it
+            // back from disk here reverted every change still inside the arming
+            // debounce, and the pending snapshot then wrote over this commit.
+            var document = try workspaceRuntime?.document ?? store.load()
             for (zoneId, placement) in transaction.zonePlacements {
                 if let index = document.zones.firstIndex(where: { $0.zoneId == zoneId }) {
                     document.zones[index] = placement
@@ -14707,9 +14722,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     try write.store.saveCanvas(write.updated)
                     savedProjectWrites.append((write.store, write.original))
                 }
-                let saveController = WorkspaceDocumentSaveController(store: store)
-                saveController.scheduleZoneLayoutSave(document)
-                try saveController.flushPendingSave()
+                if let workspaceRuntime {
+                    try workspaceRuntime.commitLayoutTransaction(transaction)
+                } else {
+                    let saveController = WorkspaceDocumentSaveController(store: store)
+                    saveController.scheduleZoneLayoutSave(document)
+                    try saveController.flushPendingSave()
+                }
             } catch {
                 for saved in savedProjectWrites.reversed() {
                     do { try saved.store.saveCanvas(saved.original) }
@@ -14717,10 +14736,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
                 throw error
             }
-            workspaceRuntime?.replaceDocument(document, for: workspaceId)
             // CX-01: a committed gesture is a structural change for every issued
-            // workspace.context revision.
-            workspaceRuntime?.noteStructuralCommit()
+            // workspace.context revision — noted once, by the runtime's commit.
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
@@ -14928,20 +14945,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func persistLastExplicitCreationScope(_ scope: ZoneScope) {
-        guard scope.projectId != nil,
-              let registryStore,
-              let workspaceId = workspaceRuntime?.workspaceId else { return }
+        guard scope.projectId != nil, let workspaceRuntime else { return }
+        // Through the mounted document, never a disk reload: reading the file
+        // back reverted whatever was still inside the arming debounce.
         do {
-            let store = WorkspaceStore(
-                workspaceId: workspaceId,
-                applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent()
-            )
-            var document = try store.load()
-            document.lastExplicitCreationScope = scope
-            let saveController = WorkspaceDocumentSaveController(store: store)
-            saveController.scheduleZoneLayoutSave(document)
-            try saveController.flushPendingSave()
-            workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            try workspaceRuntime.commitLastExplicitCreationScope(scope)
         } catch {
             fputs("persistLastExplicitCreationScope failed: \(error)\n", stderr)
         }
@@ -26269,7 +26277,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let acknowledged = chronology["acknowledgedGenerationBeforeTeardown"] as! UInt64
             try expect(elapsed >= Double(closeOffset) && elapsed <= Double(closeOffset + 50),
                 "iteration \(iteration) close chronology outside tolerance requested=\(closeOffset) observed=\(elapsed)")
-            try expect(scheduled > acknowledgedAtMutation && acknowledged == scheduled,
+            // Durable THROUGH the pending generation. The mounted workspace has
+            // one saver, so close's departing write lands a later generation on
+            // the same counter; equality only held while that write used a
+            // second controller.
+            try expect(scheduled > acknowledgedAtMutation && acknowledged >= scheduled,
                 "iteration \(iteration) close did not acknowledge scheduled generation \(scheduled)/\(acknowledged)")
             try expect(chronology["departingWriteScheduledGeneration"] as! UInt64
                     == chronology["departingWriteAcknowledgedGeneration"] as! UInt64,

@@ -113,6 +113,32 @@ final class WorkspaceRuntime {
         try persistWorkspaceDocument()
     }
 
+    /// Commit a canvas layout transaction's workspace half: zone placements and
+    /// ambient (WORLD) tile frames, over the in-memory document. On a failed
+    /// write the document is left as it was, so the caller can roll back the
+    /// project halves it already wrote.
+    func commitLayoutTransaction(_ transaction: CanvasLayoutTransaction) throws {
+        let previous = document
+        for (zoneId, placement) in transaction.zonePlacements {
+            if let index = document.zones.firstIndex(where: { $0.zoneId == zoneId }) {
+                document.zones[index] = placement
+            }
+        }
+        for (tileId, worldFrame) in transaction.tileFrames {
+            guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
+            document.ambientTiles[index].frame = worldFrame
+        }
+        do { try persistWorkspaceDocument() } catch {
+            document = previous
+            throw error
+        }
+    }
+
+    func commitLastExplicitCreationScope(_ scope: ZoneScope) throws {
+        document.lastExplicitCreationScope = scope
+        try persistWorkspaceDocument()
+    }
+
     func commitCreatedZone(_ placement: ZonePlacement) throws {
         guard !document.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
         if let projectId = placement.projectId {
@@ -344,7 +370,29 @@ final class WorkspaceRuntime {
         }
     }
 
-    private var armingSaveController: WorkspaceDocumentSaveController?
+    /// The ONE writer of the mounted workspace's document, debounced and
+    /// synchronous saves alike. It is bound to the workspace it was made for and
+    /// rebuilt once another is mounted.
+    ///
+    /// It used to be two writers. The ambient-arming debounce had a long-lived
+    /// controller built on first use and never rebound, so after a switch, arming
+    /// a zone in B wrote B's whole document into A's file; and every synchronous
+    /// save used a fresh controller that never superseded the pending arming
+    /// snapshot, so a rename inside the 200ms debounce was overwritten by the
+    /// older snapshot when its timer fired. Witness:
+    /// `--workspace-saver-identity-check`.
+    private var documentSaver: WorkspaceDocumentSaveController?
+    private var documentSaverWorkspaceId: UUID?
+
+    private func mountedDocumentSaver() -> WorkspaceDocumentSaveController {
+        if let documentSaver, documentSaverWorkspaceId == workspaceId { return documentSaver }
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let saver = WorkspaceDocumentSaveController(
+            store: WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport))
+        documentSaver = saver
+        documentSaverWorkspaceId = workspaceId
+        return saver
+    }
 
     /// The one writer of "which zone do new tiles go into".
     ///
@@ -419,12 +467,7 @@ final class WorkspaceRuntime {
         if reason.persistsImmediately {
             try? persistWorkspaceDocument()
         } else {
-            if armingSaveController == nil {
-                let appSupport = registryStore.registryFile.deletingLastPathComponent()
-                armingSaveController = WorkspaceDocumentSaveController(
-                    store: WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport))
-            }
-            armingSaveController?.scheduleZoneLayoutSave(document)
+            mountedDocumentSaver().scheduleZoneLayoutSave(document)
         }
         return true
     }
@@ -471,16 +514,17 @@ final class WorkspaceRuntime {
     /// deliberately read-only: close checks must observe the controller that
     /// production actually drains, rather than manufacture a fresh controller.
     var qaArmingScheduledGeneration: UInt64 {
-        armingSaveController?.scheduledGeneration ?? 0
+        documentSaverWorkspaceId == workspaceId ? documentSaver?.scheduledGeneration ?? 0 : 0
     }
 
     var qaArmingAcknowledgedGeneration: UInt64 {
-        armingSaveController?.acknowledgedGeneration ?? 0
+        documentSaverWorkspaceId == workspaceId ? documentSaver?.acknowledgedGeneration ?? 0 : 0
     }
 
-    /// QA: drain the debounced arming write so a check can assert on disk.
+    /// Drain the debounced arming write (switch, close, and checks that assert on disk).
     func flushPendingArmingSave() {
-        try? armingSaveController?.flushPendingSave()
+        guard documentSaverWorkspaceId == workspaceId else { return }
+        try? documentSaver?.flushPendingSave()
     }
 
     // MARK: - Zone membership (M1.10, `.plans/46`)
@@ -1435,10 +1479,17 @@ final class WorkspaceRuntime {
             try override(workspaceId, document)
             return
         }
-        let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        let controller = WorkspaceDocumentSaveController(store: WorkspaceStore(
-            workspaceId: workspaceId,
-            applicationSupportDirectory: appSupport))
+        // The mounted workspace's saver, so this write supersedes any pending
+        // debounced snapshot rather than racing it.
+        let controller: WorkspaceDocumentSaveController
+        if workspaceId == self.workspaceId {
+            controller = mountedDocumentSaver()
+        } else {
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            controller = WorkspaceDocumentSaveController(store: WorkspaceStore(
+                workspaceId: workspaceId,
+                applicationSupportDirectory: appSupport))
+        }
         let generation = controller.scheduleZoneLayoutSave(document)
         qaLastScheduledWorkspaceGeneration = generation
         try controller.flush(through: generation)

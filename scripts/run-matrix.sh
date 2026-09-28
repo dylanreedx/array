@@ -710,6 +710,8 @@ run_app_check .build/debug/Array --workspace-scene-owner-check
 # a StoreFileWriter fault seam, and negative controls (1pt shift, foreign zone,
 # ghost layer, acknowledged-but-dropped write) that must each be caught.
 run_app_check .build/debug/Array --workspace-invariants-check
+# .plans/67 slice 1: the data-protection patches, each on the fixture above.
+run_app_check .build/debug/Array --workspace-saver-identity-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the

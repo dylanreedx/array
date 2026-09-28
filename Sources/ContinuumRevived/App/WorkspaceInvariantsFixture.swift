@@ -39,16 +39,21 @@ final class WorkspaceInvariantsFixture {
     static let projectA1 = UUID(uuidString: "00000000-0000-0000-0000-0000000067A1")!
     static let projectA2 = UUID(uuidString: "00000000-0000-0000-0000-0000000067A2")!
     static let projectB1 = UUID(uuidString: "00000000-0000-0000-0000-0000000067B1")!
+    static let projectB2 = UUID(uuidString: "00000000-0000-0000-0000-0000000067B2")!
     static let zoneA1 = UUID(uuidString: "00000000-0000-0000-0000-000000067A11")!
     static let zoneA2 = UUID(uuidString: "00000000-0000-0000-0000-000000067A21")!
     static let zoneB1 = UUID(uuidString: "00000000-0000-0000-0000-000000067B11")!
+    static let zoneB2 = UUID(uuidString: "00000000-0000-0000-0000-000000067B21")!
     static let noteA1a = UUID(uuidString: "00000000-0000-0000-0000-0000067A1A01")!
     static let noteA1b = UUID(uuidString: "00000000-0000-0000-0000-0000067A1B01")!
     static let noteA2a = UUID(uuidString: "00000000-0000-0000-0000-0000067A2A01")!
     static let noteB1a = UUID(uuidString: "00000000-0000-0000-0000-0000067B1A01")!
+    static let noteB2a = UUID(uuidString: "00000000-0000-0000-0000-0000067B2A01")!
 
-    static let projectNames: [UUID: String] = [projectA1: "Alder", projectA2: "Birch", projectB1: "Cedar"]
-    static let projectOwners: [UUID: UUID] = [projectA1: workspaceA, projectA2: workspaceA, projectB1: workspaceB]
+    static let projectNames: [UUID: String] = [
+        projectA1: "Alder", projectA2: "Birch", projectB1: "Cedar", projectB2: "Dogwood"]
+    static let projectOwners: [UUID: UUID] = [
+        projectA1: workspaceA, projectA2: workspaceA, projectB1: workspaceB, projectB2: workspaceB]
 
     /// The seeded scene. Every zone sits at a NON-ZERO origin, so a frame that
     /// crossed a frame space is arithmetically visible, never accidentally right.
@@ -71,22 +76,34 @@ final class WorkspaceInvariantsFixture {
             zoneA1: zone(zoneA1, project: projectA1, x: 600, y: 200, name: "Roots", color: "blue"),
             // Empty name: the header derives it from the project.
             zoneA2: zone(zoneA2, project: projectA2, x: 1700, y: 260, name: "", color: "green"),
-            zoneB1: zone(zoneB1, project: projectB1, x: 400, y: 300, name: "Canopy", color: "purple")
+            zoneB1: zone(zoneB1, project: projectB1, x: 400, y: 300, name: "Canopy", color: "purple"),
+            zoneB2: zone(zoneB2, project: projectB2, x: 1500, y: 340, name: "", color: "orange")
         ]
         let tiles: [UUID: TileFrame] = [
             noteA1a: TileFrame(x: 640, y: 280, width: 240, height: 160),
             noteA1b: TileFrame(x: 920, y: 480, width: 240, height: 160),
             noteA2a: TileFrame(x: 1760, y: 340, width: 240, height: 160),
-            noteB1a: TileFrame(x: 450, y: 380, width: 240, height: 160)
+            noteB1a: TileFrame(x: 450, y: 380, width: 240, height: 160),
+            noteB2a: TileFrame(x: 1560, y: 420, width: 240, height: 160)
         ]
         return SeedScene(
             zones: zones,
             tiles: tiles,
-            tileProject: [noteA1a: projectA1, noteA1b: projectA1, noteA2a: projectA2, noteB1a: projectB1],
-            tileZone: [noteA1a: zoneA1, noteA1b: zoneA1, noteA2a: zoneA2, noteB1a: zoneB1],
-            zonesByWorkspace: [workspaceA: [zoneA1, zoneA2], workspaceB: [zoneB1]]
+            tileProject: [noteA1a: projectA1, noteA1b: projectA1, noteA2a: projectA2, noteB1a: projectB1,
+                          noteB2a: projectB2],
+            tileZone: [noteA1a: zoneA1, noteA1b: zoneA1, noteA2a: zoneA2, noteB1a: zoneB1, noteB2a: zoneB2],
+            zonesByWorkspace: [workspaceA: [zoneA1, zoneA2], workspaceB: [zoneB1, zoneB2]]
         )
     }()
+
+    /// Each workspace's seeded camera: both of its zones fully in view (so both
+    /// hydrate live on the fixture's 2600x1400 canvas), centred in the gap
+    /// between them, so camera arming — which arms the zone under the centre —
+    /// never fires on its own.
+    static let seededViewports: [UUID: CanvasViewport] = [
+        workspaceA: CanvasViewport(x: 300, y: -100, zoom: 1),   // centre (1600, 600): between A1 and A2
+        workspaceB: CanvasViewport(x: 100, y: -100, zoom: 1)    // centre (1400, 600): between B1 and B2
+    ]
 
     // MARK: - Directories
 
@@ -160,8 +177,11 @@ final class WorkspaceInvariantsFixture {
         }
         for (workspaceId, zoneIds) in seed.zonesByWorkspace {
             let zones = zoneIds.map { seed.zones[$0]! }
+            // The first viewport change after a mount arms whatever zone the
+            // camera centre is over (`.camera`); a scenario that did not ask for
+            // that must not have its arming moved. See `seededViewports`.
             let document = WorkspaceDocument(
-                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                viewport: Self.seededViewports[workspaceId]!,
                 zones: zones, zoneZOrder: zoneIds, lastActiveZoneId: zoneIds.first)
             try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
         }
@@ -170,7 +190,7 @@ final class WorkspaceInvariantsFixture {
         registry.workspaces = [
             WorkspaceEntry(id: Self.workspaceA, name: "Grove", projectIds: [Self.projectA1, Self.projectA2],
                            createdAt: now, updatedAt: now),
-            WorkspaceEntry(id: Self.workspaceB, name: "Forest", projectIds: [Self.projectB1],
+            WorkspaceEntry(id: Self.workspaceB, name: "Forest", projectIds: [Self.projectB1, Self.projectB2],
                            createdAt: now, updatedAt: now)
         ]
         registry.projects = Self.projectNames.keys.sorted { $0.uuidString < $1.uuidString }.map { projectId in
