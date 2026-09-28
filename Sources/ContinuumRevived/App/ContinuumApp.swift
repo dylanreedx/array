@@ -2298,7 +2298,30 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try WorkspaceInvariantsChecks.run()
                 print("ContinuumRevivedWorkspaceInvariantsChecks passed: \(artifact.path)")
-                print("MATRIX-NOTE: \(WorkspaceInvariantsChecks.matrixNote)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--agent-tile-binding-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AgentTileBindingChecks.run()
+                print("ContinuumRevivedAgentTileBindingChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--zone-presentation-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZonePresentationChecks.run()
+                print("ContinuumRevivedZonePresentationChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -8366,12 +8389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvas: canvasView,
             signals: agentSignalCenter.currentByTile
         )
-        let updatedModels = canvasView.zoneRenderModels.map { model in
-            var updated = model
-            updated.agentStatusRollup = rollupsByZone[model.placement.zoneId] ?? .empty
-            return updated
-        }
-        canvasView.updateZoneRenderModels(updatedModels)
+        canvasView.updateZoneAgentRollups(rollupsByZone)
     }
 
     private static func dockBadgeLabel(needsAttentionCount count: Int) -> String? {
@@ -13499,6 +13517,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Kept on ONE line: `--agent-restore-check` pins this whole signature by exact
     /// line match (`runAgentRestoreChecks`, via `paletteAgentSpawnBranch`), so wrapping
     /// it blinds that scan.
+    /// Tiles whose person asked, by sending a prompt in the unbound state, for a
+    /// new agent. Consumed by the next `wireManagedAgentTile` for that tile.
+    private var managedAgentStartRequests: Set<UUID> = []
+
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
@@ -13532,6 +13554,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // otherwise recurse: the wire-up below replaces this closure.
                 guard !supervisor.isAgentRespawnSuppressed(forTile: tileId) else { return }
                 self.wireManagedAgentTile(tileId)
+                view.onSubmitPrompt?(prompt)
+            }
+            return
+        } else if supervisor.staleAgent(forTile: tileId) != nil {
+            // UNAVAILABLE: this store holds the tile's agent, but its Home is gone
+            // (`restore()` marked it stale). A second agent here would be a
+            // duplicate of one that comes back with its folder, so a prompt is
+            // refused with the same words the tile already shows.
+            view.showUnavailableAgentNotice()
+            view.onSubmitPrompt = { [weak view] _ in
+                view?.showSendRefusedNotice(ManagedAgentTileNSView.unavailableAgentNoticeText)
+            }
+            return
+        } else if initialLaunchSelection == nil,
+                  workspaceRuntime?.managedAgentLaunchSelection(tileId: tileId) == nil,
+                  tileSpawner?.managedAgentLaunchSelection(tileId: tileId) == nil,
+                  managedAgentStartRequests.remove(tileId) == nil {
+            // UNBOUND (hazard 10): no record for this tile in this store, and this
+            // process did not create the tile — every spawn leaves a launch
+            // selection memo, a restored or another install's tile has none. So
+            // this is a restore or a hydration, and neither may mint. The tile says
+            // so; sending a prompt is the person's request for a new agent here.
+            view.showUnboundAgentNotice()
+            view.onSubmitPrompt = { [weak self, weak view] prompt in
+                guard let self, let view else { return }
+                self.managedAgentStartRequests.insert(tileId)
+                self.wireManagedAgentTile(tileId)
+                self.managedAgentStartRequests.remove(tileId)
+                // Bound now, the wire-up replaced this closure; a failed start
+                // left it, and forwarding would recurse.
+                guard supervisor.agent(forTile: tileId) != nil else { return }
                 view.onSubmitPrompt?(prompt)
             }
             return
@@ -14859,14 +14912,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func zoneScopeLabel(_ scope: ZoneScope) -> String {
-        guard let projectId = scope.projectId,
-              let registry = try? registryStore?.loadOrEmpty(),
-              let project = registry.projects.first(where: { $0.id == projectId }) else {
-            return "Needs Project"
-        }
-        return scope.homeRelativePath.map { "\(project.name) / \($0)" }
-            ?? "\(project.name) / Project Root"
+    /// Nil when the registry cannot be read: that is not a registry miss.
+    private func zoneProjectResolution(_ projectId: UUID) -> ZoneProjectResolution? {
+        guard let registry = try? registryStore?.loadOrEmpty() else { return nil }
+        return ZoneProjectResolution(projectId: projectId, in: registry)
     }
 
     private func filesystemScopeEvidence(forTile tileId: UUID) -> ZoneScope? {
@@ -14996,23 +15045,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     )
                     return
                 }
-                let label = self.zoneScopeLabel(ZoneScope(
-                    projectId: selection.project.id,
-                    homeRelativePath: selection.homeRelativePath
-                ))
+                // The picker offered registry entries, so its selection IS one;
+                // the header derives its Home label from it.
+                let project = ZoneProjectResolution.registered(selection.project)
                 if isNewZone {
                     canvasView.commitProvisionalZone(
                         zoneId: placement.zoneId,
                         projectId: selection.project.id,
                         homeRelativePath: selection.homeRelativePath,
-                        scopeLabel: label
+                        project: project
                     )
                 } else {
                     canvasView.setZoneScope(
                         zoneId: placement.zoneId,
                         projectId: selection.project.id,
                         homeRelativePath: selection.homeRelativePath,
-                        scopeLabel: label
+                        project: project
                     )
                     canvasView.showWorkspaceTransitionLabel("Future filesystem tiles will start in \(selection.displayPath)")
                 }
@@ -16062,6 +16110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         projectHomePicker?.qaConfirm(projectId: projectId, relativePath: homeRelativePath) ?? false
     }
 
+    /// QA: the canvas badge and zone rollup refresh every agent status change runs.
+    func qaApplyAgentStatusesToCanvas() { applyAgentStatusesToCanvas() }
+
     /// QA: quit the way the user does — `applicationShouldTerminate`'s flush,
     /// then `windowWillClose`'s teardown, which releases every controller and
     /// with it every project lock — minus the process exit, so a leg can mount a
@@ -16208,8 +16259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.filesystemScopeForTile = { [weak self] tileId in
             self?.filesystemScopeEvidence(forTile: tileId)
         }
-        canvasView.scopeLabelForZoneScope = { [weak self] scope in
-            self?.zoneScopeLabel(scope) ?? "Needs Project"
+        canvasView.projectResolutionForZoneScope = { [weak self] projectId in
+            self?.zoneProjectResolution(projectId)
         }
         canvasView.onZoneScopeRequired = { [weak self] placement, anchor in
             self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: true)
@@ -16597,14 +16648,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         case .managedAgent:
             let view = ManagedAgentTileNSView(tile: tile)
-            // M1.2b: wire ONLY an agent that already exists. `wireManagedAgentTile`
-            // spawns a brand-new agent when `supervisor.agent(forTile:)` is nil, and
-            // resolves its scope through `tileSpawner.managedAgentCreationScope`,
-            // which is empty on a spawner built for an arriving workspace. Hydrating
-            // an unbound tile would therefore mint an agent in the wrong project on
-            // every switch — hazard 10's duplicate-agent minting, in-process.
-            // An unwired tile still renders; submitting a prompt in it asks for an
-            // agent deliberately, which is the existing respawn-suppressed contract.
+            // M1.2b: wired in Phase B (`hydrateRuntimeBackedTiles`), never here.
+            // `wireManagedAgentTile` mints only for a tile this process created;
+            // a hydrated tile with no record gets the explicit unbound state, and
+            // submitting a prompt in it is how a person asks for an agent there.
             return view
         }
     }
@@ -16624,8 +16671,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
         // be installed before it can find anything.
+        // An unbound or unavailable tile is wired too: `wireManagedAgentTile` gives
+        // it its explicit state and never mints for a tile this process did not
+        // create (hazard 10).
         for tile in layer.tiles where tile.kind == .managedAgent {
-            guard agentSupervisor.agent(forTile: tile.id) != nil else { continue }
             wireManagedAgentTile(tile.id)
         }
 
@@ -17484,20 +17533,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Zone order derives from each placement's zPosition register (ticket 04).
         let orderedZones = document.zonesInZOrder
         return orderedZones.map { zone in
+            let project = zone.projectId.map { ZoneProjectResolution(projectId: $0, in: registry) }
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
-            let name = zone.name.isEmpty ? (projectEntry?.name ?? "Zone") : zone.name
-            let scopeLabel: String
-            if let projectEntry {
-                scopeLabel = zone.homeRelativePath.map { "\(projectEntry.name) / \($0)" }
-                    ?? "\(projectEntry.name) / Project Root"
-            } else {
-                scopeLabel = "Needs Project"
-            }
             let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
             return CanvasNSView.ZoneRenderModel(
                 placement: zone,
-                displayName: name,
-                scopeLabel: scopeLabel,
+                displayName: ZonePresentation.make(placement: zone, project: project).title,
+                project: project,
                 agentStatusRollup: .empty,
                 qaVerdict: qaVerdict
             )
@@ -23671,8 +23713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         createCanvas.commitProvisionalZone(
             zoneId: provisional.zoneId,
             projectId: projectP,
-            homeRelativePath: nil,
-            scopeLabel: "T17 Check Project"
+            homeRelativePath: nil
         )
         if let persistenceError { throw persistenceError }
 

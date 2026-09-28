@@ -1250,6 +1250,16 @@ final class ManagedAgentTileNSView: TileNSView {
     /// packet's option (b).
     static let previousSessionNoticeText = "Previous session — send a prompt to continue."
 
+    /// The tile's agent is not in this copy of Array's agent store — typically
+    /// another install made it (CLAUDE.md hazard 10). Nothing is started until
+    /// the person sends a prompt.
+    static let unboundAgentNoticeText =
+        "No agent here — this tile's agent belongs to another copy of Array. Send a prompt to start a new agent in this tile."
+    /// The tile's agent exists in this store but its Home directory is gone.
+    /// It is kept, not replaced: the folder may come back.
+    static let unavailableAgentNoticeText =
+        "Agent unavailable — its Home folder no longer exists. Restore the folder and relaunch to continue."
+
     /// Says why a prompt was not sent, in the transcript where the user is already
     /// looking. The id carries the reason so the same refusal twice is one notice
     /// (the projection rejects a duplicate id) while a CHANGED reason — "still
@@ -1271,6 +1281,19 @@ final class ManagedAgentTileNSView: TileNSView {
             title: "not opened",
             text: text
         )
+        synchronizeV2Transcript(final: true)
+    }
+
+    /// Hazard 10's tile: no record for it in this store. Says so, and what the
+    /// person can do; the app binds `onSubmitPrompt` to that explicit start.
+    func showUnboundAgentNotice() {
+        model.appendNotice(id: "notice-agent-unbound", title: "no agent", text: Self.unboundAgentNoticeText)
+        synchronizeV2Transcript(final: true)
+    }
+
+    /// The tile's agent is in this store but its Home is gone.
+    func showUnavailableAgentNotice() {
+        model.appendNotice(id: "notice-agent-unavailable", title: "unavailable", text: Self.unavailableAgentNoticeText)
         synchronizeV2Transcript(final: true)
     }
 

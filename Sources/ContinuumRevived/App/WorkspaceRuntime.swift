@@ -664,28 +664,28 @@ final class WorkspaceRuntime {
     }
 
     /// Render models for EVERY zone in the document, reusing a layer's own model
-    /// where one exists so display names stay whatever the layer resolved.
-    /// M1.10: a zone below the live tier still draws and is still navigable.
-    private static func zoneRenderModels(
-        for document: WorkspaceDocument,
-        layers: [CanvasNSView.ZoneLayer]
-    ) -> [CanvasNSView.ZoneRenderModel] {
-        zoneRenderModels(for: document.zones, layers: layers)
-    }
-
+    /// where one exists. M1.10: a zone below the live tier still draws and is
+    /// still navigable — and still resolves its project, so its header says the
+    /// same as a live zone's.
     private static func zoneRenderModels(
         for zones: [ZonePlacement],
-        layers: [CanvasNSView.ZoneLayer]
+        layers: [CanvasNSView.ZoneLayer],
+        registry: Registry
     ) -> [CanvasNSView.ZoneRenderModel] {
         let byZone = Dictionary(
             layers.map { ($0.placement.zoneId, $0.renderModel) },
             uniquingKeysWith: { first, _ in first })
         return zones.map { zone in
-            byZone[zone.zoneId]
-                ?? CanvasNSView.ZoneRenderModel(
-                    placement: zone,
-                    displayName: zone.name.isEmpty ? "Zone" : zone.name)
+            byZone[zone.zoneId] ?? renderModel(for: zone, registry: registry)
         }
+    }
+
+    /// A zone's inputs, its project resolved against the registry already
+    /// loaded. The header itself is derived by the canvas (`ZonePresentation`).
+    private static func renderModel(for zone: ZonePlacement, registry: Registry) -> CanvasNSView.ZoneRenderModel {
+        CanvasNSView.ZoneRenderModel(
+            placement: zone,
+            project: zone.projectId.map { ZoneProjectResolution(projectId: $0, in: registry) })
     }
     /// Install the CURRENT workspace's zone set into `canvasView`.
     ///
@@ -780,21 +780,7 @@ final class WorkspaceRuntime {
                 tileViews[tile.id] = view
             }
 
-            // A saved custom name always wins. Registry/project names are only
-            // fallbacks for a genuinely unnamed placement.
-            let displayName: String
-            if !zone.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                displayName = zone.name
-            } else if let registryName = appRegistry.projects.first(where: { $0.id == projectId })?.name {
-                displayName = registryName
-            } else {
-                displayName = controller.project.name
-            }
-
-            let renderModel = CanvasNSView.ZoneRenderModel(
-                placement: zone,
-                displayName: displayName
-            )
+            let renderModel = Self.renderModel(for: zone, registry: appRegistry)
             let layer = CanvasNSView.ZoneLayer(
                 placement: zone,
                 renderModel: renderModel,
@@ -815,7 +801,7 @@ final class WorkspaceRuntime {
         hydrateZoneLayerTiles?(canvasView, layers, .beforeInstall)
         canvasView.setZones(
             layers,
-            documentZones: Self.zoneRenderModels(for: mountableZones, layers: layers))
+            documentZones: Self.zoneRenderModels(for: mountableZones, layers: layers, registry: appRegistry))
         installedLayers = layers
         // Cold boot and in-process switching share the workspace document as
         // camera owner. The boot canvas originates in a project canvas file and
@@ -924,14 +910,6 @@ final class WorkspaceRuntime {
             acquiredProjectIds.append(projectId)
         }
 
-        // Derive display name.
-        let displayName: String
-        if let registryName = appRegistry?.projects.first(where: { $0.id == projectId })?.name {
-            displayName = registryName
-        } else {
-            displayName = controller.project.name
-        }
-
         // Append placement to document.
         let placement = document.appendProjectZone(projectId: projectId)
 
@@ -960,7 +938,7 @@ final class WorkspaceRuntime {
             tileViews[tile.id] = view
         }
 
-        let renderModel = CanvasNSView.ZoneRenderModel(placement: placement, displayName: displayName)
+        let renderModel = Self.renderModel(for: placement, registry: ownershipRegistry)
         let layer = CanvasNSView.ZoneLayer(placement: placement, renderModel: renderModel, tiles: memberTiles)
         layer.tileViews = tileViews
         installedLayers.append(layer)
@@ -1011,8 +989,7 @@ final class WorkspaceRuntime {
         for tile in memberTiles {
             tileViews[tile.id] = DescriptorTileNSView(tile: tile)
         }
-        let displayName = zone.name.isEmpty ? "Group" : zone.name
-        let renderModel = CanvasNSView.ZoneRenderModel(placement: zone, displayName: displayName)
+        let renderModel = CanvasNSView.ZoneRenderModel(placement: zone)
         let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
         layer.tileViews = tileViews
         return layer
@@ -1645,8 +1622,7 @@ final class WorkspaceRuntime {
                 let view = DescriptorTileNSView(tile: tile)
                 tileViews[tile.id] = view
             }
-            let displayName = zone.name.isEmpty ? controller.project.name : zone.name
-            let renderModel = CanvasNSView.ZoneRenderModel(placement: zone, displayName: displayName)
+            let renderModel = Self.renderModel(for: zone, registry: appRegistry)
             let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
             layer.tileViews = tileViews
             layers.append(layer)
@@ -1664,7 +1640,7 @@ final class WorkspaceRuntime {
         // visible or navigable in an unrelated (including empty) workspace.
         canvasView?.retireFlatCompatibilityScene()
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
-        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers))
+        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers, registry: appRegistry))
         installedLayers = layers
 
         // 5. Release departing (after setZones so adapters are already unregistered by T05).

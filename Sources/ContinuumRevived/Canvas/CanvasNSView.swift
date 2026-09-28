@@ -55,10 +55,15 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    /// The inputs a zone arrives with. Never drawn directly: the header is
+    /// `ZonePresentation.make` over the canvas's live placement and these.
     struct ZoneRenderModel: Equatable {
         var placement: ZonePlacement
-        var displayName: String
-        var scopeLabel: String? = nil
+        /// A title for an unnamed placement whose project gives none.
+        var displayName: String = ""
+        /// How the placement's project resolved against the registry; nil when
+        /// the owner has no registry (isolated fixtures).
+        var project: ZoneProjectResolution? = nil
         var isProvisional: Bool = false
         var agentStatusRollup: AgentStatusRollup = .empty
         var qaVerdict: QARunManifestSnapshot?
@@ -100,7 +105,19 @@ final class CanvasNSView: NSView, TokenThemed {
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
     let activeZone: ZonePlacement?
-    private(set) var zoneRenderModels: [ZoneRenderModel]
+    /// Every live, non-provisional zone with the header it derives, in live
+    /// order. Computed on read: there is no second copy to go stale.
+    var zoneRenderModels: [ZoneRenderModel] {
+        liveZones.filter { !provisionalZoneIds.contains($0.zoneId) }.map { placement in
+            let presentation = zonePresentation(for: placement)
+            return ZoneRenderModel(
+                placement: placement,
+                displayName: presentation.title,
+                project: placement.projectId.flatMap { zoneProjects[$0] },
+                agentStatusRollup: presentation.agentStatusRollup,
+                qaVerdict: presentation.qaVerdict)
+        }
+    }
     private var tileViews: [UUID: TileNSView] = [:]
     /// The boot project initially renders through the legacy flat canvas. Once
     /// an in-process workspace switch installs ZoneLayers, that boot scene is a
@@ -201,25 +218,24 @@ final class CanvasNSView: NSView, TokenThemed {
     /// a per-drag operation. It preserves layer identity and order verbatim.
     private func rebuildLayerDerivedProjections() {
         liveZones = zoneLayers.map(\.placement)
-        zoneRenderModels = zoneLayers.map { layer in
+        // First occurrence wins, as it does for the chrome. A cancelled gesture
+        // is not a status tick, so the rollups already drawn stay.
+        var seeded = Set<UUID>()
+        for layer in zoneLayers where seeded.insert(layer.placement.zoneId).inserted {
             layer.renderModel.placement = layer.placement
-            return layer.renderModel
+            seedZoneInputs(layer.renderModel, rollup: false)
         }
-        zoneDisplayByZoneId = Dictionary(
-            zoneRenderModels.map { ($0.placement.zoneId, $0) },
-            uniquingKeysWith: { first, _ in first })
 
-        let liveIDs = Set(zoneDisplayByZoneId.keys)
+        let liveIDs = Set(liveZones.map(\.zoneId))
         for (zoneId, chrome) in zoneChromeViews where !liveIDs.contains(zoneId) {
             chrome.removeFromSuperview()
             zoneChromeViews.removeValue(forKey: zoneId)
         }
         if showsZoneChrome {
-            for (zoneId, model) in zoneDisplayByZoneId {
-                if let chrome = zoneChromeViews[zoneId] {
-                    chrome.update(model: model)
-                } else {
-                    let chrome = ZoneChromeNSView(model: model)
+            for zoneId in liveIDs {
+                if zoneChromeViews[zoneId] != nil {
+                    refreshZoneChrome(zoneId)
+                } else if let chrome = makeZoneChrome(zoneId) {
                     zoneChromeViews[zoneId] = chrome
                     worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
                 }
@@ -286,9 +302,15 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Seeded at init from `zoneRenderModels`. Distinct from `zoneLayers`, which
     /// remains the dormant keystone/descriptor multi-project path (T05–T10/T20).
     private var liveZones: [ZonePlacement] = []
-    /// Chrome display metadata (name / agent rollup / qa) keyed by zoneId, derived
-    /// from `zoneRenderModels`; `liveZones` holds the authoritative placement.
-    private var zoneDisplayByZoneId: [UUID: ZoneRenderModel] = [:]
+    /// A zone's header inputs besides its placement (`liveZones`), keyed by
+    /// zoneId: seeded when the zone arrives, and for the rollup patched by
+    /// `updateZoneAgentRollups` alone. No label string is stored anywhere; the
+    /// header is `ZonePresentation.make` over these.
+    private var zoneFallbackTitles: [UUID: String] = [:]
+    private var zoneQAVerdicts: [UUID: QARunManifestSnapshot] = [:]
+    private var zoneAgentRollups: [UUID: AgentStatusRollup] = [:]
+    /// projectId → how the registry resolved it, as the zone's owner last said.
+    private var zoneProjects: [UUID: ZoneProjectResolution] = [:]
     private var provisionalZoneIds: Set<UUID> = []
     private(set) var isZoneScopePickerActive = false
     /// tileId → zoneId. A tile absent from this map is a bare (unzoned) tile.
@@ -352,7 +374,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA reader: the current (mutable) placement of a live zone, or nil.
     func qaLiveZonePlacement(_ zoneId: UUID) -> ZonePlacement? { liveZones.first { $0.zoneId == zoneId } }
     /// QA reader: the rendered display name of a live zone, or nil.
-    func qaZoneDisplayName(_ zoneId: UUID) -> String? { zoneDisplayByZoneId[zoneId]?.displayName }
+    func qaZoneDisplayName(_ zoneId: UUID) -> String? { zonePresentation(for: zoneId)?.title }
     /// QA reader: the move-grab header rect for a live zone (screen coords).
     func qaZoneHeaderGrabRect(_ zoneId: UUID) -> CGRect? {
         liveZones.first { $0.zoneId == zoneId }.flatMap { zoneHeaderScreenRect(for: $0) }
@@ -389,7 +411,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Filesystem scope evidence for a tile. Browser and Note never call this;
     /// Agent, Shell, File Tree, and checkout-backed File do.
     var filesystemScopeForTile: ((UUID) -> ZoneScope?)?
-    var scopeLabelForZoneScope: ((ZoneScope) -> String)?
+    /// How the registry resolves a project, for a zone that binds itself from
+    /// its tiles' agreed scope rather than through the picker.
+    var projectResolutionForZoneScope: ((UUID) -> ZoneProjectResolution?)?
 
     /// Fired when a drag-to-create gesture commits a new group zone.
     /// The placement is passed; the caller persists it (e.g. via WorkspaceDocument).
@@ -722,13 +746,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for (id, placement) in resolvedZonePlacements {
             if let index = liveZones.firstIndex(where: { $0.zoneId == id }) { liveZones[index] = placement }
             if let layer = zoneLayers.first(where: { $0.placement.zoneId == id }) { layer.placement = placement }
-            if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == id }) {
-                zoneRenderModels[index].placement = placement
-            }
-            if var model = zoneDisplayByZoneId[id] {
-                model.placement = placement
-                zoneDisplayByZoneId[id] = model
-            }
+            refreshZoneChrome(id)
         }
         for staged in stagedFlatFrames {
             canvasState.tiles[staged.index].frame = staged.frame
@@ -886,7 +904,7 @@ final class CanvasNSView: NSView, TokenThemed {
             placement = layer.placement
         }
         guard let placement else { return }
-        if var model = zoneDisplayByZoneId[zoneId] { model.placement.autoLayoutMode = mode; zoneDisplayByZoneId[zoneId] = model }
+        refreshZoneChrome(zoneId)
         onZoneMoved?(placement)
         if mode.resolves(globalEnabled: CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults)),
            CanvasAutoLayoutConfig.activation(defaults: autoLayoutDefaults) == .immediately {
@@ -942,14 +960,7 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         liveZones.append(placement)
         provisionalZoneIds.insert(zoneId)
-        zoneDisplayByZoneId[zoneId] = ZoneRenderModel(
-            placement: placement,
-            displayName: zoneName,
-            scopeLabel: "Choose a project to finish",
-            isProvisional: true
-        )
-        if showsZoneChrome, zoneChromeViews[zoneId] == nil {
-            let view = ZoneChromeNSView(model: zoneDisplayByZoneId[zoneId]!)
+        if showsZoneChrome, zoneChromeViews[zoneId] == nil, let view = makeZoneChrome(zoneId) {
             zoneChromeViews[zoneId] = view
             worldPlane.addSubview(view, positioned: .below, relativeTo: nil)
         }
@@ -962,9 +973,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 zoneId: zoneId,
                 projectId: projectId,
                 homeRelativePath: scope.homeRelativePath,
-                scopeLabel: scopeLabelForZoneScope?(scope)
-                    ?? scope.homeRelativePath.map { "Project / \($0)" }
-                    ?? "Project Root"
+                project: projectResolutionForZoneScope?(projectId) ?? nil
             )
         } else {
             onZoneScopeRequired?(placement, CGPoint(x: rect.midX, y: rect.midY))
@@ -974,24 +983,21 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Commits a new marquee only after project/Home validation. Until this call,
     /// the zone has no tile membership and has never reached persistence.
+    /// - Parameter project: how the registry resolves `projectId`; nil keeps
+    ///   whatever this canvas was already told about that project.
     func commitProvisionalZone(
         zoneId: UUID,
         projectId: UUID,
         homeRelativePath: String?,
-        scopeLabel: String
+        project: ZoneProjectResolution? = nil
     ) {
         guard provisionalZoneIds.remove(zoneId) != nil,
               let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
         liveZones[index].projectId = projectId
         liveZones[index].homeRelativePath = homeRelativePath
         let placement = liveZones[index]
-        if var model = zoneDisplayByZoneId[zoneId] {
-            model.placement = placement
-            model.scopeLabel = scopeLabel
-            model.isProvisional = false
-            zoneDisplayByZoneId[zoneId] = model
-            zoneChromeViews[zoneId]?.update(model: model)
-        }
+        if let project { zoneProjects[projectId] = project }
+        refreshZoneChrome(zoneId)
         adoptBareTiles(enclosedBy: placement)
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
@@ -1005,7 +1011,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func cancelProvisionalZone(zoneId: UUID) {
         guard provisionalZoneIds.remove(zoneId) != nil else { return }
         liveZones.removeAll { $0.zoneId == zoneId }
-        zoneDisplayByZoneId.removeValue(forKey: zoneId)
+        forgetZoneInputs(zoneId)
         zoneChromeViews.removeValue(forKey: zoneId)?.removeFromSuperview()
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
@@ -1017,7 +1023,7 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneId: UUID,
         projectId: UUID,
         homeRelativePath: String?,
-        scopeLabel: String
+        project: ZoneProjectResolution? = nil
     ) {
         var placement: ZonePlacement?
         if let index = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
@@ -1031,13 +1037,8 @@ final class CanvasNSView: NSView, TokenThemed {
             placement = layer.placement
         }
         guard let placement else { return }
-        if var model = zoneDisplayByZoneId[zoneId] {
-            model.placement = placement
-            model.scopeLabel = scopeLabel
-            model.isProvisional = false
-            zoneDisplayByZoneId[zoneId] = model
-            zoneChromeViews[zoneId]?.update(model: model)
-        }
+        if let project { zoneProjects[projectId] = project }
+        refreshZoneChrome(zoneId)
         onZoneMoved?(placement)
         delegate?.canvasDidChange(self)
     }
@@ -1071,14 +1072,7 @@ final class CanvasNSView: NSView, TokenThemed {
             layer.placement = placement
             layer.renderModel.placement = placement
         }
-        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
-            zoneRenderModels[index].placement = placement
-        }
-        if var model = zoneDisplayByZoneId[zoneId] {
-            model.placement = placement
-            zoneDisplayByZoneId[zoneId] = model
-            zoneChromeViews[zoneId]?.update(model: model)
-        }
+        refreshZoneChrome(zoneId)
         onZoneMoved?(placement)
         delegate?.canvasDidChange(self)
     }
@@ -1682,10 +1676,11 @@ final class CanvasNSView: NSView, TokenThemed {
         self.canvasState = canvasState
         self.activeZone = activeZone
         self.showsZoneChrome = showsZoneChrome
+        let seeds: [ZoneRenderModel]
         if zoneRenderModels.isEmpty, let activeZone {
-            self.zoneRenderModels = [ZoneRenderModel(placement: activeZone, displayName: "Project")]
+            seeds = [ZoneRenderModel(placement: activeZone, displayName: "Project")]
         } else {
-            self.zoneRenderModels = zoneRenderModels
+            seeds = zoneRenderModels
         }
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
@@ -1749,8 +1744,8 @@ final class CanvasNSView: NSView, TokenThemed {
         // blindly assigned to the active project zone; otherwise relaunch makes
         // every tile belong to the default project zone and loses group-zone
         // organization.
-        liveZones = self.zoneRenderModels.map { $0.placement }
-        zoneDisplayByZoneId = Dictionary(self.zoneRenderModels.map { ($0.placement.zoneId, $0) }, uniquingKeysWith: { first, _ in first })
+        liveZones = seeds.map { $0.placement }
+        for seed in seeds.reversed() { seedZoneInputs(seed) }
         seedTileZoneMembershipFromGeometry()
         if showsZoneChrome {
             installZoneChromeViews()
@@ -1841,8 +1836,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func installZoneChromeViews() {
         guard showsZoneChrome else { return }
         for placement in liveZones {
-            let model = zoneDisplayByZoneId[placement.zoneId] ?? ZoneRenderModel(placement: placement, displayName: "")
-            let view = ZoneChromeNSView(model: model)
+            let view = ZoneChromeNSView(placement: placement, presentation: zonePresentation(for: placement))
             zoneChromeViews[placement.zoneId] = view
             // Chrome is the zone background — keep it BELOW every tile subview.
             worldPlane.addSubview(view, positioned: .below, relativeTo: nil)
@@ -1929,11 +1923,7 @@ final class CanvasNSView: NSView, TokenThemed {
             liveZones[idx] = placement
         }
         let placement = liveZones[idx]
-        if var model = zoneDisplayByZoneId[zoneId] {
-            model.placement = placement
-            zoneDisplayByZoneId[zoneId] = model
-            zoneChromeViews[zoneId]?.update(model: model)
-        }
+        refreshZoneChrome(zoneId)
         layoutZoneChromeViews()
         // Persist, so the grown zone survives a relaunch rather than snapping back.
         if notifyChange { onZoneMoved?(placement) }
@@ -2107,7 +2097,7 @@ final class CanvasNSView: NSView, TokenThemed {
             for id in memberIds { setTileZone(id, zoneId: nil) }  // spill to bare canvas
         }
         liveZones.remove(at: idx)
-        zoneDisplayByZoneId.removeValue(forKey: zoneId)
+        forgetZoneInputs(zoneId)
         zoneChromeViews[zoneId]?.removeFromSuperview()
         zoneChromeViews.removeValue(forKey: zoneId)
         reorderTileSubviewsByZIndex()
@@ -2724,12 +2714,7 @@ final class CanvasNSView: NSView, TokenThemed {
                   let value = zoneValues[liveZones[index].zoneId] else { continue }
             liveZones[index].origin = value.origin
             liveZones[index].size = value.size
-            if var model = zoneDisplayByZoneId[value.zoneId] {
-                model.placement.origin = value.origin
-                model.placement.size = value.size
-                zoneDisplayByZoneId[value.zoneId] = model
-                zoneChromeViews[value.zoneId]?.update(model: model)
-            }
+            refreshZoneChrome(value.zoneId)
         }
         var appliedZoneIds = Set<UUID>()
         for layer in zoneLayers {
@@ -4835,7 +4820,7 @@ final class CanvasNSView: NSView, TokenThemed {
             width: max(40, header.width - 9 - 36),
             height: fieldHeight
         ))
-        field.stringValue = zoneDisplayByZoneId[zoneId]?.displayName ?? placement.name
+        field.stringValue = zonePresentation(for: zoneId)?.title ?? placement.name
         field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         // P1.11: an editable field floating over the zone chrome is an `overlay`
         // surface carrying `textPrimary`, which is a documented pair. The old
@@ -4903,18 +4888,8 @@ final class CanvasNSView: NSView, TokenThemed {
         if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
             layer.placement = placement
             layer.renderModel.placement = placement
-            layer.renderModel.displayName = trimmed
         }
-        if let modelIndex = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
-            zoneRenderModels[modelIndex].placement = placement
-            zoneRenderModels[modelIndex].displayName = trimmed
-        }
-        if var model = zoneDisplayByZoneId[zoneId] {
-            model.placement = placement
-            model.displayName = trimmed
-            zoneDisplayByZoneId[zoneId] = model
-            zoneChromeViews[zoneId]?.update(model: model)
-        }
+        refreshZoneChrome(zoneId)
         onZoneRenamed?(zoneId, trimmed)
         delegate?.canvasDidChange(self)
         return true
@@ -5152,17 +5127,76 @@ final class CanvasNSView: NSView, TokenThemed {
         }?.placement.zoneId
     }
 
+    // MARK: - Zone presentation (derived, never stored)
+
+    /// Take a zone's inputs from the model it arrived with. `rollup: false`
+    /// keeps the rollup already drawn, for a rebuild that is not a status tick.
+    private func seedZoneInputs(_ model: ZoneRenderModel, rollup: Bool = true) {
+        let zoneId = model.placement.zoneId
+        zoneFallbackTitles[zoneId] = model.displayName
+        zoneQAVerdicts[zoneId] = model.qaVerdict
+        if rollup { zoneAgentRollups[zoneId] = model.agentStatusRollup }
+        if let projectId = model.placement.projectId, let project = model.project {
+            zoneProjects[projectId] = project
+        }
+    }
+
+    private func forgetZoneInputs(_ zoneId: UUID) {
+        zoneFallbackTitles.removeValue(forKey: zoneId)
+        zoneQAVerdicts.removeValue(forKey: zoneId)
+        zoneAgentRollups.removeValue(forKey: zoneId)
+    }
+
+    private func clearZoneInputs() {
+        zoneFallbackTitles.removeAll()
+        zoneQAVerdicts.removeAll()
+        zoneAgentRollups.removeAll()
+        zoneProjects.removeAll()
+    }
+
+    private func zonePresentation(for placement: ZonePlacement) -> ZonePresentation {
+        ZonePresentation.make(
+            placement: placement,
+            project: placement.projectId.flatMap { zoneProjects[$0] },
+            isProvisional: provisionalZoneIds.contains(placement.zoneId),
+            rollup: zoneAgentRollups[placement.zoneId] ?? .empty,
+            qaVerdict: zoneQAVerdicts[placement.zoneId],
+            fallbackTitle: zoneFallbackTitles[placement.zoneId] ?? "")
+    }
+
+    /// What a live zone's header says now.
+    func zonePresentation(for zoneId: UUID) -> ZonePresentation? {
+        liveZones.first { $0.zoneId == zoneId }.map(zonePresentation(for:))
+    }
+
+    private func makeZoneChrome(_ zoneId: UUID) -> ZoneChromeNSView? {
+        liveZones.first { $0.zoneId == zoneId }.map {
+            ZoneChromeNSView(placement: $0, presentation: zonePresentation(for: $0))
+        }
+    }
+
+    /// Hand a zone's chrome its current placement and presentation; the chrome
+    /// redraws only when something it draws changed.
+    private func refreshZoneChrome(_ zoneId: UUID) {
+        guard let chrome = zoneChromeViews[zoneId],
+              let placement = liveZones.first(where: { $0.zoneId == zoneId }) else { return }
+        chrome.update(placement: placement, presentation: zonePresentation(for: placement))
+    }
+
     func zoneChromeSnapshot(for zoneId: UUID) -> ZoneChromeNSView.Snapshot? {
         zoneChromeViews[zoneId]?.snapshot
     }
 
-    func updateZoneRenderModels(_ models: [ZoneRenderModel]) {
-        zoneRenderModels = models
-        zoneDisplayByZoneId = Dictionary(models.map { ($0.placement.zoneId, $0) }, uniquingKeysWith: { first, _ in first })
-        for model in models {
-            zoneChromeViews[model.placement.zoneId]?.update(model: model)
+    /// The agent-status tick's one write: every live zone's rollup, a zone
+    /// missing from `rollups` rolling up to empty. Touches nothing else — a
+    /// status change may alter status-dependent display only.
+    func updateZoneAgentRollups(_ rollups: [UUID: AgentStatusRollup]) {
+        for zoneId in Set(liveZones.map(\.zoneId)) {
+            let rollup = rollups[zoneId] ?? .empty
+            guard zoneAgentRollups[zoneId] != rollup else { continue }
+            zoneAgentRollups[zoneId] = rollup
+            refreshZoneChrome(zoneId)
         }
-        layoutZoneChromeViews()
     }
 
     func tileChromeSnapshot(for tileId: UUID) -> TileNSView.ChromeSnapshot? {
@@ -5716,7 +5750,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement else { return nil }
 
         let menu = NSMenu(title: "Zone")
-        if let label = zoneDisplayByZoneId[zoneId]?.scopeLabel {
+        if let label = zonePresentation(for: zoneId)?.homeLabel {
             let scope = NSMenuItem(title: label, action: nil, keyEquivalent: "")
             scope.isEnabled = false
             menu.addItem(scope)
@@ -6268,10 +6302,8 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneChromeViews.removeAll()
         let zoneModels = documentZones ?? layers.map(\.renderModel)
         liveZones = zoneModels.map(\.placement)
-        zoneRenderModels = zoneModels
-        zoneDisplayByZoneId = Dictionary(
-            zoneModels.map { ($0.placement.zoneId, $0) },
-            uniquingKeysWith: { first, _ in first })
+        clearZoneInputs()
+        for model in zoneModels.reversed() { seedZoneInputs(model) }
         tileZoneMembership = Dictionary(
             layers.flatMap { layer in layer.tiles.map { ($0.id, layer.placement.zoneId) } },
             uniquingKeysWith: { first, _ in first })
@@ -6333,8 +6365,7 @@ final class CanvasNSView: NSView, TokenThemed {
         tileViews.removeAll()
         tileZoneMembership.removeAll()
         liveZones.removeAll()
-        zoneRenderModels.removeAll()
-        zoneDisplayByZoneId.removeAll()
+        clearZoneInputs()
         // M1.10: clearing the DATA while leaving the VIEWS in `worldPlane` is what
         // left a departed workspace's zone rectangles painted on screen forever,
         // frozen at their last frame (`layoutZoneChromeViews` iterates `liveZones`,
@@ -6370,18 +6401,12 @@ final class CanvasNSView: NSView, TokenThemed {
         } else {
             liveZones.append(layer.placement)
         }
-        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == zoneId }) {
-            zoneRenderModels[index] = layer.renderModel
-        } else {
-            zoneRenderModels.append(layer.renderModel)
-        }
-        zoneDisplayByZoneId[zoneId] = layer.renderModel
+        seedZoneInputs(layer.renderModel)
         for tile in layer.tiles { tileZoneMembership[tile.id] = zoneId }
         if showsZoneChrome {
-            if let chrome = zoneChromeViews[zoneId] {
-                chrome.update(model: layer.renderModel)
-            } else {
-                let chrome = ZoneChromeNSView(model: layer.renderModel)
+            if zoneChromeViews[zoneId] != nil {
+                refreshZoneChrome(zoneId)
+            } else if let chrome = makeZoneChrome(zoneId) {
                 zoneChromeViews[zoneId] = chrome
                 worldPlane.addSubview(chrome, positioned: .below, relativeTo: nil)
             }
@@ -6405,8 +6430,7 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         zoneChromeViews.removeValue(forKey: zoneId)?.removeFromSuperview()
         liveZones.removeAll { $0.zoneId == zoneId }
-        zoneRenderModels.removeAll { $0.placement.zoneId == zoneId }
-        zoneDisplayByZoneId.removeValue(forKey: zoneId)
+        forgetZoneInputs(zoneId)
         for tile in layer.tiles { tileZoneMembership.removeValue(forKey: tile.id) }
         zoneLayers.removeAll { $0.placement.zoneId == zoneId }
         zoneLayerOrder.removeAll { $0 == zoneId }
@@ -6425,14 +6449,7 @@ final class CanvasNSView: NSView, TokenThemed {
         if let index = liveZones.firstIndex(where: { $0.zoneId == placement.zoneId }) {
             liveZones[index] = placement
         }
-        if let index = zoneRenderModels.firstIndex(where: { $0.placement.zoneId == placement.zoneId }) {
-            zoneRenderModels[index].placement = placement
-        }
-        if var model = zoneDisplayByZoneId[placement.zoneId] {
-            model.placement = placement
-            zoneDisplayByZoneId[placement.zoneId] = model
-            zoneChromeViews[placement.zoneId]?.update(model: model)
-        }
+        refreshZoneChrome(placement.zoneId)
         for tile in layer.tiles {
             _layoutLayerTile(tile, in: layer)
         }
@@ -7862,8 +7879,7 @@ final class CanvasNSView: NSView, TokenThemed {
             canvas.commitProvisionalZone(
                 zoneId: placement.zoneId,
                 projectId: selectedProjectId,
-                homeRelativePath: nil,
-                scopeLabel: "Fixture / Project Root"
+                homeRelativePath: nil
             )
         }
 
@@ -8549,7 +8565,7 @@ final class CanvasNSView: NSView, TokenThemed {
                    "one ZoneLayer tile resize must produce one final geometry transaction")
         try expect(layerCanvas.qaLiveZonePlacement(layerZoneId) == resizedLayerZone
                        && layerCanvas.zoneRenderModels.first(where: { $0.placement.zoneId == layerZoneId })?.placement == resizedLayerZone
-                       && layerCanvas.zoneDisplayByZoneId[layerZoneId]?.placement == resizedLayerZone,
+                       && layerCanvas.zoneChromeViews[layerZoneId]?.placement == resizedLayerZone,
                    "normal unique-layer real gesture must keep liveZones and both render mirrors synchronized")
         let expectedUniqueChrome = CanvasEngine.tileScreenFrame(
             CanvasEngine.zoneWorldFrame(resizedLayerZone), viewport: layerCanvas.canvasState.viewport)
@@ -9462,7 +9478,7 @@ final class CanvasNSView: NSView, TokenThemed {
             guard let first = orderedLayers.first else {
                 throw CheckError.failed("\(label): fixture unexpectedly has no surviving layer")
             }
-            try expect(sameCanvas.zoneDisplayByZoneId[sameZoneId]?.placement == first.placement,
+            try expect(sameCanvas.zoneChromeViews[sameZoneId]?.placement == first.placement,
                        "\(label): shared display model must describe the first concrete occurrence")
             let expectedChrome = Self.worldRect(CanvasEngine.zoneWorldFrame(first.placement))
             try expect(sameCanvas.zoneLayerChromeFrame(for: sameZoneId) == expectedChrome,
@@ -11770,8 +11786,7 @@ final class CanvasNSView: NSView, TokenThemed {
             canvas.commitProvisionalZone(
                 zoneId: placement.zoneId,
                 projectId: scopedProjectId,
-                homeRelativePath: nil,
-                scopeLabel: "Autoname / Project Root"
+                homeRelativePath: nil
             )
         }
 
@@ -11852,8 +11867,7 @@ final class CanvasNSView: NSView, TokenThemed {
             canvas.commitProvisionalZone(
                 zoneId: placement.zoneId,
                 projectId: renameProjectId,
-                homeRelativePath: nil,
-                scopeLabel: "Rename / Project Root"
+                homeRelativePath: nil
             )
         }
         // Create a zone (auto-named "Zone 1"): canvas-local (120,150)→(520,470).
@@ -11919,7 +11933,9 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(renamed.count == 1 && renamed[0].1 == "Work", "onZoneRenamed must fire once with 'Work'; got \(renamed)")
 
         try expect(installedLayer.placement.name == "Work", "installed ZoneLayer placement retained the pre-rename name")
-        try expect(installedLayer.renderModel.displayName == "Work", "installed ZoneLayer render model retained the project name")
+        // The header's title derives from the placement, so the layer's model
+        // must carry the renamed placement; it stores no title of its own.
+        try expect(installedLayer.renderModel.placement.name == "Work", "installed ZoneLayer render model retained the pre-rename placement")
         canvas.setZones([installedLayer], documentZones: [installedLayer.renderModel])
         try expect(canvas.qaZoneDisplayName(zoneId) == "Work", "a production layer reinstall flipped the custom name back")
         try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "a production layer reinstall restored the old placement name")
@@ -12007,8 +12023,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 canvas.commitProvisionalZone(
                     zoneId: placement.zoneId,
                     projectId: fixtureProjectId,
-                    homeRelativePath: nil,
-                    scopeLabel: "Fixture / Project Root"
+                    homeRelativePath: nil
                 )
             }
         }
@@ -12856,7 +12871,10 @@ final class ZoneChromeNSView: NSView {
     /// an instance; the instance `headerHeight` below drives `headerRect`.
     static let headerHeight: Double = 34
 
-    private var model: CanvasNSView.ZoneRenderModel
+    /// What this chrome draws: the zone's placement (color, collapse, layout
+    /// mode) and its header. Both are handed in whole by the canvas.
+    private(set) var placement: ZonePlacement
+    private var presentation: ZonePresentation
     private let headerHeight: CGFloat = 34
     private let backgroundShape = CAShapeLayer()
     private let outlineShape = CAShapeLayer()
@@ -12874,7 +12892,7 @@ final class ZoneChromeNSView: NSView {
     private func refreshChrome() {
         needsLayout = true
         headerDrawingView.needsDisplay = true
-        toolTip = model.qaVerdict?.tooltip
+        toolTip = presentation.qaVerdict?.tooltip
     }
 
     override func layout() {
@@ -12883,16 +12901,16 @@ final class ZoneChromeNSView: NSView {
         CATransaction.setDisableActions(true)
         let rect = bounds.insetBy(dx: 1, dy: 1)
         let path = CGPath(roundedRect: rect, cornerWidth: 12, cornerHeight: 12, transform: nil)
-        let accent = Self.color(named: model.placement.color)
+        let accent = Self.color(named: placement.color)
         backgroundShape.frame = bounds
         backgroundShape.path = path
-        backgroundShape.fillColor = accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).cgColor
+        backgroundShape.fillColor = accent.withAlphaComponent(placement.collapsed ? 0.20 : 0.10).cgColor
         outlineShape.frame = bounds
         outlineShape.path = path
         outlineShape.fillColor = nil
         outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : 0.75).cgColor
         outlineShape.lineWidth = isArmed ? 3 : 2
-        outlineShape.lineDashPattern = model.isProvisional ? [6, 4] : nil
+        outlineShape.lineDashPattern = presentation.isProvisional ? [6, 4] : nil
         if headerDrawingView.frame != headerRect { headerDrawingView.frame = headerRect }
         CATransaction.commit()
     }
@@ -12932,24 +12950,30 @@ final class ZoneChromeNSView: NSView {
         return drawnHeaderText
     }
 
-    /// Replace the render model (e.g. after a rename) and redraw the header.
-    func update(model: CanvasNSView.ZoneRenderModel) {
-        self.model = model
-        refreshChrome()
+    /// Take the zone's current placement and header; redraw only when
+    /// something drawn changed, so a zone moving does not repaint its header.
+    func update(placement: ZonePlacement, presentation: ZonePresentation) {
+        let redraw = presentation != self.presentation
+            || placement.color != self.placement.color
+            || placement.collapsed != self.placement.collapsed
+            || placement.autoLayoutMode != self.placement.autoLayoutMode
+        self.placement = placement
+        self.presentation = presentation
+        if redraw { refreshChrome() }
     }
 
     var snapshot: Snapshot {
         Snapshot(
-            displayName: model.displayName,
-            color: model.placement.color,
-            collapsed: model.placement.collapsed,
+            displayName: presentation.title,
+            color: placement.color,
+            collapsed: placement.collapsed,
             frame: frame,
             headerRect: headerRect,
-            scopeLabel: model.scopeLabel,
-            isProvisional: model.isProvisional,
-            agentRollupText: model.agentStatusRollup.displayText,
-            qaVerdictGlyph: model.qaVerdict?.verdict.glyph,
-            qaVerdictTooltip: model.qaVerdict?.tooltip,
+            scopeLabel: presentation.homeLabel,
+            isProvisional: presentation.isProvisional,
+            agentRollupText: presentation.agentStatusRollup.displayText,
+            qaVerdictGlyph: presentation.qaVerdict?.verdict.glyph,
+            qaVerdictTooltip: presentation.qaVerdict?.tooltip,
             isArmed: isArmed
         )
     }
@@ -12960,8 +12984,9 @@ final class ZoneChromeNSView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(model: CanvasNSView.ZoneRenderModel) {
-        self.model = model
+    init(placement: ZonePlacement, presentation: ZonePresentation) {
+        self.placement = placement
+        self.presentation = presentation
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -12980,7 +13005,7 @@ final class ZoneChromeNSView: NSView {
 
     private func drawHeader() {
         drawnHeaderText = []
-        let accent = Self.color(named: model.placement.color)
+        let accent = Self.color(named: placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
         let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
 
@@ -12991,7 +13016,7 @@ final class ZoneChromeNSView: NSView {
         path.addClip()
         accent.withAlphaComponent(isArmed ? 0.38 : 0.24).setFill()
         headerRect.fill()
-        let title = model.placement.collapsed ? "▸ \(model.displayName)" : model.displayName
+        let title = placement.collapsed ? "▸ \(presentation.title)" : presentation.title
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.88)
@@ -13008,10 +13033,10 @@ final class ZoneChromeNSView: NSView {
             withAttributes: attributes
         )
         drawnHeaderText.append(title)
-        if let scope = model.scopeLabel {
+        if let scope = presentation.homeLabel {
             let scopeAttributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: model.isProvisional ? .semibold : .regular),
-                .foregroundColor: NSColor.white.withAlphaComponent(model.isProvisional ? 0.86 : 0.62)
+                .font: NSFont.systemFont(ofSize: 11, weight: presentation.isProvisional ? .semibold : .regular),
+                .foregroundColor: NSColor.white.withAlphaComponent(presentation.isProvisional ? 0.86 : 0.62)
             ]
             scope.draw(
                 in: CGRect(
@@ -13039,7 +13064,7 @@ final class ZoneChromeNSView: NSView {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.66)
         ])
-        let layoutGlyph = model.placement.autoLayoutMode == .disabled ? "" : "⇥"
+        let layoutGlyph = placement.autoLayoutMode == .disabled ? "" : "⇥"
         if !layoutGlyph.isEmpty {
             (layoutGlyph as NSString).draw(
                 in: CGRect(x: overflowRect.minX - 24, y: 7, width: 20, height: 18),
@@ -13051,7 +13076,7 @@ final class ZoneChromeNSView: NSView {
         }
 
         var rightInset: CGFloat = 12 + closeSize + 56   // close + overflow + layout slots
-        if let qaVerdict = model.qaVerdict {
+        if let qaVerdict = presentation.qaVerdict {
             let badgeAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 12, weight: .bold),
                 .foregroundColor: Self.qaColor(for: qaVerdict.verdict).withAlphaComponent(0.92)
@@ -13064,7 +13089,7 @@ final class ZoneChromeNSView: NSView {
             rightInset += badgeSize.width + 10
         }
 
-        if let rollup = model.agentStatusRollup.displayText {
+        if let rollup = presentation.agentStatusRollup.displayText {
             let rollupAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
                 .foregroundColor: NSColor.white.withAlphaComponent(0.70)

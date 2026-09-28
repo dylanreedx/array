@@ -717,6 +717,18 @@ run_app_check .build/debug/Array --retired-flat-write-check
 run_app_check .build/debug/Array --flat-spawn-migration-check
 run_app_check .build/debug/Array --canvas-save-receipt-check
 run_app_check .build/debug/Array --picker-epoch-fence-check
+# .plans/67 ARC-3: a zone's header is derived from its placement, registry entry,
+# rollup and provisional state. Mount, rename, Home change through the picker,
+# Create Zone, rollup ticks, switch and remount each compare the DRAWN header text
+# with the canonical inputs; provisional, unbound, registry-miss and unavailable
+# projects each draw their own Home label.
+run_app_check .build/debug/Array --zone-presentation-check
+# .plans/67 §3.2 / hazard 10: a managed-agent tile with no record in this
+# channel's store renders an explicit unbound state and mints nothing across
+# mount, switch and remount; one whose agent's Home is gone renders
+# unavailable and refuses a prompt; only a prompt the person sends starts a new
+# agent for the unbound tile.
+run_app_check .build/debug/Array --agent-tile-binding-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the

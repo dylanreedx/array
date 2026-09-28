@@ -585,15 +585,28 @@ final class WorkspaceInvariantsFixture {
     }
 
     /// Each header draws exactly its zone's title and Home label, derived from
-    /// the canonical fields: the zone's name (or its project's when empty) and
-    /// `<project> / <home or Project Root>`.
+    /// the canonical fields. Written out here independently of the app's
+    /// builder, so it is a specification rather than a copy.
+    static func expectedHeader(for zone: ZonePlacement, registry: Registry) -> [String] {
+        let project = registry.projects.first { $0.id == zone.projectId }
+        let named = !zone.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let title = named ? zone.name : (project?.name ?? (zone.projectId == nil ? "Group" : "Zone"))
+        let home: String
+        if zone.projectId == nil {
+            home = "Needs Project"
+        } else if let project {
+            home = "\(project.name) / \(zone.homeRelativePath ?? "Project Root")"
+                + (project.missing ? " · Unavailable" : "")
+        } else {
+            home = "Project Not Found"
+        }
+        return [zone.collapsed ? "▸ \(title)" : title, home]
+    }
+
     static func projectionViolations(_ model: ModelView, chrome: [UUID: [String]], registry: Registry) -> [Violation] {
         var violations: [Violation] = []
         for zone in model.document.zones {
-            let project = registry.projects.first { $0.id == zone.projectId }
-            let title = zone.name.isEmpty ? (project?.name ?? "Zone") : zone.name
-            let scope = project.map { "\($0.name) / \(zone.homeRelativePath ?? "Project Root")" } ?? "Needs Project"
-            let want = [zone.collapsed ? "▸ \(title)" : title, scope]
+            let want = expectedHeader(for: zone, registry: registry)
             let got = chrome[zone.zoneId]
             if got != want {
                 violations.append(Violation(

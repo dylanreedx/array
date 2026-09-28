@@ -367,3 +367,35 @@ that copy.
   A's zone and confirmed after switching to B landed in B's file) — the runtime
   carries a `mountEpoch`, both pickers capture it when presented and refuse a
   confirm from an older mount; a same-mount pick still lands (positive control).
+- 2026-09-28 — Slice 2 (ARC-3 derived headers) on bench `stab-arc3`, branch
+  `array/stab-arc3`, off slice 0 (`81fc32f5`). `ZonePresentation.make` is the
+  one builder of a zone's title and Home label, over the live placement, the
+  project's registry resolution (`ZoneProjectResolution`, resolved by whoever
+  holds the registry and handed in with the zone), the rollup and the
+  provisional flag. `ZoneRenderModel.scopeLabel`, the stored `zoneRenderModels`
+  array (now computed from `liveZones`) and `zoneDisplayByZoneId` are gone;
+  the status tick calls `updateZoneAgentRollups`, which writes rollups only.
+  Distinct Home labels: provisional "Choose a project to finish", unbound
+  "Needs Project", registry miss "Project Not Found", missing folder
+  "<project> / <home> · Unavailable". RED at base, GREEN after:
+  `--workspace-invariants-check` with projection back in its clean control
+  (the `MATRIX-NOTE` is gone) and the new `--zone-presentation-check` (mount,
+  rename, Home change through the picker's confirm, Create Zone, rollup ticks,
+  switch, quit+remount, and the four states). A registry-miss or
+  missing-folder zone still cannot mount (`mountableZones` throws, the factory
+  refuses); the leg witnesses those two on launch's pre-mount canvas. Nothing
+  merged.
+- 2026-09-28 — Slice 2, second part (explicit agent binding), same bench. A
+  managed-agent tile is bound, unbound or unavailable, decided in
+  `wireManagedAgentTile`: a record for the tile binds it; a stale record (its
+  Home is gone) makes it unavailable, which says so and refuses a prompt; no
+  record and no creation memo from this process makes it unbound, which says
+  so, and only a prompt the person sends starts one new agent there. Hydration
+  now wires every managed tile, so the unbound state renders after a switch.
+  New `--agent-tile-binding-check` (fixture mount, switch, remount, act,
+  remount; records counted on disk and through the supervisor; the tile's own
+  transcript text) was RED at base: no state rendered and a prompt in the
+  unbound tile did nothing. GREEN after. The mounted path already minted
+  nothing at base (M1.2b); the launch-only flat boot walk for an unpersisted
+  workspace goes through the same rule but is not driven by this leg.
+  Nothing merged.
