@@ -2137,6 +2137,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--window-chrome-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWindowChromeSelfCheck()
+                print("ContinuumRevivedWindowChromeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-sidebar-shell-check") {
             do {
                 _ = NSApplication.shared
@@ -2322,6 +2334,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try ZonePresentationChecks.run()
                 print("ContinuumRevivedZonePresentationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--zone-rename-hotkey-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZoneRenameHotkeyChecks.run()
+                print("ContinuumRevivedZoneRenameHotkeyChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -4868,17 +4892,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 canvasState: canvasState)
             refreshAgentSurfaces(notify: false)
 
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = Self.mainWindowTitle(for: project, registry: updatedRegistry)
-            window.center()
-            let contentFrame = window.contentRect(forFrameRect: window.frame)
-            window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
-            window.delegate = self
+            let window = makeWorkspaceWindow(
+                canvasView: canvasView,
+                title: Self.mainWindowTitle(for: project, registry: updatedRegistry))
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
             self.window = window
@@ -7850,6 +7866,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let shortcut = focusBroker.reservedShortcut(for: event)
+        // This monitor runs ahead of the field editor, so an app chord that it
+        // consumes (⌘F, ⌘1…) never reaches an open zone rename, and nothing
+        // else will commit the typed name before a switch or quit drops it.
+        // Commit it first, exactly as losing focus would; ordinary typing and
+        // the field's own editing chords are not app chords and are untouched.
+        if canvasView?.isZoneRenameOpen == true,
+           shortcut != nil || matchesRegisteredGlobalShortcut(event) {
+            canvasView?.commitZoneRename()
+        }
         // Text entry owns ordinary typing, while every app-reserved command and
         // inbox jump is withheld before it can open a modal, spawn, or navigate.
         // Unmatched keys still return false below and reach the field editor.
@@ -8616,6 +8641,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
         return true
+    }
+
+    private func matchesRegisteredGlobalShortcut(_ event: NSEvent) -> Bool {
+        guard let registry = try? CommandRegistry.productRegistry() else { return false }
+        let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
+        let store = ShortcutBindingStore()
+        return registry.shortcuts.contains {
+            $0.contexts.contains(.global)
+                && store.matches(keyCode: event.keyCode, modifiers: modifiers, definition: $0)
+        }
     }
 
     private func registeredShortcutID(for legacy: ReservedShortcut) -> ShortcutID? {
@@ -10127,7 +10162,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func makeWorkspaceContentView(canvasView: CanvasNSView, frame: NSRect) -> NSView {
-        let splitView = NSSplitView(frame: frame)
+        // The top bar is no longer a row inside the content pane. With
+        // `.fullSizeContentView` it IS the window's titlebar strip: full width,
+        // above the split, with the traffic lights sitting inside it. The split
+        // view owns everything below.
+        let topBarHeight = Self.workspaceTopBarHeight
+        let splitFrame = NSRect(x: 0, y: 0, width: frame.width, height: max(0, frame.height - topBarHeight))
+
+        let splitView = NSSplitView(frame: splitFrame)
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.autoresizingMask = [.width, .height]
@@ -10135,7 +10177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let width = CGFloat(WorkspaceSidebarConfig.resolveWidth())
         let divider = splitView.dividerThickness
-        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: splitFrame.height))
         sidebar.autoresizingMask = [.height]
         configureWorkspaceSidebar(sidebar)
 
@@ -10145,9 +10187,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // returned below prevents that overlay regression while preserving this
         // actual workspace surface.
 
-        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
+        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, splitFrame.width - width - divider), height: splitFrame.height))
         contentPane.autoresizingMask = [.width, .height]
-        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 38), width: contentPane.bounds.width, height: 38))
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - topBarHeight), width: frame.width, height: topBarHeight))
+        topBar.autoresizingMask = [.width, .minYMargin]
+        topBar.trafficLightInset = Self.workspaceTrafficLightInset
         configureWorkspaceTopBar(topBar)
         let shortcutRail = CanvasShortcutRailView(frame: .zero)
         shortcutRail.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
@@ -10157,30 +10201,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         gettingStarted.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
         gettingStarted.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
 
-        topBar.translatesAutoresizingMaskIntoConstraints = false
         canvasView.translatesAutoresizingMaskIntoConstraints = false
-        contentPane.addSubview(topBar)
         contentPane.addSubview(canvasView)
         shortcutRail.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(shortcutRail, positioned: .above, relativeTo: canvasView)
         gettingStarted.translatesAutoresizingMaskIntoConstraints = false
         contentPane.addSubview(gettingStarted, positioned: .above, relativeTo: canvasView)
         NSLayoutConstraint.activate([
-            topBar.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
-            topBar.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
-            topBar.topAnchor.constraint(equalTo: contentPane.topAnchor),
-            topBar.heightAnchor.constraint(equalToConstant: 38),
-
             canvasView.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
             canvasView.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
-            canvasView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            canvasView.topAnchor.constraint(equalTo: contentPane.topAnchor),
             canvasView.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor),
 
             shortcutRail.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor, constant: -12),
             shortcutRail.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor, constant: -12),
 
             gettingStarted.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor, constant: 12),
-            gettingStarted.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 12),
+            gettingStarted.topAnchor.constraint(equalTo: contentPane.topAnchor, constant: 12),
         ])
 
         splitView.addSubview(sidebar)
@@ -10207,11 +10244,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //
         // A plain NSView does not lay out its children, so an overlay keeps the
         // frame it asked for.
+        //
+        // The bar is a SIBLING of the split view in that same plain container, not
+        // a child of either pane: it has to clear the sidebar to reach the traffic
+        // lights, and it must not be laid out as a third split pane. Autoresizing
+        // masks only — the container deliberately runs no layout pass.
         let container = NSView(frame: frame)
         container.autoresizingMask = [.width, .height]
-        splitView.frame = container.bounds
+        splitView.frame = NSRect(
+            x: 0, y: 0,
+            width: container.bounds.width,
+            height: max(0, container.bounds.height - topBarHeight))
         container.addSubview(splitView)
+        topBar.frame = NSRect(
+            x: 0, y: max(0, container.bounds.height - topBarHeight),
+            width: container.bounds.width, height: topBarHeight)
+        container.addSubview(topBar)
         return container
+    }
+
+    /// The merged titlebar, in one place so the boot path and
+    /// `--window-chrome-check` cannot drift apart.
+    ///
+    /// Before this, Array stacked an empty 28pt system titlebar (traffic lights and
+    /// a title string, nothing else) on top of a 38pt app bar that did not even span
+    /// the window — it started right of the sidebar divider. 66pt of chrome for one
+    /// row of controls.
+    static let workspaceWindowStyleMask: NSWindow.StyleMask =
+        [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+
+    /// The height of the titlebar this bar replaces, measured rather than assumed:
+    /// it is 28pt through macOS 15 and 32pt on Tahoe and later, and the bar has to
+    /// coincide with it or the traffic lights sit off-centre in their own row.
+    static let systemTitlebarHeight: CGFloat = {
+        let contentRect = NSRect(x: 0, y: 0, width: 100, height: 100)
+        let frameRect = NSWindow.frameRect(
+            forContentRect: contentRect,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable])
+        return frameRect.height - contentRect.height
+    }()
+
+    /// The strip itself, with a floor so the `.small` controls still fit on the
+    /// shorter pre-Tahoe titlebar.
+    static var workspaceTopBarHeight: CGFloat { max(30, systemTitlebarHeight) }
+
+    /// Clearance for close/miniaturize/zoom. They end at x=69 on Tahoe (61 before
+    /// it); this leaves a deliberate gap rather than tucking the workspace name up
+    /// against the zoom button. `--window-chrome-check` measures the real buttons
+    /// and fails if that gap closes.
+    static let workspaceTrafficLightInset: CGFloat = 76
+
+    /// The workspace window exactly as launch builds it, so `--window-chrome-check`
+    /// measures the window the user gets rather than a copy of it.
+    func makeWorkspaceWindow(canvasView: CanvasNSView, title: String) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: Self.workspaceWindowStyleMask,
+            backing: .buffered,
+            defer: false
+        )
+        // The title is still set: it is what Mission Control, the Window menu
+        // and the dock preview read. It is just no longer DRAWN — see
+        // `applyMergedTitlebarChrome`.
+        window.title = title
+        Self.applyMergedTitlebarChrome(to: window)
+        window.center()
+        let contentFrame = window.contentRect(forFrameRect: window.frame)
+        window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
+        window.delegate = self
+        return window
+    }
+
+    static func applyMergedTitlebarChrome(to window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
     }
 
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
@@ -11260,6 +11368,238 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               !isApplyingWorkspaceSidebarVisibility,
               !sidebar.isHidden else { return }
         WorkspaceSidebarConfig.setWidth(Double(sidebar.frame.width))
+    }
+
+    /// Witness for the merged titlebar (0.7.21).
+    ///
+    /// RED before the merge on three counts, each a thing a user could see: the
+    /// window's content rect was 28pt shorter than its frame because the system
+    /// drew an empty titlebar above it; the top bar was not a subview of the
+    /// window's content container at all but buried inside the right-hand split
+    /// pane, so it began at the sidebar divider instead of the window edge; and it
+    /// reserved no clearance, so hoisting it without one would have run the
+    /// workspace name under the traffic lights.
+    ///
+    /// Asserts frames and window metrics, never the presence of a call.
+    static func runWindowChromeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        // Every assertion runs and every failure is reported: a RED run names all
+        // of the chrome that regressed, not just the first thing it tripped on.
+        var failures: [String] = []
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+            if !condition() { failures.append(message) }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-window-chrome-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceId, name: "Chrome Workspace", projectIds: [],
+                           createdAt: Date(timeIntervalSince1970: 0),
+                           updatedAt: Date(timeIntervalSince1970: 0)),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            .save(WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [],
+                zoneZOrder: [],
+                lastActiveZoneId: nil,
+                ambientTiles: []))
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(
+            registry: try registryStore.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil))
+
+        // The window launch builds, through the method launch calls: style mask,
+        // title, chrome, content view and delegate all come from production. Only
+        // the ordering differs — the window is never put on screen.
+        let window = app.makeWorkspaceWindow(canvasView: canvas, title: "Chrome Workspace — Array")
+        app.window = window
+
+        guard let content = window.contentView else {
+            throw CheckError.failed("window has no content view")
+        }
+        content.layoutSubtreeIfNeeded()
+
+        guard let topBar = app.workspaceTopBarView, let splitView = app.workspaceSplitView else {
+            throw CheckError.failed("workspace mount did not retain the top bar and split view")
+        }
+        expect(window.delegate === app, "launch's window must report its fullscreen transitions to the app delegate")
+
+        // 1. The content occupies the WHOLE frame — no system titlebar strip above it.
+        let frameHeight = window.frame.height
+        let contentHeight = window.contentRect(forFrameRect: window.frame).height
+        let legacyContentHeight = NSWindow.contentRect(
+            forFrameRect: window.frame,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable]).height
+        let recoveredTitlebarHeight = contentHeight - legacyContentHeight
+        expect(abs(contentHeight - frameHeight) < 0.5,
+               "content must span the full frame; frame \(frameHeight) content \(contentHeight)")
+        expect(abs(content.frame.height - frameHeight) < 0.5 && abs(content.frame.width - window.frame.width) < 0.5,
+               "the content view must fill the frame; content \(content.frame.size) frame \(window.frame.size)")
+        expect(recoveredTitlebarHeight > 0,
+               "the merge must recover the system titlebar strip, recovered \(recoveredTitlebarHeight)")
+        expect(window.titleVisibility == .hidden, "the drawn window title must be hidden")
+        expect(window.titlebarAppearsTransparent, "the titlebar must be transparent")
+        expect(window.title == "Chrome Workspace — Array",
+               "the title string must survive for Mission Control and the Window menu, got '\(window.title)'")
+
+        // 2. The bar is the window's own top strip, not a row inside a split pane.
+        expect(!(content is NSSplitView),
+               "the window content view must not be an NSSplitView — it would lay out ⌘K as a pane")
+        expect(topBar.superview === content,
+               "the top bar must be a direct subview of the content container, not of a split pane")
+        expect(splitView.superview === content, "the split view must sit beside the bar in the content container")
+        let barFrame = topBar.frame
+        expect(abs(barFrame.width - content.bounds.width) < 0.5,
+               "the bar must span the full window width, got \(barFrame.width) of \(content.bounds.width)")
+        expect(abs(barFrame.minX) < 0.5, "the bar must start at the window's leading edge, got \(barFrame.minX)")
+        expect(abs(barFrame.maxY - content.bounds.maxY) < 0.5,
+               "the bar must touch the top of the content, got maxY \(barFrame.maxY) of \(content.bounds.maxY)")
+        expect(abs(barFrame.height - workspaceTopBarHeight) < 0.5,
+               "the bar must be \(workspaceTopBarHeight)pt tall, got \(barFrame.height)")
+
+        // 3. Everything else lives strictly below it, and the total top chrome is
+        //    now the bar alone rather than the bar stacked on a titlebar.
+        expect(abs(splitView.frame.maxY - barFrame.minY) < 0.5,
+               "the split view must end where the bar begins; split maxY \(splitView.frame.maxY), bar minY \(barFrame.minY)")
+        expect(abs(splitView.frame.minY) < 0.5, "the split view must reach the bottom of the window, minY \(splitView.frame.minY)")
+        let topChromeHeight = frameHeight - splitView.frame.height
+        // What it cost before: the same system strip, plus the old 38pt app row.
+        let legacyTopChromeHeight = recoveredTitlebarHeight + 38
+        expect(abs(topChromeHeight - workspaceTopBarHeight) < 0.5,
+               "top chrome must be the bar alone, got \(topChromeHeight)")
+        expect(topChromeHeight < legacyTopChromeHeight,
+               "top chrome must shrink; got \(topChromeHeight) against \(legacyTopChromeHeight)")
+
+        // 4. The workspace identity clears the traffic lights instead of hiding under them.
+        guard let closeButton = window.standardWindowButton(.closeButton),
+              let zoomButton = window.standardWindowButton(.zoomButton) else {
+            throw CheckError.failed("the merged titlebar must keep the standard window buttons")
+        }
+        let buttonsRight = max(
+            closeButton.convert(closeButton.bounds, to: nil).maxX,
+            zoomButton.convert(zoomButton.bounds, to: nil).maxX)
+        let identityLeft = topBar.convert(topBar.identityFrameForQA, to: nil).minX
+        let trafficLightGap = identityLeft - buttonsRight
+        expect(trafficLightGap >= 12,
+               "the workspace name must start clear of the traffic lights by at least 12pt; identity at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
+        let buttonsMidY = closeButton.convert(closeButton.bounds, to: nil).midY
+        let barInWindow = topBar.convert(topBar.bounds, to: nil)
+        expect(buttonsMidY > barInWindow.minY && buttonsMidY < barInWindow.maxY,
+               "the traffic lights must sit inside the bar's strip; buttons midY \(buttonsMidY), bar \(barInWindow.minY)...\(barInWindow.maxY)")
+
+        // 5. Window drag. A mouse-down on the bar's empty surface must land on a
+        //    view that lets the window move, and the window itself must be movable.
+        //    (A real drag is a WindowServer tracking loop; see the visual QA.)
+        let identityRightInBar = topBar.identityFrameForQA.maxX
+        let emptyPointInBar = NSPoint(x: identityRightInBar + 5, y: topBar.bounds.midY)
+        let hitView = content.hitTest(topBar.convert(emptyPointInBar, to: content))
+        expect(window.isMovable, "the workspace window must be movable")
+        expect(hitView != nil && hitView!.isDescendant(of: topBar),
+               "a click on the bar's empty surface must hit the bar, hit \(String(describing: hitView))")
+        expect(hitView?.mouseDownCanMoveWindow == true,
+               "dragging the bar's empty surface must move the window; hit \(String(describing: hitView)) mouseDownCanMoveWindow \(String(describing: hitView?.mouseDownCanMoveWindow))")
+
+        // 6. Full screen retires the clearance and leaving it restores it. Delivered
+        //    as the window's own notifications, which reach the delegate only
+        //    through the observation `NSWindow.delegate` sets up — a window launch
+        //    built without the delegate, or a delegate without the handlers, stays
+        //    at 76 and goes RED here. A real `toggleFullScreen(_:)` is not driven:
+        //    it moves the window to its own Space on the user's display.
+        func identityLeftInWindow() -> CGFloat {
+            content.layoutSubtreeIfNeeded()
+            return topBar.convert(topBar.identityFrameForQA, to: nil).minX
+        }
+        let insetWindowed = topBar.trafficLightInset
+        let identityWindowed = identityLeftInWindow()
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: window)
+        let insetFullScreen = topBar.trafficLightInset
+        let identityFullScreen = identityLeftInWindow()
+        NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: window)
+        NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: window)
+        let insetRestored = topBar.trafficLightInset
+        let identityRestored = identityLeftInWindow()
+        expect(abs(insetWindowed - workspaceTrafficLightInset) < 0.5,
+               "windowed, the bar must reserve \(workspaceTrafficLightInset)pt for the traffic lights, got \(insetWindowed)")
+        expect(abs(insetFullScreen) < 0.5,
+               "entering full screen must drop the traffic-light inset to 0, got \(insetFullScreen)")
+        expect(abs(identityFullScreen - WorkspaceTopBarView.identityLeading) < 0.5,
+               "in full screen the workspace name must sit at the bar's own \(WorkspaceTopBarView.identityLeading)pt margin, got \(identityFullScreen)")
+        expect(abs(insetRestored - workspaceTrafficLightInset) < 0.5,
+               "leaving full screen must restore the \(workspaceTrafficLightInset)pt inset, got \(insetRestored)")
+        expect(abs(identityRestored - identityWindowed) < 0.5,
+               "leaving full screen must put the workspace name back at \(identityWindowed), got \(identityRestored)")
+
+        // A notification for some other window must not touch this bar.
+        let stranger = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                styleMask: [.titled], backing: .buffered, defer: true)
+        stranger.delegate = app
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: stranger)
+        expect(abs(topBar.trafficLightInset - workspaceTrafficLightInset) < 0.5,
+               "another window's full screen must not change this bar's inset, got \(topBar.trafficLightInset)")
+        stranger.delegate = nil
+
+        guard failures.isEmpty else {
+            window.delegate = nil
+            app.window = nil
+            throw CheckError.failed("window chrome: \(failures.count) assertion(s) failed:\n  - " + failures.joined(separator: "\n  - "))
+        }
+
+        window.orderOut(nil)
+        window.delegate = nil
+        app.window = nil
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("window-chrome", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "window-chrome",
+            "frameHeight": Double(frameHeight),
+            "contentHeight": Double(contentHeight),
+            "recoveredTitlebarHeight": Double(recoveredTitlebarHeight),
+            "topChromeHeight": Double(topChromeHeight),
+            "legacyTopChromeHeight": Double(legacyTopChromeHeight),
+            "barWidth": Double(barFrame.width),
+            "barHeight": Double(barFrame.height),
+            "identityLeftInWindow": Double(identityLeft),
+            "trafficLightsRightInWindow": Double(buttonsRight),
+            "trafficLightGap": Double(trafficLightGap),
+            "systemTitlebarHeight": Double(systemTitlebarHeight),
+            "trafficLightInsetWindowed": Double(insetWindowed),
+            "trafficLightInsetFullScreen": Double(insetFullScreen),
+            "trafficLightInsetRestored": Double(insetRestored),
+            "identityLeftWindowed": Double(identityWindowed),
+            "identityLeftFullScreen": Double(identityFullScreen),
+            "identityLeftRestored": Double(identityRestored),
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runWorkspaceSidebarShellSelfCheck() throws -> URL {
@@ -14873,11 +15213,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Persist a zone rename: update the stored zone's name so it survives relaunch.
     /// Mirrors `persistMovedZone` (full document load → mutate → save).
     private func persistRenamedZone(_ zoneId: UUID, name: String) {
-        if let workspaceRuntime, var placement = canvasView?.zonePlacement(for: zoneId) {
+        // While a workspace is mounted its runtime document is the only truth:
+        // never reload it from disk here (README §3.4). A reload reverts whatever
+        // is still inside the save debounce, and the pending snapshot then
+        // overwrites this rename anyway.
+        if let workspaceRuntime {
+            guard var placement = canvasView?.zonePlacement(for: zoneId) else {
+                reportUnsavedZoneRename(zoneId, name: name)
+                return
+            }
             placement.name = name
             do {
                 try workspaceRuntime.commitZonePlacement(placement)
                 reloadWorkspaceSidebar()
+            } catch WorkspaceRuntime.WorkspaceMutationError.zoneNotFound {
+                // A provisional zone has not reached the document yet; the
+                // creation commit carries the canvas placement, name included.
+                if canvasView?.isZoneProvisional(zoneId) == true { return }
+                reportUnsavedZoneRename(zoneId, name: name)
             } catch {
                 fputs("persistRenamedZone failed: \(error)\n", stderr)
             }
@@ -14910,6 +15263,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } catch {
             fputs("persistRenamedZone failed: \(error)\n", stderr)
         }
+    }
+
+    /// The canvas shows a zone the mounted document does not hold, so the name
+    /// cannot be saved. Say so where the user is looking, and leave the typed
+    /// name on screen rather than dropping it.
+    private func reportUnsavedZoneRename(_ zoneId: UUID, name: String) {
+        fputs("persistRenamedZone: zone \(zoneId) is not in the mounted workspace; name not saved\n", stderr)
+        setWorkspaceManagementMessage("Couldn't save zone name \u{201C}\(name)\u{201D}: the zone isn't part of this workspace's saved layout.")
     }
 
     /// Nil when the registry cannot be read: that is not a registry miss.
@@ -16086,6 +16447,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA: host the mounted canvas in `window` and install the keyDown monitor
+    /// launch installs, so a check's key events take the production route
+    /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown
+    /// removes the monitor again.
+    func qaAttachWindowInstallingHotkeyMonitor(_ window: NSWindow) {
+        self.window = window
+        installHotkeyMonitor()
+    }
     /// QA (M1.11): whether a spawner is reachable at all.
     var qaHasTileSpawner: Bool { tileSpawner != nil }
     /// QA (M1.11): live browser runtimes, to prove none was built and dropped.
@@ -16893,6 +17262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // ⌘Q is a menu key equivalent and takes no focus, so a zone name still
+        // being typed would otherwise miss the flush below.
+        canvasView?.commitZoneRename()
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
             closeFlushAcknowledgedWindow = window
@@ -16927,8 +17299,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshAgentSurfaces()
     }
 
+    /// Full screen moves the traffic lights into the auto-hiding overlay, so the
+    /// clearance the bar reserves for them becomes a 62pt hole at the leading edge.
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        workspaceTopBarView?.trafficLightInset = 0
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        workspaceTopBarView?.trafficLightInset = Self.workspaceTrafficLightInset
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === window else { return true }
+        // The close button takes no focus either; see `applicationShouldTerminate`.
+        canvasView?.commitZoneRename()
         do {
             try workspaceRuntime?.flushMountedWorkspaceState()
             closeFlushAcknowledgedWindow = sender

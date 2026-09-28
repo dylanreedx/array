@@ -179,6 +179,7 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
+check --window-chrome-check
 check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-canvas-check
@@ -217,6 +218,7 @@ check --zone-move-unified-check
 check --zone-presentation-check
 check --zone-project-session-naming-check
 check --zone-registry-refcount-check
+check --zone-rename-hotkey-check
 check --zone-rename-inline-check
 check --zone-resize-check
 check --zone-runtime-duplication-check
@@ -404,6 +406,7 @@ leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
+leg run_app_check .build/debug/Array --window-chrome-check
 leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
@@ -442,6 +445,7 @@ leg run_app_check .build/debug/Array --zone-move-unified-check
 leg run_app_check .build/debug/Array --zone-presentation-check
 leg run_app_check .build/debug/Array --zone-project-session-naming-check
 leg run_app_check .build/debug/Array --zone-registry-refcount-check
+leg run_app_check .build/debug/Array --zone-rename-hotkey-check
 leg run_app_check .build/debug/Array --zone-rename-inline-check
 leg run_app_check .build/debug/Array --zone-resize-check
 leg run_app_check .build/debug/Array --zone-runtime-duplication-check

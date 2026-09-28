@@ -4899,6 +4899,13 @@ final class CanvasNSView: NSView, TokenThemed {
         teardownZoneRenameField()
     }
 
+    /// Whether an inline zone rename field is open (and possibly mid-typing).
+    var isZoneRenameOpen: Bool { renamingZoneId != nil }
+
+    /// Whether a zone is still provisional: drawn, but not yet given a project
+    /// and so not yet in the workspace document.
+    func isZoneProvisional(_ zoneId: UUID) -> Bool { provisionalZoneIds.contains(zoneId) }
+
     private func teardownZoneRenameField() {
         zoneRenameField?.removeFromSuperview()
         zoneRenameField = nil
@@ -4907,6 +4914,12 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// QA: the zone whose inline rename is active, or nil.
     var qaZoneRenameActiveZoneId: UUID? { renamingZoneId }
+    /// QA: what the open rename field holds right now, read from its field
+    /// editor while editing. nil when no rename is open.
+    var qaZoneRenameFieldText: String? {
+        guard let field = zoneRenameField else { return nil }
+        return field.currentEditor()?.string ?? field.stringValue
+    }
     /// QA: apply a rename through the real mutation path. The NSTextField field
     /// editor's lifecycle isn't reproducible headlessly (it ends synchronously in a
     /// non-interactive window); the double-click ROUTING is covered by

@@ -28,6 +28,24 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     private let commandCenterButton: NSButton
 
     private var currentWorkspaceId: UUID?
+    private var identityLeadingConstraint: NSLayoutConstraint?
+    private var identityStack: NSStackView?
+
+    /// Leading room reserved for the window's traffic lights, now that this bar
+    /// IS the titlebar strip rather than a row stacked under it. Zero by default:
+    /// the ui-probe appearance surfaces render this view in a borderless host with
+    /// no window buttons to dodge, and full screen moves the buttons into the
+    /// auto-hiding overlay, so both want the plain 10pt margin.
+    var trafficLightInset: CGFloat = 0 {
+        didSet {
+            guard trafficLightInset != oldValue else { return }
+            identityLeadingConstraint?.constant = Self.identityLeading + trafficLightInset
+            needsLayout = true
+        }
+    }
+
+    /// The bar's own margin, before any traffic-light clearance.
+    static let identityLeading: CGFloat = 10
     /// The save state the label is currently showing, so `applyTokens()` can
     /// re-resolve its token on an appearance flip without waiting for a `reload`.
     private var currentSaveState: WorkspaceDocumentSaveState = .saved
@@ -127,6 +145,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         commandCenterButton.action = #selector(openCommandCenterClicked(_:))
 
         let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel, managementMessageLabel])
+        self.identityStack = identityStack
         identityStack.orientation = .horizontal
         identityStack.alignment = .firstBaseline
         identityStack.spacing = 8
@@ -143,10 +162,16 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         addSubview(identityStack)
         addSubview(actionsStack)
 
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
+        let identityLeadingConstraint = identityStack.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: Self.identityLeading + trafficLightInset)
+        self.identityLeadingConstraint = identityLeadingConstraint
 
-            identityStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+        NSLayoutConstraint.activate([
+            // 28, not 36: the bar is sized to the system titlebar strip it now
+            // occupies. A 36pt floor silently fought the frame the window gives it.
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
+
+            identityLeadingConstraint,
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             identityStack.trailingAnchor.constraint(lessThanOrEqualTo: actionsStack.leadingAnchor, constant: -10),
 
@@ -231,7 +256,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
             ?? "Open Command Center"
     }
 
+    /// A drag anywhere on the bar's own surface moves the window, the way the
+    /// titlebar it replaced did. Controls and labels keep their own hit areas.
+    override var mouseDownCanMoveWindow: Bool { true }
+
     var workspaceNameForQA: String { nameLabel.stringValue }
+    var identityLeadingForQA: CGFloat { identityLeadingConstraint?.constant ?? 0 }
+    var identityFrameForQA: NSRect { identityStack?.frame ?? .zero }
     var countsTextForQA: String { countsLabel.stringValue }
     var saveStateTextForQA: String { saveStateLabel.stringValue }
     var managementMessageForQA: String { managementMessageLabel.stringValue }

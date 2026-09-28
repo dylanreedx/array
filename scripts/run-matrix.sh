@@ -589,6 +589,9 @@ run_app_check .build/debug/Array --multi-zone-render-check
 run_app_check .build/debug/Array --zone-create-gesture-check
 run_app_check .build/debug/Array --zone-autoname-check
 run_app_check .build/debug/Array --zone-rename-inline-check
+# A zone rename still being typed survives a consumed app chord, the close
+# button and quit: real field, production keyDown monitor, workspace file bytes.
+run_app_check .build/debug/Array --zone-rename-hotkey-check
 run_app_check .build/debug/Array --zone-create-encloses-check
 run_app_check .build/debug/Array --zone-breakout-check
 run_app_check .build/debug/Array --zone-close-keep-delete-check
@@ -674,6 +677,10 @@ run_app_check .build/debug/Array --workspace-top-bar-check
 # delete path; registered here with the delete-failure leg beside it.
 run_app_check .build/debug/Array --workspace-management-polish-check
 run_app_check .build/debug/Array --workspace-delete-failure-check
+# 0.7.21: the top bar IS the titlebar now. Asserts window metrics and frames —
+# full-frame content, a full-width bar at the top of it, the split strictly below,
+# and the workspace name clear of the traffic lights.
+run_app_check .build/debug/Array --window-chrome-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
