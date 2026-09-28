@@ -829,6 +829,14 @@ final class WorkspaceRuntime {
         restoreFocus(from: canvasView)
     }
 
+    /// Schedule every mounted project's debounced canvas save; each controller
+    /// writes its own file through the persistence projection.
+    func scheduleCanvasSaveForMountedProjects() {
+        for projectId in acquiredProjectIds {
+            registry.controller(for: projectId)?.scheduleCanvasSave()
+        }
+    }
+
     /// Flush every live controller's pending saves (fan-out of `flushPendingSaves`).
     func flushAll() {
         for projectId in acquiredProjectIds {

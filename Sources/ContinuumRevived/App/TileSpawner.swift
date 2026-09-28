@@ -1171,7 +1171,7 @@ final class TileSpawner {
         if let existingInspectorId = existingBrowserInspectorTileId(inspecting: browserTileId, browserState: browserState, in: canvasView) {
             refreshBrowserInspector(inspectorTileId: existingInspectorId, browserTileId: browserTileId, browserState: browserState)
             _ = revealTile(existingInspectorId)
-            try? projectStore.saveCanvas(canvasView.canvasState)
+            try? persistCanvasForCurrentModel(canvasView: canvasView)
             return .spawned(tileId: existingInspectorId)
         }
 
@@ -1261,7 +1261,7 @@ final class TileSpawner {
             guard let self else { return }
             _ = self.revealTile(browserTileId)
             if let canvasView = self.canvasView {
-                try? self.projectStore.saveCanvas(canvasView.canvasState)
+                try? self.persistCanvasForCurrentModel(canvasView: canvasView)
             }
         }
     }
@@ -2095,7 +2095,7 @@ final class TileSpawner {
             )
             canvasView.updateTile(activeTile)
             try? upsertNoteTile(noteId: noteId, tileId: tile.id, title: tile.title)
-            try? projectStore.saveCanvas(canvasView.canvasState)
+            try? projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
         }
         let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
         let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
@@ -2222,7 +2222,8 @@ final class TileSpawner {
         }
     }
 
-    /// Persist this project's canvas after the note conversion removed a tile.
+    /// Persist this project's canvas from the mounted scene (after a note
+    /// conversion removed a tile, or a reveal).
     ///
     /// Through the one persistence projection, merged over the file: a persisted
     /// tile vanishes only when its own zone is installed and it is gone from
@@ -2423,7 +2424,7 @@ final class TileSpawner {
     ) throws {
         switch target {
         case .flatCanvasState:
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
             let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
@@ -2459,6 +2460,9 @@ final class TileSpawner {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         let trimmedPath = runDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return .invalidPath }
+        // Still a flat-only spawn (hazard 9). Once the flat scene is retired its
+        // save would write the boot snapshot over this project's file, so refuse.
+        do { _ = try canvasView.flatCanvasStateForPersistence() } catch { return .failure(error) }
 
         let frame = makePlacement(
             worldPoint: worldPoint,
@@ -2479,7 +2483,7 @@ final class TileSpawner {
         canvasView.install(tileView: view, for: tile)
 
         do {
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
         } catch {
             return .failure(error)
         }

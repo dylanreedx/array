@@ -2221,6 +2221,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--retired-flat-write-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceDataProtectionChecks.runRetiredFlatWrite()
+                print("ContinuumRevivedRetiredFlatWriteChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--note-conversion-writer-check") {
             do {
                 _ = NSApplication.shared
@@ -14118,14 +14130,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             var registry = try registryStore.loadOrEmpty()
             var browserState = try projectStore?.loadBrowserState()
-            var canvasState = canvasView?.canvasState
+            // While the boot-only flat scene is live it is the model; once retired
+            // it is a stale boot snapshot, so rewrite the mounted tiles instead
+            // and let each project's controller persist its own file.
+            let flatState = try? canvasView?.flatCanvasStateForPersistence()
+            var canvasState: CanvasState? = flatState ?? canvasView.map {
+                CanvasState(viewport: $0.viewport, tiles: $0.allWorkspaceTiles(), groups: [], lastActiveTileId: nil)
+            }
             let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &browserState, canvasState: &canvasState)
             guard rewrite.registryDeleted else { return }
             try registryStore.save(registry)
             if let browserState { try projectStore?.saveBrowserState(browserState) }
             if let canvasState {
-                for tile in canvasState.tiles { canvasView?.updateTile(tile) }
-                try projectStore?.saveCanvas(canvasState)
+                if flatState != nil {
+                    for tile in canvasState.tiles { canvasView?.updateTile(tile) }
+                    try projectStore?.saveCanvas(canvasState)
+                } else {
+                    let rewritten = Set(rewrite.canvasTileIdsRewritten)
+                    for tile in canvasState.tiles where rewritten.contains(tile.id) { canvasView?.updateTile(tile) }
+                    workspaceRuntime?.scheduleCanvasSaveForMountedProjects()
+                }
             }
             tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
             let idsToSwitch = rewrite.affectedTileIds.isEmpty ? [tileId] : rewrite.affectedTileIds
@@ -16334,7 +16358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // does nothing if they are never built.
         workspaceRuntime?.refreshDocumentRelationships()
 
-        try projectStore.saveCanvas(canvasView.canvasState)
+        try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
     }
 
     private func configureActiveControllerRuntimeCallbacks() {
@@ -16687,6 +16711,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             presentSpawnRefusal("Add a project to this workspace before opening a diff review.")
             return
         }
+        // Still a flat-only spawn (hazard 9). Once the flat scene is retired its
+        // save would write the boot snapshot over the project's file, so refuse.
+        guard (try? canvasView.flatCanvasStateForPersistence()) != nil else {
+            presentSpawnRefusal("Diff review can't open in a zoned workspace yet.")
+            return
+        }
         let reviewId = UUID()
         var canvasState = canvasView.canvasState
         let tile = Self.materializeDiffReviewTile(in: &canvasState, reviewId: reviewId)
@@ -16699,7 +16729,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             })
             diffView.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
             canvasView.install(tileView: diffView, for: tile)
-            try projectStore.saveCanvas(canvasView.canvasState)
+            try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
             focusSpawnedTile(tile.id)
         } catch {
             fputs("spawnDiffReviewFromPalette failed: \(error)\n", stderr)

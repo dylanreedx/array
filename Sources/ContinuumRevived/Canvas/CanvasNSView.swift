@@ -6299,6 +6299,23 @@ final class CanvasNSView: NSView, TokenThemed {
         tileSurfaceStore.prune(keeping: Set(tileViewsInVisualOrder.map { $0.tile.id }))
     }
 
+    enum FlatSceneError: Error, CustomStringConvertible {
+        case retired
+        var description: String {
+            "the boot-only flat scene is retired; its state is a stale boot snapshot and cannot be persisted"
+        }
+    }
+
+    /// The flat scene's state, for the one writer that may still persist it: a
+    /// boot-time spawn before any layer exists. Once the scene is retired its
+    /// model is the boot snapshot of one project, and writing it put those
+    /// boot-time tiles back over whatever that project's file had become.
+    /// Witness: `--retired-flat-write-check`.
+    func flatCanvasStateForPersistence() throws -> CanvasState {
+        guard flatCompatibilitySceneActive else { throw FlatSceneError.retired }
+        return canvasState
+    }
+
     /// Permanently retire the boot-only flat scene before the first workspace
     /// swap. Its model remains intact for its owning ProjectStore, but none of
     /// its views or indexes may leak into the arriving workspace canvas.

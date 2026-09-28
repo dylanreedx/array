@@ -172,6 +172,69 @@ extension WorkspaceDataProtectionChecks {
     }
 }
 
+extension WorkspaceDataProtectionChecks {
+    // MARK: - --retired-flat-write-check
+
+    /// Once the mount retires the boot-only flat scene, its model is a stale
+    /// boot snapshot, and no production path may write it to a project file.
+    static func runRetiredFlatWrite() throws -> URL {
+        try runScenarios("retired-flat-write", [
+            ("inspector-reveal", inspectorRevealAfterRetirement),
+            ("flat-writer-refuses", flatWriterRefusesAfterRetirement)
+        ])
+    }
+
+    /// Spawn a browser and its inspector into zone A1, commit a tile move, then
+    /// ask for the inspector again, which takes the reveal-the-existing-one
+    /// branch. Project A1's file must still hold the moved frame and both
+    /// spawned tiles: writing the flat scene put the boot snapshot back.
+    private static func inspectorRevealAfterRetirement(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("inspector reveal")
+        guard let spawner = m.runtime.controller(for: Fixture.projectA1)?.tileSpawner else {
+            throw Failure(message: "project A1 has no live spawner")
+        }
+        guard case let .spawned(browser) = spawner.spawnBrowser(url: "about:blank", targetZoneId: Fixture.zoneA1) else {
+            throw Failure(message: "browser spawn into zone A1 failed")
+        }
+        guard case let .spawned(inspector) = spawner.spawnBrowserInspector(for: browser.tileId) else {
+            throw Failure(message: "first inspector spawn failed")
+        }
+        var requested = Fixture.seed.tiles[Fixture.noteA1b]!
+        requested.y += 40
+        guard case .committed = m.canvas.applyProgrammaticTileGeometry(
+            tileId: Fixture.noteA1b, in: Fixture.zoneA1, worldFrame: requested, action: .moveTile) else {
+            throw Failure(message: "the tile move was not committed")
+        }
+        let moved = try fixture.modelView().tileWorldFrames[Fixture.noteA1b]
+        guard case let .spawned(revealed) = spawner.spawnBrowserInspector(for: browser.tileId), revealed == inspector else {
+            throw Failure(message: "the second inspector request did not reveal the existing inspector")
+        }
+        // Read the file the reveal left, before any later canvas save rewrites it:
+        // the process can die here.
+        let tiles = fixture.readProjectFile(Fixture.projectA1).canvas?.tiles ?? []
+        let byId = Dictionary(tiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        try expect(byId[browser.tileId] != nil && byId[inspector] != nil,
+                   "project A1's file lost the spawned browser and inspector; it holds \(tiles.map { $0.id.uuidString.suffix(4) })")
+        try expect(byId[Fixture.noteA1b]?.frame == moved,
+                   "project A1's file lost the committed move: \(String(describing: byId[Fixture.noteA1b]?.frame)), committed \(String(describing: moved))")
+        return ["tiles": tiles.map { "\($0.id.uuidString.suffix(4)) \($0.kind)" }]
+    }
+
+    /// The flat scene's writer refuses once the scene is retired, and every
+    /// project file is untouched by the refusal.
+    private static func flatWriterRefusesAfterRetirement(_ fixture: Fixture) throws -> [String: Any] {
+        try fixture.mount()
+        let m = try fixture.requireMounted("flat writer")
+        let before = fixture.readProjectFile(Fixture.projectA1).bytes
+        var refused = false
+        do { _ = try m.canvas.flatCanvasStateForPersistence() } catch { refused = true }
+        try expect(refused, "the retired flat scene's state was still handed out for persistence")
+        try expect(fixture.readProjectFile(Fixture.projectA1).bytes == before, "a refused flat write changed project A1's file")
+        return ["refused": refused]
+    }
+}
+
 private extension Optional {
     func orThrow(_ error: Error) throws -> Wrapped {
         guard let value = self else { throw error }

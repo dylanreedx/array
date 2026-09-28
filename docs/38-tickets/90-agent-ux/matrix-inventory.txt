@@ -129,6 +129,7 @@ check --relationship-geometry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
+check --retired-flat-write-check
 check --run-artifacts-tile-check
 check --session-observer-check
 check --session-resume-check
@@ -348,6 +349,7 @@ leg run_app_check .build/debug/Array --relationship-geometry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
+leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
 leg run_app_check .build/debug/Array --session-observer-check
 leg run_app_check .build/debug/Array --session-resume-check
