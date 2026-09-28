@@ -816,7 +816,7 @@ extension SessionObserver {
             let url = try writeArtifact(["status": "skipped", "reason": "resolved executable did not behave like tmux -V", "tmuxPath": tmuxPath])
             return TmuxIntegrationOutcome(message: "SKIP: terminal-tmux-observer-check resolved executable is not real tmux; artifact: \(url.path)", artifact: url)
         }
-        guard let clang = which("clang") else {
+        guard which("clang") != nil else {
             let url = try writeArtifact(["status": "skipped", "reason": "no clang on PATH to build the sentinel 'claude' binary"])
             return TmuxIntegrationOutcome(message: "SKIP: terminal-tmux-observer-check no clang available; artifact: \(url.path)", artifact: url)
         }
@@ -839,8 +839,12 @@ extension SessionObserver {
         try "#include <unistd.h>\nint main(void) { pause(); return 0; }\n".write(to: sourceURL, atomically: true, encoding: .utf8)
         let sentinelURL = binDir.appendingPathComponent("claude")
         let compile = Process()
-        compile.executableURL = URL(fileURLWithPath: clang)
-        compile.arguments = ["-O0", "-o", sentinelURL.path, sourceURL.path]
+        // Through `xcrun --sdk macosx`, the way SwiftPM resolves its SDK. A bare
+        // `clang` picks the Command Line Tools SDK, which can be newer than the
+        // selected toolchain's linker understands (MacOSX27.0.sdk's
+        // libSystem.B.tbd under Xcode 26.6's ld: "tapi error: malformed file").
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compile.arguments = ["--sdk", "macosx", "clang", "-O0", "-o", sentinelURL.path, sourceURL.path]
         try compile.run()
         compile.waitUntilExit()
         try expect(compile.terminationStatus == 0, "failed to compile the sentinel 'claude' binary via clang")
@@ -1029,7 +1033,7 @@ extension SessionObserver {
         guard let version = try? runTmux(tmuxPath, ["-V"], allowFailure: true), version.status == 0, version.stdout.lowercased().hasPrefix("tmux") else {
             return "SKIP: terminal-tmux-observer-wiring-check resolved executable did not behave like tmux -V"
         }
-        guard let clang = which("clang") else {
+        guard which("clang") != nil else {
             return "SKIP: terminal-tmux-observer-wiring-check no clang available to build the sentinel 'claude' binary"
         }
 
@@ -1052,8 +1056,8 @@ extension SessionObserver {
         try "#include <unistd.h>\nint main(void) { pause(); return 0; }\n".write(to: sourceURL, atomically: true, encoding: .utf8)
         let sentinelURL = binDir.appendingPathComponent("claude")
         let compile = Process()
-        compile.executableURL = URL(fileURLWithPath: clang)
-        compile.arguments = ["-O0", "-o", sentinelURL.path, sourceURL.path]
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compile.arguments = ["--sdk", "macosx", "clang", "-O0", "-o", sentinelURL.path, sourceURL.path]
         try compile.run()
         compile.waitUntilExit()
         try expect(compile.terminationStatus == 0, "failed to compile the sentinel 'claude' binary via clang")

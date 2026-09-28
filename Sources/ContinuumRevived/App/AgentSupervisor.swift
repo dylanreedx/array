@@ -7732,6 +7732,9 @@ private func runCompletionComposerChecks() async throws -> Int {
         backing: .buffered,
         defer: false
     )
+    // `close()` below releases a window that owns its own release; under ARC
+    // that is a second release, and the autorelease pool pops a dead NSWindow.
+    window.isReleasedWhenClosed = false
     window.contentView = composer
     window.makeKey()
     guard window.makeFirstResponder(textView), composer.isEditorFocused else {
@@ -7934,6 +7937,9 @@ func runAgentCompletionSemanticChecks() async throws {
         backing: .buffered,
         defer: false
     )
+    // `close()` below releases a window that owns its own release; under ARC
+    // that is a second release, and the autorelease pool pops a dead NSWindow.
+    window.isReleasedWhenClosed = false
     window.contentView = composer
     window.makeKey()
     guard window.makeFirstResponder(textView) else {

@@ -28073,13 +28073,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let firstOldWebView = firstRuntime.webView
 
-        // Navigate to second page to build back history.
+        // Navigate to second page to build back history. Page1 has to have
+        // committed first: loading Page2 over a still-provisional Page1 cancels
+        // it, and the history then holds Page2 alone, with nothing to go back to.
+        let firstPageDeadline = Date().addingTimeInterval(3.0)
+        while firstRuntime.webView.isLoading || !(firstRuntime.webView.url?.absoluteString.contains("Page1") ?? false),
+              Date() < firstPageDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
         firstRuntime.loadURL(secondURL)
         // Spin the run loop until WebKit commits the navigation and populates
         // interactionState (required for A8 unconditional assertion). WebKit needs
         // a committed navigation before interactionState is non-nil. Timeout 3s.
+        // Waiting for a non-nil interactionState alone is not enough: Page1's own
+        // commit satisfies it, so the snapshot used to be written while Page2 was
+        // still loading and A12 read Page1 back. Wait for Page2 to have committed,
+        // finished, and reached the runtime's URL (set by its KVO hop).
+        func secondPageSettled() -> Bool {
+            guard firstRuntime.capturedInteractionState != nil, !firstRuntime.webView.isLoading,
+                  let committed = firstRuntime.webView.url?.absoluteString else { return false }
+            return committed.contains("Page2") && firstRuntime.url == committed
+        }
         let interactionStateDeadline = Date().addingTimeInterval(3.0)
-        while firstRuntime.capturedInteractionState == nil, Date() < interactionStateDeadline {
+        while !secondPageSettled(), Date() < interactionStateDeadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
         }
 
@@ -28141,8 +28157,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // navigation survived the restore). Fallback per spec lines 179-182: if canGoBack
         // is flaky in the headless harness, the blob round-trips (appliedState == saved
         // blob), proving interactionState — not just URL — was set on the fresh WebView.
-        // Give WebKit a run-loop tick to settle after restoreInteractionState.
-        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+        // Give WebKit time to settle after restoreInteractionState. One
+        // `run(mode:before:)` returns after the first source it handles, not after
+        // the interval, so poll (bounded) for the history this assertion reads.
+        let restoreDeadline = Date().addingTimeInterval(3.0)
+        repeat {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        } while !secondRuntime.webView.canGoBack && Date() < restoreDeadline
         let appliedState = secondRuntime.capturedInteractionState
         try expect(
             appliedState != nil,

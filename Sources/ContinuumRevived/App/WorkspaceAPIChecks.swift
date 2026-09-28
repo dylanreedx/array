@@ -348,12 +348,15 @@ enum WorkspaceAPIChecks {
         try expect(coverage?["complete"]?.bool == false, "coverage must not claim completeness with an unhydrated zone")
         try expect(coverage?["installedZoneIds"]?.array?.compactMap(uuid) == [f.zoneB], "installed zones = [zoneB], got \(String(describing: coverage?["installedZoneIds"]))")
         try expect(coverage?["unhydratedZoneIds"]?.array?.compactMap(uuid) == [f.zoneB2], "unhydrated zones = [zoneB2]")
-        // The preset covers the reads, the open, reveal and operation.get.
+        // The preset covers the reads, the open, reveal, operation.get and the
+        // own-checkout board operations (KB-01 grants board.query/board.apply by
+        // preset; CoreChecks pins that in the contract sections).
         // `canvas.apply` and `agent.delegate` are withheld until the user
         // approves them, so they must NOT be advertised here — a capability
         // list is a promise, not a menu of what exists.
         try expect((ctx["capabilities"]?.array?.compactMap(\.string) ?? []).sorted()
-                   == ["agent.find", "agent.inspect", "agent.reveal", "artifact.open", "canvas.query", "operation.get", "workspace.context"],
+                   == ["agent.find", "agent.inspect", "agent.reveal", "artifact.open", "board.apply", "board.query",
+                       "canvas.query", "operation.get", "workspace.context"],
                    "capabilities from the preset grant, got \(String(describing: ctx["capabilities"]))")
         let ctxBytes = try JSONSerialization.data(withJSONObject: WorkspaceAPIService.plain(ctx)).count
         try expect(ctxBytes < WorkspaceContextResponse.encodedByteCeiling, "context must stay under the byte ceiling, got \(ctxBytes)")
