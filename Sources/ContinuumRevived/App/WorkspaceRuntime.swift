@@ -52,6 +52,13 @@ final class WorkspaceRuntime {
     // Retains the installed ZoneLayers so the check (and T09 swap) can read back placements.
     private var installedLayers: [CanvasNSView.ZoneLayer] = []
 
+    // The document's legacy foreign placements: zones naming a project another
+    // workspace owns. The document keeps them; the mount excludes them. Written
+    // at init and on every mount, so a later pass over `document.zones` can
+    // exclude them too — `reconcileHydration` once acquired their projects,
+    // which then blocked switching to the workspace that owns them.
+    private var foreignZoneIds: Set<UUID> = []
+
     // CX-01 (`.plans/59`, §16/§7.2): two host-observed counters.
     //
     // `interactionGeneration` bumps on USER-driven presentation changes only —
@@ -217,6 +224,11 @@ final class WorkspaceRuntime {
         self.registryStore = registryStore
         self.ghostty = ghostty
         self.browserEngine = browserEngine
+        // Production boots through `adoptCanvas`, never `install`, so the boot
+        // document's foreign placements are resolved here.
+        if let appRegistry = try? registryStore.loadOrEmpty() {
+            foreignZoneIds = Self.foreignZoneIds(in: document, workspaceId: workspaceId, registry: appRegistry)
+        }
     }
 
     /// Convenience init for an already-built boot controller (the production
@@ -706,6 +718,7 @@ final class WorkspaceRuntime {
         // in a workspace that does not own their project.
         let mountableZones = try Self.mountableZones(
             in: document, workspaceId: workspaceId, registry: appRegistry)
+        foreignZoneIds = Set(document.zones.map(\.zoneId)).subtracting(mountableZones.map(\.zoneId))
         self.canvasView = canvasView
         canvasView.activateUndoWorkspace(workspaceId)
 
@@ -1552,13 +1565,14 @@ final class WorkspaceRuntime {
         try flushMountedWorkspaceState()
 
         // 3. Diff project sets.
+        // `targetZones` holds only projects the target owns, so a project in both
+        // sets was acquired by the departing workspace through a stale foreign
+        // placement. Hand its controller over. Refusing here trapped the user in
+        // the departing workspace until a third one reset the acquisitions.
         let currentProjectIds = Set(acquiredProjectIds)
         let targetProjectIds = Set(
             targetZones.compactMap(\.projectId)
         )
-        if let sharedProjectId = currentProjectIds.intersection(targetProjectIds).first {
-            throw WorkspaceSwitchError.projectAppearsInBothWorkspaces(sharedProjectId)
-        }
         let departing = currentProjectIds.subtracting(targetProjectIds)
         let arriving = targetProjectIds.subtracting(currentProjectIds)
 
@@ -1653,6 +1667,7 @@ final class WorkspaceRuntime {
         if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
         canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers, registry: appRegistry))
         installedLayers = layers
+        foreignZoneIds = Set(targetDocument.zones.map(\.zoneId)).subtracting(targetZoneIds)
 
         // 5. Release departing (after setZones so adapters are already unregistered by T05).
         for projectId in departing {
@@ -1698,14 +1713,11 @@ final class WorkspaceRuntime {
 
     enum WorkspaceSwitchError: Error, CustomStringConvertible {
         case documentNotFound(UUID)
-        case projectAppearsInBothWorkspaces(UUID)
         /// M1.10: the runtime was asked to switch before anything gave it a canvas.
         case noCanvas
         var description: String {
             switch self {
             case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)"
-            case let .projectAppearsInBothWorkspaces(projectId):
-                return "switchWorkspace: project \(projectId) appears in both workspaces; move it explicitly instead"
             case .noCanvas:
                 return "switchWorkspace: this WorkspaceRuntime has no canvas — nothing called adoptCanvas(_:), so the switch would have silently changed the document and left the canvas alone"
             }
@@ -1740,6 +1752,17 @@ final class WorkspaceRuntime {
             guard let projectId = zone.projectId else { return true }
             return try registry.exclusiveWorkspaceOwner(of: projectId) == workspaceId
         }
+    }
+
+    private static func foreignZoneIds(
+        in document: WorkspaceDocument,
+        workspaceId: UUID,
+        registry: Registry
+    ) -> Set<UUID> {
+        guard let mountable = try? mountableZones(in: document, workspaceId: workspaceId, registry: registry) else {
+            return []
+        }
+        return Set(document.zones.map(\.zoneId)).subtracting(mountable.map(\.zoneId))
     }
 
     // MARK: - Browser Runtime Budget (T07)
@@ -1821,6 +1844,7 @@ final class WorkspaceRuntime {
     func reconcileHydration() {
         reconcileCount += 1
         guard let canvasView else { return }
+        let mountedZones = document.zones.filter { !foreignZoneIds.contains($0.zoneId) }
         let viewport = canvasView.viewport
         let visibleSize = CGSize(
             width: canvasView.bounds.width > 0 ? canvasView.bounds.width : 1280,
@@ -1828,14 +1852,14 @@ final class WorkspaceRuntime {
         )
         let focusedTileZone: UUID? = {
             guard let activeTileId = canvasView.canvasState.lastActiveTileId else { return nil }
-            return document.zones.first(where: { zone in
+            return mountedZones.first(where: { zone in
                 guard let projectId = zone.projectId,
                       let controller = registry.controller(for: projectId) else { return false }
                 return controller.canvasView?.canvasState.tiles.contains { $0.id == activeTileId } ?? false
             })?.zoneId
         }()
         let plan = ZoneHydrationOrchestrator.plan(
-            zones: document.zones,
+            zones: mountedZones,
             viewport: viewport,
             visibleSize: visibleSize,
             focusedTileZone: focusedTileZone,
@@ -1848,7 +1872,7 @@ final class WorkspaceRuntime {
         // TIER still follows the camera like every other zone -- pinning it live
         // would defeat the hydration budget and keep a zone hot forever.
         let armedZoneId = document.lastActiveZoneId
-        for zone in document.zones {
+        for zone in mountedZones {
             guard let projectId = zone.projectId,
                   let plannedTier = plan.tier(for: zone.zoneId) else { continue }
             guard let controller = registry.controller(for: projectId) else {

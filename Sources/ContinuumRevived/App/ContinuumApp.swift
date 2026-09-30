@@ -13117,7 +13117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // ---------------------------------------------------------------- (3)
         // ATOMICITY. A `WorkspaceRuntime` that never adopted a canvas throws
         // `WorkspaceSwitchError.noCanvas` out of `switchWorkspace` — the same throw
-        // `documentNotFound` and `projectAppearsInBothWorkspaces` make. The registry
+        // `documentNotFound` makes. The registry
         // must be exactly as it was, and the message must not claim otherwise.
         let (atomicSupport, atomicRegistryStore) = try makeFixture("atomic")
         let atomicApp = AppDelegate()
@@ -13438,6 +13438,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and frame workspace bounds")
         try expect(transitionLabelShown, "workspace switch should show transition label")
 
+        // FOREIGN PLACEMENT. Dylan's "personal" document still held zones for two
+        // projects "work" owns. The mount hid them, but `reconcileHydration` walked
+        // `document.zones` and acquired their projects anyway, and `switchWorkspace`
+        // then refused personal -> work as "appears in both workspaces". Only a
+        // third workspace reset the acquisitions. Driven through the production
+        // shape: designated init + `adoptCanvas`, never `install(into:)`.
+        let personal = UUID(uuidString: "00000000-0000-0000-0000-00000000F641")!
+        let work = UUID(uuidString: "00000000-0000-0000-0000-00000000F642")!
+        let projectP = UUID(uuidString: "00000000-0000-0000-0000-00000000F643")!
+        let projectW = UUID(uuidString: "00000000-0000-0000-0000-00000000F644")!
+        let zoneP = UUID(uuidString: "00000000-0000-0000-0000-00000000F645")!
+        let zoneForeignW = UUID(uuidString: "00000000-0000-0000-0000-00000000F646")!
+        let zoneW = UUID(uuidString: "00000000-0000-0000-0000-00000000F647")!
+        let projectPRoot = tempRoot.appendingPathComponent("ProjectP", isDirectory: true)
+        let projectWRoot = tempRoot.appendingPathComponent("ProjectW", isDirectory: true)
+        try fm.createDirectory(at: projectPRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectWRoot, withIntermediateDirectories: true)
+        let projectPObject = makeProject(id: projectP, name: "Project P", root: projectPRoot, now: now)
+        let projectWObject = makeProject(id: projectW, name: "Project W", root: projectWRoot, now: now)
+        let storeP = ProjectStore(projectRoot: projectPRoot)
+        let storeW = ProjectStore(projectRoot: projectWRoot)
+        try storeP.saveProject(projectPObject)
+        try storeP.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        try storeW.saveProject(projectWObject)
+        try storeW.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let docPersonal = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneP, projectId: projectP, origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 400, height: 300), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "P"),
+                // Under the camera, so the hydration plan puts it in the live tier.
+                ZonePlacement(zoneId: zoneForeignW, projectId: projectW, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "stale W"),
+            ],
+            zoneZOrder: [zoneP, zoneForeignW],
+            lastActiveZoneId: zoneP
+        )
+        let docWork = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(zoneId: zoneW, projectId: projectW, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "W")],
+            zoneZOrder: [zoneW],
+            lastActiveZoneId: zoneW
+        )
+
+        /// One fresh app mounted on "personal". Returns what the switch to "work"
+        /// and back reported, after `makeStale` had its chance to acquire W.
+        func foreignScenario(_ label: String, makeStale: (WorkspaceRuntime) throws -> Void) throws -> (reconcileAcquiredForeign: Bool, switchedToWork: Bool, switchedBack: Bool, releasedAfterReturn: Bool) {
+            let support = tempRoot.appendingPathComponent("Foreign-\(label)", isDirectory: true)
+            try fm.createDirectory(at: support, withIntermediateDirectories: true)
+            try WorkspaceStore(workspaceId: personal, applicationSupportDirectory: support).save(docPersonal)
+            try WorkspaceStore(workspaceId: work, applicationSupportDirectory: support).save(docWork)
+            var foreignRegistry = Registry.empty()
+            foreignRegistry.lastActiveWorkspaceId = personal
+            foreignRegistry.lastActiveProjectId = projectP
+            foreignRegistry.workspaces = [
+                WorkspaceEntry(id: personal, name: "personal", projectIds: [projectP], createdAt: now, updatedAt: now),
+                WorkspaceEntry(id: work, name: "work", projectIds: [projectW], createdAt: now, updatedAt: now),
+            ]
+            foreignRegistry.projects = [
+                ProjectEntry(id: projectP, name: "Project P", rootPath: projectPRoot.path, workspaceId: personal, lastOpenedAt: now, pinned: false, missing: false),
+                ProjectEntry(id: projectW, name: "Project W", rootPath: projectWRoot.path, workspaceId: work, lastOpenedAt: now, pinned: false, missing: false),
+            ]
+            let foreignRegistryStore = RegistryStore(applicationSupportDirectory: support)
+            try foreignRegistryStore.save(foreignRegistry)
+
+            let foreignApp = AppDelegate()
+            let foreignBrowserEngine = BrowserEngineContext()
+            defer { foreignBrowserEngine.shutdown() }
+            let foreignZoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+                if projectId == projectP { return ZoneRuntimeController(projectRoot: projectPRoot, projectStore: storeP, project: projectPObject) }
+                if projectId == projectW { return ZoneRuntimeController(projectRoot: projectWRoot, projectStore: storeW, project: projectWObject) }
+                throw CheckError.failed("unexpected project id \(projectId)")
+            })
+            let foreignRuntime = WorkspaceRuntime(
+                workspaceId: personal, document: docPersonal, registry: foreignZoneRegistry,
+                focusBroker: foreignApp.focusBroker, registryStore: foreignRegistryStore,
+                ghostty: nil, browserEngine: foreignBrowserEngine)
+            let foreignCanvas = CanvasNSView(canvasState: CanvasState(viewport: docPersonal.viewport, tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+            foreignCanvas.frame = NSRect(x: 0, y: 0, width: 1_200, height: 800)
+            foreignApp.registryStore = foreignRegistryStore
+            foreignApp.workspaceRuntime = foreignRuntime
+            foreignApp.canvasView = foreignCanvas
+            foreignRuntime.adoptCanvas(foreignCanvas)
+
+            foreignRuntime.flushPendingHydrationReconcile()
+            let reconcileAcquiredForeign = foreignZoneRegistry.controller(for: projectW) != nil
+            try makeStale(foreignRuntime)
+            let switchedToWork = foreignApp.switchWorkspaceFromSidebarIfNeeded(work)
+            let switchedBack = switchedToWork && foreignApp.switchWorkspaceFromSidebarIfNeeded(personal)
+            foreignRuntime.flushPendingHydrationReconcile()
+            let releasedAfterReturn = switchedBack && foreignZoneRegistry.controller(for: projectW) == nil
+            return (reconcileAcquiredForeign, switchedToWork, switchedBack, releasedAfterReturn)
+        }
+
+        // (F1) the real route: the camera settles over the stale placement.
+        let viaCamera = try foreignScenario("camera") { _ in }
+        try expect(!viaCamera.reconcileAcquiredForeign,
+                   "hydration must not acquire a project through another workspace's stale placement")
+        try expect(viaCamera.switchedToWork, "personal -> work must switch directly with a stale placement in personal")
+        try expect(viaCamera.switchedBack, "work -> personal must switch directly")
+        // (F2) any other stale acquisition: the switch hands it over instead of refusing.
+        let viaStaleAcquire = try foreignScenario("acquired") { runtime in
+            _ = try runtime.ensureSpawner(forProjectId: projectW)
+        }
+        try expect(viaStaleAcquire.switchedToWork,
+                   "a switch must hand over a project the departing workspace acquired but the target owns")
+        try expect(viaStaleAcquire.switchedBack && viaStaleAcquire.releasedAfterReturn,
+                   "switching back must release the handed-over project, not leak its controller")
+        let foreignPlacementSwitchWorked = !viaCamera.reconcileAcquiredForeign && viaCamera.switchedToWork
+            && viaCamera.switchedBack && viaStaleAcquire.switchedToWork && viaStaleAcquire.releasedAfterReturn
+
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent("qa-runs", isDirectory: true)
@@ -13455,6 +13564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "roundTripViewportRestored": roundTripViewportRestored,
             "deletedFocusFallbackWorked": deletedFocusFallbackWorked,
             "transitionLabelShown": transitionLabelShown,
+            "foreignPlacementSwitchWorked": foreignPlacementSwitchWorked,
             "departingViewport": ["x": persistedAAfterDeparture.viewport.x, "y": persistedAAfterDeparture.viewport.y, "zoom": persistedAAfterDeparture.viewport.zoom],
             "targetViewport": ["x": docB.viewport.x, "y": docB.viewport.y, "zoom": docB.viewport.zoom],
             "fallbackViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
@@ -15693,8 +15803,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Delete a workspace, or leave everything exactly as it was.
     ///
     /// 0721: the ordering here is the fix, not a tidy-up. This used to save the
-    /// registry FIRST and then call `switchWorkspace`, which throws on `noCanvas`,
-    /// `documentNotFound` and `projectAppearsInBothWorkspaces`. A throw landed in the
+    /// registry FIRST and then call `switchWorkspace`, which throws on `noCanvas`
+    /// and `documentNotFound`. A throw landed in the
     /// catch below, told the user "Delete workspace failed", and skipped
     /// `deleteDocument()` — while the workspace was already gone from `registry.json`
     /// and stayed gone on the next launch. Every step that can fail now runs BEFORE
