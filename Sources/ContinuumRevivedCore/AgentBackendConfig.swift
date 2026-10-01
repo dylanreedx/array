@@ -37,6 +37,10 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
     public let displayNames: [String: String]
     public let contextWindows: [String: Int]
     public let refreshedAt: Date?
+    /// The model the CLI itself calls its default (claude's `default` entry,
+    /// codex's `isDefault`). Nil when the CLI names none; callers then take the
+    /// first listed model, which is the CLI's own ordering.
+    public let defaultModel: String?
 
     public init(
         harness: AgentHarness,
@@ -44,7 +48,8 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
         models: [String],
         displayNames: [String: String] = [:],
         contextWindows: [String: Int] = [:],
-        refreshedAt: Date? = nil
+        refreshedAt: Date? = nil,
+        defaultModel: String? = nil
     ) {
         self.harness = harness
         self.readiness = readiness
@@ -52,6 +57,14 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
         self.displayNames = displayNames
         self.contextWindows = contextWindows
         self.refreshedAt = refreshedAt
+        self.defaultModel = defaultModel
+    }
+
+    /// The seed for a new agent on this harness: the CLI's default when it is
+    /// offered, otherwise the first model the CLI listed.
+    public var seedModel: String? {
+        if let defaultModel, models.contains(defaultModel) { return defaultModel }
+        return models.first
     }
 }
 

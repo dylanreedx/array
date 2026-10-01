@@ -501,12 +501,13 @@ private func runCodexCatalogUnionChecks() {
     let seeded = ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-5"]
     catalog.resetForQA(options: seeded)
     catalog.apply(codexBackendAvailable: true)
-    // Derived from the curated list rather than re-listing it. Pinning the data
+    catalog.apply(codexCatalog: AgentCatalogQAFixture.codex)
+    // Derived from the fixture rather than re-listing it. Pinning the data
     // meant every catalogue refresh re-broke this leg — `c9f7bc89` added
     // `gpt-6-astra` and left it red, and because `expect` calls `exit(1)` that
     // took the rest of the executable with it. The RULE is what this leg owns:
-    // seeded ids keep their positions and every curated id appears exactly once.
-    let expectedUnion = seeded + CodexCLIBackend.curatedCatalogModels.filter { !seeded.contains($0) }
+    // seeded ids keep their positions and every codex id appears exactly once.
+    let expectedUnion = seeded + AgentCatalogQAFixture.codex.models.filter { !seeded.contains($0) }
     expect(catalog.options() == expectedUnion,
            "AgentModelCatalog: codex entries must append without duplicating ids already present, got \(catalog.options())")
     expect(Set(catalog.options()).count == catalog.options().count,
@@ -525,12 +526,12 @@ private func runCodexCatalogUnionChecks() {
 
     // The claude and codex stores are independent: applying one must not touch
     // the other.
-    catalog.apply(claudeBackendAvailable: true)
-    catalog.apply(codexBackendAvailable: true)
-    expect(catalog.options().contains("anthropic/claude-sonnet-4-5") && catalog.options().contains("openai-codex/gpt-5.6-terra"),
+    catalog.apply(claudeCatalog: AgentCatalogQAFixture.claude)
+    catalog.apply(codexCatalog: AgentCatalogQAFixture.codex)
+    expect(catalog.options().contains("anthropic/claude-sonnet-4-6") && catalog.options().contains("openai-codex/gpt-5.6-terra"),
            "AgentModelCatalog: claude and codex unions must coexist, got \(catalog.options())")
     catalog.apply(codexBackendAvailable: false)
-    expect(catalog.options().contains("anthropic/claude-sonnet-4-5") && !catalog.options().contains("openai-codex/gpt-5.6-terra"),
+    expect(catalog.options().contains("anthropic/claude-sonnet-4-6") && !catalog.options().contains("openai-codex/gpt-5.6-terra"),
            "AgentModelCatalog: clearing codex must leave the claude union intact, got \(catalog.options())")
 
     catalog.resetForQA()

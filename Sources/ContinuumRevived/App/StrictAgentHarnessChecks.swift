@@ -140,8 +140,9 @@ func runStrictAgentHarnessChecks() throws {
     // construction those are the aliases the paragraph itself calls "an alias for
     // the latest model" — a name that renames itself under the user, is not a key
     // in the context-window map, and can never select a previous model. The scrape
-    // is gone; the harness serves `ClaudeCLIBackend.curatedCatalogModels`, and the
-    // probe no longer runs `--help` at all (see the launch count below).
+    // is gone; the harness serves the CLI's own `initialize` catalogue, keyed by
+    // resolved id, and the probe no longer runs `--help` at all (see the launch
+    // count below).
     for id in AgentModelCatalog().snapshot(for: .claudeCode).models {
         let argument = ClaudeCLIBackend.modelArgument(forCatalogId: id)
         try expect(argument.hasPrefix("claude-") && argument.contains(where: \.isNumber),
@@ -177,6 +178,18 @@ func runStrictAgentHarnessChecks() throws {
                "a model the harness does not own refused without saying so: \(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")))")
     try expect(AgentSupervisor.sendRefusal(record: record(.claudeCode, model: "anthropic/claude-opus-5"), catalog: refusalCatalog) == nil,
                "a ready harness holding its own model was refused")
+    // 0.7.24: the claude and codex catalogues are the CLIs' own now, and each
+    // drops older models from its list. An agent persisted on one keeps running:
+    // those CLIs take the exact id and refuse a bad one themselves.
+    try expect(AgentSupervisor.sendRefusal(record: record(.claudeCode, model: "anthropic/claude-opus-4-5"), catalog: refusalCatalog) == nil,
+               "an existing claude agent was refused because claude's own list stopped naming its model: \(refusal(record(.claudeCode, model: "anthropic/claude-opus-4-5")))")
+    // Pi keeps the strict rule: its `--model` fuzzy-matches, so an id it did not
+    // list could silently run a different model.
+    let piRefusalCatalog = AgentModelCatalog()
+    piRefusalCatalog.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: ["google/gemini"]))
+    let unlistedPi = AgentSupervisor.sendRefusal(record: record(.pi, model: "google/gemini-old"), catalog: piRefusalCatalog) ?? "<accepted>"
+    try expect(unlistedPi.contains("cannot run"),
+               "a pi agent on a model pi does not list must still be refused, got \(unlistedPi)")
 
     let countable = AgentModelCatalog(probeExecutor: { _, arguments, _ in
         switch arguments {

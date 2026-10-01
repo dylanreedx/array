@@ -56,49 +56,58 @@ public enum ClaudeCLIBackend {
         effortLevels.contains(thinking) ? thinking : nil
     }
 
-    /// The catalogue entries the claude backend contributes when the CLI is
-    /// present and logged in.
-    ///
-    /// These used to be claude's three moving ALIASES (`opus`, `sonnet`,
-    /// `haiku`). An alias is not a model: it renames itself under the user
-    /// every time Anthropic ships, so "what did this agent run" had no answer,
-    /// a previous model could not be chosen at all, and — because the context
-    /// window map is keyed by concrete ids — every claude agent's radial ring
-    /// had no denominator. The list is now EXPLICIT and includes previous
-    /// models, newest first.
-    ///
-    /// Every id is verbatim from a provider catalogue (`pi --list-models`,
-    /// probed 2026-09-21) and `claude --help` documents that `--model` takes
-    /// "a model's full name", so `modelArgument(forCatalogId:)` hands the CLI
-    /// a name it accepts. The dated pins (`claude-opus-4-5-20251101`, …) are
-    /// deliberately omitted: they name the same weights as the undated id and
-    /// would double the picker for no user-visible choice.
-    public static let curatedCatalogModels: [String] = [
-        "anthropic/claude-opus-5",
-        "anthropic/claude-fable-5-1",
-        "anthropic/claude-fable-5",
-        "anthropic/claude-sonnet-5",
-        "anthropic/claude-opus-4-8",
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-6",
-        "anthropic/claude-opus-4-5",
-        "anthropic/claude-sonnet-4-5",
-        "anthropic/claude-haiku-4-5",
+    /// The claude CLI's own model catalogue, read from the `initialize`
+    /// control handshake: the same list claude's `/model` picker shows, for this
+    /// account and this CLI version. It sends no prompt and starts no turn.
+    /// Hooks are disabled for the probe only, so a model listing never runs the
+    /// user's SessionStart hooks (`disableAllHooks` changes no catalogue entry;
+    /// checked against the live CLI 2026-10-01).
+    public static let modelProbeArguments = [
+        "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--settings", #"{"disableAllHooks":true}"#,
     ]
-    public static let curatedCatalogDisplayNames: [String: String] = [
-        "anthropic/claude-opus-5": "Claude Opus 5",
-        "anthropic/claude-fable-5-1": "Claude Fable 5.1",
-        "anthropic/claude-fable-5": "Claude Fable 5",
-        "anthropic/claude-sonnet-5": "Claude Sonnet 5",
-        "anthropic/claude-opus-4-8": "Claude Opus 4.8",
-        "anthropic/claude-opus-4-7": "Claude Opus 4.7",
-        "anthropic/claude-opus-4-6": "Claude Opus 4.6",
-        "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
-        "anthropic/claude-opus-4-5": "Claude Opus 4.5",
-        "anthropic/claude-sonnet-4-5": "Claude Sonnet 4.5",
-        "anthropic/claude-haiku-4-5": "Claude Haiku 4.5",
-    ]
+    public static let modelProbeRequestId = "array-models"
+    public static var modelProbeRequestLine: String {
+        #"{"type":"control_request","request_id":"\#(modelProbeRequestId)","request":{"subtype":"initialize"}}"#
+    }
+
+    /// One stdout line of the probe → a catalogue, or nil when the line is not
+    /// the handshake's answer or names no model.
+    ///
+    /// Each entry's id is its `resolvedModel`, the exact id the alias stands
+    /// for today: `opus` arrives as `claude-opus-5-5`, so a record says which
+    /// model it ran and the context-window map has a key for it. The `default`
+    /// entry is not a model of its own; it names the CLI's default. Order is the
+    /// CLI's.
+    public static func parseInitializeModels(controlResponseLine line: String) -> AgentHarnessCatalogSnapshot? {
+        guard let object = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+              (object["type"] as? String) == "control_response",
+              let envelope = object["response"] as? [String: Any],
+              (envelope["subtype"] as? String) == "success",
+              let response = envelope["response"] as? [String: Any],
+              let entries = response["models"] as? [[String: Any]] else { return nil }
+        var models: [String] = []
+        var names: [String: String] = [:]
+        var defaultModel: String?
+        for entry in entries {
+            guard let value = entry["value"] as? String else { continue }
+            let resolved = (entry["resolvedModel"] as? String) ?? value
+            guard resolved.hasPrefix("claude-") else { continue }
+            let id = "anthropic/\(resolved)"
+            if value == "default" {
+                defaultModel = id
+                continue
+            }
+            guard !models.contains(id) else { continue }
+            models.append(id)
+            if let name = entry["displayName"] as? String, !name.isEmpty { names[id] = name }
+        }
+        if let defaultModel, !models.contains(defaultModel) { models.insert(defaultModel, at: 0) }
+        guard !models.isEmpty else { return nil }
+        return AgentHarnessCatalogSnapshot(
+            harness: .claudeCode, readiness: .ready, models: models,
+            displayNames: names, defaultModel: defaultModel)
+    }
 
     /// `claude auth status --json` → is a subscription login present. Pure —
     /// pinned against the real output shape. Array only ever READS readiness;

@@ -364,7 +364,7 @@ private func runClaudeResolvedModelContextWindowChecks() {
            "resolved-model: the fixture must keep the alias unkeyed, or this witnesses nothing")
     // And the fix at the catalogue level: every id the claude harness now offers
     // is the SHAPE this map is keyed by, so the direct lookup can hit at all.
-    for id in ClaudeCLIBackend.curatedCatalogModels where id.hasSuffix("claude-opus-5") || id.hasSuffix("claude-opus-4-5") {
+    for id in AgentCatalogQAFixture.claude.models where id.hasSuffix("claude-opus-5") || id.hasSuffix("claude-fable-5") {
         expect(windows[id] != nil,
                "resolved-model: \(id) must be a key in a models-store window map — an offered id that cannot be a key is the empty ring, back again")
     }
@@ -535,9 +535,9 @@ private func runClaudeBackendPolicyChecks() {
            "ClaudeCLIBackend: an unprefixed value passes through")
     // Routing is prefix-based and model-agnostic, which is why the catalogue
     // could move from aliases to explicit ids without touching it.
-    for id in ClaudeCLIBackend.curatedCatalogModels {
+    for id in AgentCatalogQAFixture.claude.models {
         expect(ClaudeCLIBackend.routesToClaude(model: id, claudeCLIAvailable: true),
-               "ClaudeCLIBackend: every curated id must route to the claude CLI, got \(id)")
+               "ClaudeCLIBackend: every id claude reports must route to the claude CLI, got \(id)")
     }
 
     // Effort: exact pass-through or omission — never an invented mapping.
@@ -554,26 +554,27 @@ private func runClaudeBackendPolicyChecks() {
 }
 
 private func runClaudeCatalogUnionChecks() {
-    // The claude backend UNIONS into the catalogue: pi's list (or the frozen
-    // fallback) keeps standing, the curated EXPLICIT ids append, and losing the
-    // CLI clears them again. QA instances never probe, so this is all
-    // fixture-driven. Derived from the curated list rather than re-listing it:
+    // The claude backend UNIONS into the catalogue: pi's list (or the QA
+    // fixture) keeps standing, the ids claude reports append, and losing the CLI
+    // clears them again. QA instances never probe, so this is all
+    // fixture-driven. Derived from the capture rather than re-listing it:
     // pinning the data meant every catalogue refresh re-broke this leg, and
     // `expect` calls `exit(1)`, which takes the rest of the executable with it.
     let catalog = AgentModelCatalog()
     let seeded = ["openai-codex/gpt-5.6", "anthropic/claude-opus-5"]
     catalog.resetForQA(options: seeded)
     catalog.apply(claudeBackendAvailable: true)
-    let expectedUnion = seeded + ClaudeCLIBackend.curatedCatalogModels.filter { !seeded.contains($0) }
+    catalog.apply(claudeCatalog: AgentCatalogQAFixture.claude)
+    let expectedUnion = seeded + AgentCatalogQAFixture.claude.models.filter { !seeded.contains($0) }
     expect(catalog.options() == expectedUnion,
            "AgentModelCatalog: claude entries must append without duplicating ids already present, got \(catalog.options())")
-    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-5") == "Claude Sonnet 4.5",
-           "AgentModelCatalog: claude ids must carry their curated display names, got \(String(describing: catalog.displayName(for: "anthropic/claude-sonnet-4-5")))")
+    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-6") == "Sonnet 4.6",
+           "AgentModelCatalog: claude ids must carry the CLI's display names, got \(String(describing: catalog.displayName(for: "anthropic/claude-sonnet-4-6")))")
 
     // pi's display names win when both know an id (pi's are model-specific).
-    catalog.apply(displayNames: ["anthropic/claude-sonnet-4-5": "Sonnet from pi"])
-    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-5") == "Sonnet from pi",
-           "AgentModelCatalog: pi display names must take precedence over curated ones")
+    catalog.apply(displayNames: ["anthropic/claude-sonnet-4-6": "Sonnet from pi"])
+    expect(catalog.displayName(for: "anthropic/claude-sonnet-4-6") == "Sonnet from pi",
+           "AgentModelCatalog: pi display names must take precedence over claude's")
 
     catalog.apply(claudeBackendAvailable: false)
     expect(catalog.options() == seeded,

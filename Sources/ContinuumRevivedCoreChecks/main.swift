@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+// 0.7.24: an arm of its own, because the bare run is KNOWN-RED and a witness
+// inside it can fail without the matrix reporting it. The two older model
+// sections ride along for the same reason; until now they ran only there.
+if CommandLine.arguments.contains("--live-model-catalog-check") {
+    runLiveModelCatalogChecks()
+    runAgentModelPolicyChecks()
+    runAgentModelConfigChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--layout-pressure-check") {
     runLayoutPressureChecks()
     runCanvasAutoLayoutChecks()

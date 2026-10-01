@@ -17,12 +17,13 @@ import Foundation
 func runAgentModelPolicyChecks() {
     // MARK: A · the claude harness serves explicit ids only
 
-    // The curated list is what `snapshot(for: .claudeCode)` serves on a fresh
-    // instance, and also what a successful probe applies
-    // (`apply(claudeBackendAvailable: true)`). Assert the SNAPSHOT, both ways.
+    // A fresh QA instance serves the captured claude answer; a successful probe
+    // applies claude's own catalogue (`apply(claudeCatalog:)`). Assert the
+    // SNAPSHOT, both ways.
     let fresh = AgentModelCatalog()
     let probed = AgentModelCatalog()
     probed.apply(claudeBackendAvailable: true)
+    probed.apply(claudeCatalog: AgentCatalogQAFixture.claude)
 
     for (label, catalog) in [("fallback", fresh), ("after a successful probe", probed)] {
         let snapshot = catalog.snapshot(for: .claudeCode)
@@ -65,12 +66,14 @@ func runAgentModelPolicyChecks() {
     }
 
     // PREVIOUS models are the half of the request that a "newest only" list
-    // would silently drop. Assert that more than one generation is reachable.
+    // would silently drop. Assert that more than one generation the CLI reports
+    // is reachable, in the CLI's own order.
     let offered = fresh.snapshot(for: .claudeCode).models
-    expect(offered.contains("anthropic/claude-opus-5") && offered.contains("anthropic/claude-opus-4-5"),
+    expect(offered.contains("anthropic/claude-opus-5-5") && offered.contains("anthropic/claude-opus-5")
+            && offered.contains("anthropic/claude-opus-4-8"),
            "claude-policy: previous models must stay selectable alongside the newest, got \(offered)")
-    expect(offered.first == "anthropic/claude-opus-5",
-           "claude-policy: the newest model must lead the list, got \(String(describing: offered.first))")
+    expect(offered == AgentCatalogQAFixture.claude.models,
+           "claude-policy: the claude harness must serve the CLI's list in the CLI's order, got \(offered)")
 
     // The seed for a new agent is one of those explicit ids.
     expect(offered.contains(AgentModelConfig.defaultModel),
@@ -111,7 +114,7 @@ func runAgentModelPolicyChecks() {
 
     // The frozen fallback obeys the same rule (it is what QA and an unprobed app
     // serve), and so does the ownership predicate the pickers filter with.
-    expect(AgentModelConfig.fallbackModelOptions.allSatisfy { !PiCatalogPolicy.excludes($0) },
+    expect(AgentCatalogQAFixture.pi.allSatisfy { !PiCatalogPolicy.excludes($0) },
            "pi-policy: the frozen Pi fallback must not contain an excluded provider")
     expect(!AgentHarnessConfig.isProviderCompatible(model: "anthropic/claude-opus-5", harness: .pi),
            "pi-policy: Pi must not own an anthropic id")

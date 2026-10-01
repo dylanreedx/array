@@ -412,6 +412,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 # thing ahead of it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so

@@ -746,16 +746,18 @@ extension ProviderModelButton {
                    } == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
                    "Pi must not own an anthropic id, got \(AgentModelConfig.modelOptions(for: .pi).filter { AgentHarnessConfig.isProviderCompatible(model: $0, harness: .pi) })")
 
-        // 6b. The REAL claude catalogue, in a real picker. It went from 3 aliases
-        //     to 11 explicit ids, and `ChoiceListView` does not scroll — a pane
-        //     that does not grow with its tallest group draws rows nobody can
-        //     reach (the 0.4.7 regression). Drive the shipping list, not a
-        //     two-row fixture.
+        // 6b. A REAL claude catalogue, in a real picker: the CLI's own
+        //     `initialize` answer, captured. `ChoiceListView` does not scroll — a
+        //     pane that does not grow with its tallest group draws rows nobody
+        //     can reach (the 0.4.7 regression). Drive a real list, not a two-row
+        //     fixture.
+        let claudeCapture = AgentCatalogQAFixture.claude
         AgentModelCatalog.shared.resetForQA(snapshot: .init(
             harness: .claudeCode,
             readiness: .ready,
-            models: ClaudeCLIBackend.curatedCatalogModels,
-            displayNames: ClaudeCLIBackend.curatedCatalogDisplayNames))
+            models: claudeCapture.models,
+            displayNames: claudeCapture.displayNames,
+            defaultModel: claudeCapture.defaultModel))
         let claudeFooter = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 520, height: AgentComposerFooterView.height))
         window.contentView?.addSubview(claudeFooter)
         defer { claudeFooter.removeFromSuperview() }
@@ -770,14 +772,14 @@ extension ProviderModelButton {
             throw SelfCheckError.message("presenting the claude catalogue must install the picker surface")
         }
         defer { claudeButton.dismissPresentedPopover() }
-        try expect(claudePicker.qaVisibleModelIDs == ClaudeCLIBackend.curatedCatalogModels,
+        try expect(claudePicker.qaVisibleModelIDs == claudeCapture.models,
                    "the claude pane must list every offered id, in catalogue order, got \(claudePicker.qaVisibleModelIDs)")
         try expect(claudePicker.qaListContentFitsPane,
-                   "the claude pane clips \(ClaudeCLIBackend.curatedCatalogModels.count) rows — ChoiceListView does not scroll, so the rows past the fold are unreachable")
+                   "the claude pane clips \(claudeCapture.models.count) rows — ChoiceListView does not scroll, so the rows past the fold are unreachable")
         try expect(claudePicker.qaVisibleModelTitles.allSatisfy { !$0.lowercased().contains("latest") },
                    "a rendered claude row says 'latest', got \(claudePicker.qaVisibleModelTitles)")
-        try expect(claudePicker.qaVisibleModelTitles.first == "Claude Opus 5",
-                   "the claude pane must render curated display names, got \(claudePicker.qaVisibleModelTitles)")
+        try expect(claudePicker.qaVisibleModelTitles.first == "Opus 5.5",
+                   "the claude pane must render the CLI's display names, got \(claudePicker.qaVisibleModelTitles)")
 
         let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
         AgentBackendConfig.store(.codex)

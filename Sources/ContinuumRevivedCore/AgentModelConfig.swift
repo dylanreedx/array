@@ -40,24 +40,18 @@ public enum AgentModelConfig {
     public static let modelKey = "continuum.agents.model"
     public static let thinkingKey = "continuum.agents.thinking"
 
-    /// The seed for a NEW agent under the default harness (Claude Code). An
-    /// EXPLICIT id, never an alias: `anthropic/opus` renamed itself under the
-    /// user on every Anthropic release and was not a key in the context-window
-    /// map. Must stay an exact member of `ClaudeCLIBackend.curatedCatalogModels`.
-    public static let defaultModel = "anthropic/claude-opus-5"
-    public static let defaultThinking = "medium"
+    /// The seed for a NEW agent on `harness`: the model that CLI reports as its
+    /// default, else the first it lists. Never a literal: a hand-kept default
+    /// named last release's model the day a new one shipped. Nil until the CLI
+    /// has answered.
+    public static func defaultModel(for harness: AgentHarness) -> String? {
+        AgentModelCatalog.shared.snapshot(for: harness).seedModel
+    }
 
-    /// Frozen Pi fixture for deterministic QA/offline presentation. It is never
-    /// evidence that production Pi is authenticated.
-    public static let fallbackModelOptions = [
-        "openai-codex/gpt-5.6-sol",
-        "openai-codex/gpt-5.6-luna",
-        "openai-codex/gpt-5.6-terra",
-        "openai-codex/gpt-5.5",
-        "openai-codex/gpt-5.4",
-        "openai-codex/gpt-5.4-mini",
-        "openai-codex/gpt-5.3-codex-spark",
-    ]
+    /// `defaultModel(for:)` under the default harness (Claude Code), or "" when
+    /// claude has not answered.
+    public static var defaultModel: String { defaultModel(for: AgentHarnessConfig.defaultHarness) ?? "" }
+    public static let defaultThinking = "medium"
 
     public static var modelOptions: [String] {
         modelOptions(for: AgentHarnessConfig.resolved())
@@ -90,7 +84,7 @@ public enum AgentModelConfig {
     /// not something Pi offers at all any more (`PiCatalogPolicy`).
     public static func resolvedFromDefaults(harness: AgentHarness, defaults: UserDefaults = .standard) -> Resolution {
         let options = modelOptions(for: harness)
-        let harnessDefault = harness == .claudeCode ? defaultModel : (options.first ?? defaultModel)
+        let harnessDefault = defaultModel(for: harness) ?? ""
         let stored = defaults.string(forKey: modelKey)
         return Resolution(
             model: oneOf(stored, options, harnessDefault),
@@ -107,7 +101,7 @@ public enum AgentModelConfig {
         defaults: UserDefaults = .standard
     ) -> AgentLaunchSelection? {
         let harness = explicitHarness ?? AgentHarnessConfig.resolved(defaults: defaults)
-        let model = explicitModel ?? defaults.string(forKey: modelKey) ?? (harness == .claudeCode ? defaultModel : "")
+        let model = explicitModel ?? defaults.string(forKey: modelKey) ?? defaultModel(for: harness) ?? ""
         let thinking = explicitThinking ?? defaults.string(forKey: thinkingKey) ?? defaultThinking
         guard modelOptions(for: harness).contains(model),
               AgentHarnessConfig.isProviderCompatible(model: model, harness: harness),

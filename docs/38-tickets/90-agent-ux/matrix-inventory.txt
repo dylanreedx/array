@@ -93,6 +93,7 @@ check --leader-activation-check
 check --leader-jump-check
 check --leader-snap-check
 check --leader-zone-jump-check
+check --live-model-catalog-check
 check --location-action-surface-check
 check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
@@ -467,6 +468,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg scripts/check-app-bundle.sh --configuration debug
@@ -494,7 +496,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 145
+count ContinuumRevivedCoreChecks 148
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

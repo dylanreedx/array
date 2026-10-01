@@ -9,11 +9,12 @@ import Foundation
 /// so when the user logs into a new provider (via pi's own `/login` CLI auth
 /// flow — never pasted API keys) the picker stayed stuck on the snapshot.
 /// This cache keeps the exactness rule — ids come verbatim from pi's own
-/// list — and makes the list live: seeded with the frozen fallback, replaced
-/// by one successful bounded probe per process (kicked at real-app startup).
+/// list — and makes the list live: replaced by one successful bounded probe
+/// per process (kicked at real-app startup). The same holds for the claude and
+/// codex harnesses, each catalogued by its own CLI.
 ///
-/// QA never calls `startRefresh()`, so every check sees the deterministic
-/// fallback.
+/// QA never calls `enableLiveRefresh()`, so every check sees the deterministic
+/// `AgentCatalogQAFixture`, and the real app never does.
 public final class AgentModelCatalog: @unchecked Sendable {
     public static let didRefreshNotification = Notification.Name("ArrayAgentModelCatalogDidRefresh")
     public static let shared = AgentModelCatalog()
@@ -25,18 +26,20 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// fully-qualified id. Empty when the store is absent — the meter then
     /// shows no percentage rather than a guessed one.
     private var liveContextWindows: [String: Int] = [:]
-    /// Models the claude CLI backend contributes (curated EXPLICIT ids, applied
-    /// only when a live probe saw the CLI installed AND logged in). Kept
+    /// Models the claude CLI reports for itself (its `initialize` handshake),
+    /// applied only when a live probe saw the CLI installed AND logged in. Kept
     /// separate from `liveOptions` so a pi probe replacing the list cannot
     /// wipe them, and vice versa.
     private var claudeBackendModels: [String] = []
     private var claudeBackendDisplayNames: [String: String] = [:]
+    private var claudeBackendDefault: String?
     /// Models the codex CLI backend contributes, kept in their own store for the
     /// same reason as claude's: a pi probe replacing `liveOptions` must not wipe
     /// them, and the two native probes must not clobber each other.
     private var codexBackendModels: [String] = []
     private var codexBackendDisplayNames: [String: String] = [:]
     private var codexBackendContextWindows: [String: Int] = [:]
+    private var codexBackendDefault: String?
     /// Live refreshing is opt-in and only the real app opts in (startup).
     /// QA never enables it, so presenting pickers in checks can never spawn
     /// a probe or race fixture options.
@@ -65,7 +68,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
         self.probeExecutor = probeExecutor
     }
     #else
-    /// iOS has no provider CLI to probe: it serves the curated catalogues only.
+    /// iOS has no provider CLI to probe and never enables live refresh.
     public init() {}
     #endif
 
@@ -74,13 +77,28 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     public func snapshot(for harness: AgentHarness) -> AgentHarnessCatalogSnapshot {
         lock.withLock {
+            // Only the CLI's own answer, in the real app. `AgentCatalogQAFixture`
+            // stands in for a CLI that has not answered ONLY while live refresh
+            // is off, which is checks and previews; a live app whose probe found
+            // nothing serves nothing rather than a list Array wrote down.
+            let qa = !liveRefreshEnabled
+            let readiness = readinessByHarness[harness] ?? .checking
+            let refreshedAt = refreshedAtByHarness[harness]
             switch harness {
             case .claudeCode:
-                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: claudeBackendModels.isEmpty ? ClaudeCLIBackend.curatedCatalogModels : claudeBackendModels, displayNames: claudeBackendDisplayNames.isEmpty ? ClaudeCLIBackend.curatedCatalogDisplayNames : claudeBackendDisplayNames, refreshedAt: refreshedAtByHarness[harness])
+                if claudeBackendModels.isEmpty, qa {
+                    let fixture = AgentCatalogQAFixture.claude
+                    return AgentHarnessCatalogSnapshot(harness: harness, readiness: readiness, models: fixture.models, displayNames: fixture.displayNames, refreshedAt: refreshedAt, defaultModel: fixture.defaultModel)
+                }
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readiness, models: claudeBackendModels, displayNames: claudeBackendDisplayNames, refreshedAt: refreshedAt, defaultModel: claudeBackendDefault)
             case .codex:
-                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: codexBackendModels.isEmpty ? CodexCLIBackend.curatedCatalogModels : codexBackendModels, displayNames: codexBackendDisplayNames.isEmpty ? CodexCLIBackend.curatedCatalogDisplayNames : codexBackendDisplayNames, contextWindows: codexBackendContextWindows, refreshedAt: refreshedAtByHarness[harness])
+                if codexBackendModels.isEmpty, qa {
+                    let fixture = AgentCatalogQAFixture.codex
+                    return AgentHarnessCatalogSnapshot(harness: harness, readiness: readiness, models: fixture.models, displayNames: fixture.displayNames, refreshedAt: refreshedAt, defaultModel: fixture.defaultModel)
+                }
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readiness, models: codexBackendModels, displayNames: codexBackendDisplayNames, contextWindows: codexBackendContextWindows, refreshedAt: refreshedAt, defaultModel: codexBackendDefault)
             case .pi:
-                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readinessByHarness[harness] ?? .checking, models: liveOptions ?? AgentModelConfig.fallbackModelOptions, displayNames: liveDisplayNames, contextWindows: liveContextWindows, refreshedAt: refreshedAtByHarness[harness])
+                return AgentHarnessCatalogSnapshot(harness: harness, readiness: readiness, models: liveOptions ?? (qa ? AgentCatalogQAFixture.pi : []), displayNames: liveDisplayNames, contextWindows: liveContextWindows, refreshedAt: refreshedAt)
             }
         }
     }
@@ -89,12 +107,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func displayName(for id: String, harness: AgentHarness) -> String? { snapshot(for: harness).displayNames[id] }
     public func contextWindow(for id: String, harness: AgentHarness) -> Int? { snapshot(for: harness).contextWindows[id] }
 
-    public func options(fallback: [String] = AgentModelConfig.fallbackModelOptions) -> [String] {
+    public func options(fallback: [String] = AgentCatalogQAFixture.pi) -> [String] {
         lock.withLock {
-            let base = liveOptions ?? fallback
+            let base = liveOptions ?? (liveRefreshEnabled ? [] : fallback)
             // Union, not replace: a machine with pi keeps pi's full catalogue
             // and gains the native aliases; a machine with only claude/codex
-            // still gets usable entries on top of the frozen fallback. Each
+            // still gets usable entries on top of the QA fixture in checks. Each
             // native backend appends only ids not already present.
             var union = base
             union += claudeBackendModels.filter { !union.contains($0) }
@@ -116,10 +134,10 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     public func displayNamesSnapshot() -> [String: String] {
         lock.withLock {
-            // pi's names win over curated ones (they are model-specific); the two
-            // curated sets never share an id (anthropic/* vs openai-codex/*).
+            // pi's names win over the native CLIs' (they are model-specific); the
+            // two native sets never share an id (anthropic/* vs openai-codex/*).
             claudeBackendDisplayNames
-                .merging(codexBackendDisplayNames) { curated, _ in curated }
+                .merging(codexBackendDisplayNames) { claude, _ in claude }
                 .merging(liveDisplayNames) { _, pi in pi }
         }
     }
@@ -182,7 +200,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     }
 
     /// Parse the catalogue maintained by the Codex CLI. Malformed/newer
-    /// shapes fail closed and leave the curated fallback in place. Only models
+    /// shapes fail closed and leave the previous probe's answer in place. Only models
     /// Codex marks visible are offered; hidden service models stay hidden.
     public static func parseCodexModelsCache(_ data: Data) -> AgentHarnessCatalogSnapshot? {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -211,6 +229,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
         guard let entries = result["data"] as? [[String: Any]] else { return nil }
         var models: [String] = []
         var names: [String: String] = [:]
+        var defaultModel: String?
         for entry in entries {
             guard (entry["hidden"] as? Bool) != true,
                   let slug = (entry["model"] as? String) ?? (entry["id"] as? String),
@@ -219,10 +238,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
             guard !models.contains(id) else { continue }
             models.append(id)
             if let name = entry["displayName"] as? String, !name.isEmpty { names[id] = name }
+            if (entry["isDefault"] as? Bool) == true, defaultModel == nil { defaultModel = id }
         }
         guard !models.isEmpty else { return nil }
         return AgentHarnessCatalogSnapshot(
-            harness: .codex, readiness: .ready, models: models, displayNames: names)
+            harness: .codex, readiness: .ready, models: models, displayNames: names,
+            defaultModel: defaultModel)
     }
 
     // `parseClaudeModelAliases(helpOutput:)` lived here: it scraped the quoted
@@ -230,9 +251,10 @@ public final class AgentModelCatalog: @unchecked Sendable {
     // catalogue ids. By construction those are ALIASES ("opus", "sonnet") — the
     // one thing this catalogue must not serve, because an alias renames itself
     // under the user, is not a key in the context-window map, and can never name
-    // a previous model. The claude harness now serves
-    // `ClaudeCLIBackend.curatedCatalogModels` — explicit ids only — and the
-    // probe no longer runs `--help` at all.
+    // a previous model. A hand-kept explicit list replaced it and went stale the
+    // first time Anthropic shipped. The claude harness now serves the CLI's own
+    // `initialize` catalogue, keyed by each entry's resolved id
+    // (`ClaudeCLIBackend.parseInitializeModels`).
 
     /// The model's published context window, or nil when the store has no entry
     /// (pi not installed, or a model it does not list). Callers must degrade to
@@ -265,14 +287,31 @@ public final class AgentModelCatalog: @unchecked Sendable {
         lock.withLock { liveDisplayNames = displayNames }
     }
 
-    /// The claude probe's outcome. Applied only from `startProbe` (real app)
-    /// and QA fixtures — `available: false` clears, so a user who uninstalls
-    /// claude loses the entries on the next probe.
+    /// The claude login probe's outcome. Applied only from `startProbe` (real
+    /// app) and QA fixtures — `available: false` clears, so a user who
+    /// uninstalls claude loses the entries on the next probe. The models
+    /// themselves arrive through `apply(claudeCatalog:)`.
     public func apply(claudeBackendAvailable available: Bool) {
         lock.withLock {
-            claudeBackendModels = available ? ClaudeCLIBackend.curatedCatalogModels : []
-            claudeBackendDisplayNames = available ? ClaudeCLIBackend.curatedCatalogDisplayNames : [:]
+            if !available {
+                claudeBackendModels = []
+                claudeBackendDisplayNames = [:]
+                claudeBackendDefault = nil
+            }
             readinessByHarness[.claudeCode] = available ? .ready : .loggedOut
+            refreshedAtByHarness[.claudeCode] = Date()
+        }
+    }
+
+    /// The claude CLI's own catalogue. An empty one changes nothing, so a
+    /// handshake that fails keeps the previous probe's answer.
+    public func apply(claudeCatalog snapshot: AgentHarnessCatalogSnapshot) {
+        guard snapshot.harness == .claudeCode, !snapshot.models.isEmpty else { return }
+        lock.withLock {
+            claudeBackendModels = snapshot.models
+            claudeBackendDisplayNames = snapshot.displayNames
+            claudeBackendDefault = snapshot.defaultModel
+            readinessByHarness[.claudeCode] = .ready
             refreshedAtByHarness[.claudeCode] = Date()
         }
     }
@@ -289,9 +328,12 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// entries on the next probe. Independent of the claude store.
     public func apply(codexBackendAvailable available: Bool) {
         lock.withLock {
-            codexBackendModels = available ? CodexCLIBackend.curatedCatalogModels : []
-            codexBackendDisplayNames = available ? CodexCLIBackend.curatedCatalogDisplayNames : [:]
-            codexBackendContextWindows = [:]
+            if !available {
+                codexBackendModels = []
+                codexBackendDisplayNames = [:]
+                codexBackendContextWindows = [:]
+                codexBackendDefault = nil
+            }
             readinessByHarness[.codex] = available ? .ready : .loggedOut
             refreshedAtByHarness[.codex] = Date()
         }
@@ -303,6 +345,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
             codexBackendModels = snapshot.models
             codexBackendDisplayNames = snapshot.displayNames
             codexBackendContextWindows = snapshot.contextWindows
+            codexBackendDefault = snapshot.defaultModel
             readinessByHarness[.codex] = .ready
             refreshedAtByHarness[.codex] = Date()
         }
@@ -314,9 +357,11 @@ public final class AgentModelCatalog: @unchecked Sendable {
             liveDisplayNames = displayNames
             claudeBackendModels = []
             claudeBackendDisplayNames = [:]
+            claudeBackendDefault = nil
             codexBackendModels = []
             codexBackendDisplayNames = [:]
             codexBackendContextWindows = [:]
+            codexBackendDefault = nil
             liveRefreshEnabled = false
             lastRefreshStartedAt = nil
             refreshInFlight = false
@@ -331,9 +376,9 @@ public final class AgentModelCatalog: @unchecked Sendable {
             if let refreshedAt = snapshot.refreshedAt { refreshedAtByHarness[snapshot.harness] = refreshedAt }
             switch snapshot.harness {
             case .claudeCode:
-                claudeBackendModels = snapshot.models; claudeBackendDisplayNames = snapshot.displayNames
+                claudeBackendModels = snapshot.models; claudeBackendDisplayNames = snapshot.displayNames; claudeBackendDefault = snapshot.defaultModel
             case .codex:
-                codexBackendModels = snapshot.models; codexBackendDisplayNames = snapshot.displayNames; codexBackendContextWindows = snapshot.contextWindows
+                codexBackendModels = snapshot.models; codexBackendDisplayNames = snapshot.displayNames; codexBackendContextWindows = snapshot.contextWindows; codexBackendDefault = snapshot.defaultModel
             case .pi:
                 liveOptions = snapshot.models; liveDisplayNames = snapshot.displayNames; liveContextWindows = snapshot.contextWindows
             }
@@ -466,10 +511,78 @@ public final class AgentModelCatalog: @unchecked Sendable {
         let output = boundedProbeOutput(
             command: command, arguments: ["auth", "status", "--json"], timeout: timeout)
         let loggedIn = output.map { ClaudeCLIBackend.isLoggedIn(authStatusJSON: Data($0.utf8)) } ?? false
-        // Readiness is the whole probe. The catalogue itself is the curated
-        // explicit-id list; there is nothing live to scrape (claude has no
-        // model-list command, and its help text advertises only aliases).
+        // The catalogue BEFORE readiness, so claude never reads as ready with no
+        // models while the handshake is out.
+        if loggedIn, probeExecutor == nil,
+           let catalog = Self.probeClaudeModels(command: command, timeout: timeout) {
+            apply(claudeCatalog: catalog)
+        }
         apply(claudeBackendAvailable: loggedIn)
+    }
+
+    /// Ask claude for its own model list: the `initialize` control handshake
+    /// over stream-json, which answers before any prompt and starts no turn
+    /// (0.23s against claude 2.1.285). The group is terminated as soon as the
+    /// answer arrives, or at `timeout`. Public so a check can drive the real
+    /// spawn, pipe and parse against a fixture executable.
+    public static func probeClaudeModels(
+        command: PiAgentRunner.ResolvedCommand,
+        timeout: TimeInterval
+    ) -> AgentHarnessCatalogSnapshot? {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = PiAgentRunner.augmentedPath(
+            basePath: environment["PATH"] ?? "", extraDirs: PiAgentRunner.liveExtraDirs())
+        guard let child = try? ProcessGroupChild.spawn(
+            executable: command.executable,
+            arguments: command.prefixArgs + ClaudeCLIBackend.modelProbeArguments,
+            environment: environment,
+            currentDirectory: nil,
+            standardInput: .pipe)
+        else { return nil }
+        defer { child.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive) }
+        guard let stdin = child.standardInput else { return nil }
+        do {
+            try stdin.write(contentsOf: Data((ClaudeCLIBackend.modelProbeRequestLine + "\n").utf8))
+        } catch {
+            return nil
+        }
+        // Non-blocking reads of both pipes until the answer or the deadline: a
+        // blocking read would outlive `timeout` if claude never answers, and an
+        // undrained stderr can wedge the child against a full pipe.
+        let descriptors = [child.standardOutput.fileDescriptor, child.standardError.fileDescriptor]
+        for descriptor in descriptors {
+            let flags = fcntl(descriptor, F_GETFL)
+            if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+        }
+        var pending = Data()
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        let deadline = Date().addingTimeInterval(timeout)
+        while deadline.timeIntervalSinceNow > 0 {
+            var stdoutOpen = true
+            for (index, descriptor) in descriptors.enumerated() {
+                while true {
+                    let count = buffer.withUnsafeMutableBytes { read(descriptor, $0.baseAddress!, $0.count) }
+                    if count > 0 {
+                        if index == 0 { pending.append(contentsOf: buffer.prefix(count)) }
+                        continue
+                    }
+                    if count == 0, index == 0 { stdoutOpen = false }
+                    break
+                }
+            }
+            while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+                let line = String(decoding: pending[pending.startIndex..<newline], as: UTF8.self)
+                pending.removeSubrange(pending.startIndex...newline)
+                if let catalog = ClaudeCLIBackend.parseInitializeModels(controlResponseLine: line) {
+                    return catalog
+                }
+            }
+            guard stdoutOpen else { return nil }
+            var fds = descriptors.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            _ = poll(&fds, nfds_t(fds.count), Int32(min(remaining * 1000, 50)))
+        }
+        return nil
     }
 
     /// The codex CLI backend's catalogue contribution: entries appear when the
@@ -558,7 +671,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
             return
         }
         // Older Codex CLIs may lack model/list; their provider-maintained cache
-        // is the compatibility fallback before Array's curated snapshot.
+        // is the compatibility fallback.
         let cacheURL = codexModelsCacheURL()
         if let data = try? Data(contentsOf: cacheURL),
            let snapshot = Self.parseCodexModelsCache(data) {

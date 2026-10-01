@@ -27,60 +27,52 @@ func runAgentModelConfigChecks() {
     // catalogues") without this literal moving with it, and `expect` calls
     // `exit(1)` — so that refresh took every check registered after this one
     // with it. The rule below keeps the two from drifting silently again.
-    expect(Set(CodexCLIBackend.curatedCatalogModels).isSubset(of: catalogue),
-           "the pinned pi catalogue snapshot is missing curated codex ids: \(Set(CodexCLIBackend.curatedCatalogModels).subtracting(catalogue).sorted()) — refresh this literal when the provider catalogue changes")
+    expect(Set(AgentCatalogQAFixture.codex.models).isSubset(of: catalogue),
+           "the pinned pi catalogue snapshot is missing QA codex ids: \(Set(AgentCatalogQAFixture.codex.models).subtracting(catalogue).sorted()) — refresh this literal when the provider catalogue changes")
 
-    // Strict harness ownership gave each CLI its own catalogue, so "the exact id
-    // rule" is now per-harness: an id is exact for the harness that owns it and
-    // meaningless to the other two. Pinned as literals for the same reason the pi
-    // list is — the matrix stays offline, and a curated list that moves must move
-    // here too.
-    //
-    // These are also asked for EXPLICITLY, never through the ambient
-    // `AgentHarnessConfig.resolved()`. Reading the ambient harness made this check
-    // report whatever the operator's own `continuum.agents.backend` happened to
-    // say: green on a machine storing "pi (all providers)", red in three places on
-    // a clean one. A check that changes verdict with a preference is not a witness.
-    //
-    // Claude Code's ground truth is the anthropic half of the same
-    // `pi --list-models` reading (2026-09-21), verbatim, dated pins included.
-    // It is NOT derived from `curatedCatalogModels` — deriving it would make
-    // the subset rule below circular and would let a hand-typed id that no
-    // provider lists pass as "exact".
-    let anthropicCatalogue: Set<String> = [
-        "anthropic/claude-fable-5",
+    // Claude Code's catalogue is claude's own `initialize` answer, parsed by the
+    // production parser from a real capture (`AgentCatalogQAFixture`). The ids
+    // below are what that capture must parse to, written out by hand so the rule
+    // is not circular: each entry's RESOLVED id (so `opus` is `claude-opus-5-5`
+    // and `haiku` its dated id), in the CLI's order, with `default` naming the
+    // default rather than adding a row.
+    let anthropicFromCapture = [
+        "anthropic/claude-opus-5-5",
         "anthropic/claude-fable-5-1",
-        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-5-5",
         "anthropic/claude-haiku-4-5-20251001",
-        "anthropic/claude-opus-4-5",
-        "anthropic/claude-opus-4-5-20251101",
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-opus-4-8",
-        "anthropic/claude-opus-5",
-        "anthropic/claude-sonnet-4-5",
-        "anthropic/claude-sonnet-4-5-20250929",
-        "anthropic/claude-sonnet-4-6",
         "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-fable-5",
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-sonnet-4-6",
     ]
-    expect(Set(ClaudeCLIBackend.curatedCatalogModels).isSubset(of: anthropicCatalogue),
-           "the pinned anthropic catalogue snapshot is missing curated claude ids: \(Set(ClaudeCLIBackend.curatedCatalogModels).subtracting(anthropicCatalogue).sorted()) — refresh this literal when the provider catalogue changes")
+    let claudeCapture = AgentCatalogQAFixture.claude
+    expect(claudeCapture.models == anthropicFromCapture,
+           "claude's initialize capture must parse to its resolved ids in the CLI's order, got \(claudeCapture.models)")
+    expect(claudeCapture.defaultModel == "anthropic/claude-fable-5-1",
+           "claude's `default` entry names the default model, got \(claudeCapture.defaultModel ?? "nil")")
+    expect(claudeCapture.displayNames["anthropic/claude-opus-5-5"] == "Opus 5.5",
+           "display names come verbatim from the CLI, got \(claudeCapture.displayNames["anthropic/claude-opus-5-5"] ?? "nil")")
+    let anthropicCatalogue = Set(anthropicFromCapture)
 
     // The claude harness must never offer an ALIAS again. `opus`, `sonnet` and
     // `haiku` are what it used to serve: each renames itself under the user on
     // every Anthropic release, is not a key in the context-window map (so the
     // radial ring had no denominator), and can never name a PREVIOUS model.
-    let retiredClaudeAliases = ["anthropic/opus", "anthropic/sonnet", "anthropic/haiku", "anthropic/fable"]
+    let retiredClaudeAliases = ["anthropic/opus", "anthropic/sonnet", "anthropic/haiku", "anthropic/fable", "anthropic/default"]
     for alias in retiredClaudeAliases {
-        expect(!ClaudeCLIBackend.curatedCatalogModels.contains(alias),
+        expect(!claudeCapture.models.contains(alias),
                "the claude catalogue must not offer the alias \(alias)")
     }
-    for name in ClaudeCLIBackend.curatedCatalogDisplayNames.values {
-        expect(!name.lowercased().contains("latest"),
-               "a claude display name must name a model, never \"latest\": \(name)")
+    for name in claudeCapture.displayNames.values {
+        expect(!name.lowercased().contains("latest") && !name.lowercased().contains("default"),
+               "a claude display name must name a model, never \"latest\" or \"default\": \(name)")
     }
-    expect(Set(ClaudeCLIBackend.curatedCatalogDisplayNames.keys) == Set(ClaudeCLIBackend.curatedCatalogModels),
-           "every curated claude id needs exactly one display name, and vice versa")
+    expect(Set(claudeCapture.displayNames.keys) == Set(claudeCapture.models),
+           "every claude id needs exactly one display name, and vice versa")
 
     let catalogueByHarness: [AgentHarness: Set<String>] = [
         .pi: catalogue,
@@ -271,7 +263,7 @@ func runAgentModelCatalogChecks() {
     expect(AgentModelConfig.resolvedFromDefaults(harness: .pi, defaults: defaults).model == "google/gemini-3-pro",
            "a stored live-catalogue id wins")
     AgentModelCatalog.shared.resetForQA()
-    expect(AgentModelConfig.modelOptions(for: .pi) == AgentModelConfig.fallbackModelOptions,
+    expect(AgentModelConfig.modelOptions(for: .pi) == AgentCatalogQAFixture.pi,
            "after reset the frozen fallback stands again")
 
     // 4. Display names from pi's synced models-store: fully-qualified keys,

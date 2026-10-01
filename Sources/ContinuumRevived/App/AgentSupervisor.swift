@@ -3023,7 +3023,15 @@ final class AgentSupervisor {
         // yesterday refusing every prompt forever, and CLAUDE.md forbids
         // silently re-pointing it at another CLI. It is absent from the picker,
         // so moving off it is one-way.
+        // The same holds for a model the CLI's own list stopped naming: claude
+        // and codex catalogues are live now, and both drop older models and
+        // re-key aliases (claude lists Haiku under its dated id). Those CLIs take
+        // the exact id and refuse a bad one loudly, so a persisted record keeps
+        // its model. Pi does not get this: `--model` fuzzy-matches there.
+        let ownsPersistedModel = harness != .pi
+            && AgentHarnessConfig.isProviderCompatible(model: record.model, harness: harness)
         guard snapshot.models.contains(record.model)
+                || ownsPersistedModel
                 || PiCatalogPolicy.isRetiredSelection(model: record.model, harness: harness) else {
             return "\(harness.rawValue) cannot run \(record.model). Pick a model this harness owns."
         }
@@ -17623,7 +17631,7 @@ private func checkPerAgentProviderSettings(
     let savedModel = standardDefaults.object(forKey: AgentModelConfig.modelKey)
     let savedThinking = standardDefaults.object(forKey: AgentModelConfig.thinkingKey)
     AgentHarnessConfig.store(.pi, defaults: standardDefaults)
-    standardDefaults.set(AgentModelConfig.fallbackModelOptions[0], forKey: AgentModelConfig.modelKey)
+    standardDefaults.set(AgentCatalogQAFixture.pi[0], forKey: AgentModelConfig.modelKey)
     standardDefaults.set(AgentModelConfig.defaultThinking, forKey: AgentModelConfig.thinkingKey)
     defer {
         func restore(_ value: Any?, key: String) {

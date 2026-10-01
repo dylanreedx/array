@@ -41,32 +41,6 @@ public enum CodexCLIBackend {
         effortLevels.contains(thinking) ? thinking : nil
     }
 
-    /// The catalogue entries the codex backend contributes when the CLI is
-    /// present and logged in. Codex's own model slugs (from
-    /// `~/.codex/models_cache.json`), namespaced under `openai-codex/` exactly
-    /// as pi lists them, so a pi machine's ids dedup against these. Exact ids,
-    /// never patterns.
-    public static let curatedCatalogModels: [String] = [
-        "openai-codex/gpt-6-astra",
-        "openai-codex/gpt-5.6-sol",
-        "openai-codex/gpt-5.6-terra",
-        "openai-codex/gpt-5.6-luna",
-        "openai-codex/gpt-5.5",
-        "openai-codex/gpt-5.4",
-        "openai-codex/gpt-5.4-mini",
-        "openai-codex/gpt-5.3-codex-spark",
-    ]
-    public static let curatedCatalogDisplayNames: [String: String] = [
-        "openai-codex/gpt-6-astra": "GPT-6 Astra",
-        "openai-codex/gpt-5.6-sol": "GPT-5.6 Sol",
-        "openai-codex/gpt-5.6-terra": "GPT-5.6 Terra",
-        "openai-codex/gpt-5.6-luna": "GPT-5.6 Luna",
-        "openai-codex/gpt-5.5": "GPT-5.5",
-        "openai-codex/gpt-5.4": "GPT-5.4",
-        "openai-codex/gpt-5.4-mini": "GPT-5.4 Mini",
-        "openai-codex/gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
-    ]
-
     /// `codex login status` → is a ChatGPT subscription login present. There is
     /// NO `--json` (`codex login status --json` errors), so this parses the real
     /// text shape: exit 0 AND stdout contains "Logged in". Pure — pinned against
