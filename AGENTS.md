@@ -68,8 +68,11 @@ modules, never global find-replace the old name.
 
 `pi --model` takes a pattern; partial ids fuzzy-match and run the wrong model
 silently. Every offered id is fully qualified (`provider/model`) and comes
-verbatim from pi's own catalogue (`AgentModelCatalog`, live-probed at startup,
-frozen fallback in QA).
+verbatim from the CLI that runs it — pi's `--list-models`, claude's `initialize`
+handshake, codex's `model/list` — live-probed at startup (`AgentModelCatalog`).
+No model list or default model is written into the source: a hand-kept claude
+list hid Opus 5.5 for a release. `AgentCatalogQAFixture` stands in for the CLIs
+in checks only; a live app whose probe found nothing offers nothing.
 
 ## A small glossary
 
