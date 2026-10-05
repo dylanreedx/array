@@ -128,6 +128,10 @@ class TileNSView: NSView, TokenThemed {
         promoteForIncomingFocus()
     }
 
+    func enableTitleBarActions() { titleBar?.enableActions() }
+    var titleBarUsesCustomOverflowForQA: Bool { titleBar?.usesCustomActionsForQA ?? false }
+    var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
+
     func setTitleBarAccessory(_ accessory: NSView?) {
         invalidateTitleBarAccessory()
         titleBar?.setAccessory(accessory)
@@ -1324,6 +1328,26 @@ private final class TitleBarView: NSView, TokenThemed {
         )
     }
 
+    private var actionsButton: AgentTileOverflowButton?
+    var usesCustomActionsForQA: Bool { actionsButton.map { $0.subviews.allSatisfy { !($0 is NSButton) } } ?? false }
+    var actionsFrameForQA: NSRect? { actionsButton?.frame }
+
+    func enableActions() {
+        guard actionsButton == nil else { return }
+        let button = AgentTileOverflowButton(frame: .zero)
+        button.target = self
+        button.action = #selector(showTileActions(_:))
+        button.toolTip = "Agent actions"
+        button.setAccessibilityLabel("Agent actions")
+        addSubview(button)
+        actionsButton = button
+        needsLayout = true
+    }
+
+    @objc private func showTileActions(_ sender: AgentTileOverflowButton) {
+        makeTileContextMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+    }
+
     private let closeButton: TileCloseControl
     /// Desired close-button edge length (world units) + glyph point size, set
     /// from the parent tile's `layout()` so the × holds a usable on-screen size
@@ -1418,6 +1442,8 @@ private final class TitleBarView: NSView, TokenThemed {
             width: size,
             height: size
         )
+        actionsButton?.frame = NSRect(x: qaDragHandleLeadingX - 4, y: (bounds.height - closeButtonWorldSize) / 2, width: closeButtonWorldSize, height: closeButtonWorldSize)
+        actionsButton?.applyTokens()
         let markSize = 14 * chromeScale
         providerMarkView.frame = NSRect(
             x: CGFloat(Space.m) * chromeScale,
@@ -1529,6 +1555,7 @@ private final class TitleBarView: NSView, TokenThemed {
         if closeButton.frame.contains(point) {
             return closeButton
         }
+        if let actionsButton, actionsButton.frame.contains(point) { return actionsButton }
         if let accessoryView, accessoryView.frame.contains(point) {
             // NSStackView reports itself for this hierarchy. Return its native
             // leaf control so tracking/action is not swallowed by title-bar drag.
@@ -1666,7 +1693,7 @@ private final class TitleBarView: NSView, TokenThemed {
         let cy = bounds.midY
         var cx = bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - Self.dragDotGap * scale
         TextToken.textSecondary.color.nsColor(for: theme).setFill()
-        for _ in 0..<Self.dragDotCount {
+        for _ in 0..<(actionsButton == nil ? Self.dragDotCount : 0) {
             let rect = NSRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2)
             NSBezierPath(ovalIn: rect).fill()
             cx -= spacing

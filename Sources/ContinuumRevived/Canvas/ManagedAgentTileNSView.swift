@@ -338,7 +338,9 @@ final class ManagedAgentTileNSView: TileNSView {
         )
         super.init(tile: tile)
         addSubview(awarenessBorder, positioned: .above, relativeTo: nil)
-        addSubview(awarenessBadge, positioned: .above, relativeTo: awarenessBorder)
+        agentHeader.installStatusBadge(awarenessBadge)
+        enableTitleBarActions()
+        compactStatusRow.hideLocationActions()
         refreshTitleBarIdentity()
         // TileNSView establishes its compatibility border after its polymorphic
         // token call; re-apply once subclass initialization is complete so the
@@ -354,12 +356,6 @@ final class ManagedAgentTileNSView: TileNSView {
             guard let self, let agentID = self.projectedAgentID else { return }
             self.onLocationActionMenuRequested?(agentID, anchor)
         }
-        agentHeader.onStopAgentRun = { [weak self] in
-            guard let self else { return }
-            if self.isProbingV2HeaderActions { self.onStopRun?() }
-            else { self.requestV2Stop() }
-        }
-        agentHeader.onDetachView = { [weak self] in self?.onClose?() }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
@@ -656,12 +652,7 @@ final class ManagedAgentTileNSView: TileNSView {
     override func layout() {
         super.layout()
         awarenessBorder.frame = bounds.insetBy(dx: 2, dy: 2)
-        let width = min(150, max(94, awarenessBadge.fittingSize.width + 20))
-        awarenessBadge.frame = NSRect(
-            x: max(8, bounds.width - width - 10),
-            y: chromeBarHeight + 8,
-            width: width,
-            height: 22)
+
     }
 
     func applyAwarenessSignal(_ signal: AgentSignal?) {
@@ -812,6 +803,8 @@ final class ManagedAgentTileNSView: TileNSView {
         return true
     }
 
+    var locationMenuProvider: ((AgentID) -> NSMenu?)?
+
     override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
         let root = NSMenuItem(title: "Sounds", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "Sounds")
@@ -838,7 +831,10 @@ final class ManagedAgentTileNSView: TileNSView {
             menu.addItem(item)
         }
         root.submenu = menu
-        return makePageZoomMenuItems() + [root] + makeWorkspaceToolsMenuItems()
+        let location = projectedAgentID.flatMap { locationMenuProvider?($0) }
+        let locationItems = location?.items ?? []
+        locationItems.forEach { location?.removeItem($0) }
+        return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root] + makeWorkspaceToolsMenuItems()
     }
 
     /// CX-01 (`.plans/59` §14.1): the per-agent workspace-tools policy, offered on
@@ -3405,8 +3401,7 @@ final class ManagedAgentTileNSView: TileNSView {
         guard qaUsesV2HeaderShell,
               !agentHeader.qaName.isEmpty,
               !agentHeader.qaState.isEmpty,
-              agentHeader.qaUsesCustomOverflow,
-              agentHeader.qaActionTitles == [AgentTileHeaderView.stopActionTitle, AgentTileHeaderView.detachActionTitle],
+              titleBarUsesCustomOverflowForQA,
               layer?.borderWidth == 0 else { return false }
         let titleActions = titleBarContextMenuForQA().items.map(\.title)
         guard titleActions.contains(AgentTileHeaderView.stopActionTitle),
@@ -3424,8 +3419,11 @@ final class ManagedAgentTileNSView: TileNSView {
         onStopRun = { stopCount += 1 }
         onClose = { detachCount += 1 }
         isProbingV2HeaderActions = true
-        agentHeader.qaInvokeStopAction()
-        agentHeader.qaInvokeDetachAction()
+        let menu = titleBarContextMenuForQA()
+        for title in [AgentTileHeaderView.stopActionTitle, AgentTileHeaderView.detachActionTitle] {
+            guard let item = menu.items.first(where: { $0.title == title }), let action = item.action,
+                  NSApp.sendAction(action, to: item.target, from: item) else { return false }
+        }
         isProbingV2HeaderActions = false
         onStopRun = savedStop
         onClose = savedClose
@@ -3471,7 +3469,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var qaV2HeaderFailure: String {
         "__invalid-v2-agent-header-shell__ "
             + "installed=\(qaUsesV2HeaderShell) name=\(agentHeader.qaName) state=\(agentHeader.qaState) "
-            + "custom=\(agentHeader.qaUsesCustomOverflow) actions=\(agentHeader.qaActionTitles) "
+            + "custom=\(titleBarUsesCustomOverflowForQA) "
             + "elapsed=\(agentHeader.qaElapsed ?? "nil") timer=\(agentHeader.qaTimerIsActive) "
             + "detail=\(qaV2ContractDetail) border=\(layer?.borderWidth ?? -1) "
             + "titleActions=\(titleBarContextMenuForQA().items.map(\.title))"

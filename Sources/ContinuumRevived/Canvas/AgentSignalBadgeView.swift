@@ -1,8 +1,26 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 @MainActor
-final class AgentSignalBadgeView: NSView {
+final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
+    private var pageZoom: AgentPageZoom = .default
+    private var widthConstraint: NSLayoutConstraint?
+    private var heightConstraint: NSLayoutConstraint?
+
+    private func updateSize() {
+        invalidateIntrinsicContentSize()
+        widthConstraint?.constant = intrinsicContentSize.width
+        heightConstraint?.constant = intrinsicContentSize.height
+        needsLayout = true
+    }
+
+    func applyPageZoom(_ zoom: AgentPageZoom) {
+        pageZoom = zoom
+        label.font = .monospacedSystemFont(ofSize: CGFloat(zoom.scaled(10)), weight: .semibold)
+        layer?.cornerRadius = CGFloat(zoom.scaled(11))
+        updateSize()
+    }
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private(set) var signal: AgentSignal?
@@ -17,6 +35,11 @@ final class AgentSignalBadgeView: NSView {
         label.lineBreakMode = .byTruncatingTail
         addSubview(icon)
         addSubview(label)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthConstraint = widthAnchor.constraint(equalToConstant: intrinsicContentSize.width)
+        heightConstraint = heightAnchor.constraint(equalToConstant: intrinsicContentSize.height)
+        widthConstraint?.isActive = true
+        heightConstraint?.isActive = true
         isHidden = true
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
@@ -26,12 +49,21 @@ final class AgentSignalBadgeView: NSView {
 
     override func layout() {
         super.layout()
-        icon.frame = NSRect(x: 7, y: 4, width: 14, height: 14)
-        label.frame = NSRect(x: 25, y: 3, width: max(0, bounds.width - 31), height: 16)
+        icon.frame = NSRect(x: pageZoom.scaled(7), y: pageZoom.scaled(4), width: pageZoom.scaled(14), height: pageZoom.scaled(14))
+        label.frame = NSRect(x: pageZoom.scaled(25), y: pageZoom.scaled(3), width: max(0, bounds.width - pageZoom.scaled(31)), height: pageZoom.scaled(16))
     }
+
+    override var intrinsicContentSize: NSSize {
+        // Cell measurement includes NSTextField's text insets. Glyph width
+        // alone truncates even short labels such as “Merged”.
+        NSSize(width: ceil(label.cell?.cellSize.width ?? 0) + CGFloat(pageZoom.scaled(32)), height: CGFloat(pageZoom.scaled(22)))
+    }
+
+    var qaTextFits: Bool { label.frame.width + 0.5 >= (label.cell?.cellSize.width ?? 0) }
 
     func apply(_ signal: AgentSignal?) {
         self.signal = signal
+        defer { updateSize() }
         guard let signal else {
             isHidden = true
             setAccessibilityLabel(nil)

@@ -78,6 +78,7 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
     /// identified by both ends (which agent, and which of two with the same role),
     /// so dropping the tail the way the header's title label does would leave two
     /// chips reading the same.
+    private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private var isWarning = false
 
@@ -89,6 +90,8 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
     private var stack: NSStackView?
     private var minimumTextWidthConstraint: NSLayoutConstraint?
     private var heightConstraint: NSLayoutConstraint?
+    private var iconWidth: NSLayoutConstraint?
+    private var iconHeight: NSLayoutConstraint?
 
     /// Derived from the type it holds, like every other height in the tile: one
     /// `.label` line plus the chip's own vertical padding.
@@ -133,7 +136,15 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
         // header runs out of room — the agent's NAME must not truncate first.
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [label])
+        icon.image = CanvasSymbolImage.image(named: "arrow.triangle.branch", pointSize: 12)
+        icon.imageScaling = .scaleProportionallyDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        iconWidth = icon.widthAnchor.constraint(equalToConstant: 14)
+        iconHeight = icon.heightAnchor.constraint(equalToConstant: 14)
+        iconWidth?.isActive = true
+        iconHeight?.isActive = true
+        let stack = NSStackView(views: [icon, label])
+        stack.spacing = 4
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.edgeInsets = NSEdgeInsets(Self.insets, zoom: pageZoom)
@@ -168,7 +179,8 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
             return
         }
         isHidden = false
-        label.stringValue = display.text
+        label.stringValue = display.text.hasPrefix(Self.branchGlyph + " ") ? String(display.text.dropFirst(2)) : display.text
+        setAccessibilityValue(display.text)
         toolTip = display.tooltip
         isWarning = display.isWarning
         applyTokens()
@@ -192,6 +204,7 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
         // `dynamicNSColor(` ends in exactly that substring.
         let textToken = isWarning ? AccentToken.accentApproval.color : TextToken.textSecondary.color
         label.textColor = StatusChipNSView.dynamicNSColor(textToken)
+        icon.contentTintColor = label.textColor
     }
 
     /// Re-derives every metric this chip owns from `zoom`. Same contract as
@@ -201,6 +214,9 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
         pageZoom = zoom
         layer?.cornerRadius = pageZoom.scaled(Radius.card)
         label.font = .token(.label, zoom: pageZoom)
+        iconWidth?.constant = CGFloat(zoom.scaled(14))
+        iconHeight?.constant = CGFloat(zoom.scaled(14))
+        stack?.spacing = CGFloat(zoom.scaled(4))
         stack?.edgeInsets = NSEdgeInsets(Self.insets, zoom: pageZoom)
         minimumTextWidthConstraint?.constant = Self.minimumTextWidth(zoom: pageZoom)
         heightConstraint?.constant = Self.preferredHeight(zoom: pageZoom)
@@ -213,6 +229,6 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
         applyTokens()
     }
 
-    var qaText: String { label.stringValue }
+    var qaText: String { (accessibilityValue() as? String) ?? label.stringValue }
     var qaIsWarning: Bool { isWarning }
 }

@@ -25,6 +25,7 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     private var selectedHarness = AgentHarnessConfig.resolved()
     private var usesCompactLabels = false
     private var usesCondensedModelTrigger = false
+    private var usesIconOnlyHarnessTrigger = false
     private var hidesEffort = false
     /// True only while `layout()` is installing the tier it just decided on, so
     /// that rebuild does not ask for the very layout pass it is running inside.
@@ -169,11 +170,16 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         let condensesModelTrigger = shouldHideEffort && requiredWidth(
             usingCompactLabels: true, condenseModelTrigger: false,
             includeEffort: false) > bounds.width
+        let iconOnlyHarness = condensesModelTrigger && requiredWidth(
+            usingCompactLabels: true, condenseModelTrigger: true,
+            includeEffort: false) > bounds.width
         if compact != usesCompactLabels
             || condensesModelTrigger != usesCondensedModelTrigger
+            || iconOnlyHarness != usesIconOnlyHarnessTrigger
             || shouldHideEffort != hidesEffort {
             usesCompactLabels = compact
             usesCondensedModelTrigger = condensesModelTrigger
+            usesIconOnlyHarnessTrigger = iconOnlyHarness
             hidesEffort = shouldHideEffort
             effortButton.isHidden = shouldHideEffort
             isInstallingFitDecision = true
@@ -213,8 +219,8 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
         let harnessTitle = compact ? Self.abbreviatedHarness(selectedHarness) : selectedHarness.rawValue
         let gap = CGFloat(pageZoom.scaled(Space.m))
-        let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle, zoom: pageZoom)
-            + gap + ChoiceButton.fittingWidth(forTitle: modelTitle, zoom: pageZoom)
+        let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle, zoom: pageZoom) + CGFloat(pageZoom.scaled(22))
+            + gap + ChoiceButton.fittingWidth(forTitle: modelTitle, zoom: pageZoom) + CGFloat(pageZoom.scaled(22))
         return includeEffort
             ? providerAndModel + gap + ChoiceButton.fittingWidth(forTitle: effortTitle, zoom: pageZoom)
             : providerAndModel
@@ -276,20 +282,24 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     }
 
     private func rebuildChoices() {
+        harnessButton.selectedIcon = .provider(selectedHarness == .claudeCode ? "anthropic/" : selectedHarness == .codex ? "openai/" : "pi")
         harnessButton.items = AgentHarness.allCases.map { harness in
-            ChoiceItem(id: harness.rawValue, title: usesCompactLabels ? Self.abbreviatedHarness(harness) : harness.rawValue)
+            ChoiceItem(id: harness.rawValue, title: usesCompactLabels ? Self.abbreviatedHarness(harness) : harness.rawValue, icon: .provider(harness == .claudeCode ? "anthropic/" : harness == .codex ? "openai/" : "pi"))
         }
         harnessButton.selectedID = selectedHarness.rawValue
+        harnessButton.selectedTitleOverride = usesIconOnlyHarnessTrigger ? "" : nil
+        harnessButton.toolTip = selectedHarness.rawValue
         let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
         var models = snapshot.models
         if selectedHarness == recordHarness, !models.contains(settings.model) { models.append(settings.model) }
         modelButton.items = models.map { model in
-            ChoiceItem(id: model, title: usesCompactLabels ? Self.abbreviatedModel(model) : (snapshot.displayNames[model] ?? model))
+            ChoiceItem(id: model, title: usesCompactLabels ? Self.abbreviatedModel(model) : (snapshot.displayNames[model] ?? model), icon: .provider(model))
         }
         modelButton.selectedTitleOverride = usesCondensedModelTrigger ? "Model" : nil
         var efforts = AgentModelConfig.thinkingOptions
         if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }
         effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: usesCompactLabels ? Self.abbreviatedEffort(effort) : effort.capitalized) }
+        modelButton.selectedIcon = selectedHarness == recordHarness ? .provider(settings.model) : harnessButton.selectedIcon
         modelButton.selectedID = selectedHarness == recordHarness ? settings.model : nil
         effortButton.selectedID = settings.thinking
         // Installing titles changes what the row NEEDS, so the fit decision owes

@@ -7,6 +7,7 @@ import ContinuumRevivedAgentUI
 enum ChoiceIcon: Equatable {
     case system(String)
     case asset(String)
+    case provider(String)
 
     @MainActor
     func image() -> NSImage? {
@@ -18,6 +19,15 @@ enum ChoiceIcon: Equatable {
             // subtree, so retaining vector symbol reps here would undo part of
             // the symbol freeze when the sidebar and camera programs merge.
             source = CanvasSymbolImage.image(named: name)
+        case .provider(let model):
+            if model == "pi" {
+                source = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+                    ("π" as NSString).draw(in: rect, withAttributes: [.font: NSFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: NSColor.black])
+                    return true
+                }
+            } else {
+                source = BrandMark96.mark(forModel: model) ?? CanvasSymbolImage.image(named: "cpu")
+            }
         case .asset(let name):
             source = NSImage(named: NSImage.Name(name))
         }
@@ -458,8 +468,8 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         detailLabel.lineBreakMode = presentation == .completions
             ? .byTruncatingMiddle : .byTruncatingTail
         detailLabel.isHidden = item.detail == nil
-        leadingImageView.image = presentation == .choices
-            ? CanvasSymbolImage.image(named: "checkmark") : item.icon?.image()
+        leadingImageView.image = item.icon?.image() ?? (presentation == .choices
+            ? CanvasSymbolImage.image(named: "checkmark") : nil)
         leadingImageView.imageScaling = .scaleProportionallyDown
         leadingImageView.setAccessibilityElement(false)
         addSubview(leadingImageView)
@@ -470,6 +480,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         let help = item.destructive ? "Destructive action. \(item.detail ?? "")" : item.detail
         setAccessibilityHelp(help)
         setAccessibilityEnabled(item.enabled)
+        setAccessibilitySelected(selected)
         applyTokens()
     }
 
@@ -563,7 +574,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             layer?.backgroundColor = nil
         }
         layer?.borderWidth = 0
-        leadingImageView.isHidden = presentation == .choices ? !selected : item.icon == nil
+        leadingImageView.isHidden = presentation == .choices ? (item.icon == nil && !selected) : item.icon == nil
         // Keep destructive copy calm, but tint its icon with the established failure
         // accent: native command-menu hierarchy without turning a whole row into an
         // alarm before the person has even chosen it.

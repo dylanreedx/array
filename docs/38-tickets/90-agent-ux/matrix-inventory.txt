@@ -190,6 +190,7 @@ check --workspace-api-grants-check
 check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
 check --workspace-boot-persistence-check
+check --workspace-chrome-polish-check
 check --workspace-delete-failure-check
 check --workspace-invariants-check
 check --workspace-management-polish-check
@@ -418,6 +419,7 @@ leg run_app_check .build/debug/Array --workspace-api-grants-check
 leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
+leg run_app_check .build/debug/Array --workspace-chrome-polish-check
 leg run_app_check .build/debug/Array --workspace-delete-failure-check
 leg run_app_check .build/debug/Array --workspace-invariants-check
 leg run_app_check .build/debug/Array --workspace-management-polish-check

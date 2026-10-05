@@ -46,6 +46,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // width constraint after initialization, when QA configuration is known.
         return button
     }()
+    func hideLocationActions() { actionButton.isHidden = true }
+
     private let activityIcon = NSImageView()
     private let activityLabel = HonestWidthLabel(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")

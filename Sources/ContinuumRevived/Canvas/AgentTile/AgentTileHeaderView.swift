@@ -14,7 +14,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     static func preferredHeight(zoom: AgentPageZoom) -> CGFloat {
-        CGFloat(zoom.rowHeight(for: .title, lines: 2))
+        max(CGFloat(zoom.rowHeight(for: .title, lines: 2)), CGFloat(zoom.scaled(26) + BranchChipNSView.preferredHeight(zoom: zoom) + zoom.scaled(Inset.row).vertical))
     }
 
     /// This header's rung of the tile's page zoom. `.default` until the tile's
@@ -27,7 +27,6 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     private let stateLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let branchChip = BranchChipNSView()
-    private let overflowButton = AgentTileOverflowButton()
     private var presentation: AgentTileStatePresenter.Presentation?
     private var elapsedTimer: Timer?
 
@@ -36,14 +35,31 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     private var stateRow: NSStackView?
     private var identity: NSStackView?
     private var row: NSStackView?
+    private var detailsStack: NSStackView?
+    private weak var statusBadge: NSView?
     private var stateDotWidth: NSLayoutConstraint?
     private var stateDotHeight: NSLayoutConstraint?
     private var elapsedWidth: NSLayoutConstraint?
-    private var overflowWidth: NSLayoutConstraint?
-    private var overflowHeight: NSLayoutConstraint?
 
-    var onStopAgentRun: (() -> Void)?
-    var onDetachView: (() -> Void)?
+    func installStatusBadge(_ badge: NSView) {
+        guard let row else { return }
+        statusBadge = badge
+        row.removeArrangedSubview(branchChip)
+        branchChip.removeFromSuperview()
+        let details = NSStackView()
+        details.orientation = .vertical
+        // Reserve the status lane even before a signal arrives. Detaching the
+        // hidden badge leaves its old frame outside the solved trailing edge.
+        details.detachesHiddenViews = false
+        details.addArrangedSubview(badge)
+        details.addArrangedSubview(branchChip)
+        details.alignment = .trailing
+        details.spacing = CGFloat(pageZoom.scaled(4))
+        detailsStack = details
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        row.addArrangedSubview(details)
+    }
+
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -63,8 +79,6 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         elapsedLabel.setContentHuggingPriority(.required, for: .horizontal)
         elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        overflowButton.target = self
-        overflowButton.action = #selector(showActions(_:))
 
         let stateRow = NSStackView(views: [stateDot, stateLabel, elapsedLabel])
         stateRow.orientation = .horizontal
@@ -78,7 +92,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         identity.spacing = CGFloat(pageZoom.scaled(Space.xs))
         self.identity = identity
 
-        let row = NSStackView(views: [identity, NSView(), branchChip, overflowButton])
+        let row = NSStackView(views: [identity, NSView(), branchChip])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = CGFloat(pageZoom.scaled(Space.m))
@@ -91,13 +105,9 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         let stateDotHeight = stateDot.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(6)))
         let elapsedWidth = elapsedLabel.widthAnchor.constraint(
             equalToConstant: Self.elapsedColumnWidth(zoom: pageZoom))
-        let overflowWidth = overflowButton.widthAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(28)))
-        let overflowHeight = overflowButton.heightAnchor.constraint(equalToConstant: CGFloat(pageZoom.scaled(28)))
         self.stateDotWidth = stateDotWidth
         self.stateDotHeight = stateDotHeight
         self.elapsedWidth = elapsedWidth
-        self.overflowWidth = overflowWidth
-        self.overflowHeight = overflowHeight
 
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -107,8 +117,6 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
             stateDotWidth,
             stateDotHeight,
             elapsedWidth,
-            overflowWidth,
-            overflowHeight,
         ])
 
         setAccessibilityRole(.group)
@@ -128,7 +136,6 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         branchChip.apply(next.branch)
         updateElapsed(now: Date())
         updateTimer(startedAt: next.startedAt)
-        overflowButton.stopIsEnabled = next.status == .working || next.status == .needsAttention
         setAccessibilityValue(next.stateAccessibilityLabel)
         applyTokens()
     }
@@ -142,7 +149,6 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
             stateDot.layer?.backgroundColor = StatusChipPresenter.display(for: status).accent.cgColor(for: theme)
         }
         branchChip.applyTokens()
-        overflowButton.applyTokens()
     }
 
     /// Re-derives every metric this header owns from `zoom`. Same contract as
@@ -159,13 +165,12 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         stateDot.layer?.cornerRadius = CGFloat(pageZoom.scaled(3))
         stateRow?.spacing = CGFloat(pageZoom.scaled(Space.s))
         identity?.spacing = CGFloat(pageZoom.scaled(Space.xs))
+        detailsStack?.spacing = CGFloat(pageZoom.scaled(4))
         row?.spacing = CGFloat(pageZoom.scaled(Space.m))
         row?.edgeInsets = NSEdgeInsets(Inset.row, zoom: pageZoom)
         stateDotWidth?.constant = CGFloat(pageZoom.scaled(6))
         stateDotHeight?.constant = CGFloat(pageZoom.scaled(6))
         elapsedWidth?.constant = Self.elapsedColumnWidth(zoom: pageZoom)
-        overflowWidth?.constant = CGFloat(pageZoom.scaled(28))
-        overflowHeight?.constant = CGFloat(pageZoom.scaled(28))
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -173,6 +178,18 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    private var showsElapsed: Bool {
+        presentation?.startedAt != nil
+            && (statusBadge?.isHidden != false || bounds.width >= CGFloat(pageZoom.scaled(520)))
+    }
+
+    override func layout() {
+        // The duration remains in the spoken status. At narrow widths a live
+        // status badge takes this space so both branch and status stay legible.
+        elapsedLabel.isHidden = !showsElapsed
+        super.layout()
     }
 
     private func updateTimer(startedAt: Date?) {
@@ -218,7 +235,7 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         let seconds = interval.isFinite ? max(0, Int(interval.rounded(.down))) : 0
         let label = AgentElapsedFormatter.elapsedLabel(interval)
         elapsedLabel.stringValue = AgentElapsedFormatter.headerPrefix + label
-        elapsedLabel.isHidden = false
+        elapsedLabel.isHidden = !showsElapsed
         // Keep the spoken value free of the decorative separator. The numeric
         // duration remains live on each tick; the bounded formatter owns the visual
         // lane rather than replacing the established accessibility vocabulary.
@@ -227,51 +244,31 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
         // and a timer tick must not invalidate the transcript below this view.
     }
 
-    @objc private func showActions(_ sender: Any?) {
-        let menu = NSMenu(title: "Agent actions")
-        let stop = NSMenuItem(title: Self.stopActionTitle, action: #selector(stopAgentRun(_:)), keyEquivalent: "")
-        stop.target = self
-        stop.isEnabled = overflowButton.stopIsEnabled
-        menu.addItem(stop)
-        menu.addItem(.separator())
-        let detach = NSMenuItem(title: Self.detachActionTitle, action: #selector(detachView(_:)), keyEquivalent: "")
-        detach.target = self
-        menu.addItem(detach)
-        menu.popUp(positioning: nil, at: NSPoint(x: overflowButton.bounds.maxX, y: overflowButton.bounds.maxY), in: overflowButton)
-    }
-
-    @objc private func stopAgentRun(_ sender: Any?) { onStopAgentRun?() }
-    @objc private func detachView(_ sender: Any?) { onDetachView?() }
+    var qaBranchFrame: NSRect { branchChip.convert(branchChip.bounds, to: self) }
 
     var qaName: String { nameLabel.stringValue }
     var qaState: String { stateLabel.stringValue }
     var qaElapsed: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
     var qaBranch: String? { branchChip.isHidden ? nil : branchChip.qaText }
-    var qaActionTitles: [String] { [Self.stopActionTitle, Self.detachActionTitle] }
-    var qaUsesCustomOverflow: Bool { overflowButton.subviews.allSatisfy { !($0 is NSButton) } }
     var qaBranchIsWarning: Bool { !branchChip.isHidden && branchChip.qaIsWarning }
     var qaBranchTooltip: String? { branchChip.isHidden ? nil : branchChip.toolTip }
     var qaTimerIsActive: Bool { elapsedTimer?.isValid == true }
     // Geometry probes read shell-space frames so lane assertions compare like
     // coordinates regardless of the internal stack nesting.
     var qaNameFrame: NSRect? { nameLabel.superview.map { $0.convert(nameLabel.frame, to: self) } }
-    var qaOverflowFrame: NSRect? { overflowButton.superview.map { $0.convert(overflowButton.frame, to: self) } }
     var qaElapsedFrame: NSRect? { elapsedLabel.superview.map { $0.convert(elapsedLabel.frame, to: self) } }
 
     /// Deterministic action/timer seams used by the existing supervisor check.
     /// They invoke the same callbacks as the production menu items and drive the
     /// same elapsed-label update as the one-second timer; no parallel QA behavior.
-    func qaInvokeStopAction() { stopAgentRun(nil) }
-    func qaInvokeDetachAction() { detachView(nil) }
     func qaTick(now: Date) { updateElapsed(now: now) }
 }
 
 /// NSControl supplies target/action, keyboard focus and accessibility without
 /// leaking an Aqua button bezel into the header.
 @MainActor
-private final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalable {
+final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let imageView = NSImageView(frame: .zero)
-    var stopIsEnabled = false
     private var isPressed = false
 
     /// This button's rung of the tile's page zoom, delivered by the tile's
@@ -297,7 +294,7 @@ private final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZo
 
     override func layout() {
         super.layout()
-        let inset = CGFloat(pageZoom.scaled(7))
+        let inset = min(CGFloat(pageZoom.scaled(7)), bounds.width / 8)
         imageView.frame = bounds.insetBy(dx: inset, dy: inset)
     }
 

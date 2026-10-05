@@ -60,6 +60,7 @@ enum ProviderModelGrouping {
             let nice = displayNames[item.id]
             let row = ChoiceItem(
                 id: item.id, title: nice ?? tail, detail: nice != nil ? tail : item.detail,
+                icon: item.icon,
                 enabled: item.enabled, destructive: item.destructive)
             if byProvider[provider] == nil { order.append(provider) }
             byProvider[provider, default: []].append(row)

@@ -11,6 +11,11 @@ import ContinuumRevivedAgentUI
 class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     private let titleLabel = NSTextField(labelWithString: "")
     private let chevronView = NSImageView(frame: .zero)
+    private let leadingIcon = NSImageView(frame: .zero)
+    var selectedIcon: ChoiceIcon? {
+        didSet { leadingIcon.image = selectedIcon?.image(); leadingIcon.isHidden = selectedIcon == nil; invalidateIntrinsicContentSize(); needsLayout = true }
+    }
+    private var iconWidth: CGFloat { selectedIcon == nil ? 0 : CGFloat(pageZoom.scaled(22)) }
     private let popoverController = ChoicePopoverController()
     private var isHovered = false
     private var isPressed = false
@@ -83,6 +88,9 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         titleLabel.lineBreakMode = .byTruncatingTail
         chevronView.image = CanvasSymbolImage.image(named: "chevron.up.chevron.down")
         chevronView.imageScaling = .scaleProportionallyDown
+        leadingIcon.imageScaling = .scaleProportionallyDown
+        leadingIcon.isHidden = true
+        addSubview(leadingIcon)
         addSubview(titleLabel)
         addSubview(chevronView)
         setAccessibilityRole(.popUpButton)
@@ -132,7 +140,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
 
     override var intrinsicContentSize: NSSize {
         NSSize(
-            width: scaledHorizontalPadding * 2 + measuredTitleWidth + scaledTitleGap + scaledChevronSize,
+            width: iconWidth + scaledHorizontalPadding * 2 + measuredTitleWidth + scaledTitleGap + scaledChevronSize,
             height: scaledControlHeight
         )
     }
@@ -146,11 +154,12 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
             width: chevronSize,
             height: chevronSize
         )
+        leadingIcon.frame = NSRect(x: scaledHorizontalPadding, y: (bounds.height - CGFloat(pageZoom.scaled(14))) / 2, width: CGFloat(pageZoom.scaled(14)), height: CGFloat(pageZoom.scaled(14)))
         let titleHeight = scaledTitleHeight
         titleLabel.frame = NSRect(
-            x: scaledHorizontalPadding,
+            x: scaledHorizontalPadding + iconWidth,
             y: floor((bounds.height - titleHeight) / 2),
-            width: max(0, chevronView.frame.minX - scaledTitleGap - scaledHorizontalPadding),
+            width: max(0, chevronView.frame.minX - scaledTitleGap - scaledHorizontalPadding - iconWidth),
             height: titleHeight
         )
     }
@@ -231,6 +240,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
+        leadingIcon.contentTintColor = BrandMark96.foreground(in: self)
         let focused = window?.firstResponder === self
         let accented = focused || presentedPopoverIsVisible
         let background: TokenColor = (isHovered || presentedPopoverIsVisible)

@@ -679,6 +679,7 @@ run_app_check .build/debug/Array --composer-image-components-check
 # non-file, and stale registered roots without mutating the agent; the native
 # menu switches from Change Home to New Agent Here after work/history exists.
 run_app_check .build/debug/Array --location-action-surface-check
+run_app_check .build/debug/Array --workspace-chrome-polish-check
 run_app_check .build/debug/Array --focus-scope-dispatch-check
 run_app_check .build/debug/Array --reserved-dispatch-check
 run_app_check .build/debug/Array --tile-action-check

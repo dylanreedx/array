@@ -3056,6 +3056,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-chrome-polish-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceChromePolishChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--location-action-surface-check") {
             do {
                 _ = NSApplication.shared
@@ -10501,7 +10512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         } catch {
             fputs("Workspace top bar reload failed: \(error)\n", stderr)
-            topBar.setManagementMessage("Workspace list failed to load: \(error.localizedDescription)")
+            topBar.setManagementMessage("Workspace list failed to load: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -10708,7 +10719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             sidebar.reload(tree: SidebarTree(workspaces: []), currentWorkspaceId: nil)
             // 0721: an empty tree disables every workspace verb. Without this the
             // sidebar looks normal and Delete is simply dead.
-            sidebar.setManagementMessage("Workspace list failed to load: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Workspace list failed to load: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -10746,7 +10757,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return workspaceRuntime.workspaceId == workspaceId
         } catch {
             fputs("Workspace sidebar switch failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch workspaces: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Couldn't switch workspaces: \(error.localizedDescription)", kind: .error)
             return false
         }
     }
@@ -11047,7 +11058,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
         for record in running { agentSupervisor.stop(record.id) }
-        setWorkspaceManagementMessage("Stopped \(countedAgents(running.count)): \(agentNameList(running)).")
+        setWorkspaceManagementMessage("Stopped \(countedAgents(running.count)): \(agentNameList(running)).", kind: .success)
         refreshAgentSurfaces(notify: false)
         return true
     }
@@ -11099,7 +11110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         if ignored > 0 { sentence += " \(ignored) selected row(s) had no agent to archive." }
-        setWorkspaceManagementMessage(sentence)
+        setWorkspaceManagementMessage(sentence, kind: refused.isEmpty && ignored == 0 ? .success : .warning)
         refreshAgentSurfaces(notify: false)
         return !parked.isEmpty
     }
@@ -11150,7 +11161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let tileId = record.tileId { deleteTile(id: tileId) }
         }
         setWorkspaceManagementMessage(
-            agentArchiveMessage(verb: verb, targets: targets, reports: reports, ignored: ignored))
+            agentArchiveMessage(verb: verb, targets: targets, reports: reports, ignored: ignored),
+            kind: ignored == 0 && reports.allSatisfy { $0.recordDeleted && $0.branchRetained == nil && $0.worktreeRetained == nil } ? .success : .warning)
         refreshAgentSurfaces(notify: false)
         return true
     }
@@ -14126,6 +14138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onAcceptedBoardTask = { [weak self] acceptedAgentID, context in
             self?.advanceAcceptedBoardTask(agentID: acceptedAgentID, context: context)
         }
+        view.locationMenuProvider = { [weak self] agentID in self?.makeLocationActionMenu(for: agentID) }
         view.onLocationActionMenuRequested = { [weak self] requestedAgentID, anchor in
             self?.showLocationActionMenu(for: requestedAgentID, anchoredTo: anchor)
         }
@@ -14228,7 +14241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func showLocationActionMenu(for agentID: AgentID, anchoredTo anchor: NSButton) {
-        guard let snapshot = agentSupervisor.locationSnapshot(for: agentID) else { return }
+        makeLocationActionMenu(for: agentID)?.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private func makeLocationActionMenu(for agentID: AgentID) -> NSMenu? {
+        guard let snapshot = agentSupervisor.locationSnapshot(for: agentID) else { return nil }
         let menu = NSMenu(title: "Location Actions")
         let hasWork = agentSupervisor.hasUserWorkOrSessionHistory(agentID)
         let homeURL = snapshot.home.checkoutRoot
@@ -14241,7 +14258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if whereURL.standardizedFileURL.path != homeURL.standardizedFileURL.path {
             addPathActions(to: menu, label: "Where", url: whereURL)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+        return menu
     }
 
     private func locationPrimaryActionMenuItem(for agentID: AgentID, hasWork: Bool) -> NSMenuItem {
@@ -14544,6 +14561,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    && displayTile.chromeSnapshot?.providerModel == "openai/gpt-5.6-sol",
                    "managed chrome did not render the bundled provider mark with its exact model metadata")
         displayTile.attach(agentID: displayAgent, supervisor: delegate.agentSupervisor, projectName: "Alpha Project")
+        displayTile.locationMenuProvider = { delegate.makeLocationActionMenu(for: $0) }
+        let consolidatedMenu = displayTile.titleBarContextMenuForQA()
+        let consolidatedTitles = consolidatedMenu.items.map(\.title)
+        for title in ["Copy Home Path", "Change Home", "Sounds", "Workspace Tools", AgentTileHeaderView.stopActionTitle, AgentTileHeaderView.detachActionTitle] {
+            try expect(consolidatedTitles.contains(title), "consolidated top-bar menu lost \(title): \(consolidatedTitles)")
+        }
+        try expect(consolidatedMenu.items.contains { $0.submenu?.items.contains { $0.identifier?.rawValue == "agentTile.pageZoom.zoomIn" } == true }, "consolidated menu lost zoom actions")
         try expect(displayTile.qaLocationText.contains("Alpha Project"),
                    "attach with a project name should show it, got \(displayTile.qaLocationText)")
         displayTile.attach(agentID: displayAgent, supervisor: delegate.agentSupervisor, projectName: nil)
@@ -15399,7 +15423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// name on screen rather than dropping it.
     private func reportUnsavedZoneRename(_ zoneId: UUID, name: String) {
         fputs("persistRenamedZone: zone \(zoneId) is not in the mounted workspace; name not saved\n", stderr)
-        setWorkspaceManagementMessage("Couldn't save zone name \u{201C}\(name)\u{201D}: the zone isn't part of this workspace's saved layout.")
+        setWorkspaceManagementMessage("Couldn't save zone name \u{201C}\(name)\u{201D}: the zone isn't part of this workspace's saved layout.", kind: .error)
     }
 
     /// Nil when the registry cannot be read: that is not a registry miss.
@@ -15485,7 +15509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         canvasView.cancelProvisionalZone(zoneId: placement.zoneId)
                     }
                     self.projectHomePicker = nil
-                    self.setWorkspaceManagementMessage("Couldn't determine the active workspace.")
+                    self.setWorkspaceManagementMessage("Couldn't determine the active workspace.", kind: .error)
                     return
                 }
                 // Fenced by the mount the picker was opened in. The workspace is
@@ -15531,7 +15555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                     self.projectHomePicker = nil
                     self.setWorkspaceManagementMessage(
-                        "Couldn't use that project here: \(error.localizedDescription)"
+                        "Couldn't use that project here: \(error.localizedDescription)", kind: .error
                     )
                     return
                 }
@@ -15671,9 +15695,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func setWorkspaceManagementMessage(_ message: String?) {
+    private func setWorkspaceManagementMessage(_ message: String?, kind: WorkspaceNotificationView.Kind = .warning) {
         workspaceManagementMessage = message
-        workspaceTopBarView?.setManagementMessage(message)
+        workspaceTopBarView?.setManagementMessage(message, kind: kind)
+        workspaceTopBarView?.notificationView.onDismiss = { [weak self] in
+            self?.workspaceManagementMessage = nil
+        }
         workspaceSidebarView?.setManagementMessage(message)
     }
 
@@ -15711,7 +15738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try registryStore.save(registry)
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)", kind: .error)
             return false
         }
         do {
@@ -15719,7 +15746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // the registry entry and empty document are durable, a switch problem
             // must not tell the user that creation failed or encourage duplicates.
             try workspaceRuntime?.switchWorkspace(to: workspace.id)
-            setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.")
+            setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.", kind: .success)
         } catch {
             fputs("Created Workspace but switch failed: \(error)\n", stderr)
             setWorkspaceManagementMessage(
@@ -15780,12 +15807,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return false
             }
             try registryStore.save(registry)
-            setWorkspaceManagementMessage("Renamed workspace to “\(trimmed)”.")
+            setWorkspaceManagementMessage("Renamed workspace to “\(trimmed)”.", kind: .success)
             reloadWorkspaceSidebar()
             return true
         } catch {
             fputs("Rename Workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Rename workspace failed: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Rename workspace failed: \(error.localizedDescription)", kind: .error)
             return false
         }
     }
@@ -15884,14 +15911,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     fputs("Delete Workspace: document cleanup failed: \(error)\n", stderr)
                 }
             }
-            setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.")
+            setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.", kind: .success)
             reloadWorkspaceSidebar()
             return true
         } catch {
             fputs("Delete Workspace failed: \(error)\n", stderr)
             // The registry has not been written on this path, so say so: the
             // workspace is still there and the next launch will still show it.
-            setWorkspaceManagementMessage("Delete workspace failed, so “\(workspaceNameForMessage(workspaceId: workspaceId))” was kept: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Delete workspace failed, so “\(workspaceNameForMessage(workspaceId: workspaceId))” was kept: \(error.localizedDescription)", kind: .error)
             reloadWorkspaceSidebar()
             return false
         }
@@ -15971,7 +15998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         } catch {
             fputs("Add Project to Canvas failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't add project: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Couldn't add project: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -16007,11 +16034,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             try workspaceRuntime?.switchWorkspace(to: workspaceId)
             showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
-            setWorkspaceManagementMessage("Switched to “\(workspace.name)” for “\(project.name)”.")
+            setWorkspaceManagementMessage("Switched to “\(workspace.name)” for “\(project.name)”.", kind: .success)
             reloadWorkspaceSidebar()
         } catch {
             fputs("Switch to owning workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch to “\(workspace.name)”: \(error.localizedDescription)")
+            setWorkspaceManagementMessage("Couldn't switch to “\(workspace.name)”: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -17419,7 +17446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         refusedCloseOverUnsavedChanges = true
         fputs("workspace close flush failed; close cancelled: \(error)\n", stderr)
-        setWorkspaceManagementMessage("\(error.localizedDescription). Quit again to quit without saving it.")
+        setWorkspaceManagementMessage("\(error.localizedDescription). Quit again to quit without saving it.", kind: .error)
         return false
     }
 

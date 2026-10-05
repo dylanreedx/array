@@ -673,10 +673,12 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         select(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
     }
 
+    var managementMessageIsVisibleForQA: Bool { !managementMessageLabel.isHidden }
+
     func setManagementMessage(_ message: String?) {
         let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         managementMessageLabel.stringValue = text
-        managementMessageLabel.isHidden = text.isEmpty
+        managementMessageLabel.isHidden = true
     }
 
     // P3.14: same three names, driving the scope menu instead of the removed header

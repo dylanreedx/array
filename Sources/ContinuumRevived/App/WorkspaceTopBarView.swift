@@ -16,6 +16,27 @@ struct WorkspaceTopBarModel: Equatable {
 
 @MainActor
 final class WorkspaceTopBarView: NSView, TokenThemed {
+    let notificationView = WorkspaceNotificationView(frame: .zero)
+    private var messageKind: WorkspaceNotificationView.Kind = .warning
+    private var lastMessage: String?
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        notificationView.removeFromSuperview()
+        guard let host = superview else { return }
+        notificationView.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(notificationView, positioned: .above, relativeTo: self)
+        let preferredWidth = notificationView.widthAnchor.constraint(equalToConstant: 440)
+        preferredWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            preferredWidth,
+            notificationView.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -16),
+            notificationView.topAnchor.constraint(equalTo: bottomAnchor, constant: 12),
+            notificationView.widthAnchor.constraint(lessThanOrEqualToConstant: 440),
+            notificationView.widthAnchor.constraint(lessThanOrEqualTo: host.widthAnchor, constant: -32)
+        ])
+    }
+
     private let nameLabel: NSTextField
     private let countsLabel: NSTextField
     private let saveStateLabel: NSTextField
@@ -144,7 +165,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         commandCenterButton.target = self
         commandCenterButton.action = #selector(openCommandCenterClicked(_:))
 
-        let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel, managementMessageLabel])
+        let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel])
         self.identityStack = identityStack
         identityStack.orientation = .horizontal
         identityStack.alignment = .firstBaseline
@@ -244,10 +265,19 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return workspaceCount > 1 ? "Delete workspace" : lastWorkspaceToolTip
     }
 
+    func setManagementMessage(_ message: String?, kind: WorkspaceNotificationView.Kind) {
+        messageKind = kind
+        lastMessage = nil
+        setManagementMessage(message)
+    }
+
     func setManagementMessage(_ message: String?) {
         let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         managementMessageLabel.stringValue = text
-        managementMessageLabel.isHidden = text.isEmpty
+        managementMessageLabel.isHidden = true
+        guard lastMessage != text else { return }
+        lastMessage = text
+        notificationView.show(text, kind: messageKind)
     }
 
     func updateCommandCenterShortcut(_ display: String?) {
@@ -259,6 +289,8 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// A drag anywhere on the bar's own surface moves the window, the way the
     /// titlebar it replaced did. Controls and labels keep their own hit areas.
     override var mouseDownCanMoveWindow: Bool { true }
+
+    var managementMessageIsVisibleForQA: Bool { !managementMessageLabel.isHidden && managementMessageLabel.superview != nil }
 
     var workspaceNameForQA: String { nameLabel.stringValue }
     var identityLeadingForQA: CGFloat { identityLeadingConstraint?.constant ?? 0 }

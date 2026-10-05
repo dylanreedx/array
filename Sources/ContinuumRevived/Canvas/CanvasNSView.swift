@@ -12880,6 +12880,18 @@ extension CanvasNSView: NSTextFieldDelegate {
 }
 
 final class ZoneChromeNSView: NSView {
+    private static let homeIcon = homeSymbol("house")
+    private static let directoryIcon = homeSymbol("folder")
+
+    private static func homeSymbol(_ name: String) -> NSImage {
+        let symbol = CanvasSymbolImage.image(named: name, pointSize: 11)
+        return NSImage(size: NSSize(width: 11, height: 11), flipped: true) { rect in
+            symbol?.draw(in: rect)
+            NSColor.white.withAlphaComponent(0.80).setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
     struct Snapshot: Equatable {
         var displayName: String
         var color: String
@@ -13062,15 +13074,22 @@ final class ZoneChromeNSView: NSView {
         )
         drawnHeaderText.append(title)
         if let scope = presentation.homeLabel {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingMiddle
             let scopeAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: presentation.isProvisional ? .semibold : .regular),
-                .foregroundColor: NSColor.white.withAlphaComponent(presentation.isProvisional ? 0.86 : 0.62)
+                .foregroundColor: NSColor.white.withAlphaComponent(presentation.isProvisional ? 0.86 : 0.80),
+                .paragraphStyle: paragraph
             ]
+            let homeRect = CGRect(x: 31 + titleWidth, y: 6, width: max(0, min((scope as NSString).size(withAttributes: scopeAttributes).width + 30, headerRect.width - titleWidth - 110)), height: 22)
+            NSColor.white.withAlphaComponent(0.08).setFill()
+            NSBezierPath(roundedRect: homeRect, xRadius: 5, yRadius: 5).fill()
+            (placement.homeRelativePath == nil ? Self.homeIcon : Self.directoryIcon).draw(in: CGRect(x: homeRect.minX + 6, y: 11, width: 11, height: 11))
             scope.draw(
                 in: CGRect(
-                    x: 31 + titleWidth,
+                    x: homeRect.minX + 22,
                     y: 9,
-                    width: max(0, headerRect.width - titleWidth - 125),
+                    width: max(0, homeRect.width - 26),
                     height: 16
                 ),
                 withAttributes: scopeAttributes
@@ -13092,18 +13111,7 @@ final class ZoneChromeNSView: NSView {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.66)
         ])
-        let layoutGlyph = placement.autoLayoutMode == .disabled ? "" : "⇥"
-        if !layoutGlyph.isEmpty {
-            (layoutGlyph as NSString).draw(
-                in: CGRect(x: overflowRect.minX - 24, y: 7, width: 20, height: 18),
-                withAttributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                    .foregroundColor: NSColor.white.withAlphaComponent(0.62)
-                ]
-            )
-        }
-
-        var rightInset: CGFloat = 12 + closeSize + 56   // close + overflow + layout slots
+        var rightInset: CGFloat = 12 + closeSize + 30
         if let qaVerdict = presentation.qaVerdict {
             let badgeAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 12, weight: .bold),

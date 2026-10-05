@@ -5782,11 +5782,14 @@ enum UIProbeGeometry {
                 now: Date(timeIntervalSince1970: 165)
             ))
             header.layoutSubtreeIfNeeded()
-            guard let overflow = header.qaOverflowFrame, overflow.width == 28, overflow.height == 28,
-                  header.bounds.insetBy(dx: -0.5, dy: -0.5).contains(overflow) else {
-                throw fail("agent header: overflow action lost its 28pt hit target inside the shell at \(Int(width))pt")
+            let tile = ManagedAgentTileNSView(tile: Tile(id: UUID(), kind: .managedAgent, title: longName, frame: TileFrame(x: 0, y: 0, width: Double(width), height: 480), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: width, height: 480)
+            tile.layoutSubtreeIfNeeded()
+            guard let overflow = tile.titleBarActionsFrameForQA, overflow.width > 0, overflow.height > 0,
+                  tile.bounds.insetBy(dx: -0.5, dy: -0.5).contains(overflow), tile.titleBarUsesCustomOverflowForQA else {
+                throw fail("agent tile: consolidated top-bar action lost its custom hit target at \(Int(width))pt")
             }
-            guard let name = header.qaNameFrame, name.maxX <= overflow.minX,
+            guard let name = header.qaNameFrame, name.maxX <= header.bounds.maxX,
                   name.minX >= 0, header.qaName == longName else {
                 throw fail("agent header: name label escaped its lane at \(Int(width))pt — truncation must stay inside the shell")
             }
