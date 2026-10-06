@@ -64,7 +64,13 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public var codexConfigOverrides: [String] {
         ["mcp_servers.array_workspace.command=\(Self.tomlString(serverExecutable))",
          "mcp_servers.array_workspace.args=[]",
-         "mcp_servers.array_workspace.tool_timeout_sec=\(Self.toolCallTimeoutSeconds)"]
+         "mcp_servers.array_workspace.tool_timeout_sec=\(Self.toolCallTimeoutSeconds)",
+         // Measured on codex 0.159.3: under `approval_policy=never` an MCP call
+         // to a server without this fails "requires approval, but approval
+         // policy is never" — every Array tool, unreached. Array's own grant
+         // and approval UI gate its operations, as `--allowedTools` leaves them
+         // the only gate for Claude.
+         "mcp_servers.array_workspace.default_tools_approval_mode=\"approve\""]
             + environment.keys.sorted().map { key in
                 "mcp_servers.array_workspace.env.\(key)=\(Self.tomlString(environment[key] ?? ""))"
             }
