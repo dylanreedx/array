@@ -78,5 +78,18 @@ Chips render `Name ·` with no visible state — status label missing/clipped.
 - T5 steering, queue rail, force-send, interrupt-not-kill; persistent Claude
   process (decisions below)
 
-## Decisions
-(recorded when Dylan answers)
+## Decisions (Dylan, 2026-10-06)
+- D1 Enter while working = STEER; ⌥↩ = queue; ⌘↩ = force send. One rail,
+  two sections: "Steering · after next tool call" and "Queued · after this
+  turn"; each item has send-now, edit, delete, drag-to-reorder.
+- D2 Force send = interrupt the turn WITHOUT killing the process, send now, no
+  confirmation. Later queued items stay held.
+- D3 Claude = one persistent stream-json process per agent, kept alive while a
+  turn or background work runs, reaped after ~10 min idle; model/effort change
+  respawns with --resume.
+- D4 Queue drains one item per turn.
+Coordinator defaults (not asked): steers are held by Array until the provider
+reaches a tool boundary so they stay editable/cancellable, and run ahead of the
+queue if the turn ends first; Stop = interrupt (kill only as fallback); a failed
+turn keeps draining; an interrupted/paused queue shows a Resume control and
+never auto-resumes after relaunch.
