@@ -6652,7 +6652,9 @@ final class AgentSupervisor {
     private var deferredQueueOutcomes: [AgentID: TurnOutcome] = [:]
     /// A force send whose interrupt ended the turn, waiting for the receipts
     /// of the steers that turn still had in delivery (T5c).
-    private var deferredForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
+    /// `token` ties each grace timer to the force send it was armed for, so a
+    /// timer left over from an earlier one cannot release a later one early.
+    private var deferredForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool, token: UUID)] = [:]
     private var promptEchoObservers: [AgentID: [UUID: (AgentPrompt) -> Void]] = [:]
 
     /// One pending steer for the rail: still HELD (editable, cancellable) or
@@ -6914,7 +6916,8 @@ final class AgentSupervisor {
         if deliveringSteers[id]?.isEmpty ?? true { sendDeferredForceSend(for: id) }
     }
 
-    private func sendDeferredForceSend(for id: AgentID) {
+    private func sendDeferredForceSend(for id: AgentID, token: UUID? = nil) {
+        guard let pending = deferredForceSends[id], token == nil || pending.token == token else { return }
         guard let forced = deferredForceSends.removeValue(forKey: id) else { return }
         if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
     }
@@ -7597,9 +7600,10 @@ final class AgentSupervisor {
                 if deliveringSteers[id]?.isEmpty ?? true {
                     if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
                 } else {
-                    deferredForceSends[id] = forced
+                    let token = UUID()
+                    deferredForceSends[id] = (forced.prompt, forced.echo, token)
                     DispatchQueue.main.asyncAfter(deadline: .now() + interruptGrace) { [weak self] in
-                        self?.sendDeferredForceSend(for: id)
+                        self?.sendDeferredForceSend(for: id, token: token)
                     }
                 }
                 return
