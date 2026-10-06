@@ -104,7 +104,7 @@ func runWorkspaceMCPChecks() {
     let claudeArgs = ClaudeAgentRunner.processArguments(
         model: "opus", effort: Optional<String>.none, sessionMode: ClaudeSessionMode.start,
         sessionId: "00000000-0000-4000-8000-000000000001", extraArgs: [],
-        prompt: AgentPrompt("hello"), workspaceMCP: config)
+        workspaceMCP: config)
     expect(claudeArgs.contains("--strict-mcp-config") && claudeArgs.contains(config.claudeMCPConfigPath),
            "Claude launch argv did not include the isolated MCP configuration file path")
     func value(after flag: String, in args: [String]) -> String? {
@@ -118,17 +118,13 @@ func runWorkspaceMCPChecks() {
            "Claude must pre-allow Array's own MCP server so Array's approval is the only gate")
     expect(value(after: "--disallowedTools", in: claudeArgs) == "ListAgents",
            "Claude's ListAgents must be withheld in an Array tile")
-    if let separator = claudeArgs.firstIndex(of: "--") {
-        expect(separator + 1 < claudeArgs.count && claudeArgs[separator + 1] == "hello",
-               "Claude prompt was not placed after the option terminator")
-        expect(["--append-system-prompt", "--allowedTools", "--disallowedTools"].allSatisfy { (claudeArgs.firstIndex(of: $0) ?? .max) < separator },
-               "Array's Claude flags must precede the option terminator")
-    } else {
-        expect(false, "Claude launch argv omitted the option terminator before the prompt")
-    }
+    // T5: the prompt travels on stdin (stream-json), so nothing positional
+    // follows the variadic `--mcp-config` list for it to swallow.
+    expect(!claudeArgs.contains("--") && claudeArgs.last == config.claudeMCPConfigPath,
+           "Claude's MCP config path must end the argv with no positional prompt after it: \(claudeArgs)")
     let plainClaudeArgs = ClaudeAgentRunner.processArguments(
         model: "opus", effort: Optional<String>.none, sessionMode: ClaudeSessionMode.start,
-        sessionId: "00000000-0000-4000-8000-000000000001", extraArgs: [], prompt: AgentPrompt("hello"))
+        sessionId: "00000000-0000-4000-8000-000000000001", extraArgs: [])
     expect(!plainClaudeArgs.contains("--append-system-prompt") && !plainClaudeArgs.contains("--allowedTools"),
            "an agent without workspace tools gets no Array guidance or allowance")
     let codexArgs = CodexCLIBackend.processArguments(

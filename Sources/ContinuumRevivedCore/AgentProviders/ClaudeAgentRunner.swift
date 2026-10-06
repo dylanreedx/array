@@ -171,6 +171,26 @@ public enum ClaudeCLIBackend {
 
 #if os(macOS)
 
+/// T5 (`.plans/69`, D3) — ONE long-lived `claude -p --input-format stream-json`
+/// process per agent, fed one stream-json user message per prompt.
+///
+/// It used to be one process per turn with the prompt in argv, and the whole
+/// process group was killed when that turn's process exited. That killed every
+/// Bash background job and every background subagent claude had started — real
+/// work, lost at the turn boundary — and it left no channel for a second
+/// message while a turn ran. Now:
+///
+/// - the turn boundary is the `result` frame, never process exit;
+/// - a steer is one more user message on stdin, which claude consumes at its
+///   next tool boundary (or, when no boundary is left, runs as the next turn) and
+///   confirms by replaying it (`--replay-user-messages`, `isReplay: true`);
+/// - an interrupt is a `control_request`, which ends the turn and keeps the
+///   process;
+/// - a turn claude starts on its own (a promoted steer, a finished background
+///   task's notification) is buffered and announced, so the supervisor can bind
+///   it to the agent like any other turn.
+///
+/// Measured live on claude 2.1.291 (captures in `.plans/69`'s probe directory).
 public final class ClaudeAgentRunner: @unchecked Sendable {
     public struct Config: Sendable {
         /// Claude-native model argument (already stripped of the `anthropic/`
@@ -182,7 +202,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// The conversation UUID (claude validates the format). Derived from
         /// the agent id by the supervisor, never persisted.
         public var sessionId: String
-        /// Extra args before the prompt.
+        /// Extra args after the session flags.
         public var extraArgs: [String]
         /// Whether the conversation behind `sessionId` is believed to exist.
         ///
@@ -195,9 +215,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// Defaults to true, which is the historical resume-first behavior.
         public var conversationMayExist: Bool
         /// B7.2 — when true, `sessionId` is the OLD session to resume-and-fork
-        /// FROM (`/clear`'s rotation), not the session to resume/start. Bypasses
-        /// the resume/start ordering entirely: `run` makes exactly one
-        /// `--fork-session` attempt with no retry.
+        /// FROM (`/clear`'s rotation), not the session to resume/start. The
+        /// process's first spawn makes exactly one `--fork-session` attempt with
+        /// no retry.
         public var forkSession: Bool
         public var workspaceMCP: WorkspaceMCPConfiguration?
 
@@ -228,17 +248,19 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// claude policy in `ClaudeCLIBackend` and be witnessed without a process.
     public typealias SessionMode = ClaudeSessionMode
 
-    /// The claude args after the executable. `--verbose` is required by the
-    /// CLI for stream-json in print mode. Permission mode is intentionally not
-    /// overridden: the user's effective Claude configuration remains
-    /// authoritative, while hook events expose native interaction seams.
+    /// The claude args after the executable — the ONE place the argv is built.
+    /// `--verbose` is required by the CLI for stream-json in print mode. No
+    /// positional prompt: every prompt is a stdin message, so there is nothing
+    /// after the options for `--mcp-config`'s variadic list to swallow.
+    /// Permission mode is intentionally not overridden: the user's effective
+    /// Claude configuration remains authoritative, while hook events expose
+    /// native interaction seams.
     public static func processArguments(
         model: String,
         effort: String?,
         sessionMode: SessionMode,
         sessionId: String,
         extraArgs: [String],
-        prompt: AgentPrompt,
         workspaceMCP: WorkspaceMCPConfiguration? = nil
     ) -> [String] {
         let sessionArgs: [String]
@@ -254,9 +276,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // CLAUDE_CODE_FORWARD_SUBAGENT_TEXT; verified present in `claude --help`
         // on the installed 2.1.241, where it also states it only works with
         // --print and --output-format=stream-json, which is exactly this argv.
-        var args = ["-p", "--output-format", "stream-json", "--verbose",
-                "--include-partial-messages", "--include-hook-events",
-                "--forward-subagent-text"]
+        // T5: `--replay-user-messages` is the consumption receipt for a steer.
+        var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                "--verbose", "--include-partial-messages", "--replay-user-messages",
+                "--include-hook-events", "--forward-subagent-text"]
             + ["--model", model]
             + (effort.map { ["--effort", $0] } ?? [])
             + sessionArgs
@@ -275,20 +298,64 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                      "--disallowedTools", "ListAgents",
                      "--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
-        // `--mcp-config` accepts a variadic list. Terminate option parsing so
-        // Claude cannot interpret the user's prompt as another config path.
-        return args + ["--", promptArgument(prompt)]
+        return args
     }
 
-    /// Claude takes ONE positional prompt (pi takes segments). The visible
-    /// text and each attachment's `@/local/file` reference join with
-    /// newlines — claude reads @-references itself, same contract as pi's.
+    /// The text of a prompt with every attachment as an `@/local/file`
+    /// reference, newline-joined — the shape claude's argv prompt had, kept as
+    /// the shared contract with codex's positional prompt.
     public static func promptArgument(_ prompt: AgentPrompt) -> String {
         var segments: [String] = []
         if !prompt.text.isEmpty { segments.append(prompt.text) }
         segments.append(contentsOf: prompt.imageAttachments.map(\.piPathReference))
         segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
         return segments.joined(separator: "\n")
+    }
+
+    /// The text block of one stdin message: the visible text and each FILE
+    /// reference as `@path` (claude's Read tool fetches it). Images travel as
+    /// native image blocks instead — the same split pi's rpc prompt makes.
+    public static func userMessageText(_ prompt: AgentPrompt) -> String {
+        var segments: [String] = []
+        if !prompt.text.isEmpty { segments.append(prompt.text) }
+        segments.append(contentsOf: prompt.fileReferences.map(\.piPathReference))
+        return segments.joined(separator: "\n")
+    }
+
+    /// One stream-json user message line. Text-only content stays a plain
+    /// string, which is exactly the shape the live probe measured.
+    public static func userMessageLine(_ prompt: AgentPrompt) throws -> String {
+        let text = userMessageText(prompt)
+        let content: Any
+        if prompt.imageAttachments.isEmpty {
+            content = text
+        } else {
+            var blocks: [[String: Any]] = []
+            if !text.isEmpty { blocks.append(["type": "text", "text": text]) }
+            for attachment in prompt.imageAttachments {
+                let data = try Data(contentsOf: attachment.fileURL, options: [.mappedIfSafe])
+                blocks.append([
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": attachment.metadata.contentType
+                            ?? PiRpcAgentRunner.inferredImageMIMEType(for: attachment.fileURL),
+                        "data": data.base64EncodedString(),
+                    ],
+                ])
+            }
+            content = blocks
+        }
+        let object: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The interrupt control request, measured live: answered by a
+    /// `control_response` in ~10ms, the in-flight tool is declined, the turn's
+    /// `result` is `error_during_execution`, and the process keeps reading.
+    public static func interruptRequestLine(requestId: String) -> String {
+        #"{"type":"control_request","request_id":"\#(requestId)","request":{"subtype":"interrupt"}}"#
     }
 
     public enum RunError: Error, CustomStringConvertible {
@@ -338,78 +405,143 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         liveResolvedCommand().prefixArgs.isEmpty
     }
 
+    /// How long `interrupt()` waits for claude's `control_response`.
+    public static let interruptAcknowledgementTimeout: TimeInterval = 5
+
     public let config: Config
     public var compactionCapabilities: AgentCompactionCapabilities {
-        AgentCompactionCapabilities(
-            supportsManual: config.conversationMayExist && !config.forkSession,
+        let established = queue.sync { conversationEstablished }
+        let exists = config.conversationMayExist || established
+        return AgentCompactionCapabilities(
+            supportsManual: exists && (!config.forkSession || established),
             supportsFocus: true,
-            unavailableReason: config.conversationMayExist ? nil : "Nothing to compact yet"
+            unavailableReason: exists ? nil : "Nothing to compact yet"
         )
     }
+
+    /// How a waited-on turn ended.
+    private enum TurnEnd {
+        case completed
+        case stopped
+        case exited(code: Int32, sawInit: Bool, stderr: String)
+    }
+
+    /// One `run`/`compact`/adoption waiting for `remaining` turn completions.
+    private final class TurnWaiter: @unchecked Sendable {
+        let onEvent: @Sendable (AgentRuntimeEvent) -> Void
+        var remaining: Int
+        var end: TurnEnd?
+        let semaphore = DispatchSemaphore(value: 0)
+        init(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void, remaining: Int) {
+            self.onEvent = onEvent
+            self.remaining = remaining
+        }
+    }
+
+    /// Events of a turn claude started with nobody waiting, held until the
+    /// supervisor adopts it. `open` counts turns begun and not yet completed.
+    private struct UnsolicitedTurns {
+        var events: [AgentRuntimeEvent] = []
+        var open = 0
+    }
+
     private let queue = DispatchQueue(label: "continuum.claude-agent-runner")
+    /// Every stdin write goes through one serial queue (prompt, steer,
+    /// interrupt), so two frames can never interleave their bytes.
+    private let writeQueue = DispatchQueue(label: "continuum.claude-agent-runner.write")
+    // Everything below is queue-confined.
     private var translator: ClaudeEventTranslator
     private var buffer = Data()
-    private var stderrBuffer = Data()   // queue-confined
-    /// M1.8: see `ProcessGroupChild`. Queue-confined (set in run, read in stop).
+    private var stderrBuffer = Data()
+    /// M1.8: see `ProcessGroupChild`. The LIVE session process, or nil.
     private var child: ProcessGroupChild?
-    private var stopRequested = false   // queue-confined; suppresses the retry
+    private var stopRequested = false
+    private var forkConsumed = false
+    /// An init has been seen from a process of this runner: the conversation
+    /// exists now whatever the config believed.
+    private var conversationEstablished = false
+    /// The CURRENT process has started at least one turn. A process that dies
+    /// before that is the only one the session-mode retry may replace.
+    private var processSawInit = false
+    private var turn: TurnWaiter?
+    private var unsolicited: UnsolicitedTurns?
+    /// Steers written to stdin and not yet replayed, oldest first.
+    private var pendingSteers: [(id: UUID, text: String)] = []
+    private var interruptRequested = false
+    private var controlCounter = 0
+    private var pendingControls: [String: (semaphore: DispatchSemaphore, success: Bool?)] = [:]
+    /// claude's own `background_tasks_changed` list size: Bash background jobs
+    /// and background subagents still running inside this process.
+    private var backgroundTaskCount = 0
+    private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
+    private var observationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
+    private var subagentHandler: (@Sendable (String, AgentRuntimeEvent) -> Void)?
+    private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
+    private var unsolicitedTurnHandler: (@Sendable () -> Void)?
 
     public init(config: Config) {
         self.config = config
         self.translator = ClaudeEventTranslator(workingDirectory: config.cwd)
     }
 
-    /// Runs claude with `prompt`, streaming events to `onEvent` until it
-    /// exits. Blocking; call off the main thread. `onEvent` is invoked on the
-    /// runner's serial queue.
-    ///
-    /// Two orderings, one mechanism. `config.conversationMayExist` picks which mode
-    /// is tried first and the other becomes the retry, so the pair self-heals in
-    /// BOTH directions: a resume of a conversation that does not exist retries as
-    /// `--session-id`, and a `--session-id` for one that already exists retries as
-    /// `--resume`. A failing attempt streams nothing (the translator gates on init,
-    /// and the failure emits no events), so a retry cannot duplicate content.
-    ///
-    /// Why the hint matters: this was resume-first unconditionally, so the first
-    /// turn of every claude agent spawned a whole `claude --resume <uuid>` process,
-    /// waited for it to fail, and only then spawned the real one — a guaranteed
-    /// wasted CLI launch in front of the user's very first prompt.
-    public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        // B7.2 — `/clear`'s rotation is a single, non-retryable attempt: it
-        // either forks (and the new id is adopted from `system/init` over the
-        // runtime-observation channel) or it fails outright. Falling back to
-        // an ordinary resume/start on failure would silently abandon the
-        // rotation and keep talking to the OLD, un-cleared session.
-        if config.forkSession {
-            let result = try runOnce(mode: .fork, prompt: prompt, onEvent: onEvent)
-            if result.exitCode != 0 {
-                try throwStoppedIfRequested(stderr: result.stderr)
-                throw RunError.claudeFailed(exitCode: result.exitCode, stderr: result.stderr)
-            }
-            return
-        }
-        let order = ClaudeCLIBackend.sessionModeOrder(
-            conversationMayExist: config.conversationMayExist)
-        let first = try runOnce(mode: order.first, prompt: prompt, onEvent: onEvent)
-        if first.exitCode == 0 { return }
-        guard ClaudeCLIBackend.retryIsWarranted(after: order.first, stderr: first.stderr) else {
-            // M1.7: a Stop SIGTERMs the child, so this non-zero exit is the Stop
-            // arriving, not a failure. The flag existed and was read only to
-            // suppress the retry BELOW -- after this line had already thrown.
-            try throwStoppedIfRequested(stderr: first.stderr)
-            throw RunError.claudeFailed(exitCode: first.exitCode, stderr: first.stderr)
-        }
-        let shouldRetry: Bool = queue.sync { !stopRequested }
-        guard shouldRetry else { throw AgentRunStopped(detail: first.stderr) }
-        let second = try runOnce(mode: order.retry, prompt: prompt, onEvent: onEvent)
-        if second.exitCode != 0 {
-            try throwStoppedIfRequested(stderr: second.stderr)
-            throw RunError.claudeFailed(exitCode: second.exitCode, stderr: second.stderr)
-        }
+    deinit {
+        // An idle runner is retained between turns on purpose; if its owner
+        // goes away without a stop, do not orphan claude or its jobs.
+        child?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
     }
 
-    /// Invoke Claude's native slash command without publishing its synthetic
-    /// print-mode turn. Only the compaction lifecycle/boundary crosses this seam.
+    // MARK: - Session state
+
+    /// True while the session process is alive and not being stopped.
+    public var isSessionRunning: Bool {
+        queue.sync { child != nil && !stopRequested }
+    }
+
+    /// True while a turn is waited on and a steer could be written into it.
+    public var acceptsSteerNow: Bool {
+        queue.sync { child != nil && !stopRequested && turn != nil && !interruptRequested }
+    }
+
+    /// Background jobs or subagents claude reports running in this process.
+    /// The idle reaper keeps a session alive while this is true.
+    public var hasBackgroundWork: Bool {
+        queue.sync { backgroundTaskCount > 0 }
+    }
+
+    /// A turn claude began on its own is buffered and waiting to be adopted.
+    public var hasUnsolicitedTurn: Bool {
+        queue.sync { unsolicited != nil }
+    }
+
+    // MARK: - Turns
+
+    /// Writes `prompt` to the session (starting it on first use) and blocks
+    /// until the turn it starts reaches its `result`. `onEvent` is invoked on
+    /// the runner's serial queue.
+    ///
+    /// The first spawn tries the session mode its config believes in and, only
+    /// when that process dies before ever starting a turn with the matching
+    /// stderr, retries the other mode with the same prompt — the self-healing
+    /// pair from the one-shot runner, unchanged. A `/clear` rotation is one
+    /// `--fork-session` attempt with no retry.
+    public func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        let line: String
+        do {
+            line = try Self.userMessageLine(prompt)
+        } catch {
+            throw RunError.launchFailed("could not prepare a local image attachment")
+        }
+        try drive(line: line, onEvent: onEvent)
+    }
+
+    /// Text-only compatibility wrapper, matching PiAgentRunner's.
+    public func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
+    }
+
+    /// Invoke Claude's native slash command over the same stdin, without
+    /// publishing its synthetic print-mode turn. Only the compaction
+    /// lifecycle/boundary crosses this seam.
     public func compact(
         _ request: AgentCompactionRequest,
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
@@ -419,7 +551,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         }
         let focus = request.focus?.trimmingCharacters(in: .whitespacesAndNewlines)
         let command = focus.flatMap { $0.isEmpty ? nil : $0 }.map { "/compact \($0)" } ?? "/compact"
-        let result = try runOnce(mode: .resume, prompt: AgentPrompt(command)) { event in
+        try drive(line: try Self.userMessageLine(AgentPrompt(command)), modes: [.resume]) { event in
             switch event {
             case .compactionChanged(let threadId, var lifecycle):
                 lifecycle.operationID = request.operationID
@@ -431,24 +563,156 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 break
             }
         }
-        if result.exitCode != 0 {
-            try throwStoppedIfRequested(stderr: result.stderr)
-            throw RunError.claudeFailed(exitCode: result.exitCode, stderr: result.stderr)
+    }
+
+    /// Binds a turn claude started without a prompt from Array (a steer it
+    /// promoted to its own turn, a background task's notification). Replays the
+    /// buffered events into `onEvent`, then blocks until that turn's `result`.
+    /// Returns at once when nothing is buffered.
+    public func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        let waiter: TurnWaiter? = queue.sync {
+            guard turn == nil, let buffered = unsolicited else { return nil }
+            unsolicited = nil
+            buffered.events.forEach(onEvent)
+            guard buffered.open > 0, child != nil else { return nil }
+            let waiter = TurnWaiter(onEvent: onEvent, remaining: buffered.open)
+            turn = waiter
+            return waiter
+        }
+        guard let waiter else { return }
+        waiter.semaphore.wait()
+        switch waiter.end ?? .completed {
+        case .completed:
+            return
+        case .stopped:
+            throw AgentRunStopped(detail: nil)
+        case let .exited(code, _, stderr):
+            if queue.sync(execute: { stopRequested }) { throw AgentRunStopped(detail: stderr) }
+            if code != 0 { throw RunError.claudeFailed(exitCode: code, stderr: stderr) }
         }
     }
 
-    /// M1.7: consult the stop flag BEFORE every throw. `stopRequested` is set
-    /// under `queue.sync` by `stop()`, which also sends the SIGTERM, so by the time
-    /// a `run` sees a non-zero exit the flag is already true.
-    private func throwStoppedIfRequested(stderr: String) throws {
-        if queue.sync { stopRequested } { throw AgentRunStopped(detail: stderr) }
+    private func drive(
+        line: String,
+        modes requestedModes: [SessionMode]? = nil,
+        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
+    ) throws {
+        if queue.sync(execute: { stopRequested }) { throw AgentRunStopped(detail: nil) }
+        let modes: [SessionMode]
+        if let requestedModes {
+            modes = requestedModes
+        } else if config.forkSession && !queue.sync(execute: { forkConsumed }) {
+            modes = [.fork]
+        } else {
+            let order = ClaudeCLIBackend.sessionModeOrder(
+                conversationMayExist: config.conversationMayExist || queue.sync { conversationEstablished })
+            modes = [order.first, order.retry]
+        }
+        for (index, mode) in modes.enumerated() {
+            try ensureStarted(mode: mode)
+            let waiter: TurnWaiter = try queue.sync {
+                guard turn == nil else { throw RunError.launchFailed("a claude turn is already in flight") }
+                // A turn claude began on its own that nobody adopted yet comes
+                // first: its events precede this prompt's, and this prompt's turn
+                // only starts after it.
+                var remaining = 1
+                var buffered: [AgentRuntimeEvent] = []
+                if let pending = unsolicited {
+                    unsolicited = nil
+                    buffered = pending.events
+                    remaining += pending.open
+                }
+                let waiter = TurnWaiter(onEvent: onEvent, remaining: remaining)
+                turn = waiter
+                buffered.forEach(onEvent)
+                return waiter
+            }
+            // A failed write means the process is going away; its exit path
+            // completes the waiter with the real exit code and stderr.
+            try? write(line)
+            waiter.semaphore.wait()
+            switch waiter.end ?? .completed {
+            case .completed:
+                return
+            case .stopped:
+                throw AgentRunStopped(detail: nil)
+            case let .exited(code, sawInit, stderr):
+                if queue.sync(execute: { stopRequested }) { throw AgentRunStopped(detail: stderr) }
+                if !sawInit, index + 1 < modes.count,
+                   ClaudeCLIBackend.retryIsWarranted(after: mode, stderr: stderr) {
+                    continue
+                }
+                // Exit 0 with no result is the supervisor's to close ("exited
+                // without reporting a result"); anything else is a failure.
+                if code == 0 { return }
+                throw RunError.claudeFailed(exitCode: code, stderr: stderr)
+            }
+        }
     }
 
-    /// Text-only compatibility wrapper, matching PiAgentRunner's.
-    public func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-        try run(prompt: AgentPrompt(prompt), onEvent: onEvent)
+    // MARK: - Steering and interrupt
+
+    /// Hands one more user message to the turn in flight. claude takes it at
+    /// its next tool boundary, or runs it as the next turn when the current one
+    /// has no boundary left; either way the replay of the message is the
+    /// receipt, reported through `observeSteerDispositions`. Irrevocable once
+    /// this returns.
+    public func steer(_ prompt: AgentPrompt, id: UUID) throws {
+        let line: String
+        do {
+            line = try Self.userMessageLine(prompt)
+        } catch {
+            throw AgentSteerNotAccepted("could not prepare a local image attachment")
+        }
+        let text = Self.userMessageText(prompt)
+        try queue.sync {
+            guard child != nil, !stopRequested, turn != nil, !interruptRequested else {
+                throw AgentSteerNotAccepted("no claude turn is in flight")
+            }
+            pendingSteers.append((id, text))
+        }
+        do {
+            try write(line)
+        } catch {
+            queue.sync { pendingSteers.removeAll { $0.id == id } }
+            throw AgentSteerNotAccepted("the claude session is not accepting input")
+        }
     }
 
+    /// Ends the turn in flight and keeps the process. Blocks until claude
+    /// acknowledges; the turn then closes with `.interrupted`. A no-op when no
+    /// turn is waited on.
+    public func interrupt() throws {
+        let request: (id: String, semaphore: DispatchSemaphore)? = try queue.sync {
+            guard child != nil, !stopRequested else { throw RunError.launchFailed("claude session is not running") }
+            guard turn != nil else { return nil }
+            controlCounter += 1
+            let id = "array-interrupt-\(controlCounter)"
+            let semaphore = DispatchSemaphore(value: 0)
+            pendingControls[id] = (semaphore, nil)
+            interruptRequested = true
+            return (id, semaphore)
+        }
+        guard let request else { return }
+        do {
+            try write(Self.interruptRequestLine(requestId: request.id))
+        } catch {
+            queue.sync { pendingControls[request.id] = nil; interruptRequested = false }
+            throw RunError.launchFailed("claude session is not accepting input")
+        }
+        let answered = request.semaphore.wait(timeout: .now() + Self.interruptAcknowledgementTimeout) == .success
+        let success = queue.sync { () -> Bool in
+            defer { pendingControls[request.id] = nil }
+            return pendingControls[request.id]?.success ?? false
+        }
+        guard answered, success else {
+            queue.sync { interruptRequested = false }
+            throw RunError.launchFailed("claude did not acknowledge the interrupt")
+        }
+    }
+
+    /// Kills the whole session group — the process, its tools, its background
+    /// jobs. The fallback behind `interrupt()`, and the end of the agent.
     public func stop() {
         // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
         let running = queue.sync { () -> ProcessGroupChild? in
@@ -456,17 +720,17 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             return child
         }
         running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+        queue.sync { finishTurn(.stopped) }
     }
 
-    /// Claude has no `spawn_agent` — its Task tool spawns claude-internal
-    /// sub-agents that surface as ordinary tool items. The handler is
-    /// accepted for seam parity and never fires.
+    // MARK: - Side channels
+
     /// C7 — this was a no-op, so every claude subagent announcement was dropped
     /// before it could reach the supervisor. It is the same seam pi uses; what
     /// arrives through it is an OBSERVED child (`observedOnly`), not a request to
     /// launch one.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
-        queue.sync { translator.onSpawnRequest = handler }
+        queue.sync { spawnHandler = handler; translator.onSpawnRequest = handler }
     }
 
     /// C7 — one observed child's own events, keyed by the spawning `Agent`
@@ -475,22 +739,34 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     public func observeSubagentEvents(
         _ handler: @escaping @Sendable (String, AgentRuntimeEvent) -> Void
     ) {
-        queue.sync { translator.onSubagentEvent = handler }
+        queue.sync { subagentHandler = handler; translator.onSubagentEvent = handler }
     }
 
     public func observeRuntimeObservations(
         _ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void
     ) {
-        queue.sync { translator.onRuntimeObservation = handler }
+        queue.sync { observationHandler = handler; translator.onRuntimeObservation = handler }
     }
 
-    // MARK: - one spawn
+    /// A steer's id once claude has replayed it, i.e. consumed it. claude never
+    /// drops a written message, so nothing is ever `returned` here.
+    public func observeSteerDispositions(
+        _ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void
+    ) {
+        queue.sync { steerDispositionHandler = handler }
+    }
 
-    private func runOnce(
-        mode: SessionMode,
-        prompt: AgentPrompt,
-        onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
-    ) throws -> (exitCode: Int32, stderr: String) {
+    /// Fired (on the runner's queue) when claude starts a turn nobody is
+    /// waiting on. The handler hops threads itself and later calls
+    /// `continueUnsolicitedTurn`.
+    public func observeUnsolicitedTurns(_ handler: @escaping @Sendable () -> Void) {
+        queue.sync { unsolicitedTurnHandler = handler }
+    }
+
+    // MARK: - Process
+
+    private func ensureStarted(mode: SessionMode) throws {
+        if queue.sync(execute: { child != nil }) { return }
         let command = Self.liveResolvedCommand()
         let arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
@@ -498,12 +774,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             sessionMode: mode,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
-            prompt: prompt,
             workspaceMCP: config.workspaceMCP
         )
-
-        queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
-
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
@@ -516,48 +788,100 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 // keychain lookup and the CLI stops finding its own login.
                 environment: Self.childEnvironment(workspaceMCP: config.workspaceMCP),
                 currentDirectory: config.cwd,
-                standardInput: .inherit
+                standardInput: .pipe
             )
         } catch {
             throw RunError.launchFailed(String(describing: error))
         }
-        queue.sync { self.child = spawned }
-
+        // A write after claude exits must fail as an error, never as a SIGPIPE
+        // delivered to the app.
+        if let stdin = spawned.standardInput {
+            _ = fcntl(stdin.fileDescriptor, F_SETNOSIGPIPE, 1)
+        }
+        queue.sync {
+            child = spawned
+            processSawInit = false
+            buffer.removeAll()
+            stderrBuffer.removeAll()
+            if mode == .fork { forkConsumed = true }
+        }
         spawned.standardOutput.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            self?.queue.sync { self?.consume(chunk, onEvent: onEvent) }
+            guard !chunk.isEmpty else {
+                // EOF: the dispatch source stays armed and re-fires forever.
+                handle.readabilityHandler = nil
+                return
+            }
+            self?.queue.sync { self?.consume(chunk) }
         }
         // Drain stderr CONCURRENTLY (the pi runner's deadlock lesson: a full
-        // 64KB stderr pipe blocks the child while we block in waitUntilExit).
+        // 64KB stderr pipe blocks the child). Bounded: the process now lives
+        // for many turns.
         spawned.standardError.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            self?.queue.sync { self?.stderrBuffer.append(chunk) }
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self?.queue.sync {
+                guard let self else { return }
+                self.stderrBuffer.append(chunk)
+                if self.stderrBuffer.count > 65_536 {
+                    self.stderrBuffer.removeFirst(self.stderrBuffer.count - 65_536)
+                }
+            }
         }
-
-        let exitCode = spawned.wait()
-        spawned.standardOutput.readabilityHandler = nil
-        spawned.standardError.readabilityHandler = nil
-
-        // The LEADER exited, but a descendant that inherited fd 1/2 (a Task
-        // subagent, an MCP server, a backgrounded shell) keeps the pipe's write
-        // end open, and `readDataToEndOfFile()` then blocks until THAT process
-        // exits — potentially forever, parking this run() and its runner slot.
-        // Kill whatever is left of the group so the pipes close (a clean exit
-        // leaves nothing, making this a no-op), then drain with a bound.
-        spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
-        let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
-        let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
-        let errText: String = queue.sync {
-            if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
-            flushBuffer(onEvent: onEvent)
-            stderrBuffer.append(stderrRemainder)
-            let text = String(decoding: stderrBuffer, as: UTF8.self)
-            self.child = nil
-            return text
+        // The LEADER's exit is the authoritative end, not stdout EOF: a
+        // background job that inherited fd 1 keeps the pipe open after claude
+        // itself is gone, and waiting for EOF would park the turn forever.
+        let watcher = Thread { [weak self] in
+            let code = spawned.wait()
+            spawned.standardOutput.readabilityHandler = nil
+            spawned.standardError.readabilityHandler = nil
+            // claude is gone, so nothing it started can report back any more:
+            // reap the rest of the group so the pipes close, then drain them
+            // with a bound.
+            spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+            let remainder = ProcessGroupChild.drainRemainder(of: spawned.standardOutput)
+            let stderrRemainder = ProcessGroupChild.drainRemainder(of: spawned.standardError)
+            self?.queue.sync { self?.processExited(spawned, code: code, remainder: remainder, stderrRemainder: stderrRemainder) }
         }
-        return (exitCode, errText)
+        watcher.start()
+    }
+
+    private func processExited(_ process: ProcessGroupChild, code: Int32, remainder: Data, stderrRemainder: Data) {
+        guard child === process else { return }
+        if !remainder.isEmpty { consume(remainder) }
+        if !buffer.isEmpty {
+            handleLine(String(decoding: buffer, as: UTF8.self))
+            buffer.removeAll()
+        }
+        stderrBuffer.append(stderrRemainder)
+        let stderr = String(decoding: stderrBuffer, as: UTF8.self)
+        child = nil
+        backgroundTaskCount = 0
+        interruptRequested = false
+        for (id, control) in pendingControls where control.success == nil {
+            pendingControls[id] = (control.semaphore, false)
+            control.semaphore.signal()
+        }
+        finishTurn(.exited(code: code, sawInit: processSawInit, stderr: stderr))
+    }
+
+    private func finishTurn(_ end: TurnEnd) {
+        guard let waiter = turn else { return }
+        turn = nil
+        waiter.end = end
+        waiter.semaphore.signal()
+    }
+
+    private func write(_ line: String) throws {
+        guard let handle = queue.sync(execute: { child?.standardInput }) else {
+            throw RunError.launchFailed("claude session is not running")
+        }
+        var data = Data(line.utf8)
+        data.append(0x0A)
+        try writeQueue.sync { try handle.write(contentsOf: data) }
     }
 
     /// The MCP server's endpoint and token reach it through its own config
@@ -568,28 +892,103 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         PiAgentRunner.childEnvironment()
     }
 
-    // MARK: - queue-confined line assembly
+    // MARK: - queue-confined line handling
 
-    private func consume(_ chunk: Data, onEvent: @Sendable (AgentRuntimeEvent) -> Void) {
+    private func consume(_ chunk: Data) {
         buffer.append(chunk)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let lineData = buffer[buffer.startIndex..<newline]
             buffer.removeSubrange(buffer.startIndex...newline)
-            emit(lineData, onEvent: onEvent)
+            guard let line = String(data: Data(lineData), encoding: .utf8) else { continue }
+            handleLine(line)
         }
     }
 
-    private func flushBuffer(onEvent: @Sendable (AgentRuntimeEvent) -> Void) {
-        guard !buffer.isEmpty else { return }
-        emit(buffer[...], onEvent: onEvent)
-        buffer.removeAll()
+    private func makeTranslator() -> ClaudeEventTranslator {
+        var fresh = ClaudeEventTranslator(workingDirectory: config.cwd)
+        fresh.onSpawnRequest = spawnHandler
+        fresh.onRuntimeObservation = observationHandler
+        fresh.onSubagentEvent = subagentHandler
+        return fresh
     }
 
-    private func emit(_ lineData: Data.SubSequence, onEvent: @Sendable (AgentRuntimeEvent) -> Void) {
-        guard let line = String(data: Data(lineData), encoding: .utf8) else { return }
-        for event in translator.translate(line: line) {
-            onEvent(event)
+    private func handleLine(_ line: String) {
+        var announceUnsolicited = false
+        if let data = line.data(using: .utf8),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let type = object["type"] as? String {
+            switch type {
+            case "control_response":
+                // Protocol-only; never part of the transcript.
+                if let response = object["response"] as? [String: Any],
+                   let requestID = response["request_id"] as? String,
+                   let control = pendingControls[requestID] {
+                    pendingControls[requestID] = (control.semaphore, (response["subtype"] as? String) == "success")
+                    control.semaphore.signal()
+                }
+                return
+            case "system":
+                switch object["subtype"] as? String {
+                case "background_tasks_changed":
+                    backgroundTaskCount = (object["tasks"] as? [Any])?.count ?? 0
+                case "init":
+                    // Each turn opens with its own init. A fresh translator per
+                    // turn keeps the one-turn-per-translator contract its
+                    // per-turn counters were written against.
+                    processSawInit = true
+                    conversationEstablished = true
+                    translator = makeTranslator()
+                    if turn == nil {
+                        if unsolicited == nil {
+                            unsolicited = UnsolicitedTurns()
+                            announceUnsolicited = true
+                        }
+                        unsolicited?.open += 1
+                    }
+                default:
+                    break
+                }
+            case "user":
+                if (object["isReplay"] as? Bool) == true,
+                   (object["parent_tool_use_id"] as? String) == nil,
+                   let message = object["message"] as? [String: Any],
+                   let text = Self.replayedText(message["content"]),
+                   let index = pendingSteers.firstIndex(where: { $0.text == text }) {
+                    let consumed = pendingSteers.remove(at: index)
+                    steerDispositionHandler?(consumed.id, .consumed)
+                }
+            default:
+                break
+            }
         }
+        for var event in translator.translate(line: line) {
+            if case let .turnCompleted(threadId, turnId, _, _) = event, interruptRequested {
+                // claude reports an interrupted turn as `error_during_execution`;
+                // the interrupt was asked for, so it is not a failure.
+                interruptRequested = false
+                event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: nil)
+            }
+            if let waiter = turn {
+                waiter.onEvent(event)
+                if case .turnCompleted = event { waiter.remaining -= 1 }
+            } else if unsolicited != nil {
+                unsolicited?.events.append(event)
+                if case .turnCompleted = event { unsolicited?.open -= 1 }
+            }
+        }
+        if let waiter = turn, waiter.remaining <= 0 { finishTurn(.completed) }
+        if announceUnsolicited { unsolicitedTurnHandler?() }
+    }
+
+    /// The text of a replayed user message: a plain string, or its text blocks.
+    private static func replayedText(_ content: Any?) -> String? {
+        if let text = content as? String { return text }
+        guard let blocks = content as? [[String: Any]] else { return nil }
+        let texts = blocks.compactMap { block -> String? in
+            guard (block["type"] as? String) == "text" else { return nil }
+            return block["text"] as? String
+        }
+        return texts.isEmpty ? nil : texts.joined(separator: "\n")
     }
 }
 

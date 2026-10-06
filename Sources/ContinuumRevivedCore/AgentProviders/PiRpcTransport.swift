@@ -37,7 +37,7 @@ public enum PiRpcCommand {
         "get_session_stats", "export_html", "switch_session", "fork", "clone",
         "get_fork_messages", "get_entries", "get_tree",
         "get_last_assistant_text", "set_session_name", "get_messages",
-        "get_commands"
+        "get_commands", "clear_queue"
     ]
 
     /// The two frame types rpc adds on top of the shared event stream.

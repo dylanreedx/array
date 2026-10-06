@@ -69,6 +69,10 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     private var compactionOutcomeError: Error?
     private var observedAutomaticCompactionPolicy: AgentAutomaticCompactionPolicy?
     private var observedAdvertisedCommands: Set<String>?
+    /// T5 — steers pi has accepted into its steering queue and not yet taken,
+    /// oldest first. pi drains that queue FIFO and says so with `queue_update`.
+    private var pendingSteerIDs: [UUID] = []
+    private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
 
     /// The session's own slash commands, as answered by `get_commands`, or nil
     /// when this session has not answered with a parseable list.
@@ -376,6 +380,45 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
 
     // MARK: - Session-runner surface (`AgentSessionRunning`, wired in the app target)
 
+    /// True while a `run` is waiting on its turn, i.e. while a steer lands in it.
+    public var acceptsSteerNow: Bool {
+        queue.sync { started && !stopRequested && turnSemaphore != nil }
+    }
+
+    /// T5 — a steer with an id, images included, into the turn in flight.
+    /// Delivered after the current assistant turn finishes its tool calls,
+    /// before the next LLM call; `queue_update` reports when pi took it.
+    /// pi refuses an extension slash command here, which surfaces as
+    /// `AgentSteerNotAccepted` so the supervisor keeps the message.
+    public func steer(_ prompt: AgentPrompt, id: UUID) throws {
+        let payload: [String: Any]
+        do {
+            payload = try Self.promptPayload(prompt)
+        } catch {
+            throw AgentSteerNotAccepted("could not prepare a local image attachment")
+        }
+        try queue.sync {
+            guard started, !stopRequested, turnSemaphore != nil else {
+                throw AgentSteerNotAccepted("no pi turn is in flight")
+            }
+            // Recorded before the send: pi emits its `queue_update` before the
+            // command's response.
+            pendingSteerIDs.append(id)
+        }
+        do {
+            _ = try transport.sendAndAwait(type: "steer", payload: payload)
+        } catch {
+            queue.sync { pendingSteerIDs.removeAll { $0 == id } }
+            throw AgentSteerNotAccepted(String(describing: error))
+        }
+    }
+
+    public func observeSteerDispositions(
+        _ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void
+    ) {
+        queue.sync { steerDispositionHandler = handler }
+    }
+
     /// Turn-boundary steering (`agent-session.js:986`): delivered after the
     /// current assistant turn finishes its tool calls, before the next LLM
     /// call. NOT mid-tool interruption -- callers must not describe it as one.
@@ -401,6 +444,17 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         // pi resolves every pending dialog `undefined` on abort; tell the host
         // before it commits anything else for this turn.
         queue.sync { cancelAllHostToolCallsOnQueue() }
+        // T5 — `abort` leaves pi's steering queue armed for whatever prompt
+        // comes next. Clear it, and hand back what it held: a steer pi never
+        // read is the user's message again, not something already sent.
+        let unread = queue.sync { () -> [UUID] in
+            defer { pendingSteerIDs.removeAll() }
+            return pendingSteerIDs
+        }
+        guard !unread.isEmpty else { return }
+        _ = try? transport.sendAndAwait(type: "clear_queue")
+        let handler = queue.sync { steerDispositionHandler }
+        for id in unread { handler?(id, .returned) }
     }
 
     /// Escape hatch onto the raw vocabulary (`get_state`, `set_model`,
@@ -499,6 +553,17 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     /// Queue-confined: translate one raw rpc line, forward each resulting
     /// event to the in-flight turn's callback, and detect turn completion.
     private func handleEventLine(_ line: String) {
+        if !pendingSteerIDs.isEmpty, line.contains("\"queue_update\""),
+           let data = line.data(using: .utf8),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           (object["type"] as? String) == "queue_update" {
+            // pi drains its steering queue oldest first, so a shorter list means
+            // that many of the oldest steers were taken into the conversation.
+            let waiting = (object["steering"] as? [Any])?.count ?? 0
+            while pendingSteerIDs.count > waiting {
+                steerDispositionHandler?(pendingSteerIDs.removeFirst(), .consumed)
+            }
+        }
         let events = translator.translate(line: line)
         for event in events {
             currentOnEvent?(event)
@@ -575,7 +640,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         return payload
     }
 
-    private static func inferredImageMIMEType(for url: URL) -> String {
+    static func inferredImageMIMEType(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "jpg", "jpeg": return "image/jpeg"
         case "gif": return "image/gif"

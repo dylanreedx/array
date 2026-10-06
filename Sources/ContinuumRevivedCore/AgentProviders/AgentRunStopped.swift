@@ -29,3 +29,26 @@ public struct AgentRunStopped: Error, CustomStringConvertible, Sendable {
         return "the turn was stopped (\(detail))"
     }
 }
+
+/// T5 — a steer the runner could not hand to the provider: no turn is live, the
+/// turn kind refuses steering (codex review/compact), or the provider rejected
+/// the frame. The supervisor keeps the message HELD rather than losing it, so it
+/// runs as the next turn instead.
+public struct AgentSteerNotAccepted: Error, CustomStringConvertible, Sendable {
+    public let reason: String
+
+    public init(_ reason: String) {
+        self.reason = reason
+    }
+
+    public var description: String { "steer not accepted (\(reason))" }
+}
+
+/// T5 — what became of a steer a runner accepted. `consumed` is the provider's
+/// own receipt (claude's replay, pi's queue drain, codex's `turn/steer`
+/// response); `returned` means the provider dropped it unread (pi's queue cleared
+/// at an interrupt), so the supervisor holds it again.
+public enum AgentSteerDisposition: Equatable, Sendable {
+    case consumed
+    case returned
+}

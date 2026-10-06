@@ -422,11 +422,13 @@ private func runClaudeRunnerArgvChecks() {
         effort: "high",
         sessionMode: .resume,
         sessionId: claudeSID,
-        extraArgs: [],
-        prompt: AgentPrompt("do the thing")
+        extraArgs: []
     )
     expect(resume == [
-        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--include-partial-messages",
+        // T5: the replay is a steer's consumption receipt.
+        "--replay-user-messages",
         "--include-hook-events",
         // C7: without this the stream carries a subagent's tool_use/tool_result
         // blocks and nothing it SAID, so a child transcript is tool calls with no
@@ -436,7 +438,6 @@ private func runClaudeRunnerArgvChecks() {
         "--model", "claude-haiku-4-5-20251001",
         "--effort", "high",
         "--resume", claudeSID,
-        "do the thing",
     ], "ClaudeAgentRunner argv (resume) drifted: \(resume)")
 
     let start = ClaudeAgentRunner.processArguments(
@@ -444,11 +445,12 @@ private func runClaudeRunnerArgvChecks() {
         effort: nil,
         sessionMode: .start,
         sessionId: claudeSID,
-        extraArgs: ["--extra"],
-        prompt: AgentPrompt("first turn")
+        extraArgs: ["--extra"]
     )
     expect(start == [
-        "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+        "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--include-partial-messages",
+        "--replay-user-messages",
         "--include-hook-events",
         // C7: without this the stream carries a subagent's tool_use/tool_result
         // blocks and nothing it SAID, so a child transcript is tool calls with no
@@ -458,7 +460,6 @@ private func runClaudeRunnerArgvChecks() {
         "--model", "claude-haiku-4-5-20251001",
         "--session-id", claudeSID,
         "--extra",
-        "first turn",
     ], "ClaudeAgentRunner argv (start) drifted: \(start)")
 
     // Executable resolution mirrors pi's GUI-thin-PATH strategy.
