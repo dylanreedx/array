@@ -15,6 +15,9 @@ public enum AgentComposerIntent: Equatable, Sendable {
     case stop
     case steer(AgentPrompt)
     case queue(AgentPrompt)
+    /// T5 (D2) — interrupt the turn in flight WITHOUT killing its process and
+    /// run this prompt now, ahead of every held steer and queued follow-up.
+    case forceSend(AgentPrompt)
     case command(String)
     /// A completion-selected provider or harness command. The invocation stays
     /// typed until the supervisor/adapter serializes it for the active runtime.

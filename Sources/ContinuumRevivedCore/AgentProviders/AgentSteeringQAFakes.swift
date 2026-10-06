@@ -12,6 +12,7 @@ import Foundation
 //   argv.json        the argument vector of the latest spawn
 //   spawn.count      how many processes were started
 //   stdin.jsonl      every stdin line, verbatim, in arrival order
+//   pid.txt          the pid of the latest spawn
 //
 // The prompt text picks the turn's shape (shared by all three):
 //   TOOL        a tool call that waits ~1.5 s for a steer before finishing
@@ -68,6 +69,12 @@ public enum AgentSteeringQAFakes {
         return argv
     }
 
+    /// The pid of the most recently spawned fake process.
+    public static func latestPid(in directory: URL) -> pid_t? {
+        let text = try? String(contentsOf: directory.appendingPathComponent("pid.txt"), encoding: .utf8)
+        return pid_t(text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+    }
+
     /// The pid the claude fake's BACKGROUND turn started, if any.
     public static func backgroundPid(in directory: URL) -> pid_t? {
         let text = try? String(contentsOf: directory.appendingPathComponent("bg.pid"), encoding: .utf8)
@@ -88,6 +95,8 @@ except FileNotFoundError:
     _n = 0
 with open(_count_path, "w") as f:
     f.write(str(_n + 1))
+with open(os.path.join(HERE, "pid.txt"), "w") as f:
+    f.write(str(os.getpid()))
 
 _out_lock = threading.Lock()
 def out(obj):

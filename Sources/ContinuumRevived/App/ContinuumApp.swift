@@ -1666,6 +1666,9 @@ enum ContinuumApp {
                 do {
                     try await runAgentCompactionUIChecks()
                     print("AgentCompactionUIChecks passed")
+                    // T5: the supervisor's steering, force-send, interrupt and
+                    // queue semantics share this leg's queue machinery.
+                    try await runAgentSteeringChecks()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
