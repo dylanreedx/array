@@ -231,21 +231,26 @@ final class AgentReferenceChipView: NSButton {
         let zoom = self.zoom
         let glyphSide = Self.glyphSide(zoom: zoom)
         let contentGap = Self.contentGap(zoom: zoom)
-        let titleSize = titleLabel.intrinsicContentSize
-        let contentWidth = glyphSide + contentGap + ceil(titleSize.width)
+        // The title's size is measured once, when its text changes
+        // (`applyTokens`), and the capsule's intrinsic width is derived from the
+        // SAME figure — so the label is always granted exactly what the title
+        // needs, and layout never measures text.
+        let contentWidth = glyphSide + contentGap + titleSize.width
         let contentX = floor((bounds.width - contentWidth) / 2)
-        glyphView.frame = NSRect(
+        let glyphFrame = NSRect(
             x: contentX,
             y: floor((bounds.height - glyphSide) / 2),
             width: glyphSide,
             height: glyphSide
         )
-        titleLabel.frame = NSRect(
-            x: glyphView.frame.maxX + contentGap,
+        if glyphView.frame != glyphFrame { glyphView.frame = glyphFrame }
+        let titleFrame = NSRect(
+            x: glyphFrame.maxX + contentGap,
             y: floor((bounds.height - titleSize.height) / 2),
-            width: min(ceil(titleSize.width), max(0, bounds.maxX - Self.horizontalPadding(zoom: zoom) - glyphView.frame.maxX - contentGap)),
+            width: min(titleSize.width, max(0, bounds.maxX - Self.horizontalPadding(zoom: zoom) - glyphFrame.maxX - contentGap)),
             height: titleSize.height
         )
+        if titleLabel.frame != titleFrame { titleLabel.frame = titleFrame }
     }
 
     deinit {
@@ -353,22 +358,50 @@ final class AgentReferenceChipView: NSButton {
             ?? renderContext.tokens.decorativeLine.color.cgColor(for: theme)
         glyphView.contentTintColor = statusColor
             ?? renderContext.tokens.secondaryText.color.nsColor(for: theme)
-        titleLabel.attributedStringValue = composedTitle(theme: theme)
+        let title = Self.composedTitle(
+            name: payload?.displayNameAtSpawn ?? "",
+            label: currentInboxState?.label,
+            zoom: zoom,
+            primary: renderContext.tokens.primaryText.color.nsColor(for: theme),
+            secondary: renderContext.tokens.secondaryText.color.nsColor(for: theme)
+        )
+        titleLabel.attributedStringValue = title
+        titleSize = Self.titleSize(of: title)
         invalidateIntrinsicContentSize()
         superview?.needsLayout = true
         needsLayout = true
     }
 
+    /// The composed title's size, measured where the title is composed. Kept so
+    /// `layout()` and `intrinsicContentSize` read a number instead of measuring.
+    private var titleSize = NSSize.zero
+
     override var intrinsicContentSize: NSSize {
-        let zoom = self.zoom
-        let titleWidth = ceil(titleLabel.attributedStringValue.size().width)
-        return NSSize(
-            width: max(
-                Self.minimumWidth(zoom: zoom),
-                titleWidth + Self.glyphSide(zoom: zoom) + Self.contentGap(zoom: zoom)
-                    + Self.horizontalPadding(zoom: zoom) * 2
-            ),
-            height: Self.controlHeight(zoom: zoom)
+        NSSize(width: Self.width(titleWidth: titleSize.width, zoom: zoom), height: Self.controlHeight(zoom: zoom))
+    }
+
+    /// Measured by a label cell, not `NSAttributedString.size()`: the cell
+    /// draws its text inside a 2pt inset on each side, so a label exactly as
+    /// wide as the string truncates its last characters.
+    private static func titleSize(of title: NSAttributedString) -> NSSize {
+        measuringCell.attributedStringValue = title
+        let size = measuringCell.cellSize
+        return NSSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    private static let measuringCell: NSTextFieldCell = {
+        let cell = NSTextFieldCell(textCell: "")
+        cell.isBordered = false
+        cell.isBezeled = false
+        cell.drawsBackground = false
+        cell.lineBreakMode = .byTruncatingTail
+        return cell
+    }()
+
+    private static func width(titleWidth: CGFloat, zoom: AgentPageZoom) -> CGFloat {
+        max(
+            minimumWidth(zoom: zoom),
+            titleWidth + glyphSide(zoom: zoom) + contentGap(zoom: zoom) + horizontalPadding(zoom: zoom) * 2
         )
     }
 
@@ -379,27 +412,40 @@ final class AgentReferenceChipView: NSButton {
     var qaContentGap: CGFloat { titleLabel.frame.minX - glyphView.frame.maxX }
     var qaContentMidX: CGFloat { (glyphView.frame.minX + titleLabel.frame.maxX) / 2 }
     var qaTitleMinX: CGFloat { titleLabel.frame.minX }
+    var qaTitleLabel: NSTextField { titleLabel }
+    var qaTitleText: String { titleLabel.attributedStringValue.string }
 
     /// `Name · Working` — the name in primary text, the live state trailing it in
     /// secondary. Status is COMPOSED here rather than stored, so it still never
     /// touches the document; and it is rendered as TEXT rather than only as a
     /// tint, because a colour alone told the reader nothing about what the child
     /// was doing.
-    private func composedTitle(theme: TokenTheme) -> NSAttributedString {
-        let name = Self.safeName(payload?.displayNameAtSpawn ?? "")
+    ///
+    /// The paragraph style is load-bearing. An attributed title without one
+    /// carries the DEFAULT style, word wrapping, which overrides the label's own
+    /// `.byTruncatingTail`; at the exact width the capsule grants, the last word
+    /// then broke onto a second line the 15pt label cannot show, and every chip
+    /// read "Name ·" with blank capsule after the dot.
+    private static func composedTitle(
+        name: String,
+        label: String?,
+        zoom: AgentPageZoom,
+        primary: NSColor,
+        secondary: NSColor
+    ) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let font = NSFont.token(.label, zoom: zoom)
         let composed = NSMutableAttributedString(
-            string: name,
-            attributes: [
-                .font: NSFont.token(.label, zoom: zoom),
-                .foregroundColor: renderContext.tokens.primaryText.color.nsColor(for: theme)
-            ])
-        guard let label = currentInboxState?.label, !label.isEmpty else { return composed }
+            string: safeName(name),
+            attributes: [.font: font, .foregroundColor: primary, .paragraphStyle: paragraph])
+        // No label, no separator: a dangling "·" reads as a state that failed to load.
+        guard let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
+            return composed
+        }
         composed.append(NSAttributedString(
             string: "  ·  \(label)",
-            attributes: [
-                .font: NSFont.token(.label, zoom: zoom),
-                .foregroundColor: renderContext.tokens.secondaryText.color.nsColor(for: theme)
-            ]))
+            attributes: [.font: font, .foregroundColor: secondary, .paragraphStyle: paragraph]))
         return composed
     }
 
