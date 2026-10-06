@@ -516,8 +516,14 @@ public struct CodexAppServerEventTranslator {
         if failed, let error = turn["error"] as? [String: Any] {
             code = (error["code"] as? String) ?? (error["type"] as? String)
         }
+        // T5 — `turn/interrupt` ends the turn `interrupted`; reporting that as
+        // completed drained the queue into a turn the user had just stopped.
+        let interrupted = (turn["status"] as? String) == "interrupted"
         return [
-            .turnCompleted(threadId: threadId, turnId: turnId, outcome: failed ? .failed : .completed, errorMessage: code),
+            .turnCompleted(
+                threadId: threadId, turnId: turnId,
+                outcome: failed ? .failed : (interrupted ? .interrupted : .completed),
+                errorMessage: code),
             .sessionStateChanged(.ready),
         ]
     }

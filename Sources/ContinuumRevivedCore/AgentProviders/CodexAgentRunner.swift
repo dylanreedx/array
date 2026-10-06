@@ -290,6 +290,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var appServerLiveChildThreads: Set<String> = []
     private var appServerTurnAccepted = false
     private var providerSubagentActivityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
+    private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
 
     public init(config: Config) {
         self.config = config
@@ -742,6 +743,68 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
         // M1.8: the whole GROUP, at the interactive grace. See `ProcessGroupChild`.
         running?.terminateGroup(graceSeconds: ProcessGroupChild.Grace.interactive)
+    }
+
+    // MARK: - T5 steering and interrupt (app-server only)
+
+    /// True while an app-server turn is live on its own connection. The
+    /// app-server process lives exactly as long as the turn: thread state is
+    /// codex's rollout, `thread/resume` is cheap, and a per-turn process keeps
+    /// the late-child drain and teardown below unchanged. Steering only needs
+    /// the connection while the turn runs, which this already holds.
+    public var acceptsSteerNow: Bool {
+        queue.sync { !stopRequested && appServerTransport != nil && appServerActiveTurn != nil }
+    }
+
+    /// `turn/steer` into the active turn, pinned by `expectedTurnId` so a steer
+    /// can never land in a turn other than the one the user watched. The
+    /// response IS the receipt. A turn that already ended, or a review/compact
+    /// turn codex will not steer, refuses — and the supervisor keeps the
+    /// message for the next turn instead.
+    public func steer(_ prompt: AgentPrompt, id: UUID) throws {
+        let (transport, activeTurn, handler) = queue.sync {
+            () -> (CodexAppServerTransport?, (threadId: String, turnId: String)?, (@Sendable (UUID, AgentSteerDisposition) -> Void)?) in
+            (stopRequested ? nil : appServerTransport, appServerActiveTurn, steerDispositionHandler)
+        }
+        guard let transport, let activeTurn else {
+            throw AgentSteerNotAccepted("no codex app-server turn is in flight")
+        }
+        do {
+            _ = try transport.sendRequest(
+                method: "turn/steer",
+                params: [
+                    "threadId": activeTurn.threadId,
+                    "expectedTurnId": activeTurn.turnId,
+                    "input": [["type": "text", "text": CodexCLIBackend.promptArgument(prompt)]],
+                    "clientUserMessageId": id.uuidString,
+                ],
+                timeout: 5)
+        } catch {
+            throw AgentSteerNotAccepted(String(describing: error))
+        }
+        handler?(id, .consumed)
+    }
+
+    /// `turn/interrupt` and nothing else: the turn ends `interrupted` and
+    /// `run` returns normally. Killing is `stop()`'s job, the fallback.
+    public func interrupt() throws {
+        let (transport, activeTurn) = queue.sync {
+            () -> (CodexAppServerTransport?, (threadId: String, turnId: String)?) in
+            (appServerTransport, appServerActiveTurn)
+        }
+        guard let transport, let activeTurn else {
+            throw RunError.appServerFailed("no codex app-server turn to interrupt")
+        }
+        _ = try transport.sendRequest(
+            method: "turn/interrupt",
+            params: ["threadId": activeTurn.threadId, "turnId": activeTurn.turnId],
+            timeout: 5)
+    }
+
+    public func observeSteerDispositions(
+        _ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void
+    ) {
+        queue.sync { steerDispositionHandler = handler }
     }
 
     /// Exec has no structured subagent side channel. App-server reports through

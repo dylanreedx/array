@@ -101,6 +101,12 @@ if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)
 }
+// T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
+// through the production runners against reactive fakes of all three CLIs.
+if CommandLine.arguments.contains("--agent-steering-runner-check") {
+    runAgentSteeringRunnerChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
     Foundation.exit(0)

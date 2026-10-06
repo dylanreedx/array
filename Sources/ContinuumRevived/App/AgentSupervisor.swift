@@ -133,6 +133,37 @@ extension AgentRunning {
     var commandCapabilities: AgentSessionCommandCapabilities { .oneShotProse }
 }
 
+/// T5 (`.plans/69`) — steering and a turn-only interrupt, on EVERY harness.
+///
+/// A refinement for the same reason `AgentSessionRunning` is one: the scripted
+/// runners the checks use compile untouched and keep the queue-only floor. The
+/// three production runners conform below. Capabilities still come from the
+/// BOUND runner, never from `record.harness`.
+protocol AgentSteeringRunning: AgentRunning {
+    /// A turn is live and a steer written now lands in it.
+    var acceptsSteerNow: Bool { get }
+    /// Hands one message to the provider for the turn in flight. Irrevocable
+    /// once it returns; `AgentSteerNotAccepted` means it was not taken.
+    func steer(_ prompt: AgentPrompt, id: UUID) throws
+    /// Ends the turn and keeps the process/session. Stop's first resort; a kill
+    /// (`stop()`) is only the fallback.
+    func interrupt() throws
+    /// The provider's receipt for each accepted steer, on the runner's queue.
+    func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void)
+    /// Work the provider runs between turns (claude background jobs and
+    /// subagents). The idle reaper leaves such a session alone.
+    var hasBackgroundWork: Bool { get }
+}
+
+/// T5 — a session that can start a turn Array did not send (claude promoting a
+/// steer to its own turn, or reacting to a finished background task). The
+/// supervisor binds such a turn exactly like one it started.
+protocol AgentUnsolicitedTurnReporting: AgentRunning {
+    var hasUnsolicitedTurn: Bool { get }
+    func observeUnsolicitedTurns(_ handler: @escaping @Sendable () -> Void)
+    func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
+}
+
 /// TR-06 — the response transport for a request a provider OPENED and is
 /// holding. A REFINEMENT of `AgentRunning`, for the same reason
 /// `AgentSessionRunning` is one: only some transports can carry a response back.
@@ -173,9 +204,18 @@ extension PiRpcAgentRunner {
             advertisedNames: advertisedCommandNames)
     }
 }
+extension PiRpcAgentRunner: AgentSteeringRunning {
+    var hasBackgroundWork: Bool { false }
+}
 extension ClaudeAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentCompactionRunning {}
+extension ClaudeAgentRunner: AgentSteeringRunning {}
+extension ClaudeAgentRunner: AgentUnsolicitedTurnReporting {}
 extension ClaudeAgentRunner {
+    /// D3 — one stream-json process per agent, kept between turns and reaped
+    /// by the idle reaper.
+    var keepsSessionAliveBetweenTurns: Bool { true }
+    var canAcceptAnotherTurn: Bool { isSessionRunning }
     /// Measured 2026-08-24: `claude -p` answers `/help`, `/status` and
     /// `/compact` itself with `model: "<synthetic>"`, zero tokens and zero cost,
     /// and "Unknown command: …" for one it does not have.
@@ -183,6 +223,9 @@ extension ClaudeAgentRunner {
 }
 extension CodexAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentCompactionRunning {}
+extension CodexAgentRunner: AgentSteeringRunning {
+    var hasBackgroundWork: Bool { false }
+}
 
 private final class RefusingAgentRunner: AgentRunning,  Sendable {
     struct Refusal: Error, CustomStringConvertible { let description: String }
@@ -1209,6 +1252,7 @@ final class AgentSupervisor {
         compactingAgents.remove(id)
         if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
             idleSessionRunners[id] = runner
+            scheduleIdleReap(for: id, runner: runner)
         }
         let phase = terminal?.phase ?? .indeterminate
         if var record = records[id] {
@@ -1352,8 +1396,10 @@ final class AgentSupervisor {
         transcriptStore: AgentTranscriptStore? = nil,
         maximumActiveManagedChildren: @escaping () -> Int? = {
             AgentSpawnLimitConfig.maximumActiveChildren()
-        }
+        },
+        idleRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout
     ) {
+        self.idleRunnerTimeout = idleRunnerTimeout
         self.store = store
         self.makeRunner = makeRunner
         self.warn = warn
@@ -1972,6 +2018,12 @@ final class AgentSupervisor {
             // inbox (from the cross-review).
             staleIDs.remove(record.id)
             staleAgentsByTile = staleAgentsByTile.filter { $0.value != record.id }
+            // T5 — a queue (or held steer) a previous launch left behind waits for
+            // the user: it never auto-resumes into a turn nobody is watching.
+            if let queueFile = submissionRecoveryStore?.layout.queuedMessagesFile(for: record.id),
+               ((try? Data(contentsOf: queueFile))?.count ?? 0) > 2 {
+                pausedQueues.insert(record.id)
+            }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
         }
@@ -2688,6 +2740,23 @@ final class AgentSupervisor {
         } else {
             runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
         }
+        // T5 — steers still marked delivering belong to an earlier turn of a
+        // session that has gone idle since; a new turn means they were taken.
+        settleStaleDeliveringSteers(for: id)
+        startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
+        return true
+    }
+
+    /// T5 — binds `runner` to the agent's live slot and drives `operation` off
+    /// the main thread with every side channel and safety net a turn owes:
+    /// either a prompt's `run`, or the adoption of a turn the provider started
+    /// on its own (`AgentUnsolicitedTurnReporting`).
+    private func startTurn(
+        on runner: AgentRunning,
+        for id: AgentID,
+        operation: @escaping @Sendable (@escaping @Sendable (AgentRuntimeEvent) -> Void) throws -> Void
+    ) {
+        guard let record = records[id] else { return }
         let runnerGeneration = RunnerGenerationToken()
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
@@ -2799,9 +2868,26 @@ final class AgentSupervisor {
         // emitted immediately before Stop is misreported as a discarded session.
         let crossedPiPersistenceWatermark = TerminalDeliveryLatch()
         let harnessName = record.harness?.rawValue ?? "agent"
+        // T5 — the provider's receipt for each steer this session took, and the
+        // turns it starts on its own. Accepted while this runner is the agent's,
+        // bound or idle: a promoted steer is confirmed after its turn ended.
+        if let steering = runner as? AgentSteeringRunning {
+            steering.observeSteerDispositions { [weak self] steerID, disposition in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
+                    self.settleDeliveringSteer(steerID, disposition: disposition, for: id)
+                }
+            }
+        }
+        if let reporting = runner as? AgentUnsolicitedTurnReporting {
+            reporting.observeUnsolicitedTurns { [weak self] in
+                DispatchQueue.main.async { self?.adoptUnsolicitedTurn(from: reporting, for: id) }
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                try runner.run(prompt: prompt) { event in
+                try operation { event in
                     let bound = event.withThreadId(threadId)
                     switch bound {
                     case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
@@ -2914,7 +3000,6 @@ final class AgentSupervisor {
                 self?.clearRunner(runner, generation: runnerGeneration, for: id)
             }
         }
-        return true
     }
 
     /// Agents whose provider has produced enough output that pi would have written
@@ -3055,11 +3140,35 @@ final class AgentSupervisor {
     /// Terminates the in-flight runner and records the stop on the agent's stream.
     /// `.sessionStateChanged(.stopped)` is what the tile's status derivation reads,
     /// and it is persist-worthy, so the stored record's `lastActivityAt` moves too.
+    ///
+    /// This is the TEARDOWN stop — quit, archive, a closed tile, every
+    /// programmatic caller — and it kills. The composer's Stop goes through
+    /// `accept(.stop)`, which interrupts first (T5).
     func stop(_ id: AgentID) {
         guard records[id] != nil else {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
+        killRunner(id)
+    }
+
+    /// T5 — the user's Stop is an INTERRUPT first: the turn ends, the process
+    /// and its background work live on. A kill is the fallback, when the
+    /// interrupt fails or never lands, and a second Stop while one is pending.
+    private func stopFromComposer(_ id: AgentID) {
+        if !activeCompactionOperations.contains(id),
+           !interruptingAgents.contains(id),
+           let steering = runners[id] as? AgentSteeringRunning {
+            stopRequestedAgents.insert(id)
+            interruptTurn(steering, for: id)
+            return
+        }
+        killRunner(id)
+    }
+
+    /// Kills the bound runner's process group and closes the turn synchronously.
+    private func killRunner(_ id: AgentID) {
+        interruptingAgents.remove(id)
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
@@ -5159,8 +5268,9 @@ final class AgentSupervisor {
         // session runner is actually bound: it is real mid-turn delivery into
         // that runner's own process, so a harness mid-migration never advertises
         // a verb the process behind it cannot perform.
-        let session = mirrored ? nil : (runners[id] as? AgentSessionRunning)
-        let steerable = session?.sessionCapabilities.supportedCommands.contains("steer") ?? false
+        // T5 — every production runner steers now; the scripted check runners
+        // do not, and keep the queue-only floor.
+        let steerable = !mirrored && runners[id] is AgentSteeringRunning
         // B4 — queue is Array's own capability, not the harness's. Queueing never
         // asks the bound runner to do anything while it is busy; Array holds the
         // text and sends it as an ORDINARY prompt once `turnCompleted` frees the
@@ -5291,7 +5401,7 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
                 return .refused(.noTurnInProgress)
             }
-            stop(agentID)
+            stopFromComposer(agentID)
             return .accepted
         case .providerCommand(let invocation):
             // ONE set for the picker and for dispatch. This used to look the
@@ -5448,9 +5558,55 @@ final class AgentSupervisor {
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             return .accepted
-        case .steer, .command:
-            // Today's compiled runner exercises neither of these. Never simulate
-            // one by replaying send.
+        case .steer(let draft):
+            // T5 — HELD by Array, not written to the provider: until the turn
+            // reaches a tool boundary the steer stays editable and cancellable,
+            // and a turn that ends first runs it next, ahead of the queue.
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSteer, let store = submissionRecoveryStore else {
+                return .refused(.unsupported)
+            }
+            let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+            do {
+                _ = try await attachmentStore.preparePromptAttachments(for: agentID, draftAttachments: draftImageAttachments)
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for a steer, agent \(agentID.rawValue.uuidString)")
+                return .refused(.invalidAttachment)
+            }
+            _ = await store.enqueueSteer(
+                text: prompt.text,
+                imageAttachments: draftImageAttachments,
+                fileReferences: prompt.fileReferences.map {
+                    AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+                },
+                for: agentID)
+            queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
+            notifyTurnCapabilitiesChanged(agentID)
+            handOverHeldSteers(for: agentID)
+            return .accepted
+        case .forceSend(let draft):
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend || snapshot.capabilities.canStop else {
+                return .refused(.turnNotReady)
+            }
+            let prepared: [AgentPromptImageAttachment]
+            do {
+                prepared = try await attachmentStore.preparePromptAttachments(
+                    for: agentID,
+                    draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) })
+            } catch {
+                return .refused(.invalidAttachment)
+            }
+            let forced = PreparedAgentPrompt(
+                prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared, fileReferences: prompt.fileReferences),
+                expectedAgentID: agentID)
+            return forceSend(forced, to: agentID) ? .accepted : .refused(.turnNotReady)
+        case .command:
+            // Never simulated by replaying send.
             return .refused(.unsupported)
         }
     }
@@ -6094,6 +6250,9 @@ final class AgentSupervisor {
         //    `system/init` reports it.
         if record.harness == .claudeCode {
             record.pendingSessionForkFrom = record.providerSessionId ?? Self.claudeSessionId(for: id)
+            // T5 — the idle session process is still the OLD conversation; the
+            // next send must spawn the fork.
+            idleSessionRunners.removeValue(forKey: id)?.stop()
         }
 
         // 2. The stale-but-numeric context meter must not re-seed from a
@@ -6437,22 +6596,9 @@ final class AgentSupervisor {
                 return
             }
             guard case .prompt(let message) = workItem else { return }
-            let prompt: AgentPrompt
-            do {
-                let prepared = try await self.attachmentStore.preparePromptAttachments(
-                    for: id,
-                    draftAttachments: message.imageAttachments
-                )
-                let fileReferences = message.fileReferences.map {
-                    AgentPromptFileReference(
-                        displayName: $0.displayName,
-                        contentType: $0.contentType,
-                        fileURL: URL(fileURLWithPath: $0.path)
-                    )
-                }
-                prompt = AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
-            } catch {
-                self.warn("AgentSupervisor: dropping queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+            guard let prompt = await self.preparedQueuedPrompt(message, for: id) else {
+                // Said out loud, never dropped silently; the next item waits for
+                // the next turn like any other.
                 return
             }
             guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
@@ -6464,6 +6610,358 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
+            // No composer painted this one; the tile learns of it here.
+            self.echoPrompt(prompt, for: id)
+        }
+    }
+
+    // MARK: - T5 steering, force send, interrupt, idle reaping
+
+    /// How long an idle provider session may sit before it is reaped (D3).
+    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = 600
+    private let idleRunnerTimeout: TimeInterval
+    private var idleReapTokens: [AgentID: UUID] = [:]
+    /// How long an acknowledged interrupt may take to end the turn before
+    /// Stop falls back to killing the process. Shortened by the checks.
+    var interruptGrace: TimeInterval = 5
+    /// Tool items open in the bound runner's turn — the boundary a held steer
+    /// waits for.
+    private var openToolItems: [AgentID: Set<String>] = [:]
+    /// Steers handed to the provider and not yet confirmed. In memory only:
+    /// once handed over they are the provider's, no longer Array's to edit.
+    private var deliveringSteers: [AgentID: [(id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt)]] = [:]
+    private var steerHandoffsInFlight: Set<AgentID> = []
+    private var interruptingAgents: Set<AgentID> = []
+    /// `echo`: no composer painted this prompt (a rail send-now), so the tile
+    /// is told when it runs.
+    private var pendingForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
+    private var deferredQueueOutcomes: [AgentID: TurnOutcome] = [:]
+    private var promptEchoObservers: [AgentID: [UUID: (AgentPrompt) -> Void]] = [:]
+
+    /// One pending steer for the rail: still HELD (editable, cancellable) or
+    /// DELIVERING (handed over, awaiting the provider's receipt).
+    struct PendingSteer: Equatable {
+        enum State: Equatable { case held, delivering }
+        let id: UUID
+        let text: String
+        let state: State
+    }
+
+    /// Held steers (front of the durable queue) then delivering ones.
+    func pendingSteers(for id: AgentID) -> [PendingSteer] {
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        let held = (queuedWorkItemsCache[id] ?? []).compactMap { item -> PendingSteer? in
+            guard case .prompt(let message) = item, message.isSteer else { return nil }
+            return PendingSteer(id: message.id, text: message.text, state: .held)
+        }
+        let delivering = (deliveringSteers[id] ?? []).map {
+            PendingSteer(id: $0.id, text: $0.message.text, state: .delivering)
+        }
+        return held + delivering
+    }
+
+    /// T5 — the plain rail until T5b: held and delivering steers first, labelled,
+    /// then the queue. A delivering steer's chip cannot be removed (its id is in
+    /// no queue), which is the truth: it is the provider's now.
+    func railMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
+        let steers = pendingSteers(for: id).map { steer in
+            AgentComposerQueuedMessage(
+                id: steer.id,
+                text: (steer.state == .held ? "Steer \u{00B7} " : "Steer \u{00B7} sending \u{00B7} ") + steer.text,
+                queuedAt: Date.distantPast,
+                isSteer: true)
+        }
+        return steers + queuedMessages(for: id).filter { !$0.isSteer }
+    }
+
+    /// A supervisor-started prompt no composer painted (a drained follow-up, a
+    /// delivered steer), so an attached tile can show it.
+    @discardableResult
+    func addPromptEchoObserver(for id: AgentID, _ observe: @escaping (AgentPrompt) -> Void) -> UUID {
+        let token = UUID()
+        promptEchoObservers[id, default: [:]][token] = observe
+        return token
+    }
+
+    func removePromptEchoObserver(_ token: UUID, for id: AgentID) {
+        promptEchoObservers[id]?[token] = nil
+    }
+
+    private func echoPrompt(_ prompt: AgentPrompt, for id: AgentID) {
+        for observe in (promptEchoObservers[id] ?? [:]).values { observe(prompt) }
+    }
+
+    /// Pulls one held steer or queued follow-up back out for editing: it leaves
+    /// the queue, and the caller loads it into the composer.
+    func takeQueuedItemForEditing(_ itemID: UUID, for id: AgentID) async -> AgentComposerQueuedMessage? {
+        guard let store = submissionRecoveryStore else { return nil }
+        let item = await store.takeQueuedWorkItem(id: itemID, for: id)
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+        guard case .prompt(let message) = item else { return nil }
+        return message
+    }
+
+    /// Reorders the follow-up section; held steers keep the front.
+    func moveQueuedItem(_ itemID: UUID, toFollowUpIndex index: Int, for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        runQueueOp(for: id) { _ = await store.moveQueuedWorkItem(id: itemID, toFollowUpIndex: index, for: id) }
+    }
+
+    /// Send now. A held steer while a turn is live is handed over at once,
+    /// without waiting for a tool boundary; anything else leaves the queue and
+    /// runs now — a force send when a turn is in flight.
+    @discardableResult
+    func sendQueuedItemNow(_ itemID: UUID, for id: AgentID) async -> Bool {
+        guard let store = submissionRecoveryStore else { return false }
+        let cached = (queuedWorkItemsCache[id] ?? []).first { $0.id == itemID }
+        if case .prompt(let message) = cached, message.isSteer,
+           let steering = runners[id] as? AgentSteeringRunning, steering.acceptsSteerNow {
+            handOverHeldSteers(for: id, only: itemID)
+            return true
+        }
+        guard let item = await store.takeQueuedWorkItem(id: itemID, for: id) else { return false }
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+        guard case .prompt(let message) = item,
+              let prompt = await preparedQueuedPrompt(message, for: id) else {
+            if case .compaction = item {
+                await store.requeueWorkItemAtFront(item, for: id)
+                queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            }
+            return false
+        }
+        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, echo: true) else {
+            await store.requeueWorkItemAtFront(item, for: id)
+            queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            notifyTurnCapabilitiesChanged(id)
+            return false
+        }
+        return true
+    }
+
+    /// D2 — interrupt the turn in flight WITHOUT killing its process, then run
+    /// `prepared` immediately. It bypasses a paused queue without releasing it,
+    /// and the interrupt it causes does not pause the queue either: everything
+    /// queued stays held behind the forced message.
+    private func forceSend(_ prepared: PreparedAgentPrompt, to id: AgentID, echo: Bool = false) -> Bool {
+        guard records[id]?.capabilities.locallyManaged == true else { return false }
+        guard let runner = runners[id] else {
+            guard sendPrepared(prepared, to: id) else { return false }
+            if echo { echoPrompt(prepared.prompt, for: id) }
+            return true
+        }
+        guard !activeCompactionOperations.contains(id) else { return false }
+        pendingForceSends[id] = (prepared, echo)
+        stopRequestedAgents.insert(id)
+        if interruptingAgents.contains(id) { return true }
+        if let steering = runner as? AgentSteeringRunning {
+            interruptTurn(steering, for: id)
+        } else {
+            escalateToKill(id)
+        }
+        return true
+    }
+
+    /// Asks the bound runner to end its turn and keep its process; falls back to
+    /// a kill when the interrupt fails, or is acknowledged but the turn never
+    /// ends within `interruptGrace`.
+    private func interruptTurn(_ runner: AgentSteeringRunning, for id: AgentID) {
+        guard let generation = runnerGenerationTokens[id] else {
+            escalateToKill(id)
+            return
+        }
+        interruptingAgents.insert(id)
+        notifyTurnCapabilitiesChanged(id)
+        let grace = interruptGrace
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // A Stop pressed while the session is still starting (the prompt
+            // not yet in the provider's hands) waits for the turn to go live:
+            // an interrupt sent before it would interrupt nothing.
+            let deadline = Date().addingTimeInterval(grace)
+            while !runner.acceptsSteerNow, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            let acknowledged = (try? runner.interrupt()) != nil
+            DispatchQueue.main.async {
+                guard let self, self.runnerGenerationTokens[id] == generation, self.runners[id] === runner else { return }
+                guard acknowledged else {
+                    self.escalateToKill(id)
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+                    guard let self, self.runnerGenerationTokens[id] == generation,
+                          self.runners[id] === runner else { return }
+                    self.appendAgentDiagnostics(
+                        "interrupt acknowledged but the turn did not end within \(grace)s; killing", agentID: id)
+                    self.escalateToKill(id)
+                }
+            }
+        }
+    }
+
+    private func escalateToKill(_ id: AgentID) {
+        let forced = pendingForceSends.removeValue(forKey: id)
+        killRunner(id)
+        if let forced, sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+    }
+
+    /// Hands every held steer (or just `only`) to the bound runner, once its
+    /// turn has reached a tool boundary — or at once for `only`. Serialized with
+    /// every other queue operation, so a turn that ends meanwhile drains the
+    /// steers the provider did not take, ahead of the follow-ups.
+    private func handOverHeldSteers(for id: AgentID, only: UUID? = nil) {
+        guard let store = submissionRecoveryStore,
+              let runner = runners[id] as? AgentSteeringRunning,
+              !activeCompactionOperations.contains(id),
+              !interruptingAgents.contains(id),
+              pendingForceSends[id] == nil,
+              only != nil || !(openToolItems[id]?.isEmpty ?? true),
+              !steerHandoffsInFlight.contains(id) else { return }
+        let generation = runnerGenerationTokens[id]
+        steerHandoffsInFlight.insert(id)
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            defer { self.steerHandoffsInFlight.remove(id) }
+            guard self.runners[id] === runner, runner.acceptsSteerNow else { return }
+            let steers: [AgentComposerQueuedMessage]
+            if let only {
+                guard case .prompt(let message) = await store.takeQueuedWorkItem(id: only, for: id) else { return }
+                steers = [message]
+            } else {
+                steers = await store.takeHeldSteers(for: id)
+            }
+            var notTaken: [AgentComposerQueuedMessage] = []
+            for message in steers {
+                guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation else {
+                    notTaken.append(message)
+                    continue
+                }
+                guard let prompt = await self.preparedQueuedPrompt(message, for: id) else { continue }
+                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+                self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                self.notifyTurnCapabilitiesChanged(id)
+                let accepted = await Task.detached(priority: .userInitiated) {
+                    (try? runner.steer(prompt, id: message.id)) != nil
+                }.value
+                if !accepted, self.deliveringSteers[id]?.contains(where: { $0.id == message.id }) == true {
+                    self.deliveringSteers[id]?.removeAll { $0.id == message.id }
+                    notTaken.append(message)
+                }
+            }
+            if !notTaken.isEmpty { await store.requeueHeldSteersAtFront(notTaken, for: id) }
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// The provider's receipt for one handed-over steer.
+    private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
+        guard let index = deliveringSteers[id]?.firstIndex(where: { $0.id == steerID }),
+              let entry = deliveringSteers[id]?.remove(at: index) else { return }
+        switch disposition {
+        case .consumed:
+            recordTranscriptUserPrompt(entry.prompt, for: id)
+            echoPrompt(entry.prompt, for: id)
+        case .returned:
+            if let store = submissionRecoveryStore {
+                runQueueOp(for: id) { await store.requeueHeldSteersAtFront([entry.message], for: id) }
+            }
+        }
+        notifyTurnCapabilitiesChanged(id)
+        if deliveringSteers[id]?.isEmpty ?? true, runners[id] == nil,
+           let outcome = deferredQueueOutcomes.removeValue(forKey: id) {
+            handleQueueOnTurnCompleted(outcome: outcome, for: id)
+        }
+    }
+
+    /// Steers a session that died never confirmed go back to being held.
+    private func returnDeliveringSteers(for id: AgentID) {
+        guard let entries = deliveringSteers.removeValue(forKey: id), !entries.isEmpty,
+              let store = submissionRecoveryStore else { return }
+        runQueueOp(for: id) { await store.requeueHeldSteersAtFront(entries.map(\.message), for: id) }
+    }
+
+    /// Steers still delivering when Array starts a new turn of the same session
+    /// were taken in a turn that has already closed.
+    private func settleStaleDeliveringSteers(for id: AgentID) {
+        deferredQueueOutcomes[id] = nil
+        for entry in deliveringSteers.removeValue(forKey: id) ?? [] {
+            recordTranscriptUserPrompt(entry.prompt, for: id)
+            echoPrompt(entry.prompt, for: id)
+        }
+    }
+
+    /// claude will run a steer it received after its last tool boundary as its
+    /// own next turn. Hold the queue for that turn; if it never shows, the
+    /// steers are settled as delivered and the queue moves on.
+    private func deferQueueBehindDeliveringSteers(
+        _ outcome: TurnOutcome, runner: AgentUnsolicitedTurnReporting, for id: AgentID
+    ) {
+        deferredQueueOutcomes[id] = outcome
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.runners[id] == nil, self.idleSessionRunners[id] === runner,
+                  let outcome = self.deferredQueueOutcomes.removeValue(forKey: id) else { return }
+            self.settleStaleDeliveringSteers(for: id)
+            self.handleQueueOnTurnCompleted(outcome: outcome, for: id)
+        }
+    }
+
+    /// Binds a turn the provider started on its own to the agent, exactly like
+    /// a turn Array started. While the runner still holds the slot, the slot's
+    /// own release (`clearRunner`) adopts it instead.
+    private func adoptUnsolicitedTurn(from runner: AgentUnsolicitedTurnReporting, for id: AgentID) {
+        guard runners[id] == nil, idleSessionRunners[id] === runner, runner.hasUnsolicitedTurn else { return }
+        idleSessionRunners[id] = nil
+        idleReapTokens[id] = nil
+        deferredQueueOutcomes[id] = nil
+        turnFacts[id, default: TurnFacts()].submittedAt = Date()
+        startTurn(on: runner, for: id) { onEvent in try runner.continueUnsolicitedTurn(onEvent: onEvent) }
+    }
+
+    /// D3 — an idle provider session is reaped after `idleRunnerTimeout`,
+    /// unless it reports background work still running.
+    private func scheduleIdleReap(for id: AgentID, runner: AgentRunning) {
+        let token = UUID()
+        idleReapTokens[id] = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
+            guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
+            if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
+                self.scheduleIdleReap(for: id, runner: runner)
+                return
+            }
+            self.idleReapTokens[id] = nil
+            self.idleSessionRunners[id] = nil
+            runner.stop()
+            self.returnDeliveringSteers(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// A queued message's prompt, its managed attachments re-validated. A
+    /// message whose attachment is gone is not sent and not silently dropped:
+    /// the transcript says so.
+    private func preparedQueuedPrompt(_ message: AgentComposerQueuedMessage, for id: AgentID) async -> AgentPrompt? {
+        do {
+            let prepared = try await attachmentStore.preparePromptAttachments(
+                for: id, draftAttachments: message.imageAttachments)
+            let fileReferences = message.fileReferences.map {
+                AgentPromptFileReference(
+                    displayName: $0.displayName, contentType: $0.contentType,
+                    fileURL: URL(fileURLWithPath: $0.path))
+            }
+            return AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
+        } catch {
+            warn("AgentSupervisor: not sending queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+            let threadId = Self.threadId(for: id)
+            let itemID = "queued-attachment-invalid:\(message.id.uuidString)"
+            let preview = String(message.text.prefix(60))
+            deliver(.itemStarted(
+                threadId: threadId, itemId: itemID, kind: .error,
+                title: "A queued message was not sent because its attachment is no longer available: \u{201C}\(preview)\u{201D}"
+            ), to: id)
+            deliver(.itemCompleted(threadId: threadId, itemId: itemID, kind: .error, status: .failed), to: id)
+            return nil
         }
     }
 
@@ -6521,6 +7019,21 @@ final class AgentSupervisor {
             guard runners[id] == nil, event.isRunnerTerminal else { return }
         }
         deliver(event, to: id, now: now)
+        // T5 — the bound runner's own stream says where the tool boundaries are.
+        switch event {
+        case let .itemStarted(_, itemID, kind, _) where kind.isToolBoundary:
+            openToolItems[id, default: []].insert(itemID)
+            handOverHeldSteers(for: id)
+        case let .itemCompleted(_, itemID, _, _):
+            openToolItems[id]?.remove(itemID)
+        case .turnCompleted:
+            openToolItems[id] = nil
+            // A claude session outlives its turns now, so its mirrored children
+            // are closed at the parent's `result` rather than at process exit.
+            interruptWorkingClaudeMirroredChildren(of: id)
+        default:
+            break
+        }
     }
 
     /// `meterPublished` marks the supervisor's own context-meter reading (after
@@ -7006,21 +7519,48 @@ final class AgentSupervisor {
         // Identity-checked: a `send` that started while the previous prompt was
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
-            // Claude owns mirrored children inside this process. If it exits or
-            // crashes before their matching tool_result, no later transport can
-            // close them. Codex is deliberately excluded: its provider children
-            // can drain after the parent turn completes.
-            interruptWorkingClaudeMirroredChildren(of: id)
             runners[id] = nil
-            if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
+            interruptingAgents.remove(id)
+            openToolItems[id] = nil
+            let retained = runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn
+            if retained {
                 idleSessionRunners[id] = runner
+                scheduleIdleReap(for: id, runner: runner)
+            } else {
+                // Claude owns mirrored children inside this process. If it exits
+                // or crashes before their matching tool_result, no later transport
+                // can close them (the live-process case closes at `result`, in
+                // `deliver`). Codex is deliberately excluded: its provider
+                // children can drain after the parent turn completes.
+                interruptWorkingClaudeMirroredChildren(of: id)
+                // A steer the dead process never confirmed was never read.
+                returnDeliveringSteers(for: id)
             }
             notifyTurnCapabilitiesChanged(id)
             // B4: this is the actual moment the runner slot frees, not the
             // `.turnCompleted` event itself — that event still fires while
             // `runners[id]` holds this very runner, so draining there would
             // refuse against an occupied slot every time.
-            if let outcome = pendingQueueOutcome.removeValue(forKey: id) {
+            let outcome = pendingQueueOutcome.removeValue(forKey: id)
+            // T5 (D2) — a force send's interrupt does not pause the queue: the
+            // forced message runs now, and everything queued stays held behind it.
+            if let forced = pendingForceSends.removeValue(forKey: id) {
+                if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+                return
+            }
+            if retained, let reporting = runner as? AgentUnsolicitedTurnReporting {
+                if reporting.hasUnsolicitedTurn {
+                    adoptUnsolicitedTurn(from: reporting, for: id)
+                    return
+                }
+                // claude runs a steer it took after its last tool boundary as
+                // its own next turn; that turn, not the queue, comes next.
+                if !(deliveringSteers[id]?.isEmpty ?? true) {
+                    deferQueueBehindDeliveringSteers(outcome ?? .completed, runner: reporting, for: id)
+                    return
+                }
+            }
+            if let outcome {
                 handleQueueOnTurnCompleted(outcome: outcome, for: id)
             }
         }
@@ -7115,6 +7655,19 @@ private extension AgentRuntimeEvent {
              .contentDelta, .requestOpened, .requestResolved, .userInputRequested,
              .userInputResolved, .tokenUsageUpdated, .contextWindowUpdated,
              .childAgentSpawned, .semanticSignal:
+            return false
+        }
+    }
+}
+
+private extension ItemKind {
+    /// T5 — a tool the provider runs; a held steer is handed over while one is
+    /// open, so the provider takes it at that tool's boundary.
+    var isToolBoundary: Bool {
+        switch self {
+        case .commandExecution, .fileChange, .mcpToolCall, .webSearch, .subagent, .unknown:
+            return true
+        case .assistantMessage, .reasoning, .plan, .error, .compaction:
             return false
         }
     }
@@ -7373,20 +7926,25 @@ private func runComposerKeyContractChecks() throws -> Int {
         throw fail("Shift+Return did not stay on the native newline path")
     }
 
+    // T5 (D1): ⌘↩ force-sends and ⌥↩ queues while a turn works; on a composer
+    // with no working turn both are a send. Neither edits the draft.
     let beforeModifiedReturn = textView.string
     dispatch(try key(36, "\r", .command))
-    guard sendCount == 1, textView.string == beforeModifiedReturn else {
-        throw fail("Command+Return was repurposed or did not preserve native text behavior")
+    guard sendCount == 2, textView.string == beforeModifiedReturn else {
+        throw fail("Command+Return with content must submit (D1 force send) without editing; sends \(sendCount), got '\(textView.string)'")
     }
     dispatch(try key(36, "\r", .option))
-    guard sendCount == 1, textView.string == beforeModifiedReturn + "\n" else {
-        throw fail("Option+Return was repurposed or did not preserve native newline behavior; got '\(textView.string)'")
+    guard sendCount == 3, textView.string == beforeModifiedReturn else {
+        throw fail("Option+Return with content must submit (D1 queue) without editing; sends \(sendCount), got '\(textView.string)'")
     }
-
+    dispatch(try key(36, "\r", [.command, .shift]))
+    guard sendCount == 3, textView.string == beforeModifiedReturn + "\n" || textView.string == beforeModifiedReturn else {
+        throw fail("a Return chord outside D1 must stay native; got '\(textView.string)'")
+    }
     textView.string = "   "
     textView.setSelectedRange(NSRange(location: 3, length: 0))
     dispatch(try key(36, "\r"))
-    guard sendCount == 1, textView.string == "   \n" else {
+    guard sendCount == 3, textView.string == "   \n" else {
         throw fail("whitespace-only Return sent instead of remaining native editing")
     }
 
@@ -7406,7 +7964,7 @@ private func runComposerKeyContractChecks() throws -> Int {
             hasTrimmedContent: true,
             suggestionsVisible: false
           ) == .nativeTextSystem,
-          sendCount == 1,
+          sendCount == 3,
           !textView.hasMarkedText(),
           textView.string == "compose \n",
           textView.selectedRange() == NSRange(location: 9, length: 0) else {
@@ -7415,7 +7973,7 @@ private func runComposerKeyContractChecks() throws -> Int {
 
     textView.suggestionsAreVisible = true
     dispatch(try key(53, "\u{1b}"))
-    guard dismissCount == 1, sendCount == 1, !textView.suggestionsAreVisible else {
+    guard dismissCount == 1, sendCount == 3, !textView.suggestionsAreVisible else {
         throw fail("Escape did not dismiss suggestions first, or unexpectedly emitted send/stop-like work")
     }
     dispatch(try key(53, "\u{1b}"))

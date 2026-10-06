@@ -178,6 +178,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// this the composer's last repaint shows `canSend == false` forever
     /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
     private var capabilityObserverToken: UUID?
+    private var promptEchoObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
     private let toolDetailStore = AgentToolDetailStore()
@@ -581,10 +582,20 @@ final class ManagedAgentTileNSView: TileNSView {
             composer.onClearQueuedMessages = { [weak supervisor] in
                 supervisor?.clearQueuedMessages(for: agentID)
             }
+            composer.onResumeQueue = { [weak supervisor] in
+                supervisor?.resumeQueue(for: agentID)
+            }
             composer.updateQueuedMessages(
-                supervisor.queuedMessages(for: agentID),
+                supervisor.railMessages(for: agentID),
                 paused: supervisor.isQueuePaused(for: agentID)
             )
+            // T5 — a prompt the supervisor started itself (a drained follow-up,
+            // a delivered steer) has no composer bubble; show it when it runs.
+            if let token = promptEchoObserverToken { supervisor.removePromptEchoObserver(token, for: agentID) }
+            promptEchoObserverToken = supervisor.addPromptEchoObserver(for: agentID) { [weak self] prompt in
+                guard self?.attachedAgentID == agentID else { return }
+                self?.appendUserPrompt(prompt)
+            }
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
@@ -941,6 +952,10 @@ final class ManagedAgentTileNSView: TileNSView {
         if let displayNameObserverToken, let agentID = attachedAgentID {
             agentSource?.removeDisplayNameObserver(displayNameObserverToken, for: agentID)
             self.displayNameObserverToken = nil
+        }
+        if let promptEchoObserverToken, let agentID = attachedAgentID {
+            agentSource?.removePromptEchoObserver(promptEchoObserverToken, for: agentID)
+            self.promptEchoObserverToken = nil
         }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
@@ -2038,7 +2053,7 @@ final class ManagedAgentTileNSView: TileNSView {
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
                 v2Composer?.updateQueuedMessages(
-                    supervisor.queuedMessages(for: agentID),
+                    supervisor.railMessages(for: agentID),
                     paused: supervisor.isQueuePaused(for: agentID)
                 )
             }

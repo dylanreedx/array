@@ -421,6 +421,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # of every agent's environment, argv and config. Its own arm because the bare
 # CoreChecks run is KNOWN-RED and never reached this section.
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+# T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
+# through the production Claude/Codex/Pi runners against reactive fakes of each
+# CLI that record the exact argv and stdin frames. Its own arm for the same
+# reason as the one above: the bare CoreChecks run is KNOWN-RED.
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from

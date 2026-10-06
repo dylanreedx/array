@@ -87,6 +87,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// Array's queue, never the turn in flight.
     var onCancelQueuedMessage: ((UUID) -> Void)?
     var onClearQueuedMessages: (() -> Void)?
+    var onResumeQueue: (() -> Void)?
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
@@ -229,6 +230,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         }
         queuedMessageRail.onClearAll = { [weak self] in
             self?.onClearQueuedMessages?()
+        }
+        queuedMessageRail.onResume = { [weak self] in
+            self?.onResumeQueue?()
         }
         taskContextButton.translatesAutoresizingMaskIntoConstraints = false
         taskContextButton.isBordered = false
@@ -743,6 +747,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
+        composerRequestedSend(textView, modifier: .plain)
+    }
+
+    func composerRequestedSend(_ textView: ComposerTextView, modifier: AgentComposerSubmitModifier) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
@@ -786,11 +794,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     // be refused, rather than blindly retrying `.sendPrompt` while
                     // a turn is running (which the supervisor refuses as
                     // `.turnNotReady`, rolling back the optimistic bubble).
-                    intent = resolver.workingDraftIntent(prompt: attachedPrompt)
+                    intent = resolver.workingDraftIntent(prompt: attachedPrompt, modifier: modifier)
                 }
             } else {
                 intent = snapshot.executionState == .working
-                    ? resolver.workingDraftIntent(draft: prompt)
+                    ? resolver.workingDraftIntent(prompt: AgentPrompt(prompt), modifier: modifier)
                     : resolver.primaryIntent(draft: prompt)
             }
             guard let intent else { return }
@@ -1136,6 +1144,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         switch intent {
         case let .send(text): previewPrompt = AgentPrompt(text)
         case let .sendPrompt(prompt): previewPrompt = prompt
+        // D2 — a force send runs now, so it is painted now like a send.
+        case let .forceSend(prompt): previewPrompt = prompt
         case let .providerCommand(invocation): previewPrompt = AgentPrompt(invocation.nativeSlashText)
         case .compact: previewPrompt = nil
         default: previewPrompt = nil
