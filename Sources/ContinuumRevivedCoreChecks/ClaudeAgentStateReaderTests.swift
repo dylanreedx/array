@@ -65,6 +65,11 @@ func runClaudeAgentStateReaderTests() {
         expect(ClaudeAgentStateReader.encodeCwd("/Users/dylan/project") == "-Users-dylan-project", "encodeCwd maps leading slash to dash")
         expect(ClaudeAgentStateReader.encodeCwd("/Users/dylan/.claude/worktrees/x") == "-Users-dylan--claude-worktrees-x", "encodeCwd maps /. to double dash")
         expect(ClaudeAgentStateReader.encodeCwd("") == "", "encodeCwd keeps empty cwd safe")
+        // claude's own rule (`replace(/[^a-zA-Z0-9]/g,"-")`, per UTF-16 unit):
+        // spaces, underscores, `~` and non-ASCII letters all become dashes.
+        let encoded = ClaudeAgentStateReader.encodeCwd("/tmp/my_app v2/~x/caf\u{E9}")
+        expect(encoded == "-tmp-my-app-v2--x-caf-",
+               "encodeCwd maps every non-alphanumeric to a dash, got \(encoded)")
     }
 
     do {
