@@ -218,7 +218,7 @@ public final class PiAgentRunner: @unchecked Sendable {
 
     /// Live wrapper around `resolvedCommand`: assembles the search dirs from
     /// the real environment + home, expanding nvm node versions on disk.
-    static func liveResolvedCommand() -> ResolvedCommand {
+    public static func liveResolvedCommand() -> ResolvedCommand {
         let env = ProcessInfo.processInfo.environment
         let pathDirs = ToolDetector.splitPath(env["PATH"] ?? "")
         return resolvedCommand(

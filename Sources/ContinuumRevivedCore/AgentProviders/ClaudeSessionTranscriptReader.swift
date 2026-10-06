@@ -173,7 +173,7 @@ public enum ClaudeSessionTranscriptReader {
 
 extension ClaudeSessionTranscriptReader {
     /// `~/.claude/projects/<encodeCwd(cwd)>/<sessionId>.jsonl`. Reuses
-    /// `ClaudeAgentStateReader.encodeCwd` (both `/` and `.` → `-`).
+    /// `ClaudeAgentStateReader.encodeCwd` (every non-alphanumeric → `-`).
     public static func sessionFileURL(homeURL: URL, cwd: String, sessionId: String) -> URL {
         homeURL
             .appendingPathComponent(".claude/projects", isDirectory: true)

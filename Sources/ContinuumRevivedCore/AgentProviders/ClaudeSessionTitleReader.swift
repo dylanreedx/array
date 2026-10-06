@@ -7,10 +7,11 @@ import Foundation
 //   {"type":"ai-title","aiTitle":"Andable Zscaler connection investigation",
 //    "sessionId":"35c834ed-…"}
 //
-// Verified present in HEADLESS sessions (`-p --output-format stream-json`),
-// which is the only mode Array runs managed agents in — captured 2026-09-05
-// from claude's own store across Array's own probe roots
-// (`/private/tmp/array-*`), so this is not an interactive-TUI-only affordance.
+// Present in HEADLESS sessions (`-p --output-format stream-json`) through
+// claude 2.1.277. From 2.1.278 headless sessions no longer carry it (0 of ~1,900
+// sessions since); interactive sessions still do. It stays the FIRST rung
+// because it is free, and absence is ordinary: the supervisor then asks claude
+// itself for a title (`AgentNameOneShot`).
 //
 // `ClaudeAgentStateReader` has decoded this field since the tmux observer
 // shipped, but only for OBSERVED terminal sessions. A managed agent's session
@@ -21,7 +22,7 @@ import Foundation
 // Codex and pi have no equivalent. Codex's `set_thread_title` appears only
 // inside Codex Desktop's injected app-context prose, never as a rollout event,
 // and pi's session store carries no title field at all. Those two harnesses are
-// covered by the generated-name one-shot instead.
+// titled by their own CLI's one-shot instead.
 public enum ClaudeSessionTitleReader {
     /// How much of the session tail to scan. The title line is small, repeated,
     /// and rewritten as the conversation develops, so the newest one is near the
@@ -57,9 +58,8 @@ public enum ClaudeSessionTitleReader {
 extension ClaudeSessionTitleReader {
     /// Read the newest title for one managed agent's conversation, or nil when
     /// the session file does not exist yet, carries no title line, or cannot be
-    /// read. Every one of those is an ordinary state, not an error: claude
-    /// writes the title after the first exchange, so an agent that has not
-    /// finished a turn simply has no title yet.
+    /// read. Every one of those is an ordinary state, not an error: a session
+    /// may not have a title yet, and a headless one may never get one.
     public static func title(homeURL: URL, cwd: String, sessionId: String) -> String? {
         let url = ClaudeSessionTranscriptReader.sessionFileURL(
             homeURL: homeURL, cwd: cwd, sessionId: sessionId)
