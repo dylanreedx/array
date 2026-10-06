@@ -323,8 +323,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     }
 
     /// One stream-json user message line. Text-only content stays a plain
-    /// string, which is exactly the shape the live probe measured.
-    public static func userMessageLine(_ prompt: AgentPrompt) throws -> String {
+    /// string, which is exactly the shape the live probe measured. `uuid`
+    /// stamps a steer: claude echoes it on the replay and names it in an
+    /// interrupt's `cancelled` / `still_queued` receipt.
+    public static func userMessageLine(_ prompt: AgentPrompt, uuid: UUID? = nil) throws -> String {
         let text = userMessageText(prompt)
         let content: Any
         if prompt.imageAttachments.isEmpty {
@@ -346,7 +348,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             }
             content = blocks
         }
-        let object: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
+        var object: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
+        if let uuid { object["uuid"] = uuid.uuidString.lowercased() }
         let data = try JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)
     }
@@ -354,8 +357,14 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// The interrupt control request, measured live: answered by a
     /// `control_response` in ~10ms, the in-flight tool is declined, the turn's
     /// `result` is `error_during_execution`, and the process keeps reading.
+    ///
+    /// T5c — `cancel_queued`: without it, a steer claude holds but has not
+    /// consumed survives the interrupt (`still_queued`) and claude runs it as
+    /// its NEXT turn, so the agent kept working after the user's Stop (measured
+    /// on 2.1.291). With it, claude cancels those messages and lists their uuids
+    /// under `cancelled`; they come back to Array as `.returned`.
     public static func interruptRequestLine(requestId: String) -> String {
-        #"{"type":"control_request","request_id":"\#(requestId)","request":{"subtype":"interrupt"}}"#
+        #"{"type":"control_request","request_id":"\#(requestId)","request":{"subtype":"interrupt","cancel_queued":true}}"#
     }
 
     public enum RunError: Error, CustomStringConvertible {
@@ -655,16 +664,17 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// Hands one more user message to the turn in flight. claude takes it at
     /// its next tool boundary, or runs it as the next turn when the current one
     /// has no boundary left; either way the replay of the message is the
-    /// receipt, reported through `observeSteerDispositions`. Irrevocable once
-    /// this returns.
+    /// receipt, reported through `observeSteerDispositions`. Once this returns
+    /// only an interrupt can take it back (`returned`, see
+    /// `interruptRequestLine`).
     public func steer(_ prompt: AgentPrompt, id: UUID) throws {
+        let text = Self.userMessageText(prompt)
         let line: String
         do {
-            line = try Self.userMessageLine(prompt)
+            line = try Self.userMessageLine(prompt, uuid: id)
         } catch {
             throw AgentSteerNotAccepted("could not prepare a local image attachment")
         }
-        let text = Self.userMessageText(prompt)
         try queue.sync {
             guard child != nil, !stopRequested, turn != nil, !interruptRequested else {
                 throw AgentSteerNotAccepted("no claude turn is in flight")
@@ -748,8 +758,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         queue.sync { observationHandler = handler; translator.onRuntimeObservation = handler }
     }
 
-    /// A steer's id once claude has replayed it, i.e. consumed it. claude never
-    /// drops a written message, so nothing is ever `returned` here.
+    /// A steer's id once claude has replayed it, i.e. consumed it, or
+    /// `returned` when an interrupt cancelled it before claude read it.
     public func observeSteerDispositions(
         _ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void
     ) {
@@ -923,6 +933,14 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 if let response = object["response"] as? [String: Any],
                    let requestID = response["request_id"] as? String,
                    let control = pendingControls[requestID] {
+                    // T5c — steers the interrupt cancelled were never read:
+                    // they are the user's message again.
+                    let cancelled = Set(((response["response"] as? [String: Any])?["cancelled"] as? [String] ?? [])
+                        .map { $0.lowercased() })
+                    for steer in pendingSteers where cancelled.contains(steer.id.uuidString.lowercased()) {
+                        steerDispositionHandler?(steer.id, .returned)
+                    }
+                    pendingSteers.removeAll { cancelled.contains($0.id.uuidString.lowercased()) }
                     pendingControls[requestID] = (control.semaphore, (response["subtype"] as? String) == "success")
                     control.semaphore.signal()
                 }
@@ -953,7 +971,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                    (object["parent_tool_use_id"] as? String) == nil,
                    let message = object["message"] as? [String: Any],
                    let text = Self.replayedText(message["content"]),
-                   let index = pendingSteers.firstIndex(where: { $0.text == text }) {
+                   let index = pendingSteers.firstIndex(where: {
+                       (object["uuid"] as? String)?.lowercased() == $0.id.uuidString.lowercased()
+                   }) ?? pendingSteers.firstIndex(where: { $0.text == text }) {
                     let consumed = pendingSteers.remove(at: index)
                     steerDispositionHandler?(consumed.id, .consumed)
                 }
