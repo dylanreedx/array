@@ -11,6 +11,8 @@ protocol ComposerTextViewObserver: AnyObject {
     func composerSelectionDidChange(_ textView: ComposerTextView)
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool)
     func composerRequestedSend(_ textView: ComposerTextView)
+    /// T5 (D1) — ⌥↩ / ⌘↩. Plain ↩ stays `composerRequestedSend(_:)`.
+    func composerRequestedSend(_ textView: ComposerTextView, modifier: AgentComposerSubmitModifier)
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool
     func composerRequestedCompletionCommand(
         _ textView: ComposerTextView,
@@ -222,6 +224,10 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         switch action {
         case .send:
             composerObserver?.composerRequestedSend(self)
+        case .queueSend:
+            composerObserver?.composerRequestedSend(self, modifier: .queue)
+        case .forceSend:
+            composerObserver?.composerRequestedSend(self, modifier: .forceSend)
         case .dismissSuggestions:
             suggestionsAreVisible = false
             composerObserver?.composerRequestedDismissSuggestions(self)

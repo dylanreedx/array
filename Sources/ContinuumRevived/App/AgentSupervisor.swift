@@ -6660,6 +6660,20 @@ final class AgentSupervisor {
         return held + delivering
     }
 
+    /// T5 — the plain rail until T5b: held and delivering steers first, labelled,
+    /// then the queue. A delivering steer's chip cannot be removed (its id is in
+    /// no queue), which is the truth: it is the provider's now.
+    func railMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
+        let steers = pendingSteers(for: id).map { steer in
+            AgentComposerQueuedMessage(
+                id: steer.id,
+                text: (steer.state == .held ? "Steer \u{00B7} " : "Steer \u{00B7} sending \u{00B7} ") + steer.text,
+                queuedAt: Date.distantPast,
+                isSteer: true)
+        }
+        return steers + queuedMessages(for: id).filter { !$0.isSteer }
+    }
+
     /// A supervisor-started prompt no composer painted (a drained follow-up, a
     /// delivered steer), so an attached tile can show it.
     @discardableResult

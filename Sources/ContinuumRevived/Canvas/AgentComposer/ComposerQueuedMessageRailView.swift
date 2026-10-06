@@ -25,6 +25,9 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     private let scrollView = NSScrollView(frame: .zero)
     private let stack = NSStackView(frame: .zero)
     private let clearButton = NSButton(title: "Clear queued", target: nil, action: nil)
+    /// T5 — a paused queue (after Stop, or after relaunch) never resumes on its
+    /// own; this is the explicit way back.
+    private let resumeButton = NSButton(title: "Resume", target: nil, action: nil)
     private var messages: [AgentComposerQueuedMessage] = []
     private var paused = false
 
@@ -33,6 +36,8 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     /// "Clear queued" — every chip at once, still without touching the turn
     /// in flight.
     var onClearAll: (() -> Void)?
+    /// Resumes a paused queue (`AgentSupervisor.resumeQueue`).
+    var onResume: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -78,6 +83,9 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         if newMessages.count > 1 {
             stack.addArrangedSubview(clearButton)
         }
+        if isPaused && !newMessages.isEmpty {
+            stack.addArrangedSubview(resumeButton)
+        }
         isHidden = newMessages.isEmpty
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -90,12 +98,14 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
             chip.applyTokens(theme: theme)
         }
         clearButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+        resumeButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
     }
 
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
         applyStackMetrics()
         clearButton.font = .token(.caption, zoom: zoom)
+        resumeButton.font = .token(.caption, zoom: zoom)
         for case let chip as ComposerQueuedMessageChipView in stack.arrangedSubviews {
             chip.applyPageZoom(zoom)
         }
@@ -135,6 +145,13 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         clearButton.target = self
         clearButton.action = #selector(clearPressed(_:))
         clearButton.setAccessibilityLabel("Clear queued messages")
+        resumeButton.isBordered = false
+        resumeButton.bezelStyle = .regularSquare
+        resumeButton.setButtonType(.momentaryPushIn)
+        resumeButton.font = .token(.caption, zoom: pageZoom)
+        resumeButton.target = self
+        resumeButton.action = #selector(resumePressed(_:))
+        resumeButton.setAccessibilityLabel("Resume the paused queue")
 
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
@@ -155,6 +172,10 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
             stack.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
         ])
+    }
+
+    @objc private func resumePressed(_ sender: NSButton) {
+        onResume?()
     }
 
     @objc private func clearPressed(_ sender: NSButton) {

@@ -66,6 +66,7 @@ enum AgentFirstPaintChecks {
         try checkSettledTailStatus()
         try checkReplyOptionsReachTheComposer()
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
+        try checkWorkingReturnKeysSteerQueueAndForceSend()
         try checkPopoverCommandEchoesLikeATypedSend()
         try checkMirroredAgentOffersNoComposerOrStop()
         try checkStreamingResponseKeepsALivenessSignal()
@@ -418,6 +419,49 @@ enum AgentFirstPaintChecks {
         }
         guard prompt.text == "steer this turn", prompt.fileReferences.count == 1 else {
             throw fail("attachment mid-turn: the resolved steer intent lost the draft text or the attachment")
+        }
+    }
+
+    /// T5 (D1) — while a turn works, the real key path of the composer's text
+    /// view: ↩ steers, ⌥↩ queues, ⌘↩ force sends, ⇧↩ stays a newline. Each key
+    /// is a hardware-shaped `NSEvent` through `ComposerTextView.keyDown`, so the
+    /// policy, the observer hop and the intent resolver all run as in the app.
+    @MainActor
+    private static func checkWorkingReturnKeysSteerQueueAndForceSend() throws {
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        let sink = OrderRecordingSink(.accepted)
+        composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+            state: .working,
+            capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: true, canQueue: true),
+            turnStartedAt: Date()
+        ))
+        func press(_ flags: NSEvent.ModifierFlags, draft: String) -> AgentComposerIntent? {
+            composer.apply(.init(text: draft, selection: NSRange(location: draft.utf16.count, length: 0), revision: 1))
+            let before = sink.receivedIntents.count
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                isARepeat: false, keyCode: 36) else { return nil }
+            composer.textView.keyDown(with: event)
+            let deadline = Date().addingTimeInterval(2)
+            while sink.receivedIntents.count == before && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            // Let the accepted action settle so the next press is not latched.
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            return sink.receivedIntents.count > before ? sink.receivedIntents.last : nil
+        }
+        guard press([], draft: "steer it") == .steer(AgentPrompt("steer it")) else {
+            throw fail("working Return keys: ↩ while working must steer, got \(sink.receivedIntents)")
+        }
+        guard press(.option, draft: "after this") == .queue(AgentPrompt("after this")) else {
+            throw fail("working Return keys: ⌥↩ while working must queue, got \(sink.receivedIntents)")
+        }
+        guard press(.command, draft: "right now") == .forceSend(AgentPrompt("right now")) else {
+            throw fail("working Return keys: ⌘↩ while working must force send, got \(sink.receivedIntents)")
+        }
+        guard press(.shift, draft: "newline") == nil else {
+            throw fail("working Return keys: ⇧↩ must stay a native newline, got \(sink.receivedIntents)")
         }
     }
 
