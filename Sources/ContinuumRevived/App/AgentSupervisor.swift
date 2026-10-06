@@ -3176,6 +3176,7 @@ final class AgentSupervisor {
     /// Kills the bound runner's process group and closes the turn synchronously.
     private func killRunner(_ id: AgentID) {
         interruptingAgents.remove(id)
+        deferredForceSends[id] = nil
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
@@ -6649,6 +6650,9 @@ final class AgentSupervisor {
     /// is told when it runs.
     private var pendingForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
     private var deferredQueueOutcomes: [AgentID: TurnOutcome] = [:]
+    /// A force send whose interrupt ended the turn, waiting for the receipts
+    /// of the steers that turn still had in delivery (T5c).
+    private var deferredForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
     private var promptEchoObservers: [AgentID: [UUID: (AgentPrompt) -> Void]] = [:]
 
     /// One pending steer for the rail: still HELD (editable, cancellable) or
@@ -6896,12 +6900,23 @@ final class AgentSupervisor {
             if let store = submissionRecoveryStore {
                 runQueueOp(for: id) { await store.requeueHeldSteersAtFront([entry.message], for: id) }
             }
+            // T5c — a provider hands a steer back only when a Stop or a force
+            // send interrupted the turn. It waits, held, ahead of the queue
+            // until the user acts; after a force send it must not run as soon
+            // as the forced message finishes.
+            if !pausedQueues.contains(id) { pauseQueue(id, .afterStop) }
         }
         notifyTurnCapabilitiesChanged(id)
         if deliveringSteers[id]?.isEmpty ?? true, runners[id] == nil,
            let outcome = deferredQueueOutcomes.removeValue(forKey: id) {
             handleQueueOnTurnCompleted(outcome: outcome, for: id)
         }
+        if deliveringSteers[id]?.isEmpty ?? true { sendDeferredForceSend(for: id) }
+    }
+
+    private func sendDeferredForceSend(for id: AgentID) {
+        guard let forced = deferredForceSends.removeValue(forKey: id) else { return }
+        if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
     }
 
     /// Steers a session that died never confirmed go back to being held.
@@ -7572,9 +7587,21 @@ final class AgentSupervisor {
             // refuse against an occupied slot every time.
             let outcome = pendingQueueOutcome.removeValue(forKey: id)
             // T5 (D2) — a force send's interrupt does not pause the queue: the
-            // forced message runs now, and everything queued stays held behind it.
+            // forced message runs now, and everything queued stays held behind it
+            // (unless the interrupt handed a steer back — `settleDeliveringSteer`).
             if let forced = pendingForceSends.removeValue(forKey: id) {
-                if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+                // T5c — pi hands an unread steer back only after `abort` has
+                // already ended the turn. Starting the forced turn first would
+                // settle that steer as consumed, so the forced message waits for
+                // every receipt (bounded by `interruptGrace`).
+                if deliveringSteers[id]?.isEmpty ?? true {
+                    if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+                } else {
+                    deferredForceSends[id] = forced
+                    DispatchQueue.main.asyncAfter(deadline: .now() + interruptGrace) { [weak self] in
+                        self?.sendDeferredForceSend(for: id)
+                    }
+                }
                 return
             }
             if retained, let reporting = runner as? AgentUnsolicitedTurnReporting {
