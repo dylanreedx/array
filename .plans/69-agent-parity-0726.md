@@ -93,3 +93,21 @@ reaches a tool boundary so they stay editable/cancellable, and run ahead of the
 queue if the turn ends first; Stop = interrupt (kill only as fallback); a failed
 turn keeps draining; an interrupted/paused queue shows a Resume control and
 never auto-resumes after relaunch.
+
+## State (2026-10-06, end of session)
+All tickets merged on `array/0726-agent-parity`: T1 meter, T2 titles, T2b
+naming-check race, T3 MCP parity, T4 chip flow, T4b delegate-row fold (+ codex
+MCP approve mode, codex Array-owned delegation), T5a steering + persistent
+claude, T5b queue rail, T5c Stop/force-send with a handed steer
+(`cancel_queued:true`), plus the deferred-force-send timer token.
+Full matrix on the merged head: 247 legs, passed, 10 KNOWN-RED as listed — no
+new red, no unexpected pass. Nothing on `array/integration`, nothing pushed.
+
+Open / unwitnessed:
+- deferred force-send timer token (c05dbe2f): no targeted witness.
+- `/compact` and `--fork-session` over the persistent claude process: fake CLI only.
+- claude < `interrupt_cancel_queued_v1`: a buffered steer still runs after Stop.
+- codex: a steer accepted but unapplied at interrupt shows as sent (cannot run).
+- pi bridge still times out at 45s during an approval alert.
+- 24h MCP client timeout witnessed as configuration only.
+Release: next build 77; RELEASE.md once Dylan approves landing.
