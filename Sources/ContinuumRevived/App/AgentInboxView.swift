@@ -656,11 +656,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var qaChoiceListForQA: ChoiceListView?
     private var qaSnoozeChoiceListForQA: ChoiceListView?
     private let projectFaviconResolver = ProjectFaviconResolver()
-    /// Capability state starts unknown/hidden. It is filled by the detached,
-    /// bounded resolver and then repaints an already-open menu on the main actor;
-    /// building a menu never performs the capability lookup itself.
+    /// Whether Generate Name is offered. Read once at init from the live-titling
+    /// gate; building a menu never performs a lookup itself.
     private var nameGenerationCapabilityAvailable = false
-    private var nameGenerationCapabilityTask: Task<Void, Never>?
 
     /// The rows as they are drawn — already through the scope filter (P3.8) and
     /// `InboxSort.sortForInbox`, so index N here is row N on screen and every
@@ -1227,15 +1225,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         setAccessibilityLabel("Agent inbox")
         setAccessibilityHelp("Managed agent activity and actions")
 
-        // A cached answer may be available from an earlier view, but the first
-        // frame must still be safe when the answer is unknown. Starting the task
-        // is non-blocking; its shell/auth work happens off the main actor.
+        // Process-free: titling resolves per agent from file stats, so the only
+        // app-wide fact is whether live titling is on.
         nameGenerationCapabilityAvailable = AgentSupervisor.nameGenerationCapabilityAvailable
-        nameGenerationCapabilityTask = Task { [weak self] in
-            let capability = await AgentSupervisor.resolveNameGenerationCapability()
-            guard !Task.isCancelled else { return }
-            self?.applyNameGenerationCapability(capability)
-        }
 
         wantsLayer = true
         applyTokens()
@@ -3219,16 +3211,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             qaChoiceListForQA = list
         }
         return rowChoiceController.listView != nil || qaChoiceListForQA != nil
-    }
-
-    /// Capability resolution invalidates an open panel; the next gesture derives a
-    /// fresh action set, so an unsupported affordance cannot remain visible.
-    private func applyNameGenerationCapability(_ capability: AgentNameGenerationCapability?) {
-        let available = capability != nil
-        guard nameGenerationCapabilityAvailable != available else { return }
-        nameGenerationCapabilityAvailable = available
-        rowChoiceController.dismiss()
-        rowChoiceTargetIds.removeAll()
     }
 
     /// Hand the host an action and the agents it lands on.

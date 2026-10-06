@@ -234,7 +234,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         return PiAgentRunner.ResolvedCommand(executable: "/usr/bin/env", prefixArgs: ["codex"])
     }
 
-    static func liveResolvedCommand() -> PiAgentRunner.ResolvedCommand {
+    public static func liveResolvedCommand() -> PiAgentRunner.ResolvedCommand {
         let env = ProcessInfo.processInfo.environment
         let pathDirs = ToolDetector.splitPath(env["PATH"] ?? "")
         return resolvedCommand(

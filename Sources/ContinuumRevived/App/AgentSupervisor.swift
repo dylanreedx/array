@@ -194,184 +194,72 @@ private final class RefusingAgentRunner: AgentRunning,  Sendable {
     func observeRuntimeObservations(_ handler:   (AgentRuntimeObservation) -> Void) {}
 }
 
-// MARK: - P4.5 generated-name one-shot
+// MARK: - Session titler (each harness titles with its own CLI)
 
-/// The capability needed by the explicit generated-name action. It is resolved
-/// without launching the provider: the login shell supplies the executable PATH,
-/// and Pi's provider config supplies the authentication fact. A missing capability
-/// is therefore a hidden affordance, not a dead menu item.
-struct AgentNameGenerationCapability: Equatable, Sendable {
-    static let cheapModel = "openai-codex/gpt-5.4-mini"
-
-    let executable: String
-    let configDirectory: URL
-    let loginShellPath: String
+/// Which CLI names an agent, and with which model. Each harness titles its own
+/// sessions with its own CLI and its own login: the command comes from the SAME
+/// resolution the agent's runner uses (`liveResolvedCommand()`), and the model
+/// is the agent's own catalogue id, mapped exactly as its runner maps it. There
+/// is no cross-CLI route — a claude-only machine titles Claude agents with
+/// claude, and a harness whose CLI does not resolve simply stays untitled.
+///
+/// This replaced a pi-only titler with a hard-coded model whose capability came
+/// from a login-shell PATH probe with a 1s timeout. Shells slower than that
+/// (1.6–2.1s on Dylan's) read as "unavailable" for the app's life, so no
+/// generated name was ever written by any harness.
+struct AgentNameTitler: Equatable, Sendable {
+    let harness: AgentHarness
+    let command: PiAgentRunner.ResolvedCommand
+    /// The CLI's own model argument: claude/codex take the bare name, pi takes
+    /// the full `provider/model` id — the runners' own mappings.
     let model: String
 
-    init(
-        executable: String,
-        configDirectory: URL,
-        loginShellPath: String,
-        model: String = AgentNameGenerationCapability.cheapModel
-    ) {
-        self.executable = executable
-        self.configDirectory = configDirectory
-        self.loginShellPath = loginShellPath
-        self.model = model
-    }
-
-    /// The login-shell PATH resolver is kept pure at the path-selection seam so
-    /// deterministic checks can use a fake executable without invoking Pi.
-    static func resolvedExecutable(
-        loginShellPath: String,
-        fileExists: (String) -> Bool
-    ) -> String? {
-        for component in loginShellPath.split(separator: ":", omittingEmptySubsequences: true) {
-            let directory = String(component)
-            let candidate = directory.hasSuffix("/")
-                ? directory + "pi"
-                : directory + "/pi"
-            if fileExists(candidate) { return candidate }
+    static func resolve(
+        for record: AgentRecord,
+        command: (AgentHarness) -> PiAgentRunner.ResolvedCommand?
+    ) -> AgentNameTitler? {
+        guard let harness = record.harness, !record.model.isEmpty,
+              let resolved = command(harness) else { return nil }
+        let model: String
+        switch harness {
+        case .claudeCode: model = ClaudeCLIBackend.modelArgument(forCatalogId: record.model)
+        case .codex: model = CodexCLIBackend.modelArgument(forCatalogId: record.model)
+        case .pi: model = record.model
         }
-        return nil
+        return AgentNameTitler(harness: harness, command: resolved, model: model)
     }
 
-    /// Resolve the live capability. This reads auth/config state only; notably it
-    /// never runs `pi --list-models` or another provider probe, so an absent
-    /// capability cannot spawn a process as a side effect of hiding the action.
-    static func live(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        now: Date = Date()
-    ) -> AgentNameGenerationCapability? {
-        let home = environment["HOME"] ?? NSHomeDirectory()
-        let configuredDirectory = environment["PI_CODING_AGENT_DIR"]
-            ?? URL(fileURLWithPath: home, isDirectory: true)
-                .appendingPathComponent(".pi/agent", isDirectory: true).path
-        let configDirectory = URL(fileURLWithPath: configuredDirectory, isDirectory: true)
-        guard hasAuthentication(
-            in: configDirectory,
-            now: now
-        ) else { return nil }
-        guard let loginShellPath = loginShellPath(environment: environment),
-              let executable = resolvedExecutable(
-                loginShellPath: loginShellPath,
-                fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
-              ) else {
-            return nil
+    /// The runner's own resolution. Absolute paths only, the rule
+    /// `liveCLIAvailable()` already uses: the `/usr/bin/env` fallback proves
+    /// nothing about a GUI launch. File stats, never a process.
+    static func liveCommand(for harness: AgentHarness) -> PiAgentRunner.ResolvedCommand? {
+        guard AgentNameTitlerLiveGate.shared.isEnabled else { return nil }
+        let command: PiAgentRunner.ResolvedCommand
+        switch harness {
+        case .claudeCode: command = ClaudeAgentRunner.liveResolvedCommand()
+        case .codex: command = CodexAgentRunner.liveResolvedCommand()
+        case .pi: command = PiAgentRunner.liveResolvedCommand()
         }
-        return AgentNameGenerationCapability(
-            executable: executable,
-            configDirectory: configDirectory,
-            loginShellPath: loginShellPath
-        )
-    }
-
-    /// Pure auth/config gate used by the live resolver and the deterministic
-    /// checks. A refresh credential is sufficient for Pi to refresh an expired
-    /// access token; an expired access-only credential is not.
-    static func hasAuthentication(
-        in configDirectory: URL,
-        now: Date,
-        data: Data? = nil
-    ) -> Bool {
-        let authData = data ?? (try? Data(contentsOf: configDirectory.appendingPathComponent("auth.json")))
-        guard let authData,
-              let object = try? JSONSerialization.jsonObject(with: authData),
-              let providers = object as? [String: Any],
-              let provider = providers["openai-codex"] as? [String: Any] else {
-            return false
-        }
-        let access = (provider["access"] as? String)?.isEmpty == false
-        let refresh = (provider["refresh"] as? String)?.isEmpty == false
-        guard access || refresh else { return false }
-        if refresh { return true }
-        guard let expires = provider["expires"] as? NSNumber else { return true }
-        return expires.doubleValue > now.timeIntervalSince1970 * 1000
-    }
-
-    /// Ask the user's login shell for PATH. The actual process work is owned by
-    /// `AgentNameOneShot` and always runs off-main with a timeout and bounded pipe
-    /// readers. Keeping this call synchronous is safe only for the resolver task;
-    /// no menu/query path calls `live()` directly.
-    private static func loginShellPath(environment: [String: String]) -> String? {
-        AgentNameOneShot.loginShellPath(environment: environment)
+        return command.prefixArgs.isEmpty ? command : nil
     }
 }
 
-
-/// The menu's capability query is deliberately a snapshot. It never resolves a
-/// shell, reads auth, or launches a process. Resolution is started by a view and
-/// completed on the main actor only after the bounded utility task finishes.
-private final class AgentNameGenerationCapabilityCache: @unchecked Sendable {
-    enum State: Sendable {
-        case unknown
-        case unavailable
-        case available(AgentNameGenerationCapability)
-
-        var capability: AgentNameGenerationCapability? {
-            if case let .available(capability) = self { return capability }
-            return nil
-        }
-
-        var isAvailable: Bool { capability != nil }
-    }
-
-    static let shared = AgentNameGenerationCapabilityCache()
-
+/// Live titling is opt-in, and only the real app opts in at startup — the
+/// pattern `AgentModelCatalog.enableLiveRefresh()` set. A supervisor built by a
+/// check without an injected command can therefore never spend a real provider
+/// call on a fixture agent.
+final class AgentNameTitlerLiveGate: @unchecked Sendable {
+    static let shared = AgentNameTitlerLiveGate()
     private let lock = NSLock()
-    private var state: State = .unknown
-    private var inFlight: Task<AgentNameGenerationCapability?, Never>?
-
-    func snapshot() -> State { lock.withLock { state } }
-
-    /// Starts at most one detached resolution. Returning an already-completed
-    /// task for a cached result keeps callers uniformly asynchronous without
-    /// making the main actor wait for even a lock or a shell startup.
-    func startResolution(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        now: Date = Date()
-    ) -> Task<AgentNameGenerationCapability?, Never> {
-        lock.withLock {
-            switch state {
-            case .available, .unavailable:
-                let cached = state.capability
-                return Task.detached { cached }
-            case .unknown:
-                break
-            }
-            if let inFlight { return inFlight }
-            let task = Task.detached(priority: .utility) { [weak self] in
-                let capability = AgentNameGenerationCapability.live(environment: environment, now: now)
-                self?.finish(capability)
-                return capability
-            }
-            inFlight = task
-            return task
-        }
-    }
-
-    /// Test-only reset. Production code never needs to forget a resolved
-    /// capability; the next app launch creates a fresh cache.
-    func resetForQA() {
-        lock.withLock {
-            state = .unknown
-            inFlight?.cancel()
-            inFlight = nil
-        }
-    }
-
-    private func finish(_ capability: AgentNameGenerationCapability?) {
-        lock.withLock {
-            state = capability.map(State.available) ?? .unavailable
-            inFlight = nil
-        }
-    }
+    private var enabled = false
+    func enable() { lock.withLock { enabled = true } }
+    var isEnabled: Bool { lock.withLock { enabled } }
 }
 
 private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
     case launchFailed
     case processGroupUnavailable
-    case failed(Int32)
+    case failed(Int32, String)
     case timedOut
     case inputFailed
 
@@ -379,83 +267,151 @@ private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
         switch self {
         case .launchFailed: return "launch failed"
         case .processGroupUnavailable: return "process group unavailable"
-        case .failed(let code): return "provider exited with code \(code)"
+        case .failed(let code, let stderr):
+            return "provider exited with code \(code)" + (stderr.isEmpty ? "" : ": \(stderr)")
         case .timedOut: return "timed out"
         case .inputFailed: return "prompt input failed"
         }
     }
 }
 
-/// A provider-independent, print-mode Pi invocation. The source prompt is
+/// One print-mode titler invocation on the agent's own CLI. The source text is
 /// written to stdin only; it is never an argv element, a session, or an event.
 // Internal (not private): ToolEnvironment reuses the bounded login-shell
-// PATH probe for the app-wide PATH upgrade (go-live Phase 4).
+// PATH probe for the app-wide PATH upgrade (go-live Phase 4). Naming itself no
+// longer runs a login shell at all.
 enum AgentNameOneShot {
-    static let timeout: TimeInterval = 8
+    /// A cold `claude -p` measured 2.6s end to end on 2.1.291 (sonnet, effort
+    /// low); a larger model or codex starting the user's MCP servers takes
+    /// longer. The work is off-main and capped at two concurrent runs, so a
+    /// generous bound costs nothing but a slot.
+    static let timeout: TimeInterval = 30
     static let processGroupGrace: TimeInterval = 0.15
     static let maximumPromptLength = 8_000
-    static let systemPrompt = "Return exactly one JSON object with exactly one string field named name. The name value is short and human-readable, 1 to 8 words. Output one line only. No explanation, extra fields, markdown, punctuation, identifiers, model ids, roles, or UUIDs."
+    static let titleRules = "You name coding sessions for a sidebar. Reply with exactly one JSON object with one string field, name. The name is 3 to 6 words in sentence case (capitalize only the first word and proper nouns) and says what task the session is doing, for example \"Fix zone drag snapping\". Summarize what the work is about; do not restate the opening words of the request. No trailing punctuation, no quotes, and no file paths, ids, model names or UUIDs."
+    /// The shape every harness returns. claude and codex enforce it (`--json-schema`,
+    /// `--output-schema`); pi has no schema flag and is held to it by `rawName`.
+    static let nameSchema = #"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
 
-    static func arguments(model: String) -> [String] {
-        [
-            "--no-session",
-            "--print",
-            "--mode", "text",
-            "--model", model,
-            "--thinking", "low",
-            "--no-tools",
-            "--no-extensions",
-            "--no-skills",
-            "--no-context-files",
-            "--no-approve",
-            "--system-prompt", systemPrompt,
-        ]
+    /// The argv after the executable, per harness. Every flag here was checked
+    /// against the CLI's own help (claude 2.1.291, codex 0.159.3). Two rules
+    /// hold for all three: no session is persisted, and nothing can act — no
+    /// tools, no MCP servers, no hooks, a read-only sandbox, an empty cwd.
+    /// `--bare` is deliberately absent: it skips OAuth and reads an API key,
+    /// and a CLI's own login is the only auth Array uses.
+    static func arguments(for titler: AgentNameTitler, schemaFile: URL, lastMessageFile: URL) -> [String] {
+        switch titler.harness {
+        case .claudeCode:
+            return ["-p", "--no-session-persistence",
+                    "--output-format", "json", "--json-schema", nameSchema,
+                    "--model", titler.model]
+                + (ClaudeCLIBackend.effortArgument(forThinking: "low").map { ["--effort", $0] } ?? [])
+                + ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                   "--settings", #"{"disableAllHooks":true}"#,
+                   "--system-prompt", titleRules]
+        case .codex:
+            return ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+                    "--output-schema", schemaFile.path, "-o", lastMessageFile.path,
+                    "-m", titler.model]
+                + (CodexCLIBackend.effortArgument(forThinking: "low").map { ["-c", "model_reasoning_effort=\($0)"] } ?? [])
+        case .pi:
+            return ["--no-session", "--print", "--mode", "text",
+                    "--model", titler.model, "--thinking", "low",
+                    "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
+                    "--system-prompt", titleRules]
+        }
     }
 
-    /// Accept only the exact one-field JSON shape requested by `systemPrompt`.
-    /// Provider chatter is not a recoverable prefix: a warning, label, fence,
-    /// extra field, plain prose line, or multi-line explanation fails closed
-    /// before the existing AgentName policy can turn it into a title.
-    /// Identifiers are rejected with the same metadata-aware rule as P4.3.
-    static func candidate(
-        from stdout: String,
-        model: String?,
-        role: String?,
-        id: UUID?
-    ) -> String? {
-        let nonEmptyLines = stdout
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard nonEmptyLines.count == 1 else { return nil }
-        let line = nonEmptyLines[0]
-        guard !line.hasPrefix("```") && !line.contains("```") && line != "---",
-              !line.hasPrefix("- ") && !line.hasPrefix("* "),
-              let data = line.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object.count == 1,
-              let rawName = object["name"] as? String else {
+    /// codex exec has no system-prompt flag, so its rules ride in the prompt.
+    static func standardInput(for harness: AgentHarness, prompt: String) -> String {
+        harness == .codex ? titleRules + "\n\n" + prompt : prompt
+    }
+
+    /// The model's `name` value out of one harness's output, or nil.
+    ///
+    /// claude `--output-format json` prints one result object; the
+    /// schema-validated value is `structured_output`, and an error result is
+    /// never mined for text. codex's `-o` file and pi's stdout must BE the
+    /// one-field object: a label, fence, extra field or trailing prose fails
+    /// closed rather than being trimmed into a title.
+    static func rawName(harness: AgentHarness, output: String) -> String? {
+        let text = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        let name = stripWrappingQuotes(from: rawName)
+        let named: [String: Any]
+        if harness == .claudeCode {
+            guard object["type"] as? String == "result",
+                  object["subtype"] as? String == "success",
+                  object["is_error"] as? Bool == false,
+                  let structured = object["structured_output"] as? [String: Any] else { return nil }
+            named = structured
+        } else {
+            named = object
+        }
+        guard named.count == 1, let name = named["name"] as? String else { return nil }
+        return name
+    }
+
+    /// Provider failure text that can still arrive as a well-formed name — an
+    /// error surfaced as the "answer". Phrases, not words: with the shape now
+    /// schema-validated, ordinary words like "error" or "model" are legitimate
+    /// in a title ("Fix model picker error"), and banning them threw good names
+    /// away.
+    static let providerFailurePhrases = [
+        "api error", "invalid api key", "not logged in", "/login",
+        "credit balance", "rate limit reached", "usage limit reached", "quota exceeded",
+        "overloaded_error", "internal server error", "service unavailable",
+        "request failed", "authentication failed",
+    ]
+    /// Whole-title placeholders a model emits when it has nothing to say.
+    static let placeholderTitles: Set<String> = [
+        "error", "untitled", "unknown", "name", "title", "session", "new session", "none", "n/a",
+    ]
+
+    /// The title rules, enforced: sentence case, no wrapping quotes, no trailing
+    /// punctuation, no identifiers. The prompt asks for 3–6 words; 2–8 are
+    /// accepted so a near-miss still names the agent, and anything longer is
+    /// prose, not a title.
+    static func sanitizedTitle(_ raw: String, model: String?, role: String?, id: UUID?) -> String? {
+        var name = stripWrappingQuotes(from: raw)
+        while let last = name.last, ".,;:!?…".contains(last) {
+            name.removeLast()
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        name = stripWrappingQuotes(from: name)
         guard !name.isEmpty,
-              !name.contains(where: { ":;!?{}[]()<>#*`".contains($0) }) else {
-            return nil
-        }
+              !name.contains(where: { "\n\r\t:;!?{}[]()<>#*`\"".contains($0) }) else { return nil }
+        let words = name.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let lower = name.lowercased()
-        let words = lower.split(whereSeparator: { $0.isWhitespace })
-        let providerNoise = [
-            "warning", "fallback", "error", "progress", "assistant", "role", "user",
-            "system", "model", "title", "name", "generated", "output", "result",
-            "thinking", "note", "here", "sure", "okay", "suggest", "proposed"
-        ]
-        guard words.count <= 8,
-              !words.contains(where: { providerNoise.contains(String($0)) }),
-              !AgentName.isIdentifier(name, model: model, role: role, id: id),
-              AgentName.normalizedLabel(name) != nil else {
-            return nil
+        guard (2...8).contains(words.count),
+              !placeholderTitles.contains(lower),
+              !providerFailurePhrases.contains(where: { lower.contains($0) }),
+              !AgentName.isIdentifier(name, model: model, role: role, id: id) else { return nil }
+        return AgentName.normalizedLabel(sentenceCased(words))
+    }
+
+    /// Title Case → sentence case. Only a title where EVERY word is plainly
+    /// capitalized is rewritten, and only those plain words are lowered, so an
+    /// acronym or identifier-shaped word (`API`, `iOS`, `AgentSupervisor`)
+    /// keeps its case. The first letter is always upper.
+    private static func sentenceCased(_ words: [String]) -> String {
+        func isPlainCapitalized(_ word: String) -> Bool {
+            guard let first = word.first, first.isUppercase else { return false }
+            return word.dropFirst().allSatisfy { !$0.isUppercase }
         }
-        return AgentName.normalizedLabel(name)
+        let titleCase = words.count > 1 && words.allSatisfy { word in
+            guard let first = word.first, first.isLetter else { return true }
+            return first.isUppercase
+        }
+        var out = words.enumerated().map { index, word in
+            index > 0 && titleCase && isPlainCapitalized(word) ? word.lowercased() : word
+        }
+        if let first = out.first?.first, first.isLowercase {
+            out[0] = first.uppercased() + out[0].dropFirst()
+        }
+        return out.joined(separator: " ")
     }
 
     private static func stripWrappingQuotes(from raw: String) -> String {
@@ -510,27 +466,50 @@ enum AgentNameOneShot {
         }
     }
 
+    /// Run one titler and return its raw output: stdout for claude and pi, the
+    /// `-o` last-message file for codex. `rawName` + `sanitizedTitle` decide
+    /// whether any of it is a name.
+    ///
+    /// The process runs in an EMPTY private directory (claude would otherwise
+    /// read the agent's CLAUDE.md, codex its AGENTS.md) with the runners' own
+    /// child environment. HOME is inherited, so each CLI uses its own login;
+    /// `environmentOverrides` exists for the fake-CLI fixtures.
     static func run(
-        capability: AgentNameGenerationCapability,
+        titler: AgentNameTitler,
         prompt: String,
-        cwd: URL,
         timeout: TimeInterval = AgentNameOneShot.timeout,
         environmentOverrides: [String: String] = [:],
-        configDirectoryOverride: URL? = nil,
+        workDirectoryOverride: URL? = nil,
         inputWriteDelay: TimeInterval = 0
     ) throws -> String {
-        let configDirectory = try temporaryConfigDirectory(
-            for: capability,
-            at: configDirectoryOverride)
-        defer { try? FileManager.default.removeItem(at: configDirectory) }
+        let fileManager = FileManager.default
+        let base = workDirectoryOverride ?? fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-title-\(UUID().uuidString)", isDirectory: true)
+        let cwd = base.appendingPathComponent("cwd", isDirectory: true)
+        let io = base.appendingPathComponent("io", isDirectory: true)
+        for directory in [base, cwd, io] {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
+        }
+        defer { try? fileManager.removeItem(at: base) }
+        let schemaFile = io.appendingPathComponent("name-schema.json")
+        let lastMessageFile = io.appendingPathComponent("last-message.txt")
+        try nameSchema.write(to: schemaFile, atomically: true, encoding: .utf8)
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = capability.loginShellPath
-        environment["PI_CODING_AGENT_DIR"] = configDirectory.path
+        var environment = PiAgentRunner.childEnvironment()
         environment.merge(environmentOverrides) { _, override in override }
-        // HOME is deliberately inherited untouched in production. The optional
-        // override exists only for the controlled fake-Pi fixture, which proves
-        // that --no-session creates no session/transcript artifact in a known home.
+        if titler.harness == .pi {
+            // Unchanged pi handling: a private copy of the user's pi config, so
+            // retries are off and an OAuth refresh during the run cannot mutate
+            // the durable credential file.
+            let home = environment["HOME"] ?? NSHomeDirectory()
+            let source = environment["PI_CODING_AGENT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? URL(fileURLWithPath: home, isDirectory: true)
+                    .appendingPathComponent(".pi/agent", isDirectory: true)
+            let configDirectory = base.appendingPathComponent("pi-config", isDirectory: true)
+            try populatePiConfigDirectory(configDirectory, from: source)
+            environment["PI_CODING_AGENT_DIR"] = configDirectory.path
+        }
 
         // Foundation's Process does not expose a pre-exec hook, and attempting
         // setpgid(pid, pid) after Process.run() races the child's exec on macOS
@@ -538,17 +517,23 @@ enum AgentNameOneShot {
         // /bin/sh starts, so every descendant inherits it and timeout cleanup can
         // kill the group without risking the app's own group.
         let script = "cd -- \(shellQuote(cwd.path)) || exit 126; exec \"$@\""
-        let rawArguments = ["sh", "-c", script, "continuum-name-one-shot", capability.executable]
-            + arguments(model: capability.model)
+        let rawArguments = ["sh", "-c", script, "continuum-name-one-shot", titler.command.executable]
+            + titler.command.prefixArgs
+            + arguments(for: titler, schemaFile: schemaFile, lastMessageFile: lastMessageFile)
         let result = try runProcess(
             executable: "/bin/sh",
             arguments: rawArguments,
-            input: Data(prompt.utf8),
+            input: Data(standardInput(for: titler.harness, prompt: prompt).utf8),
             environment: environment,
             timeout: timeout,
             inputWriteDelay: inputWriteDelay)
         guard processExitCode(result.status) == 0 else {
-            throw AgentNameOneShotError.failed(processExitCode(result.status))
+            throw AgentNameOneShotError.failed(
+                processExitCode(result.status),
+                SecretRedactor.redactLocalDiagnostics(String(result.stderr.suffix(300))))
+        }
+        if titler.harness == .codex {
+            return (try? String(contentsOf: lastMessageFile, encoding: .utf8)) ?? ""
         }
         return result.stdout
     }
@@ -893,17 +878,12 @@ enum AgentNameOneShot {
         return status
     }
 
-    private static func temporaryConfigDirectory(
-        for capability: AgentNameGenerationCapability,
-        at override: URL? = nil
-    ) throws -> URL {
-        let directory = override ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("continuum-name-config-\(UUID().uuidString)", isDirectory: true)
+    private static func populatePiConfigDirectory(_ directory: URL, from source: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let settings = #"{"retry":{"maxRetries":0,"baseDelayMs":0}}"#
         try settings.write(to: directory.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
-        let auth = capability.configDirectory.appendingPathComponent("auth.json")
+        let auth = source.appendingPathComponent("auth.json")
         if FileManager.default.fileExists(atPath: auth.path) {
             // Copy rather than symlink: Pi may refresh OAuth state during a run,
             // but a best-effort name action must never mutate the user's durable
@@ -915,7 +895,7 @@ enum AgentNameOneShot {
                 ofItemAtPath: destination.path)
         }
         for name in ["models.json", "models-store.json"] {
-            let source = capability.configDirectory.appendingPathComponent(name)
+            let source = source.appendingPathComponent(name)
             let destination = directory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: source.path),
                let data = try? Data(contentsOf: source) {
@@ -925,7 +905,6 @@ enum AgentNameOneShot {
                     ofItemAtPath: destination.path)
             }
         }
-        return directory
     }
 
     private static func killProcessGroup(_ pid: Int32, signal: Int32) {
@@ -1002,10 +981,14 @@ final class AgentSupervisor {
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
     private let checkedOutBranches = CheckedOutBranchCache()
-    /// A provider seam is retained for deterministic checks. Production uses the
-    /// process-free cache snapshot; it never invokes a shell from this actor.
-    private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
+    /// Which executable titles each harness. Checks inject fake CLIs here;
+    /// production (nil) resolves through the runners' own command resolution,
+    /// file stats only, and only once the app has opened the live gate.
+    private let nameTitlerCommand: (@Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand?)?
     private let nameGenerationTimeout: TimeInterval
+    /// claude's own `ai-title` for one session (cwd, session id). Injected so
+    /// the naming checks never read the user's real `~/.claude` store.
+    private let claudeSessionTitle: @Sendable (String, String) -> String?
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
     /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
@@ -1087,6 +1070,12 @@ final class AgentSupervisor {
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
+    /// The opening of the agent's first reply, the titler's second input. Same
+    /// memory-only rule as `firstPromptByAgent`; `firstReplyClosed` stops the
+    /// capture at the first completed turn.
+    private var firstReplyByAgent: [AgentID: String] = [:]
+    private var firstReplyClosed: Set<AgentID> = []
+    private static let firstReplyCaptureLength = 600
     /// Read-watermark persistence is deliberately less frequent than the visual
     /// focus path. An unread-clearing visit is the exception: delaying that write
     /// would let a relaunch resurrect the mark the person just cleared.
@@ -1352,8 +1341,12 @@ final class AgentSupervisor {
         makeRunner: @escaping (AgentRunnerLaunch) -> AgentRunning = AgentSupervisor.productionRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
-        nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
+        nameTitlerCommand: (@Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand?)? = nil,
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
+        claudeSessionTitle: @escaping @Sendable (String, String) -> String? = { cwd, sessionId in
+            ClaudeSessionTitleReader.title(
+                homeURL: FileManager.default.homeDirectoryForCurrentUser, cwd: cwd, sessionId: sessionId)
+        },
         attachmentStore: AgentComposerAttachmentStore? = nil,
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
         codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
@@ -1366,8 +1359,9 @@ final class AgentSupervisor {
         self.makeRunner = makeRunner
         self.warn = warn
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
-        self.nameGenerationCapabilityProvider = nameGenerationCapabilityProvider
+        self.nameTitlerCommand = nameTitlerCommand
         self.nameGenerationTimeout = nameGenerationTimeout
+        self.claudeSessionTitle = claudeSessionTitle
         self.attachmentStore = attachmentStore ?? AgentComposerAttachmentStore(
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
@@ -1380,25 +1374,18 @@ final class AgentSupervisor {
         }
     }
 
-    /// The explicit action's cached capability gate. This is a snapshot only:
-    /// missing/unknown capability is hidden, and no login shell can run while a
-    /// menu is being built.
+    /// Whether the explicit Generate Name action is offered at all. Resolving
+    /// a titler is per agent and file stats only, so the only app-wide fact is
+    /// whether live titling is on; an agent whose own CLI does not resolve is
+    /// refused (and logged) by `requestGeneratedName`.
     static var nameGenerationCapabilityAvailable: Bool {
-        AgentNameGenerationCapabilityCache.shared.snapshot().isAvailable
+        AgentNameTitlerLiveGate.shared.isEnabled
     }
 
-    /// Start capability resolution without making the caller wait on a shell.
-    /// The returned task does its auth read and bounded login-shell probe on a
-    /// utility executor; callers can await it from a UI task and repaint safely.
-    static func resolveNameGenerationCapability() async -> AgentNameGenerationCapability? {
-        let task = AgentNameGenerationCapabilityCache.shared.startResolution()
-        return await task.value
-    }
-
-    /// The cached capability consumed by the already-gated row action. It is a
-    /// process-free read; a stale/unavailable cache simply refuses the action.
-    static func cachedNameGenerationCapability() -> AgentNameGenerationCapability? {
-        AgentNameGenerationCapabilityCache.shared.snapshot().capability
+    /// Called once from the real app's startup, beside the catalogue's live
+    /// refresh. Checks never call it.
+    static func enableLiveNameTitling() {
+        AgentNameTitlerLiveGate.shared.enable()
     }
 
     static let maximumConcurrentNameGenerations = 2
@@ -4656,9 +4643,14 @@ final class AgentSupervisor {
     ///
     /// The ladder is authority-ordered and stops at the first rung that can
     /// speak: a person's rename ends it outright; otherwise claude's own
-    /// conversation title wins when the harness has one; and only a harness with
-    /// no native title at all reaches the provider one-shot, which costs a
-    /// process and so runs once per agent.
+    /// `ai-title` is read first, because it is free; and when there is none —
+    /// claude ≥ 2.1.278 no longer writes it in headless sessions, and codex/pi
+    /// never did — the agent's OWN CLI is asked for a title, at most three
+    /// times per agent per app session.
+    ///
+    /// A generated title is final for the automatic path: it outranks a harness
+    /// title (`AgentDisplayNameSource.authority`), so a late `ai-title` cannot
+    /// churn it, and no later turn re-asks the titler. Generate Name still can.
     ///
     /// Everything here is best-effort and silent. A naming path that can make a
     /// turn fail, block, or warn at the user is worse than a bad name.
@@ -4694,14 +4686,13 @@ final class AgentSupervisor {
     private func refreshClaudeHarnessTitle(for id: AgentID, record: AgentRecord) {
         guard record.acceptsAutomaticName(from: .harness) else { return }
         guard harnessTitleTasks.insert(id).inserted else { return }
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let readTitle = claudeSessionTitle
         // The SAME derivation the runner used to spawn this conversation. See
         // `claudeSessionLocation` for why reading `record.cwd` here is a silent
         // no-op rather than an error.
         let (cwd, sessionId) = Self.claudeSessionLocation(for: record)
         Task.detached(priority: .utility) { [weak self] in
-            let title = ClaudeSessionTitleReader.title(
-                homeURL: home, cwd: cwd, sessionId: sessionId)
+            let title = readTitle(cwd, sessionId)
             await MainActor.run {
                 self?.finishHarnessTitle(title, for: id)
             }
@@ -4710,23 +4701,34 @@ final class AgentSupervisor {
 
     private func finishHarnessTitle(_ title: String?, for id: AgentID) {
         harnessTitleTasks.remove(id)
-        guard let title, var record = records[id] else { return }
+        // Re-fetched after the read: a rename or an explicit request can land
+        // while the file read is in flight.
+        guard var record = records[id] else { return }
+        guard let title else {
+            // No `ai-title` — the normal case for a headless claude session now.
+            // Fall through to claude's own titler, unless a request was armed
+            // while the read was in flight: superseding it would strand it.
+            guard record.namingRequest == nil else { return }
+            requestAutomaticGeneratedName(for: id, record: record)
+            return
+        }
         guard record.adoptAutomaticName(title, source: .harness) else { return }
         records[id] = record
         persist(record)
     }
 
-    /// The fallback for a harness that does not name its own conversations —
-    /// codex and pi. One attempt per agent per app session, and only while the
-    /// existing title is still no better than a truncated prompt.
+    /// Ask the agent's own CLI for a title, automatically. Only while the
+    /// current title is still automatic and not already generated — a generated
+    /// title stays put rather than churning every turn.
     private func requestAutomaticGeneratedName(for id: AgentID, record: AgentRecord) {
         guard Self.automaticGeneratedNamingEnabled else { return }
-        guard record.acceptsAutomaticName(from: .generated) else { return }
+        guard record.acceptsAutomaticName(from: .generated),
+              record.displayNameSource != .generated else { return }
         // A BOUNDED number of attempts, not one.
         //
         // `requestGeneratedName` refuses for two very different reasons and
-        // returns the same `false` for both: a permanent one (no pi capability
-        // on this machine) and a transient one (the concurrency cap, which a
+        // returns the same `false` for both: a permanent one (this harness's CLI
+        // does not resolve) and a transient one (the concurrency cap, which a
         // restore storm makes likely precisely when many agents finish at once).
         // Marking the agent done on the first refusal loses every capped agent's
         // only chance; never marking it retries a missing binary on every turn
@@ -4735,8 +4737,9 @@ final class AgentSupervisor {
         guard attempts < Self.maximumAutomaticNamingAttempts else { return }
         automaticNamingAttempts[id] = attempts + 1
         // `requestGeneratedName` owns every remaining guard: the manual check,
-        // the concurrency cap, capability resolution, and the CAS. A refusal
-        // here is silent on purpose — this path was not asked for by anyone.
+        // the concurrency cap, titler resolution, and the CAS. A refusal never
+        // reaches the person — this path was not asked for by anyone — but it
+        // is logged to agent-diagnostics.log.
         _ = requestGeneratedName(agentID: id)
     }
 
@@ -4873,21 +4876,16 @@ final class AgentSupervisor {
             warn("AgentSupervisor.requestGeneratedName: manual name owns agent \(id.rawValue.uuidString); refusing generated overwrite")
             return false
         }
-        // This admission check is on the main actor, before capability lookup or
-        // CAS mutation. A refused burst member therefore remains unchanged and
-        // cannot make a synchronous login-shell probe part of the burst.
+        // This admission check is on the main actor, before titler resolution or
+        // CAS mutation. A refused burst member therefore remains unchanged.
         guard activeNameGenerations < Self.maximumConcurrentNameGenerations else {
-            warn("AgentSupervisor.requestGeneratedName: concurrency cap \(Self.maximumConcurrentNameGenerations) reached; refusing burst member")
+            logNamingRefusal("concurrency cap \(Self.maximumConcurrentNameGenerations) reached", agentID: id)
             return false
         }
-        let capability: AgentNameGenerationCapability?
-        if let nameGenerationCapabilityProvider {
-            capability = nameGenerationCapabilityProvider()
-        } else {
-            capability = Self.cachedNameGenerationCapability()
-        }
-        guard let capability else {
-            warn("AgentSupervisor.requestGeneratedName: Pi capability/auth unavailable; no process spawned")
+        let resolveCommand = nameTitlerCommand ?? { AgentNameTitler.liveCommand(for: $0) }
+        guard let titler = AgentNameTitler.resolve(for: record, command: resolveCommand) else {
+            let harness = record.harness?.rawValue ?? "unresolved"
+            logNamingRefusal("harness=\(harness) titler unavailable (CLI not resolved or no model); no process spawned", agentID: id)
             return false
         }
         // A second explicit click supersedes the old request. Cancellation is a
@@ -4901,25 +4899,21 @@ final class AgentSupervisor {
         // storage/display split those were the same string, which meant a
         // relaunched agent was asking a model to summarize a summary.
         let source = firstPromptByAgent[id] ?? record.storedDisplayName
-        let prompt = Self.generatedNamePrompt(source)
-        let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
+        let prompt = Self.generatedNamePrompt(source, reply: firstReplyByAgent[id])
         let timeout = nameGenerationTimeout
         activeNameGenerations += 1
         nameGenerationRequestIDs[id] = request.id
-        let task = Task.detached(priority: .utility) { [weak self, capability, request, prompt, cwd, timeout, onCompletion, record] in
+        let task = Task.detached(priority: .utility) { [weak self, titler, request, prompt, timeout, onCompletion, record] in
             var candidate: String?
             var failure: String?
             do {
-                let stdout = try AgentNameOneShot.run(
-                    capability: capability,
+                let output = try AgentNameOneShot.run(
+                    titler: titler,
                     prompt: prompt,
-                    cwd: cwd,
                     timeout: timeout)
-                candidate = AgentNameOneShot.candidate(
-                    from: stdout,
-                    model: record.model,
-                    role: record.role,
-                    id: record.id.rawValue)
+                candidate = AgentNameOneShot.rawName(harness: titler.harness, output: output)
+                    .flatMap { AgentNameOneShot.sanitizedTitle(
+                        $0, model: record.model, role: record.role, id: record.id.rawValue) }
                 if candidate == nil { failure = "invalid provider output" }
             } catch let error as AgentNameOneShotError {
                 failure = error.description
@@ -4929,7 +4923,7 @@ final class AgentSupervisor {
             await MainActor.run {
                 self?.finishGeneratedName(
                     candidate: candidate,
-                    failure: failure,
+                    failure: failure.map { "harness=\(titler.harness.rawValue) \($0)" },
                     request: request,
                     agentID: id,
                     onCompletion: onCompletion)
@@ -4939,23 +4933,34 @@ final class AgentSupervisor {
         return true
     }
 
+    /// A refusal or failure on the naming path. stderr alone was invisible for a
+    /// GUI launch, which is how "no generated name has ever landed" went unseen;
+    /// the diagnostics log is the runner-failure trail people already read.
+    private func logNamingRefusal(_ reason: String, agentID id: AgentID) {
+        warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) \(reason)")
+        appendAgentDiagnostics("naming: \(reason)", agentID: id)
+    }
+
     /// QA-only observability for the concurrency witness. It is not a second
     /// capability or provider state owner.
     var qaActiveNameGenerationCount: Int { activeNameGenerations }
+    var qaActiveHarnessTitleCount: Int { harnessTitleTasks.count }
 
-    private static func generatedNamePrompt(_ source: String) -> String {
+    /// The first request and the start of the first reply: the reply is what
+    /// says what the work turned out to be. The rules live with the CLI call
+    /// (`AgentNameOneShot.titleRules`); this is only the material.
+    private static func generatedNamePrompt(_ source: String, reply: String?) -> String {
         let bounded = String(source.prefix(AgentNameOneShot.maximumPromptLength))
-        // "Summarize, do not restate" is the entire instruction that matters.
-        // Without it a model hands back the opening clause of the request, which
-        // is the truncation this whole path exists to replace.
-        return """
-        Name the agent from this user request. Summarize what the request is \
-        ABOUT; do not restate its opening words. Return one short name only, \
-        with no explanation or metadata.
+        var prompt = """
+        Title this coding session.
 
-        User request:
+        First user request:
         \(bounded)
         """
+        if let reply = reply?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty {
+            prompt += "\n\nStart of the first reply:\n" + String(reply.prefix(firstReplyCaptureLength))
+        }
+        return prompt
     }
 
     private func finishGeneratedName(
@@ -4980,7 +4985,7 @@ final class AgentSupervisor {
             landed = applyGeneratedName("", for: request, agentID: id)
         }
         if let failure {
-            warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) \(failure); keeping its existing name")
+            logNamingRefusal("\(failure); keeping its existing name", agentID: id)
         } else if !landed {
             warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) lost the naming CAS; keeping its existing name")
         }
@@ -6751,7 +6756,15 @@ final class AgentSupervisor {
         // improved: claude has had a chance to write its own title for the
         // conversation, and the transcript now says what the work turned out to
         // be. Last, after the record and every subscriber are consistent.
-        if case .turnCompleted = event { refreshDerivedName(for: id) }
+        if case let .contentDelta(_, _, .assistant, delta) = event,
+           !firstReplyClosed.contains(id),
+           (firstReplyByAgent[id]?.count ?? 0) < Self.firstReplyCaptureLength {
+            firstReplyByAgent[id, default: ""] += delta
+        }
+        if case .turnCompleted = event {
+            firstReplyClosed.insert(id)
+            refreshDerivedName(for: id)
+        }
     }
 
     /// The child half of the `spawn_agent` result-file channel. No-op for any
@@ -9742,102 +9755,89 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         throw fail("generated-name orchestration still lives in ContinuumApp.swift instead of the supervisor owner")
     }
 
-    // This is a real executable child, not a fake Process object. It records the
-    // argument vector and stdin separately, can hold a request open, and forks a
-    // child for the timeout witness. It never reaches the network.
-    let executable = root.appendingPathComponent("fake-pi", isDirectory: false)
-    let fakePi = """
+    // A real executable child, not a fake Process object, resolved as the pi
+    // titler. The one-shot runs it in a private EMPTY cwd, so every marker it
+    // reads or writes is an absolute path under `root`. Its behaviour is keyed
+    // by the `--model` it was given — the agent's own model id is the one input
+    // that differs per agent and reaches argv. It never reaches the network.
+    let executable = root.appendingPathComponent("pi", isDirectory: false)
+    let fakePi = #"""
     #!/bin/sh
     set -eu
-    printf '%s\\n' "$@" > .p45-args
+    R='\#(root.path)'
+    model=""
+    prev=""
     has_no_session=false
     for arg in "$@"; do
+      if [ "$prev" = "--model" ]; then model="$arg"; fi
       if [ "$arg" = "--no-session" ]; then has_no_session=true; fi
+      prev="$arg"
     done
     if [ "$has_no_session" = false ]; then
       mkdir -p "$HOME/.pi/agent/sessions" "$HOME/.pi/agent/transcripts"
       : > "$HOME/.pi/agent/sessions/fake-session.jsonl"
       : > "$HOME/.pi/agent/transcripts/fake-transcript.jsonl"
     fi
-    if [ -e .p45-input-failure ]; then
-      exec 0<&-
-      : > .p45-input-closed
-      (sleep 0.7; : > .p45-input-child-survived) &
-      printf '%s' "$!" > .p45-input-child-pid
-      sleep 30
+    case "$model" in
+      *input-failure*)
+        exec 0<&-
+        : > "$R/.p45-input-closed"
+        (sleep 0.7; : > "$R/.p45-input-child-survived") &
+        printf '%s' "$!" > "$R/.p45-input-child-pid"
+        sleep 30
+        exit 0
+        ;;
+    esac
+    cat > "$R/.p45-stdin"
+    case "$model" in
+      *normal-descendant*)
+        (sleep 0.7; : > "$R/.p45-normal-child-survived") &
+        printf '%s' "$!" > "$R/.p45-normal-child-pid"
+        printf '%s\n' '{"name":"Normal Child"}'
+        exit 0
+        ;;
+      *timeout*)
+        (sleep 0.7; : > "$R/.p45-child-survived") &
+        printf '%s' "$!" > "$R/.p45-child-pid"
+        sleep 30
+        exit 0
+        ;;
+    esac
+    printf '%s\n' "$@" > "$R/.p45-args"
+    ls -A > "$R/.p45-cwd-listing"
+    ls "$PI_CODING_AGENT_DIR" > "$R/.p45-config-listing"
+    while [ -e "$R/.p45-hold" ]; do sleep 0.01; done
+    if [ -e "$R/.p45-provider-output" ]; then
+      cat "$R/.p45-provider-output"
       exit 0
     fi
-    cat > .p45-stdin
-    if [ -e .p45-normal-descendant ]; then
-      (sleep 0.7; : > .p45-normal-child-survived) &
-      printf '%s' "$!" > .p45-normal-child-pid
-      printf '%s\n' '{"name":"Normal Child"}'
-      exit 0
-    fi
-    if [ -e .p45-timeout ]; then
-      (sleep 0.7; : > .p45-child-survived) &
-      printf '%s' "$!" > .p45-child-pid
-      sleep 30
-      exit 0
-    fi
-    while [ -e .p45-hold ]; do sleep 0.01; done
-    if [ -e .p45-provider-output ]; then
-      cat .p45-provider-output
-      exit 0
-    fi
-    if [ -e .p45-invalid ]; then
-      printf '%s\\n' '{"name":"openai-codex/gpt-5.4-mini"}'
-      exit 0
-    fi
-    printf '%s\\n' '{"name":"\\"  Ship   It  \\""}'
-    """
+    printf '%s\n' '{"name":"\"  Ship   It  \""}'
+    """#
     try fakePi.write(to: executable, atomically: true, encoding: .utf8)
     try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let fakeCommand = PiAgentRunner.ResolvedCommand(executable: executable.path, prefixArgs: [])
+    let piModel = "fixture-provider/fixture-pi-model"
+    let titler: @Sendable (String) -> AgentNameTitler = { model in
+        AgentNameTitler(harness: .pi, command: fakeCommand, model: model)
+    }
 
     let configDirectory = root.appendingPathComponent("pi-config", isDirectory: true)
     let controlledHome = root.appendingPathComponent("controlled-home", isDirectory: true)
-    let ephemeralConfig = root.appendingPathComponent("one-shot-config", isDirectory: true)
+    let workDirectory = root.appendingPathComponent("one-shot-work", isDirectory: true)
     try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
     try fileManager.createDirectory(at: controlledHome, withIntermediateDirectories: true)
-    let authData = Data(#"{"openai-codex":{"access":"fixture-access","expires":4102444800000}}"#.utf8)
-    try authData.write(to: configDirectory.appendingPathComponent("auth.json"))
-    let capability = AgentNameGenerationCapability(
-        executable: executable.path,
-        configDirectory: configDirectory,
-        loginShellPath: "/bin:/usr/bin",
-        model: AgentNameGenerationCapability.cheapModel)
+    try Data(#"{"fixture-provider":{"access":"fixture-access"}}"#.utf8)
+        .write(to: configDirectory.appendingPathComponent("auth.json"))
+    let fixtureEnvironment = [
+        "HOME": controlledHome.path,
+        "PI_CODING_AGENT_DIR": configDirectory.path,
+    ]
 
-    // Capability and login-shell resolution are pure enough to exercise without
-    // invoking a provider. The negative auth witness is intentionally expired.
+    // The menu query is process-free and, in QA, hidden: live titling is only
+    // ever enabled by the real app's startup.
     let now = Date(timeIntervalSince1970: 1_000)
-    let validAuth = Data(#"{"openai-codex":{"access":"fixture-access"}}"#.utf8)
-    let refreshAuth = Data(#"{"openai-codex":{"refresh":"fixture-refresh","expires":0}}"#.utf8)
-    let expiredAuth = Data(#"{"openai-codex":{"access":"fixture-access","expires":999000}}"#.utf8)
-    guard AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: validAuth),
-          AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: refreshAuth),
-          !AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: expiredAuth) else {
-        throw fail("auth gate accepted expired access or rejected a usable fixture credential")
-    }
-    guard AgentNameGenerationCapability.resolvedExecutable(
-            loginShellPath: "/missing:/bin", fileExists: { $0 == "/bin/pi" }) == "/bin/pi",
-          AgentNameGenerationCapability.resolvedExecutable(
-            loginShellPath: "/missing:/also-missing", fileExists: { _ in false }) == nil else {
-        throw fail("login-shell executable resolution did not select the first executable or refuse an absent one")
-    }
-
-    // The UI query is a snapshot, not a resolver. This records the initial
-    // unknown state as hidden and proves that a hanging/noisy login shell cannot
-    // make a main-actor menu query wait. The actual resolver is then exercised
-    // on a detached task with both stdout and stderr over the pipe cap.
-    AgentNameGenerationCapabilityCache.shared.resetForQA()
-    let queryStarted = Date()
-    let initialCapabilityQuery = AgentSupervisor.nameGenerationCapabilityAvailable
-    guard !initialCapabilityQuery,
-          Date().timeIntervalSince(queryStarted) < 0.05 else {
-        throw fail("the initial capability query was not immediately hidden: available=\(initialCapabilityQuery)")
+    guard !AgentSupervisor.nameGenerationCapabilityAvailable else {
+        throw fail("live titling was enabled inside a check process")
     }
     let menuProbe = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 280, height: 240))
     let menuProbeID = UUID()
@@ -9853,42 +9853,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     guard menuProbe.openRowMenuForQA(clickedRowId: menuProbeID),
           !menuProbe.rowMenuTitlesForQA.contains(InboxRowAction.generateName.title(forCount: 1)),
           Date().timeIntervalSince(menuQueryStarted) < 0.05 else {
-        throw fail("the initial row-menu capability query was not immediately hidden")
+        throw fail("the row menu offered Generate Name with live titling off, or the query was not immediate")
     }
-    let loginShell = root.appendingPathComponent("noisy-hanging-login-shell", isDirectory: false)
-    let noisyShell = """
-    #!/bin/sh
-    i=0
-    while [ "$i" -lt 4096 ]; do
-      printf 'login-shell-noise-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' "$i"
-      printf 'login-shell-stderr-%s-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\\n' "$i" >&2
-      i=$((i + 1))
-    done
-    sleep 30
-    """
-    try noisyShell.write(to: loginShell, atomically: true, encoding: .utf8)
-    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: loginShell.path)
-    let loginProbeStarted = Date()
-    let loginCapability = await Task.detached(priority: .utility) {
-        AgentNameGenerationCapability.live(
-            environment: [
-                "HOME": controlledHome.path,
-                "PI_CODING_AGENT_DIR": configDirectory.path,
-                "PATH": "/bin:/usr/bin",
-                "SHELL": loginShell.path,
-            ],
-            now: now)
-    }.value
-    guard loginCapability == nil,
-          Date().timeIntervalSince(loginProbeStarted) < 2 else {
-        throw fail("a noisy/hanging login shell was not bounded: result=\(String(describing: loginCapability))")
-    }
-    // The cache remains a hidden/unavailable answer until its own resolver has
-    // completed; this query is still process-free after the failed probe.
-    let postProbeQueryStarted = Date()
-    _ = AgentSupervisor.nameGenerationCapabilityAvailable
-    guard Date().timeIntervalSince(postProbeQueryStarted) < 0.05 else {
-        throw fail("the cached capability query performed synchronous shell work after resolution")
+    // With no injected command and the live gate closed, resolution yields no
+    // command at all — a check-built supervisor can never reach a real CLI.
+    guard AgentNameTitler.liveCommand(for: .pi) == nil,
+          AgentNameTitler.liveCommand(for: .claudeCode) == nil,
+          AgentNameTitler.liveCommand(for: .codex) == nil else {
+        throw fail("a live CLI resolved for titling while the live gate was closed")
     }
 
     func fixtureManifest(in roots: [URL]) -> Set<String> {
@@ -9913,80 +9885,83 @@ private func checkGeneratedNameOneShot<Failure: Error>(
             return lower.contains("session") || lower.contains("transcript")
         }
     }
+    func candidate(_ output: String) -> String? {
+        AgentNameOneShot.rawName(harness: .pi, output: output).flatMap {
+            AgentNameOneShot.sanitizedTitle($0, model: piModel, role: "reviewer", id: UUID())
+        }
+    }
 
-    // The actual one-shot proves stdin, --no-session, no user prompt in argv,
-    // no session/transcript artifact in a controlled HOME/config fixture, and
-    // the shared sanitizer on a quoted candidate line.
+    // The actual one-shot proves stdin, --no-session, the agent's own model,
+    // no user prompt in argv, an empty private cwd, a private pi config copy,
+    // no session/transcript artifact, cleanup of the work directory, and the
+    // shared sanitizer on a quoted Title Case candidate.
     let fixtureRoots = [controlledHome, configDirectory]
     let fixtureBefore = fixtureManifest(in: fixtureRoots)
     let privatePrompt = "PRIVATE prompt that must never become argv metadata"
     let output = try await Task.detached(priority: .utility) {
         try AgentNameOneShot.run(
-            capability: capability,
+            titler: titler(piModel),
             prompt: privatePrompt,
-            cwd: root,
             timeout: 2,
-            environmentOverrides: ["HOME": controlledHome.path],
-            configDirectoryOverride: ephemeralConfig)
+            environmentOverrides: fixtureEnvironment,
+            workDirectoryOverride: workDirectory)
     }.value
-    guard AgentNameOneShot.candidate(
-            from: output,
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == "Ship It" else {
-        throw fail("the fake Pi output did not sanitize to the expected one-line name")
+    guard candidate(output) == "Ship it" else {
+        throw fail("the fake Pi output did not sanitize to the expected sentence-case name: \(output.debugDescription) → \(String(describing: candidate(output)))")
     }
     let args = try String(contentsOf: root.appendingPathComponent(".p45-args"), encoding: .utf8)
     let receivedPrompt = try String(contentsOf: root.appendingPathComponent(".p45-stdin"), encoding: .utf8)
+    let cwdListing = try String(contentsOf: root.appendingPathComponent(".p45-cwd-listing"), encoding: .utf8)
+    let configListing = try String(contentsOf: root.appendingPathComponent(".p45-config-listing"), encoding: .utf8)
     let fixtureAfter = fixtureManifest(in: fixtureRoots)
-    guard args.contains("--no-session"), args.contains("--print"),
+    let expectedArgs = [
+        "--no-session", "--print", "--mode", "text",
+        "--model", piModel, "--thinking", "low",
+        "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
+        "--system-prompt", AgentNameOneShot.titleRules,
+    ].joined(separator: "\n") + "\n"
+    guard args == expectedArgs,
           !args.contains(privatePrompt), !args.contains("Ship It"),
           receivedPrompt == privatePrompt,
+          cwdListing.isEmpty,
+          configListing.split(separator: "\n").contains("auth.json"),
           fixtureBefore == fixtureAfter,
           !containsSessionOrTranscriptArtifact(fixtureAfter),
-          !fileManager.fileExists(atPath: ephemeralConfig.path) else {
-        throw fail("--no-session did not keep the prompt on stdin only or left a session/transcript artifact: args=\(args.debugDescription), stdin=\(receivedPrompt.debugDescription), fixture=\(fixtureAfter.sorted())")
+          !fileManager.fileExists(atPath: workDirectory.path) else {
+        throw fail("the pi titler argv/stdin/cwd/config contract broke: args=\(args.debugDescription), stdin=\(receivedPrompt.debugDescription), cwd=\(cwdListing.debugDescription), config=\(configListing.debugDescription), fixture=\(fixtureAfter.sorted())")
     }
-    guard AgentNameOneShot.candidate(
-            from: "```\\nName: \"  \(config.model)  \"\\n```",
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == nil else {
+    guard candidate("```\n{\"name\":\"  \(piModel)  \"}\n```") == nil,
+          candidate("{\"name\":\"\(piModel)\"}") == nil else {
         throw fail("identifier-shaped one-shot output was accepted as a display name")
     }
 
-    // These are real fake-Pi stdout cases, not only direct parser calls. Every
-    // wrapper/noise shape is refused as a whole; none is trimmed into a title.
+    // Real fake-Pi stdout cases. Every wrapper shape and genuine provider
+    // failure text is refused as a whole; none is trimmed into a title.
     let providerNoiseCases: [(String, String)] = [
         ("warning", "{\"name\":\"Warning: using fallback model\"}\n"),
-        ("fallback", "{\"name\":\"fallback model selected\"}\n"),
-        ("error", "{\"name\":\"Error: provider unavailable\"}\n"),
-        ("progress", "{\"name\":\"Progress 40%\"}\n"),
+        ("error-label", "{\"name\":\"Error: provider unavailable\"}\n"),
+        ("provider-error", "{\"name\":\"API Error 529 overloaded_error\"}\n"),
+        ("auth-error", "{\"name\":\"Not logged in, please run /login\"}\n"),
         ("role", "{\"name\":\"assistant: Ship It\"}\n"),
         ("title-field", "{\"title\":\"Ship It\"}\n"),
         ("extra-field", "{\"name\":\"Ship It\",\"status\":\"done\"}\n"),
         ("fence", "```\n{\"name\":\"Ship It\"}\n```\n"),
         ("prose", "Here is the name you requested: Ship It\n"),
-        ("multi-line", "{\"name\":\"Ship It\"}\nI hope this helps.\n")
+        ("multi-line", "{\"name\":\"Ship It\"}\nI hope this helps.\n"),
+        ("too-long", "{\"name\":\"This title keeps going well past any sidebar length\"}\n"),
     ]
     for (kind, noise) in providerNoiseCases {
         let outputFile = root.appendingPathComponent(".p45-provider-output")
         try noise.write(to: outputFile, atomically: true, encoding: .utf8)
         let noiseOutput = try await Task.detached(priority: .utility) {
             try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler(piModel),
                 prompt: privatePrompt,
-                cwd: root,
                 timeout: 2,
-                environmentOverrides: ["HOME": controlledHome.path],
-                configDirectoryOverride: ephemeralConfig)
+                environmentOverrides: fixtureEnvironment)
         }.value
         try? fileManager.removeItem(at: outputFile)
-        guard AgentNameOneShot.candidate(
-                from: noiseOutput,
-                model: config.model,
-                role: "reviewer",
-                id: UUID()) == nil else {
+        guard candidate(noiseOutput) == nil else {
             throw fail("provider noise case \(kind) was converted into a candidate: \(noiseOutput.debugDescription)")
         }
     }
@@ -9998,32 +9973,33 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     let supervisor = AgentSupervisor(
         store: store,
         makeRunner: { _ in runner },
-        nameGenerationCapabilityProvider: { capability },
+        nameTitlerCommand: { $0 == .pi ? fakeCommand : nil },
         nameGenerationTimeout: 2)
     let generatedID = supervisor.spawn(
         role: "reviewer",
         prompt: privatePrompt,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        !supervisor.isRunning(generatedID)
+        !supervisor.isRunning(generatedID) && supervisor.qaActiveNameGenerationCount == 0
     }) else {
         throw fail("the fixture prompt did not finish before the generated-name action")
     }
     guard supervisor.requestGeneratedName(agentID: generatedID) else {
-        throw fail("an authenticated fake Pi capability did not start the explicit action")
+        throw fail("a resolvable fake pi titler did not start the explicit action")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }), let generated = supervisor.records[generatedID],
-          generated.displayName == "Ship It",
+          generated.displayName == "Ship it",
           // `.generated`, not `.prompt`: a model wrote this text, and the source
           // has to say so both for the sync boundary and for the authority
           // ladder that keeps the next harness poll from undoing it.
           generated.displayNameSource == .generated,
           generated.namingRequest == nil,
-          try store.load(id: generatedID)?.displayName == "Ship It" else {
+          try store.load(id: generatedID)?.displayName == "Ship it" else {
         throw fail("the production request did not land the sanitized name through its CAS path")
     }
     let snapshot = AgentInventory.snapshot(
@@ -10046,40 +10022,42 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         as: UTF8.self)
     guard companionPayload.contains(AgentRecord.defaultAgentName),
           !companionPayload.contains(privatePrompt),
-          !companionPayload.contains("Ship It") else {
+          !companionPayload.contains("Ship it") else {
         throw fail("the actual companion payload carried the source prompt or generated name: \(companionPayload)")
     }
 
-    // A missing capability refuses before any Process launch. This is the required
-    // negative witness for the hidden/absent-auth path.
+    // A harness whose CLI does not resolve refuses before any Process launch.
     let absentRoot = root.appendingPathComponent("absent", isDirectory: true)
     let absentStore = AgentStore(applicationSupportDirectory: absentRoot)
     let absentSupervisor = AgentSupervisor(
         store: absentStore,
         makeRunner: { _ in ScriptedAgentRunner(script: []) },
-        nameGenerationCapabilityProvider: { nil })
+        nameTitlerCommand: { _ in nil })
     let absentID = absentSupervisor.spawn(
         role: nil,
         prompt: nil,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard !absentSupervisor.requestGeneratedName(agentID: absentID),
           absentSupervisor.qaActiveNameGenerationCount == 0,
           absentSupervisor.records[absentID]?.namingRequest == nil else {
-        throw fail("an absent capability started naming work or armed a durable request")
+        throw fail("an unresolvable titler started naming work or armed a durable request")
     }
 
     // A human rename while the real fake process is held must win the request CAS
     // after the child returns. This is production mutation evidence, not a direct
     // AgentRecord-only test.
     let hold = root.appendingPathComponent(".p45-hold")
+    try? fileManager.removeItem(at: root.appendingPathComponent(".p45-stdin"))
     try Data().write(to: hold)
     let raceID = supervisor.spawn(
         role: nil,
         prompt: nil,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard supervisor.requestGeneratedName(agentID: raceID),
           await waitUntil(timeout: 5, pollInterval: 0.02, {
@@ -10096,19 +10074,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         throw fail("a human rename lost to a late generated-name completion")
     }
 
-    // Three held requests prove the main-actor admission cap is race-safe: the
-    // first two use distinct fixture working directories so their fake providers
-    // cannot contend over one marker or stdin file, while the refused member is
-    // never armed. Releasing both accepted holds must release both slots.
-    let burstRoots = (0..<3).map { root.appendingPathComponent("burst-\($0)", isDirectory: true) }
-    for burstRoot in burstRoots {
-        try fileManager.createDirectory(at: burstRoot, withIntermediateDirectories: true)
-    }
-    for burstRoot in burstRoots.prefix(2) {
-        try Data().write(to: burstRoot.appendingPathComponent(".p45-hold"))
-    }
-    let burstIDs = burstRoots.map { burstRoot in
-        supervisor.spawn(role: nil, prompt: nil, cwd: burstRoot, model: config.model, thinking: config.thinking)
+    // Three requests against a held titler prove the main-actor admission cap is
+    // race-safe: two run, the third is refused and never armed, and releasing
+    // the hold releases both slots.
+    try Data().write(to: hold)
+    let burstIDs = (0..<3).map { _ in
+        supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi, model: piModel, thinking: config.thinking)
     }
     let burst = supervisor.requestGeneratedNames(agentIDs: burstIDs)
     guard burst.accepted == Array(burstIDs.prefix(2)),
@@ -10118,14 +10089,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
           supervisor.records[burstIDs[2]]?.namingRequest == nil else {
         throw fail("the generated-name burst exceeded the concurrency cap or armed the refused member")
     }
-    for burstRoot in burstRoots.prefix(2) {
-        try fileManager.removeItem(at: burstRoot.appendingPathComponent(".p45-hold"))
-    }
+    try fileManager.removeItem(at: hold)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }),
-          supervisor.records[burstIDs[0]]?.displayName == "Ship It",
-          supervisor.records[burstIDs[1]]?.displayName == "Ship It",
+          supervisor.records[burstIDs[0]]?.displayName == "Ship it",
+          supervisor.records[burstIDs[1]]?.displayName == "Ship it",
           supervisor.records[burstIDs[2]]?.displayName == AgentRecord.defaultAgentName,
           supervisor.records[burstIDs[2]]?.namingRequest == nil else {
         throw fail("the capped burst did not release both accepted names while keeping the refused member unchanged")
@@ -10133,15 +10102,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
 
     // Timeout: the fake forks a child that would leave a marker after the leader
     // exits. A process-group kill must prevent that marker from ever appearing.
-    let timeoutMarker = root.appendingPathComponent(".p45-timeout")
-    try Data().write(to: timeoutMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-child-survived"))
     let timeoutResult = await Task.detached(priority: .utility) {
         do {
             _ = try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler("fixture-provider/timeout"),
                 prompt: "timeout prompt",
-                cwd: root,
                 timeout: 0.12)
             return false
         } catch AgentNameOneShotError.timedOut {
@@ -10150,7 +10116,6 @@ private func checkGeneratedNameOneShot<Failure: Error>(
             return false
         }
     }.value
-    try? fileManager.removeItem(at: timeoutMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     guard timeoutResult,
           !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-child-survived").path) else {
@@ -10168,26 +10133,18 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     // writes a valid result and exits immediately, while its child keeps both
     // output descriptors open. The return must stay bounded and the child must
     // not get a chance to leave its survival marker.
-    let normalDescendantMarker = root.appendingPathComponent(".p45-normal-descendant")
-    try Data().write(to: normalDescendantMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-survived"))
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-pid"))
     let normalStarted = Date()
     let normalResult = await Task.detached(priority: .utility) {
         try? AgentNameOneShot.run(
-            capability: capability,
+            titler: titler("fixture-provider/normal-descendant"),
             prompt: "normal descendant prompt",
-            cwd: root,
             timeout: 1)
     }.value
     let normalElapsed = Date().timeIntervalSince(normalStarted)
-    try? fileManager.removeItem(at: normalDescendantMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
-    guard normalResult.map({ AgentNameOneShot.candidate(
-            from: $0,
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == "Normal Child" }) == true,
+    guard normalResult.map({ candidate($0) == "Normal child" }) == true,
           normalElapsed < 2,
           !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-normal-child-survived").path),
           !descendantIsAlive(pidFile: root.appendingPathComponent(".p45-normal-child-pid")) else {
@@ -10197,17 +10154,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     // Input failure is the other cleanup path. The fake closes stdin before
     // the write and leaves a descendant holding stdout/stderr; no unbounded
     // post-SIGTERM wait or pipe read may retain the request slot.
-    let inputFailureMarker = root.appendingPathComponent(".p45-input-failure")
-    try Data().write(to: inputFailureMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-survived"))
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-pid"))
     let inputFailureStarted = Date()
     let inputFailureResult = await Task.detached(priority: .utility) {
         do {
             _ = try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler("fixture-provider/input-failure"),
                 prompt: privatePrompt,
-                cwd: root,
                 timeout: 1,
                 inputWriteDelay: 0.2)
             return "success"
@@ -10218,7 +10172,6 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         }
     }.value
     let inputFailureElapsed = Date().timeIntervalSince(inputFailureStarted)
-    try? fileManager.removeItem(at: inputFailureMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     guard inputFailureResult == "input-failed",
           inputFailureElapsed < 2,
@@ -10228,27 +10181,27 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     }
 
     // The same two paths must release the supervisor's concurrency slot. The
-    // input-failure agent starts with a real prompt-derived name so failure is
-    // also proven not to clobber the prior title.
-    let normalSupervisorRoot = root.appendingPathComponent("normal-supervisor", isDirectory: true)
-    let inputSupervisorRoot = root.appendingPathComponent("input-supervisor", isDirectory: true)
-    try fileManager.createDirectory(at: normalSupervisorRoot, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: inputSupervisorRoot, withIntermediateDirectories: true)
-    try Data().write(to: normalSupervisorRoot.appendingPathComponent(".p45-normal-descendant"))
-    try Data().write(to: inputSupervisorRoot.appendingPathComponent(".p45-input-failure"))
+    // input-failure agent starts with a prior name so failure is also proven
+    // not to clobber it. Neither spawn runs a turn, so no automatic attempt
+    // competes for a slot.
     let normalSupervisorID = supervisor.spawn(
         role: nil,
         prompt: nil,
-        cwd: normalSupervisorRoot,
-        model: config.model,
+        cwd: root,
+        harness: .pi,
+        model: "fixture-provider/normal-descendant",
         thinking: config.thinking)
     let inputSupervisorID = supervisor.spawn(
         role: nil,
-        prompt: "Prior stable name",
-        cwd: inputSupervisorRoot,
-        model: config.model,
+        prompt: nil,
+        cwd: root,
+        harness: .pi,
+        model: "fixture-provider/input-failure",
         thinking: config.thinking)
-    guard let priorName = supervisor.records[inputSupervisorID]?.displayName else {
+    // An automatic (non-manual) prior title, so the explicit request may run.
+    guard let priorRequest = supervisor.beginNameGeneration(agentID: inputSupervisorID),
+          supervisor.applyGeneratedName("Prior stable name", for: priorRequest, agentID: inputSupervisorID),
+          let priorName = supervisor.records[inputSupervisorID]?.displayName else {
         throw fail("input-failure setup did not create a prior display name")
     }
     guard supervisor.requestGeneratedNames(agentIDs: [normalSupervisorID, inputSupervisorID]).accepted.count == 2 else {
@@ -10256,13 +10209,13 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
-    }), supervisor.records[normalSupervisorID]?.displayName == "Normal Child",
+    }), supervisor.records[normalSupervisorID]?.displayName == "Normal child",
           supervisor.records[inputSupervisorID]?.displayName == priorName,
           supervisor.records[inputSupervisorID]?.namingRequest == nil else {
         throw fail("normal/input-failure supervisor paths did not release their slots or preserve the prior name")
     }
 
-    return "P4.5 async cached capability gate with bounded noisy/hanging login-shell witness; fake-pi stdin/--no-session with controlled HOME/config artifact absence, strict one-field JSON/noise rejection, auth/executable gates, exact companion-envelope prompt/generated scrub, production CAS, supervisor-owned burst cap/release, normal-exit/input-failure/timeout process-group cleanup, bounded pipe drains, and prior-name preservation"
+    return "P4.5 pi titler: QA-closed live gate hides the action and resolves no CLI; fake-pi exact argv (agent's own model) / stdin-only prompt / empty private cwd / private config copy / no session artifact / work-dir cleanup; strict one-field JSON with provider-failure rejection; exact companion-envelope prompt/generated scrub; production CAS; supervisor-owned burst cap/release; normal-exit/input-failure/timeout process-group cleanup; prior-name preservation"
 }
 
 /// Focused witness for record-backed names reaching an already-attached tile.
@@ -10330,6 +10283,9 @@ func runAgentDisplayNameChecks() async throws {
     }
 
     print("agent display names: first-prompt, manual, and generated names refresh attached tile headers")
+    print(try await checkPerHarnessSessionTitles(fail: fail))
+    print(try await checkClaudeTitleLadderRaces(fail: fail))
+    print(try await checkAutomaticNameRefresh(fail: fail))
 }
 
 @MainActor
@@ -11252,10 +11208,11 @@ private func checkClaudeHarnessTitleReader<Failure: Error>(
 /// Witnesses the SUPERVISOR wiring that `checkAgentNameContract`'s pure
 /// AgentRecord/reader assertions cannot reach: `refreshDerivedName` actually
 /// fires from a real `.turnCompleted` event rather than only from the
-/// explicit "Generate Name" menu action, codex/pi's automatic fallback is
-/// bounded per agent rather than retried forever, claude's own harness never
-/// falls through to the pi one-shot, and a manual rename shuts every
-/// automatic path off before the next turn arrives.
+/// explicit "Generate Name" menu action; a generated title is final for the
+/// automatic path (no churn on later turns); the automatic path is bounded per
+/// agent for every harness; a manual rename shuts every automatic path off
+/// before the next turn; and a claude session with no title reaches CLAUDE's
+/// titler, never pi's.
 @MainActor
 private func checkAutomaticNameRefresh<Failure: Error>(
     fail: (String) -> Failure
@@ -11265,163 +11222,644 @@ private func checkAutomaticNameRefresh<Failure: Error>(
         .appendingPathComponent("continuum-automatic-name-refresh-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: root) }
     try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let models: [AgentHarness: String] = [
+        .claudeCode: "anthropic/claude-fixture-opus",
+        .codex: "openai-codex/gpt-fixture-codex",
+        // Pi only sends on a model its (QA fixture) catalogue lists.
+        .pi: AgentCatalogQAFixture.pi[0],
+    ]
 
-    // A fake pi that appends one line per invocation to a counter file, so a
-    // test can count how many times the provider actually ran. `succeed`
-    // picks between a usable name (encoding which invocation it was, so a
-    // second turn's title can be told apart from the first) and output that
-    // never sanitises to a candidate at all.
-    func makeCapability(name: String, counter: URL, succeed: Bool) throws -> AgentNameGenerationCapability {
-        let executable = root.appendingPathComponent("fake-pi-\(name)", isDirectory: false)
-        let tally = """
-        count=0
-        if [ -f "\(counter.path)" ]; then count=$(wc -l < "\(counter.path)" | tr -d ' '); fi
-        n=$((count + 1))
-        echo "$n" >> "\(counter.path)"
-        """
-        let body = succeed
-            ? "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf '{\"name\":\"Attempt %s\"}\\n' \"$n\"\n"
-            : "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf 'not a json name at all\\n'\n"
-        try body.write(to: executable, atomically: true, encoding: .utf8)
-        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let configDirectory = root.appendingPathComponent("config-\(name)", isDirectory: true)
-        try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
-        return AgentNameGenerationCapability(
-            executable: executable.path, configDirectory: configDirectory, loginShellPath: "/bin:/usr/bin")
-    }
-
-    func lineCount(_ url: URL) -> Int {
-        (try? String(contentsOf: url, encoding: .utf8)).map {
-            $0.split(separator: "\n", omittingEmptySubsequences: true).count
-        } ?? 0
+    func completeTurn(
+        _ supervisor: AgentSupervisor, _ runner: ScriptedAgentRunner, _ id: AgentID, _ turn: String
+    ) async throws {
+        let sequence = supervisor.records[id]?.latestTerminalEvent?.sequence
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: turn, outcome: .completed, errorMessage: nil)) else {
+            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+        }
+        guard await waitUntil(timeout: 12, pollInterval: 0.02, {
+            supervisor.records[id]?.latestTerminalEvent?.sequence != sequence
+                && supervisor.qaActiveHarnessTitleCount == 0
+                && supervisor.qaActiveNameGenerationCount == 0
+        }) else { throw fail("turn \(turn) did not drain its naming work") }
     }
 
     // -- 1 & 2. codex: refreshDerivedName fires from .turnCompleted alone (no
-    // explicit "Generate Name" call anywhere in this test), and a SECOND
-    // turn's title supersedes the first — equal authority replaces, now
-    // proven through the live wiring rather than the record in isolation. --
-    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
-    let fireCounter = root.appendingPathComponent("fire-counter.txt")
-    let fireCapability = try makeCapability(name: "fire", counter: fireCounter, succeed: true)
+    // explicit "Generate Name" call anywhere in this test), and the generated
+    // title is FINAL for the automatic path: a second turn neither re-asks the
+    // titler nor changes the name. --
+    let fire = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("fire-bin", isDirectory: true), harness: .codex,
+        log: root.appendingPathComponent("fire-log", isDirectory: true), behavior: .succeed("Attempt $n"))
     let fireStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("fire-support", isDirectory: true))
     let fireRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let fireSupervisor = AgentSupervisor(
         store: fireStore, makeRunner: { _ in fireRunner },
-        nameGenerationCapabilityProvider: { fireCapability }, nameGenerationTimeout: 2)
+        nameTitlerCommand: { $0 == .codex ? fire.command : nil }, nameGenerationTimeout: 10)
     let fireID = fireSupervisor.spawn(
         role: nil, prompt: "investigate the flaky build", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
+        model: models[.codex]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { fireRunner.runCount > 0 }) else {
         throw fail("the codex fixture agent's runner never started")
     }
-    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the scripted runner had no live handler to accept a turnCompleted event")
+    try await completeTurn(fireSupervisor, fireRunner, fireID, "t1")
+    guard fireSupervisor.records[fireID]?.displayNameSource == .generated,
+          fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
+        throw fail("a codex agent's turnCompleted did not land its own titler's name: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
     }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        fireSupervisor.records[fireID]?.displayNameSource == .generated
-    }) else {
-        throw fail("a codex agent's turnCompleted did not trigger the automatic generated-name fallback: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
-    }
-    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
-        throw fail("the automatic fallback did not land the provider's own name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
-    }
-    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the scripted runner refused a second turnCompleted event")
-    }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        fireSupervisor.records[fireID]?.displayName == "Attempt 2"
-    }) else {
-        throw fail("a second harness turn did not replace the first automatic name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    try await completeTurn(fireSupervisor, fireRunner, fireID, "t2")
+    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1", fire.invocationCount == 1 else {
+        throw fail("a second turn churned the generated name: name=\(String(describing: fireSupervisor.records[fireID]?.displayName)) titlerCalls=\(fire.invocationCount)")
     }
     fireRunner.releaseRunAfterStop()
 
-    // -- 3. codex: the automatic path is BOUNDED. A provider that never
-    // produces a usable name must not be retried forever — three attempts,
-    // then silence, across five completed turns. --
-    let boundCounter = root.appendingPathComponent("bound-counter.txt")
-    let boundCapability = try makeCapability(name: "bound", counter: boundCounter, succeed: false)
-    let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support", isDirectory: true))
-    let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
-    let boundSupervisor = AgentSupervisor(
-        store: boundStore, makeRunner: { _ in boundRunner },
-        nameGenerationCapabilityProvider: { boundCapability }, nameGenerationTimeout: 2)
-    let boundID = boundSupervisor.spawn(
-        role: nil, prompt: "a prompt that never gets named", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
-        throw fail("the bounded-retry fixture agent's runner never started")
-    }
-    for turn in 1...5 {
-        guard boundRunner.emit(.turnCompleted(threadId: "t", turnId: "t\(turn)", outcome: .completed, errorMessage: nil)) else {
-            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+    // -- 3. every harness: the automatic path is BOUNDED. A titler that never
+    // produces a usable name runs three times across five completed turns,
+    // then never again. Claude's ai-title read misses every turn here, so its
+    // fall-through is what is being bounded. --
+    for harness in [AgentHarness.codex, .claudeCode, .pi] {
+        let bound = try FakeTitlerCLI(
+            binDirectory: root.appendingPathComponent("bound-bin-\(harness)", isDirectory: true), harness: harness,
+            log: root.appendingPathComponent("bound-log-\(harness)", isDirectory: true), behavior: .fail)
+        let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support-\(harness)", isDirectory: true))
+        let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let boundSupervisor = AgentSupervisor(
+            store: boundStore, makeRunner: { _ in boundRunner },
+            nameTitlerCommand: { $0 == harness ? bound.command : nil }, nameGenerationTimeout: 10,
+            claudeSessionTitle: { _, _ in nil })
+        let boundID = boundSupervisor.spawn(
+            role: nil, prompt: "a prompt that never gets named", cwd: root, harness: harness,
+            model: models[harness]!, thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
+            throw fail("the bounded-retry fixture agent's runner never started")
         }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        let nameBefore = boundSupervisor.records[boundID]?.displayName
+        for turn in 1...5 {
+            try await completeTurn(boundSupervisor, boundRunner, boundID, "t\(turn)")
+        }
+        guard bound.invocationCount == 3,
+              boundSupervisor.records[boundID]?.displayName == nameBefore else {
+            throw fail("\(harness): a titler that never produces a name ran \(bound.invocationCount) time(s) across 5 turns (want 3), name=\(String(describing: boundSupervisor.records[boundID]?.displayName))")
+        }
+        boundRunner.releaseRunAfterStop()
     }
-    guard lineCount(boundCounter) == 3 else {
-        throw fail("a provider that never produces a name was invoked \(lineCount(boundCounter)) time(s) across 5 completed turns, not bounded to 3")
-    }
-    boundRunner.releaseRunAfterStop()
 
     // -- 4. codex: a MANUAL rename shuts the automatic path off before the
     // next turn — the automatic fallback must never even ask the provider. --
-    let manualCounter = root.appendingPathComponent("manual-counter.txt")
-    let manualCapability = try makeCapability(name: "manual", counter: manualCounter, succeed: true)
+    let manual = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("manual-bin", isDirectory: true), harness: .codex,
+        log: root.appendingPathComponent("manual-log", isDirectory: true), behavior: .succeed("Should never land"))
     let manualStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("manual-support", isDirectory: true))
     let manualRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let manualSupervisor = AgentSupervisor(
         store: manualStore, makeRunner: { _ in manualRunner },
-        nameGenerationCapabilityProvider: { manualCapability }, nameGenerationTimeout: 2)
+        nameTitlerCommand: { $0 == .codex ? manual.command : nil }, nameGenerationTimeout: 10)
     let manualID = manualSupervisor.spawn(
         role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
+        model: models[.codex]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
         throw fail("the manual-rename fixture agent's runner never started")
     }
     guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
         throw fail("the manual rename fixture call itself was refused")
     }
-    guard manualRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the manual-rename fixture runner had no live handler")
-    }
-    try await Task.sleep(nanoseconds: 300_000_000)
+    try await completeTurn(manualSupervisor, manualRunner, manualID, "t1")
     guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
           manualSupervisor.records[manualID]?.displayNameSource == .manual,
-          lineCount(manualCounter) == 0 else {
-        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(lineCount(manualCounter))")
+          manual.invocationCount == 0 else {
+        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(manual.invocationCount)")
     }
     manualRunner.releaseRunAfterStop()
 
-    // -- 5. claude: the harness that DOES name its own conversations must
-    // never fall through to the pi one-shot, and a turn with no session file
-    // on disk yet must not crash or invent a title. --
-    let claudeConfig = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode)
-    let claudeCalled = LockedFlag()
+    // -- 5. claude with no session file at all: the read finds nothing, and
+    // the fall-through goes to CLAUDE's titler. A pi on the same machine is
+    // never asked — there is no cross-CLI route. --
+    let claudeBin = root.appendingPathComponent("claude-bin", isDirectory: true)
+    let claudeTitler = try FakeTitlerCLI(
+        binDirectory: claudeBin, harness: .claudeCode,
+        log: root.appendingPathComponent("claude-log", isDirectory: true), behavior: .succeed("Inspect missing session file"))
+    let piBeside = try FakeTitlerCLI(
+        binDirectory: claudeBin, harness: .pi,
+        log: root.appendingPathComponent("claude-pi-log", isDirectory: true), behavior: .succeed("Pi must not title claude"))
     let claudeStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("claude-support", isDirectory: true))
     let claudeRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let claudeSupervisor = AgentSupervisor(
         store: claudeStore, makeRunner: { _ in claudeRunner },
-        nameGenerationCapabilityProvider: { claudeCalled.set(); return nil },
-        nameGenerationTimeout: 2)
+        nameTitlerCommand: titlerCommands(in: claudeBin),
+        nameGenerationTimeout: 10,
+        claudeSessionTitle: { cwd, sessionId in
+            ClaudeSessionTitleReader.title(homeURL: root, cwd: cwd, sessionId: sessionId)
+        })
     let claudeID = claudeSupervisor.spawn(
         role: nil, prompt: "a claude agent with no session file on disk", cwd: root, harness: .claudeCode,
-        model: claudeConfig.model, thinking: claudeConfig.thinking)
+        model: models[.claudeCode]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { claudeRunner.runCount > 0 }) else {
         throw fail("the claude fixture agent's runner never started")
     }
-    let claudeNameBefore = claudeSupervisor.records[claudeID]?.displayName
-    guard claudeRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the claude fixture runner had no live handler")
-    }
-    // No session file exists at this cwd, so there is nothing to read; this
-    // must resolve to "no title yet", not a crash and not an invented one.
-    try await Task.sleep(nanoseconds: 300_000_000)
-    guard claudeSupervisor.records[claudeID]?.displayName == claudeNameBefore,
-          !claudeCalled.wasSet else {
-        throw fail("a claude agent with no session file fell through to the pi one-shot fallback (called=\(claudeCalled.wasSet)) or changed its name without a title to read")
+    try await completeTurn(claudeSupervisor, claudeRunner, claudeID, "t1")
+    guard claudeSupervisor.records[claudeID]?.displayName == "Inspect missing session file",
+          claudeSupervisor.records[claudeID]?.displayNameSource == .generated,
+          claudeTitler.invocationCount == 1,
+          piBeside.invocationCount == 0 else {
+        throw fail("a session-less claude turn did not reach claude's own titler (claude=\(claudeTitler.invocationCount), pi=\(piBeside.invocationCount), name=\(String(describing: claudeSupervisor.records[claudeID]?.displayName)))")
     }
     claudeRunner.releaseRunAfterStop()
 
-    return "automatic name refresh: codex/pi fallback fires from turnCompleted with no explicit action, a later harness turn supersedes an earlier automatic name, the automatic path is bounded to 3 attempts against a provider that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and claude's own harness never falls through to the pi one-shot on a session-less turn"
+    return "automatic name refresh: the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
+}
+
+/// A fake claude / codex / pi on disk, for the session-titler witnesses. It is
+/// a real executable the production one-shot spawns, so everything the app
+/// does to reach it — command resolution, argv, cwd, stdin, environment, the
+/// output channel — is the production path. Each invocation N records
+/// `args-N` (one argument per line), `cwd-N` / `cwd-listing-N`, `stdin-N`, and
+/// for codex the `--output-schema` file as `schema-N`, under `log`. While
+/// `log/hold` exists it waits (after touching `started-N`), so a check can
+/// interleave a rename with a live titler. The name may contain `$n`.
+private struct FakeTitlerCLI {
+    enum Behavior { case succeed(String), fail }
+    let executable: URL
+    let log: URL
+
+    var command: PiAgentRunner.ResolvedCommand {
+        PiAgentRunner.ResolvedCommand(executable: executable.path, prefixArgs: [])
+    }
+
+    init(binDirectory: URL, harness: AgentHarness, log: URL, behavior: Behavior) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: binDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: log, withIntermediateDirectories: true)
+        let name: String
+        switch harness {
+        case .claudeCode: name = "claude"
+        case .codex: name = "codex"
+        case .pi: name = "pi"
+        }
+        executable = binDirectory.appendingPathComponent(name, isDirectory: false)
+        self.log = log
+        let emit: String
+        switch (harness, behavior) {
+        case (.claudeCode, .succeed(let title)):
+            emit = #"printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"name":"%s"}}\n' "\#(title)""#
+        case (.claudeCode, .fail):
+            emit = #"printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded"}'"#
+        case (.codex, .succeed(let title)):
+            emit = #"printf '%s\n' '{"type":"thread.started"}'; printf '{"name":"%s"}' "\#(title)" > "$out""#
+        case (.codex, .fail):
+            emit = #"printf 'not json at all' > "$out""#
+        case (.pi, .succeed(let title)):
+            emit = #"printf '{"name":"%s"}\n' "\#(title)""#
+        case (.pi, .fail):
+            emit = #"printf 'not a json name at all\n'"#
+        }
+        let script = #"""
+        #!/bin/sh
+        set -eu
+        LOG='\#(log.path)'
+        count=0
+        if [ -f "$LOG/count" ]; then count=$(wc -l < "$LOG/count" | tr -d ' '); fi
+        n=$((count + 1))
+        echo "$n" >> "$LOG/count"
+        printf '%s\n' "$@" > "$LOG/args-$n"
+        pwd -P > "$LOG/cwd-$n"
+        ls -A > "$LOG/cwd-listing-$n"
+        out=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "-o" ]; then out="$arg"; fi
+          if [ "$prev" = "--output-schema" ]; then cat "$arg" > "$LOG/schema-$n"; fi
+          prev="$arg"
+        done
+        cat > "$LOG/stdin-$n"
+        : > "$LOG/started-$n"
+        while [ -e "$LOG/hold" ]; do sleep 0.02; done
+        \#(emit)
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    }
+
+    var invocationCount: Int {
+        (try? String(contentsOf: log.appendingPathComponent("count"), encoding: .utf8)).map {
+            $0.split(separator: "\n", omittingEmptySubsequences: true).count
+        } ?? 0
+    }
+
+    func recorded(_ name: String, _ invocation: Int) -> String? {
+        try? String(contentsOf: log.appendingPathComponent("\(name)-\(invocation)"), encoding: .utf8)
+    }
+
+    func hold() throws { try Data().write(to: log.appendingPathComponent("hold")) }
+    func release() { try? FileManager.default.removeItem(at: log.appendingPathComponent("hold")) }
+}
+
+/// The runners' OWN resolution over one directory, exactly as production feeds
+/// it the process PATH: `resolvedCommand(pathDirs:extraDirs:fileExists:)` per
+/// harness, absolute hits only. A directory without `pi` therefore models a
+/// machine without pi.
+private func titlerCommands(in directory: URL) -> @Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand? {
+    let path = directory.path
+    return { harness in
+        let fileExists: @Sendable (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+        let command: PiAgentRunner.ResolvedCommand
+        switch harness {
+        case .claudeCode:
+            command = ClaudeAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        case .codex:
+            command = CodexAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        case .pi:
+            command = PiAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        }
+        return command.prefixArgs.isEmpty ? command : nil
+    }
+}
+
+/// T2 (0.7.26): every harness titles with its OWN CLI, end to end through the
+/// production supervisor — the runners' command resolution, the one-shot's argv,
+/// cwd, stdin and output channel, the sanitizer, the CAS, the store and an
+/// attached tile header. The argv is asserted literally (fixture argv must match
+/// production), and each fake records what it was really given.
+@MainActor
+private func checkPerHarnessSessionTitles<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-session-titles-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let schema = #"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+    let request = "fix the zone drag snapping when tiles are released near an edge"
+    // Pi refuses to SEND on a model its catalogue does not list; checks serve
+    // the QA catalogue fixture, so a pi agent that must run a turn uses one of
+    // its ids. claude/codex keep persisted provider-compatible ids.
+    let piModel = AgentCatalogQAFixture.pi[0]
+    let reply = "I will look at the drag handler and the snap threshold first."
+
+    // One machine with all three CLIs. Each harness's title is chosen to need
+    // the sanitizer: claude's is Title Case with a trailing period, and pi's
+    // holds "model" and "error", which the old word filter threw away.
+    let allBin = root.appendingPathComponent("bin-all", isDirectory: true)
+    let claude = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-claude", isDirectory: true), behavior: .succeed("Fix Zone Drag Snapping."))
+    let codex = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .codex,
+        log: root.appendingPathComponent("log-codex", isDirectory: true), behavior: .succeed("Wire codex session titles"))
+    let pi = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .pi,
+        log: root.appendingPathComponent("log-pi", isDirectory: true), behavior: .succeed("Model picker error handling"))
+    let fakes: [AgentHarness: FakeTitlerCLI] = [.claudeCode: claude, .codex: codex, .pi: pi]
+
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    var runners: [ScriptedAgentRunner] = []
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+            runners.append(runner)
+            return runner
+        },
+        nameTitlerCommand: titlerCommands(in: allBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { cwd, sessionId in
+            ClaudeSessionTitleReader.title(homeURL: home, cwd: cwd, sessionId: sessionId)
+        })
+    defer { runners.forEach { $0.releaseRunAfterStop() } }
+
+    let cases: [(AgentHarness, String, String, [String])] = [
+        (.claudeCode, "anthropic/claude-fixture-opus", "Fix zone drag snapping", [
+            "-p", "--no-session-persistence", "--output-format", "json", "--json-schema", schema,
+            "--model", "claude-fixture-opus", "--effort", "low", "--tools", "", "--strict-mcp-config",
+            "--disable-slash-commands", "--settings", #"{"disableAllHooks":true}"#,
+            "--system-prompt", AgentNameOneShot.titleRules,
+        ]),
+        (.codex, "openai-codex/gpt-fixture-codex", "Wire codex session titles", [
+            "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            "--output-schema", "<schema>", "-o", "<last-message>",
+            "-m", "gpt-fixture-codex", "-c", "model_reasoning_effort=low",
+        ]),
+        (.pi, piModel, "Model picker error handling", [
+            "--no-session", "--print", "--mode", "text", "--model", piModel,
+            "--thinking", "low", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files",
+            "--no-approve", "--system-prompt", AgentNameOneShot.titleRules,
+        ]),
+    ]
+    var expectedCalls: [AgentHarness: Int] = [:]
+    for (harness, model, expected, expectedArgs) in cases {
+        let id = supervisor.spawn(
+            role: nil, prompt: request, cwd: root, harness: harness, model: model, thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runners.count == supervisor.records.count }),
+              let runner = runners.last, let record = supervisor.records[id] else {
+            throw fail("\(harness): the fixture runner never started")
+        }
+        if harness == .claudeCode {
+            // A real session file with assistant frames and NO ai-title — what
+            // claude ≥ 2.1.278 writes headless. The reader must miss and the
+            // ladder must fall through to claude's own titler.
+            let location = AgentSupervisor.claudeSessionLocation(for: record)
+            let file = ClaudeSessionTranscriptReader.sessionFileURL(
+                homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+            try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let tile = Tile(id: UUID(), kind: .managedAgent, title: "Agent",
+                        frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
+                        zPosition: .fromLegacyRank(0), runtimeRef: nil,
+                        metadata: TileMetadata(launchProfileId: "managed-agent"))
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.attach(agentID: id, supervisor: supervisor)
+        defer { view.detach() }
+        guard runner.emit(.contentDelta(threadId: "t", turnId: "t1", streamKind: .assistant, delta: reply)),
+              runner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+            throw fail("\(harness): the fixture runner had no live handler")
+        }
+        guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+            supervisor.records[id]?.displayNameSource == .generated
+        }) else {
+            throw fail("RED \(harness): the first completed turn did not produce a generated title; name=\(String(describing: supervisor.records[id]?.displayName)) source=\(String(describing: supervisor.records[id]?.displayNameSource)) calls=\(fakes.mapValues(\.invocationCount))")
+        }
+        guard supervisor.records[id]?.displayName == expected,
+              view.qaAgentHeaderName == expected,
+              try store.load(id: id)?.displayName == expected,
+              try store.load(id: id)?.displayNameSource == .generated else {
+            throw fail("\(harness): the title did not reach record, store and attached header as \(expected.debugDescription): record=\(String(describing: supervisor.records[id]?.displayName)) header=\(view.qaAgentHeaderName)")
+        }
+        // Each harness asked its own CLI, once, and nobody else's.
+        expectedCalls[harness] = 1
+        for (other, fake) in fakes {
+            let want = expectedCalls[other] ?? 0
+            guard fake.invocationCount == want else {
+                throw fail("\(harness): \(other)'s CLI ran \(fake.invocationCount) time(s), want \(want)")
+            }
+        }
+        guard let fake = fakes[harness],
+              let argsText = fake.recorded("args", 1),
+              let stdin = fake.recorded("stdin", 1),
+              let cwd = fake.recorded("cwd", 1)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let listing = fake.recorded("cwd-listing", 1) else {
+            throw fail("\(harness): the fake CLI recorded nothing")
+        }
+        var args = argsText.components(separatedBy: "\n")
+        if args.last == "" { args.removeLast() }
+        if harness == .codex, args.count == expectedArgs.count {
+            // The two file arguments are per-run temp paths: assert their shape
+            // and the schema's bytes, then compare the rest literally.
+            guard args[6].hasPrefix("/"), args[8].hasPrefix("/"),
+                  !args[6].hasPrefix(cwd), !args[8].hasPrefix(cwd),
+                  fake.recorded("schema", 1) == schema else {
+                throw fail("codex: --output-schema/-o were not private files holding the name schema: \(args)")
+            }
+            args[6] = "<schema>"
+            args[8] = "<last-message>"
+        }
+        guard args == expectedArgs else {
+            throw fail("\(harness): argv differs from production's contract:\n got \(args)\nwant \(expectedArgs)")
+        }
+        guard !argsText.contains(request), !argsText.contains(reply),
+              stdin.contains(request), stdin.contains(reply),
+              harness != .codex || stdin.hasPrefix(AgentNameOneShot.titleRules) else {
+            throw fail("\(harness): the request/reply did not travel on stdin only: stdin=\(stdin.debugDescription)")
+        }
+        guard listing.isEmpty, cwd != root.resolvingSymlinksInPath().path,
+              !fileManager.fileExists(atPath: cwd) else {
+            throw fail("\(harness): the titler did not run in an empty private cwd that was removed afterwards: cwd=\(cwd) listing=\(listing.debugDescription)")
+        }
+
+        // No churn: a later turn re-asks nobody, and for claude a late ai-title
+        // does not replace the generated name (generated outranks harness).
+        if harness == .claudeCode, let record = supervisor.records[id] {
+            let location = AgentSupervisor.claudeSessionLocation(for: record)
+            let file = ClaudeSessionTranscriptReader.sessionFileURL(
+                homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+            try "{\"type\":\"ai-title\",\"aiTitle\":\"Later native title\"}\n".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let sequence = supervisor.records[id]?.latestTerminalEvent?.sequence
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)),
+              await waitUntil(timeout: 5, pollInterval: 0.02, {
+                  supervisor.records[id]?.latestTerminalEvent?.sequence != sequence
+                      && supervisor.qaActiveHarnessTitleCount == 0
+                      && supervisor.qaActiveNameGenerationCount == 0
+              }),
+              supervisor.records[id]?.displayName == expected,
+              fakes[harness]?.invocationCount == 1 else {
+            throw fail("\(harness): a second turn churned the generated title: \(String(describing: supervisor.records[id]?.displayName)), calls=\(fakes[harness]?.invocationCount ?? -1)")
+        }
+    }
+
+    // A claude-ONLY machine: no pi, no codex anywhere on the resolved path.
+    // Claude still gets a title from claude; a pi agent on that machine is
+    // refused without a process, and the refusal is in agent-diagnostics.log.
+    let onlyBin = root.appendingPathComponent("bin-claude-only", isDirectory: true)
+    let onlyClaude = try FakeTitlerCLI(
+        binDirectory: onlyBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-only-claude", isDirectory: true), behavior: .succeed("Title without pi installed"))
+    guard titlerCommands(in: onlyBin)(.pi) == nil, titlerCommands(in: onlyBin)(.codex) == nil else {
+        throw fail("the claude-only fixture resolved a pi or codex")
+    }
+    let onlySupport = root.appendingPathComponent("support-claude-only", isDirectory: true)
+    var onlyRunners: [ScriptedAgentRunner] = []
+    let onlySupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: onlySupport),
+        makeRunner: { _ in
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+            onlyRunners.append(runner)
+            return runner
+        },
+        nameTitlerCommand: titlerCommands(in: onlyBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { _, _ in nil })
+    defer { onlyRunners.forEach { $0.releaseRunAfterStop() } }
+    let onlyClaudeID = onlySupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .claudeCode,
+        model: "anthropic/claude-fixture-opus", thinking: "medium")
+    let onlyPiID = onlySupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .pi,
+        model: piModel, thinking: "medium")
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { onlyRunners.count == 2 }) else {
+        throw fail("claude-only: fixture runners never started")
+    }
+    for runner in onlyRunners {
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+            throw fail("claude-only: a fixture runner had no live handler")
+        }
+    }
+    let diagnosticsLog = onlySupport.appendingPathComponent("agent-diagnostics.log")
+    guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+        onlySupervisor.records[onlyClaudeID]?.displayNameSource == .generated
+            && onlySupervisor.qaActiveNameGenerationCount == 0
+    }), onlySupervisor.records[onlyClaudeID]?.displayName == "Title without pi installed",
+          onlyClaude.invocationCount == 1 else {
+        throw fail("RED claude-only: a machine with claude and no pi did not title the Claude agent: name=\(String(describing: onlySupervisor.records[onlyClaudeID]?.displayName)) calls=\(onlyClaude.invocationCount)")
+    }
+    let diagnostics = (try? String(contentsOf: diagnosticsLog, encoding: .utf8)) ?? ""
+    guard onlySupervisor.records[onlyPiID]?.displayNameSource != .generated,
+          onlySupervisor.records[onlyPiID]?.namingRequest == nil,
+          diagnostics.contains("agent=\(onlyPiID.rawValue.uuidString) naming: harness=Pi titler unavailable") else {
+        throw fail("claude-only: the pi agent was not refused-and-logged: source=\(String(describing: onlySupervisor.records[onlyPiID]?.displayNameSource)) log=\(diagnostics.debugDescription)")
+    }
+
+    // A titler FAILURE is logged too, with the harness and the reason — not
+    // the prompt.
+    let failBin = root.appendingPathComponent("bin-fail", isDirectory: true)
+    _ = try FakeTitlerCLI(
+        binDirectory: failBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-fail", isDirectory: true), behavior: .fail)
+    let failSupport = root.appendingPathComponent("support-fail", isDirectory: true)
+    let failRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let failSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: failSupport),
+        makeRunner: { _ in failRunner },
+        nameTitlerCommand: titlerCommands(in: failBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { _, _ in nil })
+    defer { failRunner.releaseRunAfterStop() }
+    let failID = failSupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .claudeCode,
+        model: "anthropic/claude-fixture-opus", thinking: "medium")
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { failRunner.runCount > 0 }),
+          failRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("failure logging: the fixture runner never started")
+    }
+    let failLog = failSupport.appendingPathComponent("agent-diagnostics.log")
+    guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+        ((try? String(contentsOf: failLog, encoding: .utf8)) ?? "")
+            .contains("agent=\(failID.rawValue.uuidString) naming: harness=Claude Code invalid provider output")
+    }), !((try? String(contentsOf: failLog, encoding: .utf8)) ?? "").contains(request) else {
+        throw fail("a failed titler run was not logged to agent-diagnostics.log (or the log carried the prompt): \(String(describing: try? String(contentsOf: failLog, encoding: .utf8)))")
+    }
+
+    return "per-harness session titles: claude (ai-title missing → claude titler), codex and pi each titled by their OWN fake CLI with the literal production argv, the agent's own model, stdin-only request+reply, an empty private cwd removed afterwards; sanitized titles reached record, store and attached header; no churn on a later turn or a late ai-title; a claude-only machine titles Claude and refuses+logs Pi; a failed titler is logged without the prompt"
+}
+
+/// The claude ladder's races, salvaged from the unlanded 0.7.21 bench and
+/// re-pointed at claude's own titler: a native ai-title still wins for free;
+/// a manual rename during the file read or during the titler process wins; a
+/// request armed while the read was in flight is not superseded.
+@MainActor
+private func checkClaudeTitleLadderRaces<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-claude-title-ladder-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+    let bin = root.appendingPathComponent("bin", isDirectory: true)
+    let titler = try FakeTitlerCLI(
+        binDirectory: bin, harness: .claudeCode,
+        log: root.appendingPathComponent("log", isDirectory: true), behavior: .succeed("Session investigation"))
+
+    func fixture(
+        _ name: String, blockRead: DispatchSemaphore? = nil, readEntered: LockedFlag = LockedFlag()
+    ) async throws -> (AgentSupervisor, ScriptedAgentRunner, AgentID, URL) {
+        let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent(name))
+        let supervisor = AgentSupervisor(
+            store: store, makeRunner: { _ in runner },
+            nameTitlerCommand: titlerCommands(in: bin),
+            nameGenerationTimeout: 5,
+            claudeSessionTitle: { cwd, sessionId in
+                readEntered.set()
+                if let blockRead { _ = blockRead.wait(timeout: .now() + 5) }
+                return ClaudeSessionTitleReader.title(homeURL: home, cwd: cwd, sessionId: sessionId)
+            })
+        let id = supervisor.spawn(
+            role: nil, prompt: "investigate a Claude session without a title", cwd: root,
+            harness: .claudeCode, model: "anthropic/claude-fixture-opus", thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount > 0 }),
+              let record = supervisor.records[id] else { throw fail("\(name): runner did not start") }
+        let location = AgentSupervisor.claudeSessionLocation(for: record)
+        let file = ClaudeSessionTranscriptReader.sessionFileURL(
+            homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+        try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return (supervisor, runner, id, file)
+    }
+    func emit(_ runner: ScriptedAgentRunner) throws {
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: UUID().uuidString,
+                                        outcome: .completed, errorMessage: nil)) else {
+            throw fail("claude ladder fixture had no live event handler")
+        }
+    }
+
+    // A native title is still the free first rung: adopted, revised, and the
+    // titler is never spawned.
+    let (native, nativeRunner, nativeID, nativeFile) = try await fixture("native-title")
+    defer { nativeRunner.releaseRunAfterStop() }
+    for title in ["Native summary", "Native summary", "Revised summary"] {
+        try "{\"type\":\"ai-title\",\"aiTitle\":\"\(title)\"}\n".write(to: nativeFile, atomically: true, encoding: .utf8)
+        let sequence = native.records[nativeID]?.latestTerminalEvent?.sequence
+        try emit(nativeRunner)
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+            native.records[nativeID]?.latestTerminalEvent?.sequence != sequence
+                && native.qaActiveHarnessTitleCount == 0 && native.records[nativeID]?.displayName == title
+        }), native.records[nativeID]?.displayNameSource == .harness, titler.invocationCount == 0 else {
+            throw fail("a native ai-title (including unchanged/revised) fell through to the titler or failed to land")
+        }
+    }
+
+    // A rename while the ai-title read is in flight: the nil read must not
+    // launch a titler over the person's name.
+    let readGate = DispatchSemaphore(value: 0)
+    defer { readGate.signal() }
+    let entered = LockedFlag()
+    let (manual, manualRunner, manualID, _) = try await fixture(
+        "rename-during-read", blockRead: readGate, readEntered: entered)
+    defer { manualRunner.releaseRunAfterStop() }
+    try emit(manualRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { entered.wasSet }),
+          manual.rename(agentID: manualID, to: "Human during read") else {
+        throw fail("could not interleave a rename with the claude title read")
+    }
+    readGate.signal()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manual.qaActiveHarnessTitleCount == 0 }),
+          manual.qaActiveNameGenerationCount == 0,
+          manual.records[manualID]?.displayName == "Human during read",
+          titler.invocationCount == 0 else {
+        throw fail("a nil title read used a stale record and launched the titler over a manual rename")
+    }
+
+    // A request armed while the read is in flight survives the nil read.
+    let pendingGate = DispatchSemaphore(value: 0)
+    defer { pendingGate.signal() }
+    let pendingEntered = LockedFlag()
+    let (pending, pendingRunner, pendingID, _) = try await fixture(
+        "request-during-read", blockRead: pendingGate, readEntered: pendingEntered)
+    defer { pendingRunner.releaseRunAfterStop() }
+    try emit(pendingRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { pendingEntered.wasSet }),
+          let pendingRequest = pending.beginNameGeneration(agentID: pendingID) else {
+        throw fail("could not interleave a naming request with the claude title read")
+    }
+    pendingGate.signal()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { pending.qaActiveHarnessTitleCount == 0 }),
+          pending.records[pendingID]?.namingRequest == pendingRequest,
+          titler.invocationCount == 0,
+          pending.applyGeneratedName("Explicit proposal", for: pendingRequest, agentID: pendingID) else {
+        throw fail("a nil title read superseded an already-armed naming request")
+    }
+
+    // A rename while claude's titler PROCESS is running wins the CAS.
+    try titler.hold()
+    defer { titler.release() }
+    let (late, lateRunner, lateID, _) = try await fixture("rename-during-titler")
+    defer { lateRunner.releaseRunAfterStop() }
+    try emit(lateRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fileManager.fileExists(atPath: titler.log.appendingPathComponent("started-1").path)
+    }), late.records[lateID]?.namingRequest != nil,
+          late.rename(agentID: lateID, to: "Human during titler") else {
+        throw fail("the missing-title fall-through did not reach a live claude titler to race")
+    }
+    titler.release()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { late.qaActiveNameGenerationCount == 0 }),
+          late.records[lateID]?.displayName == "Human during titler",
+          late.records[lateID]?.displayNameSource == .manual,
+          late.records[lateID]?.namingRequest == nil else {
+        throw fail("a late titler completion overwrote a manual rename")
+    }
+    return "claude title ladder: native ai-title adopted/revised with 0 titler calls; renames during the read and during the titler process win; a request armed during the read survives"
 }
 
 private final class LockedFlag: @unchecked Sendable {
