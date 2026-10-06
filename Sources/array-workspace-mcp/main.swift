@@ -139,7 +139,8 @@ struct ArrayWorkspaceMCP {
                 reply = await waitAgents(arguments)
             } else if let tool = WorkspaceMCPToolCatalog.tool(named: name) {
                 do {
-                    reply = try await post(op: tool.operation.rawValue, payload: .object(arguments))
+                    reply = try await post(op: tool.operation.rawValue, payload: .object(arguments),
+                                           requestId: Self.providerCallID(params))
                 } catch {
                     reply = Self.errorReply(code: "outcome_unknown", message: "\(error). Do not repeat the effect blindly; call array_workspace_context and read recentOperations.")
                 }
@@ -157,11 +158,26 @@ struct ArrayWorkspaceMCP {
             return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object(result)]))
         }
 
-        func post(op: String, payload: WorkspaceMCPJSON) async throws -> WorkspaceMCPJSON {
+        /// The client's own id for this tool call, from the request's `_meta`:
+        /// claude sends `claudecode/toolUseId` (its tool_use id), codex sends
+        /// `callId` (its `mcpToolCall` item id) — both measured, claude 2.1.291
+        /// and codex 0.159.3. It becomes the request id, exactly as pi's bridge
+        /// sends its toolCallId, so a delegation's operationId and its chip's
+        /// `sourceItemID` name the provider's call and the transcript can fold
+        /// that call's row into the chip (T4b). nil leaves a fresh UUID.
+        static func providerCallID(_ params: [String: WorkspaceMCPJSON]) -> String? {
+            guard case .object(let meta)? = params["_meta"] else { return nil }
+            for key in ["claudecode/toolUseId", "callId"] {
+                if case .string(let id)? = meta[key], SpawnResultFile.validatedHandle(id) == id { return id }
+            }
+            return nil
+        }
+
+        func post(op: String, payload: WorkspaceMCPJSON, requestId: String? = nil) async throws -> WorkspaceMCPJSON {
             let body: [String: WorkspaceMCPJSON] = [
                 "schema": .string(WorkspaceAPISchema.v1),
                 "kind": .string("request"),
-                "requestId": .string(UUID().uuidString),
+                "requestId": .string(requestId ?? UUID().uuidString),
                 "agentId": .string(agentID),
                 "token": .string(token),
                 "op": .string(op),

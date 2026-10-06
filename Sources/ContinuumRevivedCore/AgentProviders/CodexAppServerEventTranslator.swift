@@ -276,6 +276,27 @@ public struct CodexAppServerEventTranslator {
             }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .fileChange, title: "Edit")]
 
+        case "mcpToolCall":
+            // T4b (0.7.26) — previously swallowed, so every MCP call drew no row:
+            // Array's own `array_workspace` tools included, which left a codex
+            // delegation's chip nothing to fold into and a refused delegate
+            // silent. exec's `mcp_tool_call` mapping: tool and server are
+            // identifiers, the arguments stay opaque. The item id is the call id
+            // codex hands the server as `_meta.callId` (measured on 0.159.3), and
+            // `array-workspace-mcp` makes it the request id a delegate's chip
+            // carries — which is what supersedes this row.
+            let title = (item["tool"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "MCP tool"
+            if let onRuntimeObservation {
+                let server = (item["server"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: title,
+                    fields: server.map { [(key: "server", value: $0)] } ?? [],
+                    observedAt: now()
+                )))
+            }
+            return [.itemStarted(threadId: threadId, itemId: itemId, kind: .mcpToolCall, title: title)]
+
         default:
             // userMessage (our own prompt echoed back — exec has no
             // equivalent), agentMessage/reasoning (no item.started analogue in
@@ -404,9 +425,35 @@ public struct CodexAppServerEventTranslator {
                 kind: .fileChange,
                 status: ok ? .completed : .failed)]
 
+        case "mcpToolCall":
+            // A refusal arrives as `status: failed` with an `isError` result, or
+            // with `error` when codex itself declined the call; either text is
+            // the row's error, never dropped.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .ended,
+                    outputPreview: Self.mcpOutputPreview(item),
+                    observedAt: now())))
+            }
+            return [.itemCompleted(
+                threadId: threadId,
+                itemId: itemId,
+                kind: .mcpToolCall,
+                status: (item["status"] as? String) == "failed" ? .failed : .completed)]
+
         default:
             return []
         }
+    }
+
+    /// `error.message`, else the result's joined text blocks.
+    private static func mcpOutputPreview(_ item: [String: Any]) -> String? {
+        let error = (item["error"] as? [String: Any])?["message"] as? String
+        let text = error ?? ((item["result"] as? [String: Any])?["content"] as? [[String: Any]])?
+            .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n")
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     // MARK: - token usage
