@@ -7730,6 +7730,11 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     /// were all green while a Stop was being recorded as a failure.
     private let stopError: Error?
     private let persistentBetweenTurns: Bool
+    /// Held at the top of `run`, before the live handler exists. The supervisor
+    /// builds the runner on the main actor but calls `run` from a global queue,
+    /// so "the runner exists" never meant "the runner is running"; a gate lets a
+    /// check make that window as wide as a loaded machine does.
+    private let startGate: DispatchSemaphore?
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
@@ -7748,9 +7753,11 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         releaseOnStop: Bool = true,
         runError: Error? = nil,
         stopError: Error? = nil,
-        persistentBetweenTurns: Bool = false
+        persistentBetweenTurns: Bool = false,
+        startGate: DispatchSemaphore? = nil
     ) {
         self.script = script
+        self.startGate = startGate
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
         self.releaseOnStop = releaseOnStop
@@ -7775,6 +7782,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
     func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        startGate?.wait()
         lock.withLock {
             runCountStorage += 1
             promptsStorage.append(prompt.text)
@@ -12119,7 +12127,11 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
     let supervisor = AgentSupervisor(
         store: store,
         makeRunner: { _ in
-            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+            // `run` may not begin until the main queue turns over: the slow
+            // global-queue start under load, made certain.
+            let started = DispatchSemaphore(value: 0)
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true, startGate: started)
+            DispatchQueue.main.async { started.signal() }
             runners.append(runner)
             return runner
         },
@@ -12152,7 +12164,12 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
     for (harness, model, expected, expectedArgs) in cases {
         let id = supervisor.spawn(
             role: nil, prompt: request, cwd: root, harness: harness, model: model, thinking: "medium")
-        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runners.count == supervisor.records.count }),
+        // A runner that EXISTS is not yet running: `makeRunner` returns on the
+        // main actor and `run` starts later on a global queue. Only `runCount`
+        // says the live handler is there for `emit`.
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+                  runners.count == supervisor.records.count && (runners.last?.runCount ?? 0) > 0
+              }),
               let runner = runners.last, let record = supervisor.records[id] else {
             throw fail("\(harness): the fixture runner never started")
         }
@@ -12265,7 +12282,9 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
     let onlySupervisor = AgentSupervisor(
         store: AgentStore(applicationSupportDirectory: onlySupport),
         makeRunner: { _ in
-            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+            let started = DispatchSemaphore(value: 0)
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true, startGate: started)
+            DispatchQueue.main.async { started.signal() }
             onlyRunners.append(runner)
             return runner
         },
@@ -12279,7 +12298,9 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
     let onlyPiID = onlySupervisor.spawn(
         role: nil, prompt: request, cwd: root, harness: .pi,
         model: piModel, thinking: "medium")
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, { onlyRunners.count == 2 }) else {
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        onlyRunners.count == 2 && onlyRunners.allSatisfy { $0.runCount > 0 }
+    }) else {
         throw fail("claude-only: fixture runners never started")
     }
     for runner in onlyRunners {
