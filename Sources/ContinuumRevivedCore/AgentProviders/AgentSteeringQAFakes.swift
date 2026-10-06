@@ -17,6 +17,11 @@ import Foundation
 // The prompt text picks the turn's shape (shared by all three):
 //   TOOL        a tool call that waits ~1.5 s for a steer before finishing
 //   SLOW        a tool call that waits up to 10 s, for an interrupt
+//   HOLD        (claude, codex) a tool call that runs up to 10 s and takes no
+//               steer until it finishes, so an interrupt finds a steer the
+//               provider holds but has not consumed (live claude 2.1.291
+//               lists it under `still_queued` and runs it as its next turn
+//               unless the interrupt asks `cancel_queued`)
 //   BACKGROUND  (claude) starts a `sleep` job in the process group, writes its
 //               pid to bg.pid and reports one background task
 //   PLAIN       0.6 s of text generation with no tool boundary
@@ -111,7 +116,7 @@ def record(line):
         f.write(line.rstrip("\n") + "\n")
 
 def shape(text):
-    for word in ("TOOL", "SLOW", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
+    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
         if word in text:
             return word
     return "TEXT"
@@ -144,9 +149,28 @@ def reader():
         record(line)
         obj = json.loads(line)
         if obj.get("type") == "control_request":
-            if obj.get("request", {}).get("subtype") == "interrupt":
+            request = obj.get("request", {})
+            receipt = {"still_queued": []}
+            if request.get("subtype") == "interrupt":
+                # The live receipt: uuid-stamped messages claude holds and has
+                # not consumed survive the interrupt (and later run as their own
+                # turn) unless cancel_queued asks for them to be cancelled.
+                held = []
+                while True:
+                    try:
+                        held.append(inbox.get_nowait())
+                    except queue.Empty:
+                        break
+                stamped = [m.get("uuid") for m in held if m is not None and m.get("uuid")]
+                if request.get("cancel_queued"):
+                    receipt["cancelled"] = stamped
+                    held = [m for m in held if m is None or not m.get("uuid")]
+                else:
+                    receipt["still_queued"] = stamped
+                for m in held:
+                    inbox.put(m)
                 interrupted.set()
-            out({"type": "control_response", "response": {"subtype": "success", "request_id": obj.get("request_id"), "response": {"still_queued": []}}})
+            out({"type": "control_response", "response": {"subtype": "success", "request_id": obj.get("request_id"), "response": receipt}})
             continue
         inbox.put(obj)
     inbox.put(None)
@@ -154,7 +178,10 @@ def reader():
 threading.Thread(target=reader, daemon=True).start()
 
 def replay(msg):
-    out({"type": "user", "message": msg.get("message"), "session_id": SID, "parent_tool_use_id": None, "isReplay": True})
+    frame = {"type": "user", "message": msg.get("message"), "session_id": SID, "parent_tool_use_id": None, "isReplay": True}
+    if msg.get("uuid"):
+        frame["uuid"] = msg["uuid"]
+    out(frame)
 
 def result(is_error=False, subtype="success"):
     out({"type": "result", "subtype": subtype, "is_error": is_error, "session_id": SID,
@@ -200,6 +227,17 @@ def run_turn(msg):
         if steer is not None:
             replay(steer)
             say("steered: " + text_of(steer))
+    if kind == "HOLD":
+        interrupted.clear()
+        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_hold", "name": "Bash", "input": {"command": "true"}}]}, "parent_tool_use_id": None, "session_id": SID})
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if interrupted.is_set():
+                out({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_hold", "is_error": True, "content": "declined"}]}, "parent_tool_use_id": None, "session_id": SID})
+                result(True, "error_during_execution")
+                return
+            time.sleep(0.02)
+        out({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_hold", "is_error": False, "content": "done"}]}, "parent_tool_use_id": None, "session_id": SID})
     if kind == "PLAIN":
         time.sleep(0.6)
     if kind == "LONG":
@@ -256,6 +294,20 @@ def run_turn(turn_id, text):
             except queue.Empty:
                 continue
         out({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fake", "type": "commandExecution", "status": "completed"}}})
+    if kind == "HOLD":
+        # turn/steer is answered at once, but the steered input is only applied
+        # after the command; an interrupt first leaves it unapplied.
+        interrupted.clear()
+        out({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-hold", "type": "commandExecution", "command": "true"}}})
+        deadline = time.time() + 10
+        while time.time() < deadline and not interrupted.is_set():
+            time.sleep(0.02)
+        out({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-hold", "type": "commandExecution", "status": "completed"}}})
+        if interrupted.is_set():
+            status = "interrupted"
+        else:
+            while not steered.empty():
+                out({"method": "item/agentMessage/delta", "params": {"threadId": THREAD, "turnId": turn_id, "itemId": "msg-steer", "delta": "steered: " + steered.get()}})
     if kind == "PLAIN":
         time.sleep(0.6)
     if kind == "LONG":

@@ -331,9 +331,10 @@ func runAgentQueueRailChecks() async throws {
                        "\(kind): a delivering steer must not be editable or deletable")
         }
         composer.requestStop()
-        if kind == .pi {
-            // pi hands an unread steer back on abort: it is Array's again, held
-            // and deletable.
+        if kind != .codex {
+            // pi hands an unread steer back on abort, claude on an interrupt
+            // that cancels what it holds (T5c — claude used to run it as its
+            // own next turn after Stop): it is Array's again, held and deletable.
             try await eventually("\(kind): an aborted turn's unread steer must come back as held, got \(supervisor.pendingSteers(for: id))", timeout: 12) {
                 !supervisor.isRunning(id) && supervisor.pendingSteers(for: id).map(\.state) == [.held]
                     && row("late steer")?.qaOffersRemove == true

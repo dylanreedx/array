@@ -287,5 +287,47 @@ func runAgentSteeringChecks() async throws {
         try expect(h.spawns == 1, "ops: send-now must not kill pi, spawned \(h.spawns), frames \(h.frames.compactMap { $0["type"] as? String }), turns \(h.completedTurns)")
     }
 
-    print("AgentSteeringChecks passed: accept(.steer) reaches claude stdin, codex turn/steer (expectedTurnId) and pi steer and is echoed only once confirmed; a held steer runs next ahead of the queue; force send interrupts without killing and keeps the queue; Stop interrupts, pauses, and Resume drains on the same process; a claude background job outlives its turn and blocks reaping while an idle session is reaped; a crash respawns with --resume; a promoted steer becomes a bound turn; reorder, delete and send-now work on the durable queue")
+    // 9. T5c — Stop while a steer is HANDED to the provider but not consumed.
+    //    After Stop nothing further runs until the user acts: claude and pi give
+    //    the steer back, so it is held and editable at the front of the rail;
+    //    codex confirmed it on turn/steer and its app-server ends with the turn.
+    //    The queue behind it shows "Paused after Stop".
+    for kind in [AgentSteeringQAFakes.Harness.claude, .pi, .codex] {
+        let h = try Harness(kind)
+        defer { h.tearDown() }
+        onPath(h)
+        let seed = kind == .pi ? "SLOW job" : "HOLD job"
+        try expect(h.supervisor.send(seed, to: h.id), "\(kind) stop-handed: seed refused")
+        try await eventually("\(kind) stop-handed: bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
+        try expect(await h.supervisor.accept(.queue(AgentPrompt("queued one")), for: h.id) == .accepted, "\(kind) stop-handed: queue refused")
+        try expect(await h.supervisor.accept(.steer(AgentPrompt("handed steer")), for: h.id) == .accepted, "\(kind) stop-handed: steer refused")
+        try await eventually("\(kind) stop-handed: the steer must be handed to the provider at the tool boundary") {
+            kind == .codex
+                ? h.echoes == ["handed steer"]
+                : h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        try expect(await h.supervisor.accept(.stop, for: h.id) == .accepted, "\(kind) stop-handed: accept(.stop) refused")
+        try await eventually("\(kind) stop-handed: the turn must end as interrupted") {
+            !h.supervisor.isRunning(h.id) && h.completedTurns == [.interrupted]
+        }
+        // The fakes promote a surviving message to their next turn within
+        // milliseconds; give that every chance to show.
+        try await Task.sleep(for: .milliseconds(1500))
+        try expect(h.completedTurns == [.interrupted] && !h.supervisor.isRunning(h.id),
+                   "\(kind) stop-handed: nothing may run after Stop, turns \(h.completedTurns), prompts \(h.promptTexts)")
+        let rail = h.supervisor.queueRailState(for: h.id)
+        try expect(rail.pause == .afterStop && rail.queued.map(\.text) == ["queued one"],
+                   "\(kind) stop-handed: the queue must stay held, Paused after Stop, got \(rail)")
+        if kind == .codex {
+            try expect(rail.steers.isEmpty, "codex stop-handed: a confirmed steer is not Array's to hold, got \(rail.steers)")
+        } else {
+            try expect(rail.steers.map(\.text) == ["handed steer"] && rail.steers.map(\.kind) == [.heldSteer],
+                       "\(kind) stop-handed: the unconsumed steer must come back held and editable at the front, got \(rail.steers)")
+            try expect(h.echoes.isEmpty, "\(kind) stop-handed: a returned steer must not be shown as sent, echoes \(h.echoes)")
+            try expect(h.spawns == 1, "\(kind) stop-handed: Stop must interrupt, not kill, spawned \(h.spawns)")
+        }
+    }
+
+    print("AgentSteeringChecks passed: accept(.steer) reaches claude stdin, codex turn/steer (expectedTurnId) and pi steer and is echoed only once confirmed; a held steer runs next ahead of the queue; force send interrupts without killing and keeps the queue; Stop interrupts, pauses, and Resume drains on the same process; a claude background job outlives its turn and blocks reaping while an idle session is reaped; a crash respawns with --resume; a promoted steer becomes a bound turn; reorder, delete and send-now work on the durable queue; Stop with a steer handed but unconsumed runs nothing further, returns the claude/pi steer held at the front and pauses the queue on all three harnesses")
 }

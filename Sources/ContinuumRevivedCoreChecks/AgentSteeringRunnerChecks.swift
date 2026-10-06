@@ -14,7 +14,7 @@ func runAgentSteeringRunnerChecks() {
     runClaudeSessionRunnerChecks()
     runPiSteeringRunnerChecks()
     runCodexSteeringRunnerChecks()
-    print("Agent steering runner checks passed: claude is one stream-json process for many turns with the exact argv and stdin frames, steers land at the tool boundary and are confirmed by replay, interrupt keeps the process, a background job survives the result frame, a promoted steer is an adoptable unsolicited turn, the session-mode retry and crash paths hold, /compact rides stdin; pi steers and confirms through queue_update and returns unread steers on abort; codex steers with expectedTurnId and interrupts without killing")
+    print("Agent steering runner checks passed: claude is one stream-json process for many turns with the exact argv and stdin frames, steers land at the tool boundary and are confirmed by replay, interrupt keeps the process, a background job survives the result frame, a promoted steer is an adoptable unsolicited turn, the session-mode retry and crash paths hold, /compact rides stdin; pi steers and confirms through queue_update and returns unread steers on abort; codex steers with expectedTurnId and interrupts without killing; an interrupt cancels a claude steer handed over but not consumed and hands it back, and an unapplied codex steer dies with its app-server")
     #endif
 }
 
@@ -311,6 +311,55 @@ private func runClaudeSessionRunnerChecks() {
             runner.stop()
         }
     }
+
+    // 9. T5c — an interrupt while a steer is handed over but not consumed
+    //    (claude holds it until the tool ends). Live claude 2.1.291 lists such a
+    //    message under `still_queued` and runs it as its NEXT turn after a plain
+    //    interrupt; the interrupt must cancel it and hand it back, and nothing
+    //    may run afterwards.
+    do {
+        let root = steeringFakeRoot(.claude)
+        defer { try? FileManager.default.removeItem(at: root) }
+        withFakeOnPath(root) {
+            let runner = makeRunner(root)
+            let dispositions = SteeringBox<[(UUID, AgentSteerDisposition)]>([])
+            runner.observeSteerDispositions { id, d in dispositions.value.append((id, d)) }
+            let unsolicited = SteeringBox<Int>(0)
+            runner.observeUnsolicitedTurns { unsolicited.value += 1 }
+            let events = SteeringBox<[AgentRuntimeEvent]>([])
+            let done = inBackground { try? runner.run(prompt: AgentPrompt("HOLD job")) { events.value.append($0) } }
+            expect(waitUntil { events.value.contains(where: isToolStart) && runner.acceptsSteerNow },
+                   "claude stop-handed: the held tool must start")
+            let steerID = UUID()
+            do { try runner.steer(AgentPrompt("handed steer"), id: steerID) } catch {
+                expect(false, "claude stop-handed: steer() mid-tool must succeed: \(error)")
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+            do { try runner.interrupt() } catch { expect(false, "claude stop-handed: interrupt() must be acknowledged: \(error)") }
+            expect(done.wait(timeout: .now() + 3) == .success, "claude stop-handed: the turn must end after the interrupt")
+            expect(outcomes(events.value) == [.interrupted],
+                   "claude stop-handed: the turn must close .interrupted, got \(outcomes(events.value))")
+            Thread.sleep(forTimeInterval: 0.8)
+            expect(unsolicited.value == 0 && !runner.hasUnsolicitedTurn,
+                   "claude stop-handed: nothing may run after the interrupt, yet claude started \(unsolicited.value) turn(s) of its own")
+            expect(dispositions.value.map(\.0) == [steerID] && dispositions.value.map(\.1) == [.returned],
+                   "claude stop-handed: the cancelled steer must come back returned, got \(dispositions.value)")
+            let frames = AgentSteeringQAFakes.receivedFrames(in: root)
+            let steerFrame = frames.first { userTexts([$0]) == ["handed steer"] }
+            expect((steerFrame?["uuid"] as? String)?.lowercased() == steerID.uuidString.lowercased(),
+                   "claude stop-handed: the steer must carry its id as the message uuid, got \(String(describing: steerFrame))")
+            let interrupt = frames.first { (($0["request"] as? [String: Any])?["subtype"] as? String) == "interrupt" }
+            expect((interrupt?["request"] as? [String: Any])?["cancel_queued"] as? Bool == true,
+                   "claude stop-handed: the interrupt must ask claude to cancel what it holds, got \(String(describing: interrupt))")
+            let after = SteeringBox<[AgentRuntimeEvent]>([])
+            do { try runner.run(prompt: AgentPrompt("after")) { after.value.append($0) } } catch {
+                expect(false, "claude stop-handed: the same process must take the next message: \(error)")
+            }
+            expect(outcomes(after.value) == [.completed] && AgentSteeringQAFakes.spawnCount(in: root) == 1,
+                   "claude stop-handed: the next turn must be the user's, on the same process, got \(outcomes(after.value))")
+            runner.stop()
+        }
+    }
 }
 
 // MARK: - Pi
@@ -436,6 +485,37 @@ private func runCodexSteeringRunnerChecks() {
                    "codex interrupt: an interrupted turn closes .interrupted without an error, got \(outcomes(events.value)) \(String(describing: thrown.value))")
             let methods = AgentSteeringQAFakes.receivedFrames(in: root).compactMap { $0["method"] as? String }
             expect(methods.contains("turn/interrupt"), "codex interrupt: turn/interrupt must reach the app-server, got \(methods)")
+        }
+    }
+
+    // T5c — a steer codex accepted (turn/steer answered) but had not applied
+    // when the turn was interrupted. turn/steer's response is the only receipt
+    // codex gives and turn/interrupt has no cancel or receipt, so the steer
+    // stays confirmed; what makes Stop final is that the app-server lives only
+    // as long as its turn, so nothing it held can start another.
+    do {
+        let root = steeringFakeRoot(.codex)
+        defer { try? FileManager.default.removeItem(at: root) }
+        withFakeOnPath(root, extra: ["CONTINUUM_CODEX_TRANSPORT": "app-server"]) {
+            let runner = makeRunner(root)
+            let dispositions = SteeringBox<[(UUID, AgentSteerDisposition)]>([])
+            runner.observeSteerDispositions { id, d in dispositions.value.append((id, d)) }
+            let events = SteeringBox<[AgentRuntimeEvent]>([])
+            let done = inBackground { try? runner.run(prompt: AgentPrompt("HOLD job")) { events.value.append($0) } }
+            expect(waitUntil { events.value.contains(where: isToolStart) && runner.acceptsSteerNow },
+                   "codex stop-handed: the command must start")
+            let steerID = UUID()
+            do { try runner.steer(AgentPrompt("handed steer"), id: steerID) } catch {
+                expect(false, "codex stop-handed: turn/steer must be accepted: \(error)")
+            }
+            do { try runner.interrupt() } catch { expect(false, "codex stop-handed: turn/interrupt must succeed: \(error)") }
+            expect(done.wait(timeout: .now() + 5) == .success, "codex stop-handed: the turn must end")
+            expect(outcomes(events.value) == [.interrupted] && dispositions.value.map(\.1) == [.consumed],
+                   "codex stop-handed: the turn closes .interrupted with the steer confirmed by turn/steer, got \(outcomes(events.value)) \(dispositions.value)")
+            let pid = AgentSteeringQAFakes.latestPid(in: root)
+            expect(waitUntil(3) { pid.map { kill($0, 0) != 0 } ?? false },
+                   "codex stop-handed: the app-server must end with its interrupted turn, so the unapplied steer cannot start another")
+            expect(!runner.acceptsSteerNow, "codex stop-handed: no turn may remain live after the interrupt")
         }
     }
 }
