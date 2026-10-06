@@ -26,6 +26,13 @@ struct AgentReferenceStatusSource: @unchecked Sendable {
 
 /// A transcript milestone for one real child agent. The block owns only stable
 /// identity; the host resolves current status and tile placement when activated.
+///
+/// T4 (0.7.26): a run of CONSECUTIVE chips is one transcript row. The list's
+/// display projection folds the followers out of the display and hands their
+/// blocks to the run's first chip as presented `children` (the document never
+/// changes), and this renderer flows every chip of the run left to right,
+/// wrapping when the tile is narrow. One delegation of five children used to
+/// be five stacked full-width rows.
 @MainActor
 final class AgentReferenceRenderer: AgentBlockRendering {
     let kind: AgentBlockKind = .agentReference
@@ -33,13 +40,24 @@ final class AgentReferenceRenderer: AgentBlockRendering {
     func makeView() -> NSView { AgentReferenceChipRowView(frame: .zero) }
 
     func update(view: NSView, block: AgentBlock, context: AgentRenderContext) {
-        guard let view = view as? AgentReferenceChipRowView,
-              case let .agentReference(payload) = block.payload else { return }
-        view.apply(blockID: block.id, payload: payload, context: context)
+        guard let view = view as? AgentReferenceChipRowView else { return }
+        let references = Self.references(in: block)
+        guard !references.isEmpty else { return }
+        view.apply(leaderID: block.id, references: references, context: context)
     }
 
+    /// The wrapped height, from the same composition and the same flow the row
+    /// lays out with — status included, because a status word widens a chip.
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        AgentReferenceChipView.height(zoom: context.pageZoom)
+        let zoom = context.pageZoom
+        let widths = Self.references(in: block).map { reference in
+            AgentReferenceChipView.preferredWidth(
+                name: reference.payload.displayNameAtSpawn,
+                label: context.agentStatus.current(reference.payload.agentID)?.label,
+                zoom: zoom
+            )
+        }
+        return AgentReferenceChipRowView.flow(widths: widths, width: width, zoom: zoom).height
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -47,19 +65,36 @@ final class AgentReferenceRenderer: AgentBlockRendering {
               case .agentReference = block.payload else { return }
         view.refreshAccessibilityLabel()
     }
+
+    /// The run this row presents: the block itself, then the presented
+    /// followers, in transcript order.
+    static func references(in block: AgentBlock) -> [AgentReferenceChipRowView.Reference] {
+        ([block] + block.children).compactMap { member in
+            guard case let .agentReference(payload) = member.payload else { return nil }
+            return AgentReferenceChipRowView.Reference(blockID: member.id, payload: payload)
+        }
+    }
 }
 
 /// The transcript row participates in normal full-width layout, but only its
-/// intrinsic-width capsule is interactive. Keeping those two rectangles
-/// separate prevents the old "click anywhere on this empty row" affordance.
+/// intrinsic-width capsules are interactive. Keeping those rectangles separate
+/// prevents the old "click anywhere on this empty row" affordance.
 @MainActor
 final class AgentReferenceChipRowView: NSView {
-    let chip = AgentReferenceChipView(frame: .zero)
+    struct Reference {
+        let blockID: AgentNodeID
+        let payload: AgentReferencePayload
+    }
 
-    /// Put the chip's LABEL on the same reading column as a tool action title.
-    /// This is derived from both renderers' real geometry: the chip itself begins
-    /// far enough left to keep its outline and glyph, while its text lands at
-    /// `ToolCallView.detailIndent` for every provider.
+    /// One capsule per chip in the run. Bounded by the run, not the document:
+    /// the transcript still virtualizes rows, and a run is one delegation's
+    /// children.
+    private(set) var chips: [AgentReferenceChipView] = []
+
+    /// Put the first chip's LABEL on the same reading column as a tool action
+    /// title. This is derived from both renderers' real geometry: the chip itself
+    /// begins far enough left to keep its outline and glyph, while its text lands
+    /// at `ToolCallView.detailIndent` for every provider.
     static var leadingInset: CGFloat {
         max(0, ToolCallView.detailIndent - AgentReferenceChipView.titleOffset)
     }
@@ -70,45 +105,128 @@ final class AgentReferenceChipRowView: NSView {
         max(0, ToolCallView.detailIndent(zoom: zoom) - AgentReferenceChipView.titleOffset(zoom: zoom))
     }
 
+    /// Space between two chips on one line. Lines sit one transcript row-rhythm
+    /// apart (`AgentReferenceChipView.height`), so one line of chips is exactly
+    /// the height a single chip always had.
+    static func chipGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+
+    /// Flex-wrap, as one pure function shared by `measure` and `layout()`: chips
+    /// flow left to right from the leading inset with a constant gap and wrap to
+    /// a new line when the next one would cross the trailing edge. A chip wider
+    /// than the row keeps a line to itself and is clipped to the row, as a
+    /// lone chip always was.
+    static func flow(widths: [CGFloat], width: CGFloat, zoom: AgentPageZoom) -> (frames: [NSRect], height: CGFloat) {
+        let lineHeight = AgentReferenceChipView.height(zoom: zoom)
+        let controlHeight = AgentReferenceChipView.controlHeight(zoom: zoom)
+        let inset = leadingInset(zoom: zoom)
+        let gap = chipGap(zoom: zoom)
+        var frames: [NSRect] = []
+        frames.reserveCapacity(widths.count)
+        var line = 0
+        var nextX: CGFloat?
+        for chipWidth in widths {
+            if let x = nextX, x + chipWidth > width {
+                line += 1
+                nextX = nil
+            }
+            let x = nextX ?? min(inset, max(0, width - chipWidth))
+            let frame = NSRect(
+                x: x,
+                y: CGFloat(line) * lineHeight + floor((lineHeight - controlHeight) / 2),
+                width: min(max(0, width - x), chipWidth),
+                height: controlHeight
+            )
+            frames.append(frame)
+            nextX = frame.maxX + gap
+        }
+        return (frames, CGFloat(line + 1) * lineHeight)
+    }
+
     /// The page zoom of the last `apply`; `layout()` reads it, so a recycled row
     /// re-derives rather than keeping the zoom it was built at.
     private var pageZoom: AgentPageZoom = .default
+    private var leaderID: AgentNodeID?
+    private var actions: AgentRenderActions = .disabled
+    private var remeasureRequested = false
+    private var requestedHeight: CGFloat?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        addSubview(chip)
         setAccessibilityElement(false)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Lines run top-down.
+    override var isFlipped: Bool { true }
+
     override func layout() {
         super.layout()
-        let intrinsic = chip.intrinsicContentSize
-        let x = min(Self.leadingInset(zoom: pageZoom), max(0, bounds.width - intrinsic.width))
-        chip.frame = NSRect(
-            x: x,
-            y: floor((bounds.height - intrinsic.height) / 2),
-            width: min(max(0, bounds.width - x), intrinsic.width),
-            height: intrinsic.height
-        )
-        chip.needsLayout = true
+        // Arithmetic only: each chip's width was measured when its title was
+        // composed, never here.
+        let flow = Self.flow(
+            widths: chips.map(\.intrinsicContentSize.width), width: bounds.width, zoom: pageZoom)
+        for (chip, frame) in zip(chips, flow.frames) where chip.frame != frame {
+            chip.frame = frame
+            chip.needsLayout = true
+        }
+        // A live status tick can widen or narrow a chip after this row was
+        // measured — on screen, or while the row was scrolled away and its
+        // height sat in the measurement cache. When the wrap no longer fits the
+        // measured height, ask the host to re-measure this row. Deferred: the
+        // re-measure re-enters transcript layout, which must not happen from
+        // inside a layout pass.
+        if bounds.width > 0, bounds.height > 0, abs(flow.height - bounds.height) > 0.5 {
+            requestRemeasure(for: flow.height)
+        }
+    }
+
+    /// One request per height the wrap asks for: if a re-measure still lands on
+    /// a different height, asking again would only repeat it, every pass.
+    private func requestRemeasure(for height: CGFloat) {
+        guard !remeasureRequested, height != requestedHeight, let leaderID else { return }
+        remeasureRequested = true
+        requestedHeight = height
+        let actions = self.actions
+        DispatchQueue.main.async { [weak self] in
+            self?.remeasureRequested = false
+            // The host's gated actions: a row recycled for another block since
+            // this was queued cannot invalidate the wrong one.
+            actions.invalidatePresentation(blockID: leaderID)
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let chipPoint = chip.convert(point, from: self)
-        guard chip.bounds.contains(chipPoint) else { return nil }
-        return chip.hitTest(chipPoint)
+        for chip in chips {
+            let chipPoint = chip.convert(point, from: self)
+            if chip.bounds.contains(chipPoint) { return chip.hitTest(chipPoint) }
+        }
+        return nil
     }
 
-    func apply(blockID: AgentNodeID, payload: AgentReferencePayload, context: AgentRenderContext) {
+    func apply(leaderID: AgentNodeID, references: [Reference], context: AgentRenderContext) {
         pageZoom = context.pageZoom
-        chip.apply(blockID: blockID, payload: payload, context: context)
+        self.leaderID = leaderID
+        actions = context.actions
+        requestedHeight = nil
+        // Reuse capsules by position; each one re-subscribes when the agent it
+        // represents changes, exactly as a recycled single chip did.
+        while chips.count > references.count {
+            chips.removeLast().removeFromSuperview()
+        }
+        while chips.count < references.count {
+            let chip = AgentReferenceChipView(frame: .zero)
+            addSubview(chip)
+            chips.append(chip)
+        }
+        for (chip, reference) in zip(chips, references) {
+            chip.apply(blockID: reference.blockID, payload: reference.payload, context: context)
+        }
         needsLayout = true
     }
 
-    func refreshAccessibilityLabel() { chip.refreshAccessibilityLabel() }
+    func refreshAccessibilityLabel() { chips.forEach { $0.refreshAccessibilityLabel() } }
 }
 
 @MainActor
@@ -127,7 +245,7 @@ final class AgentReferenceChipView: NSButton {
     // WS5: the same chip metrics at a tile's page zoom. The zero-argument
     // properties above remain the 100% values.
     static func height(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
-    private static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(26)) }
+    static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(26)) }
     private static func cornerRadius(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
     private static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
     private static func glyphSide(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(14)) }
@@ -403,6 +521,14 @@ final class AgentReferenceChipView: NSButton {
             minimumWidth(zoom: zoom),
             titleWidth + glyphSide(zoom: zoom) + contentGap(zoom: zoom) + horizontalPadding(zoom: zoom) * 2
         )
+    }
+
+    /// The capsule width a chip naming `name` in `label`'s state will take — the
+    /// renderer's measurement, computed from the same composition the view
+    /// paints, so a measured row and a laid-out row can never disagree.
+    static func preferredWidth(name: String, label: String?, zoom: AgentPageZoom) -> CGFloat {
+        let title = composedTitle(name: name, label: label, zoom: zoom, primary: .labelColor, secondary: .secondaryLabelColor)
+        return width(titleWidth: titleSize(of: title).width, zoom: zoom)
     }
 
     var qaHasAgentGlyph: Bool { glyphView.image != nil }
