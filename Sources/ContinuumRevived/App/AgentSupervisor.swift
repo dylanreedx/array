@@ -3164,13 +3164,6 @@ final class AgentSupervisor {
         /// not defined in this project" reads as a typo when the truth is that the
         /// project has no `.pi/agents` directory. Observed live on 2026-08-25.
         case projectDeclaresNoRoles(directory: String)
-        /// C12 — the parent runs codex. `codex exec --json` (measured, `.plans/46`)
-        /// emits no wire representation for subagent activity at all: even with
-        /// `features.multi_agent_v2=true` set and delegation genuinely happening,
-        /// Array receives nothing about the child on the transport it runs. The
-        /// honest refusal is about OBSERVABILITY, not capability — codex itself can
-        /// spawn; Array cannot see it happen, so it will not pretend to run it.
-        case codexSubagentsUnobservable
         /// C12 — the parent is a claude `Agent` subagent Array only mirrors
         /// (`AgentCapabilities.observedReadOnly`): read-only transcript, not
         /// locally managed, no runner. There is nothing for a spawn to go through.
@@ -3199,8 +3192,6 @@ final class AgentSupervisor {
                 return "its isolated checkout could not be created"
             case .roleUnresolved:
                 return "the requested role is not defined in this project"
-            case .codexSubagentsUnobservable:
-                return "Array cannot observe codex subagents on the transport it runs"
             case .observedParentCannotSpawn:
                 return "this agent is mirrored, not run, and has no runner to spawn through"
             }
@@ -3772,15 +3763,9 @@ final class AgentSupervisor {
                 .roleUnresolved, for: parentId,
                 handle: request.sourceItemID, requestedRole: request.role)
         }
-        // C12 — codex delegation may genuinely be happening; Array's transport
-        // (`codex exec --json`) has no wire representation for it, so refuse
-        // honestly about observability rather than silently producing nothing or
-        // claiming codex itself cannot spawn.
-        guard parentHarness != .codex else {
-            return refuseSpawn(
-                .codexSubagentsUnobservable, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
-        }
+        // A codex parent is no longer refused here (T4b): a non-observed request
+        // from one is its `array_delegate` over MCP, a child Array runs itself.
+        // Codex-RUN subagents arrive `observedOnly` and were adopted above.
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
             return refuseSpawn(
@@ -15415,13 +15400,16 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a role refusal echoes the requested role id or a host path: \(roleRefusalTitles)")
     }
 
-    // MARK: 8 · C12 — a codex parent is refused honestly about OBSERVABILITY
+    // MARK: 8 · a codex parent's Array-owned child is spawned, not refused
 
-    // `codex exec --json` (measured, `.plans/46`) has no wire representation for
-    // subagent activity at all, so Array cannot say a codex parent spawned
-    // anything even where codex itself may be delegating. The refusal must not
-    // claim codex cannot spawn — that would be false — only that this transport
-    // cannot see it.
+    // C12 refused every codex parent because `codex exec --json` showed Array
+    // nothing of a subagent CODEX runs. A request reaching this path with
+    // `observedOnly == false` is not one: it is codex's own `array_delegate` over
+    // MCP (T3), a child ARRAY starts as its own codex agent and observes like any
+    // other. Codex-run subagents still arrive `observedOnly` (app-server
+    // `subAgentActivity`) and are adopted. RED before T4b: refused "Array cannot
+    // observe codex subagents on the transport it runs", so codex could not
+    // delegate at all.
     let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
     let codexParentId = supervisor.spawn(
         role: nil, prompt: nil, cwd: repo,
@@ -15434,38 +15422,29 @@ private func checkSpawnFromToolCall(
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: codexParentId) == 1 }) else {
         throw fail("the codex parent's subscriber never registered")
     }
-    let beforeCodexRefusal = supervisor.records.count
-    guard supervisor.handleSpawnRequest(
-        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false),
+    let codexCallID = "exec-0562414f-29fc-47c6-962d-90fe1e889886"
+    guard let codexChild = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false, sourceItemID: codexCallID),
         from: codexParentId
-    ) == nil else {
-        throw fail("a codex parent was allowed to spawn — Array has no transport evidence of what would happen to the child")
+    ) else {
+        throw fail("a codex parent's Array-owned delegation was refused: \(supervisor.spawnRefusal(for: codexParentId)?.reason ?? "no reason")")
     }
-    guard supervisor.records.count == beforeCodexRefusal else {
-        throw fail("the refused codex spawn still created a record: \(supervisor.records.count), expected \(beforeCodexRefusal)")
+    guard supervisor.records[codexChild]?.harness == .codex,
+          supervisor.records[codexChild]?.parentAgentID == codexParentId else {
+        throw fail("the codex delegation's child must run codex under its parent: \(String(describing: supervisor.records[codexChild]))")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         codexInbox.events.contains { event in
-            if case let .itemStarted(_, _, kind, title) = event {
-                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.codexSubagentsUnobservable.reason)
+            if case let .childAgentSpawned(_, child, _, _, source, provider, _) = event {
+                return child == codexChild.rawValue && source == codexCallID && provider == AgentHarness.codex.rawValue
             }
             return false
         }
     }) else {
-        throw fail("a codex parent's spawn was refused silently — nothing on its transcript: \(codexInbox.events)")
+        throw fail("the codex parent got no chip naming its call for the child it delegated: \(codexInbox.events)")
     }
-    let codexRefusalTitles = codexInbox.events.compactMap { event -> String? in
-        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
-        return nil
-    }
-    guard codexRefusalTitles.allSatisfy({ !$0.contains("delegate this to a subagent") && !$0.contains(root.path) }) else {
-        throw fail("I5: a codex refusal echoes the requested prompt or a host path: \(codexRefusalTitles)")
-    }
-    guard !codexRefusalTitles.contains(where: { $0.localizedCaseInsensitiveContains("cannot spawn") }) else {
-        throw fail("the codex refusal claims codex cannot spawn, which is false — it says Array cannot observe it: \(codexRefusalTitles)")
-    }
+    supervisor.stop(codexChild)
     supervisor.stop(codexParentId)
-
     // MARK: 9 · C12 — a mirrored (observedReadOnly) parent has no runner to spawn through
 
     // This is a claude `Agent` subagent Array only mirrors — read-only transcript,
