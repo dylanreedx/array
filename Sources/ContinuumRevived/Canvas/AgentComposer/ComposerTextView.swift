@@ -13,6 +13,9 @@ protocol ComposerTextViewObserver: AnyObject {
     func composerRequestedSend(_ textView: ComposerTextView)
     /// T5 (D1) — ⌥↩ / ⌘↩. Plain ↩ stays `composerRequestedSend(_:)`.
     func composerRequestedSend(_ textView: ComposerTextView, modifier: AgentComposerSubmitModifier)
+    /// T5b — plain ↑ on an empty draft. `true` when a queued item was taken
+    /// for editing; `false` leaves ↑ to prompt history.
+    func composerRequestedEditLastQueued(_ textView: ComposerTextView) -> Bool
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool
     func composerRequestedCompletionCommand(
         _ textView: ComposerTextView,
@@ -212,6 +215,9 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
 
     override func keyDown(with event: NSEvent) {
         if handleCompletionKey(event) { return }
+        if event.keyCode == 126, string.isEmpty, !hasMarkedText(),
+           event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty,
+           composerObserver?.composerRequestedEditLastQueued(self) == true { return }
         if handlePromptHistoryKey(event) { return }
 
         let action = ComposerKeyPolicy.action(
