@@ -734,6 +734,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaContextState: AgentRadialContextMeterState { contextMeter.qaState }
     var qaContextFraction: Double? { contextMeter.qaFraction }
     var qaContextDetail: String { contextMeter.qaDetail }
+    var qaContextThresholdFraction: Double? { contextMeter.qaThresholdFraction }
     var qaThinkingSlotVisible: Bool { !thinkingSlot.isHidden }
     var qaHasVisiblePrefixes: Bool {
         [locationLabel.stringValue, activityLabel.stringValue, contextLabel.stringValue].contains { text in

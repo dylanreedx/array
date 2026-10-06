@@ -415,22 +415,41 @@ public struct CodexAppServerEventTranslator {
     /// `threadId`/`turnId` rather than riding `turn.completed`. `total` is the
     /// cumulative-for-session figure — the same accounting semantics
     /// `CodexEventTranslator` reads off exec's `turn.completed.usage`, so this
-    /// maps to the identical `TokenUsageSnapshot`. `last` (this request's own
-    /// tokens) and `modelContextWindow` are NOT mapped here — exact occupancy
-    /// stays out of this ticket's scope; noted as a measured OPPORTUNITY in the
-    /// parity report, not implemented.
+    /// maps to the identical `TokenUsageSnapshot`.
+    ///
+    /// `last` is this REQUEST's own tokens and `modelContextWindow` its limit —
+    /// the occupancy reading, live and mid-turn (T1). `last.totalTokens` is
+    /// what codex's own context indicator and the rollout path
+    /// (`CodexRolloutTelemetry`) read; `total` is cumulative and never reaches
+    /// the ring.
     private func translateTokenUsage(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
-              let usage = params["tokenUsage"] as? [String: Any],
-              let total = usage["total"] as? [String: Any]
+              let usage = params["tokenUsage"] as? [String: Any]
         else { return [] }
-        let input = Self.intValue(total["inputTokens"])
-        let output = Self.intValue(total["outputTokens"])
-        let sum = (input ?? 0) + (output ?? 0)
-        guard sum > 0 else { return [] }
-        return [.tokenUsageUpdated(
-            threadId: threadId,
-            snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil))]
+        var events: [AgentRuntimeEvent] = []
+        if let total = usage["total"] as? [String: Any] {
+            let input = Self.intValue(total["inputTokens"])
+            let output = Self.intValue(total["outputTokens"])
+            if (input ?? 0) + (output ?? 0) > 0 {
+                events.append(.tokenUsageUpdated(
+                    threadId: threadId,
+                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil)))
+            }
+        }
+        if let last = usage["last"] as? [String: Any],
+           let used = Self.intValue(last["totalTokens"]), used > 0 {
+            events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+                usedTokens: used,
+                maxTokens: Self.intValue(usage["modelContextWindow"]).flatMap { $0 > 0 ? $0 : nil },
+                inputTokens: Self.intValue(last["inputTokens"]),
+                outputTokens: Self.intValue(last["outputTokens"]),
+                cacheReadTokens: Self.intValue(last["cachedInputTokens"]),
+                cacheWriteTokens: Self.intValue(last["cacheWriteInputTokens"]),
+                observedAt: now(),
+                source: .codexRolloutTokenCount,
+                freshness: .live)))
+        }
+        return events
     }
 
     // MARK: - turn completion

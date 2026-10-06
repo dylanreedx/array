@@ -10,7 +10,9 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
     private let supportsFocus: Bool
     private let postTokens: Int?
     private let postPrecision: AgentCompactionTokenPrecision
+    private let trailingReading: Int?
     private var firstRun = true
+    private var compactionOnEvent: (@Sendable (AgentRuntimeEvent) -> Void)?
     private(set) var operations: [String] = []
 
     init(
@@ -18,13 +20,15 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
         result: Result = .succeed,
         supportsFocus: Bool = true,
         postTokens: Int? = 20_000,
-        postPrecision: AgentCompactionTokenPrecision = .exact
+        postPrecision: AgentCompactionTokenPrecision = .exact,
+        trailingReading: Int? = nil
     ) {
         firstTurnGate = blockFirstTurn ? DispatchSemaphore(value: 0) : nil
         self.result = result
         self.supportsFocus = supportsFocus
         self.postTokens = postTokens
         self.postPrecision = postPrecision
+        self.trailingReading = trailingReading
     }
 
     var compactionCapabilities: AgentCompactionCapabilities {
@@ -51,7 +55,10 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
         _ request: AgentCompactionRequest,
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
-        lock.withLock { operations.append("compact") }
+        lock.withLock {
+            operations.append("compact")
+            compactionOnEvent = onEvent
+        }
         onEvent(.compactionChanged(threadId: "provider", event: AgentCompactionLifecycleEvent(
             operationID: request.operationID,
             phase: .running,
@@ -70,13 +77,17 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
         // A repeated provider notification must not advance the epoch twice.
         if result == .succeed {
             onEvent(.compactionChanged(threadId: "provider", event: terminal))
-            // This belongs to the operation's captured pre-boundary epoch and
-            // must not repaint the exact post-boundary meter.
-            onEvent(.contextWindowUpdated(
-                threadId: "provider",
-                snapshot: AgentContextWindowSnapshot(
-                    usedTokens: 90_000, maxTokens: 100_000,
-                    observedAt: Date(), source: .unknown("script-stale"), freshness: .live)))
+            // The provider's own report AFTER its boundary, from the live
+            // operation. It is the newest reading and must be shown: the old
+            // operation-start epoch stamp dropped exactly this (T1), which is
+            // how claude's compact_boundary snapshot never reached the ring.
+            if let trailingReading {
+                onEvent(.contextWindowUpdated(
+                    threadId: "provider",
+                    snapshot: AgentContextWindowSnapshot(
+                        usedTokens: trailingReading, maxTokens: 100_000,
+                        observedAt: Date(), source: .providerSessionStats, freshness: .live)))
+            }
         }
         if result == .fail { throw NSError(domain: "AgentCompactionUICheck", code: 1) }
     }
@@ -86,6 +97,12 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
     func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
     func snapshotOperations() -> [String] { lock.withLock { operations } }
+    /// A late frame from the finished compaction operation's callback — the
+    /// shape the epoch stamp used to guard. The runner-generation token must
+    /// reject it on its own.
+    func emitLateFromFinishedCompaction(_ event: AgentRuntimeEvent) {
+        lock.withLock { compactionOnEvent }?(event)
+    }
 }
 
 @MainActor
@@ -107,7 +124,7 @@ func runAgentCompactionUIChecks() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("array-compaction-ui-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
-    let runner = CompactionScriptRunner(blockFirstTurn: true)
+    let runner = CompactionScriptRunner(blockFirstTurn: true, trailingReading: 20_500)
     let draftStore = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
     let supervisor = AgentSupervisor(
         store: AgentStore(applicationSupportDirectory: root),
@@ -143,8 +160,19 @@ func runAgentCompactionUIChecks() async throws {
         throw Failure(description: "compaction was duplicated or routed through run(prompt:)")
     }
     guard supervisor.records[id]?.contextEpoch == 1,
-          supervisor.contextWindowSnapshot(for: id)?.usedTokens == 20_000 else {
-        throw Failure(description: "duplicate success or stale telemetry corrupted the new epoch")
+          supervisor.contextWindowSnapshot(for: id)?.usedTokens == 20_500 else {
+        throw Failure(description: "duplicate success advanced the epoch twice, or the provider's post-boundary reading was dropped (meter \(String(describing: supervisor.contextWindowSnapshot(for: id)?.usedTokens)))")
+    }
+    // Staleness is the runner generation's job now: the finished operation's
+    // callback can still fire, and its reading must not land.
+    runner.emitLateFromFinishedCompaction(.contextWindowUpdated(
+        threadId: "provider",
+        snapshot: AgentContextWindowSnapshot(
+            usedTokens: 90_000, maxTokens: 100_000,
+            observedAt: Date(), source: .providerSessionStats, freshness: .live)))
+    try await Task.sleep(for: .milliseconds(100))
+    guard supervisor.contextWindowSnapshot(for: id)?.usedTokens == 20_500 else {
+        throw Failure(description: "a retired runner generation repainted the meter")
     }
 
 
@@ -168,7 +196,7 @@ func runAgentCompactionUIChecks() async throws {
     }
     try await expectEventually("unknown-post compaction did not finish") { !unknownSupervisor.isRunning(unknownID) }
     guard unknownSupervisor.records[unknownID]?.contextEpoch == 1,
-          unknownSupervisor.contextWindowSnapshot(for: unknownID) == nil else {
+          unknownSupervisor.contextWindowSnapshot(for: unknownID)?.usedTokens == nil else {
         throw Failure(description: "missing post-compaction occupancy was rendered as a number")
     }
 
@@ -267,6 +295,8 @@ func runAgentCompactionUIChecks() async throws {
     guard unknownLabel.contains("outcome unknown"), !unknownLabel.contains("? → ?") else {
         throw Failure(description: "indeterminate compaction rendering was misleading")
     }
+
+    try await runAgentContextMeterChecks(root: root.appendingPathComponent("meter", isDirectory: true))
 
     let commandRows = await AgentCommandCompletionProvider().suggestions(for: AgentCompletionQuery(
         trigger: "/", text: "compact", replacementRange: NSRange(location: 0, length: 8),
