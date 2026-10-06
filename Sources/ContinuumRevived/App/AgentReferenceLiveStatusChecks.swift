@@ -101,6 +101,9 @@ func checkAgentReferenceLiveStatus(
     guard view.accessibilityLabel() == "Subagent, Test Child, open agent" else {
         throw fail("agent-reference status check: initial accessibility label was \(String(describing: view.accessibilityLabel())), expected the unlabelled ready form")
     }
+    guard view.qaTitleText == "Test Child" else {
+        throw fail("agent-reference status check: a ready chip's title reads \"\(view.qaTitleText)\" — no label means no dangling separator")
+    }
 
     // THE REAL STATUS CHANGE: production's own path, not a fixture poke.
     guard supervisor.send("go", to: childID) else {
@@ -116,6 +119,15 @@ func checkAgentReferenceLiveStatus(
 
     guard view.accessibilityLabel() == "Subagent, Test Child, Working, open agent" else {
         throw fail("agent-reference status check: accessibility label after the turn started was \(String(describing: view.accessibilityLabel())), expected the Working form — the chip did not observe a real status change")
+    }
+    // T4: the VISIBLE title says it too, in full. Laid out at the capsule's own
+    // width, the label must not truncate — the word used to wrap out of sight.
+    view.frame = NSRect(origin: .zero, size: view.intrinsicContentSize)
+    view.layoutSubtreeIfNeeded()
+    guard view.qaTitleText == "Test Child  ·  Working",
+          let cell = view.qaTitleLabel.cell,
+          cell.expansionFrame(withFrame: view.qaTitleLabel.bounds, in: view.qaTitleLabel) == .zero else {
+        throw fail("agent-reference status check: the chip's title reads \"\(view.qaTitleText)\" in a \(view.qaTitleLabel.bounds.width)pt label — expected \"Test Child  ·  Working\", untruncated")
     }
 
     let bytesAfterStatusChange = try encoder.encode(document)

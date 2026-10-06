@@ -71,7 +71,8 @@ enum AgentFirstPaintChecks {
         try checkStreamingResponseKeepsALivenessSignal()
         try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
         try checkADelegationTurnPresentsInteractiveSubagentChips()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, accepted local commands settle without a stuck glyph, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command waits for Enter and carries the complete surrounding draft, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud")
+        try checkConsecutiveSubagentChipsFlowAndWrapWithTheirStatus()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, accepted local commands settle without a stuck glyph, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command waits for Enter and carries the complete surrounding draft, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud, and consecutive subagent chips flow onto one line with a constant gap, wrap at a narrow width inside a row measured to fit them, and read their live status in full")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -1088,7 +1089,11 @@ extension AgentFirstPaintChecks {
         // dropped everything would pass the second alone, and a fold that never
         // fires would pass the first alone.
         let displayed = Set(transcript.qaDisplayedRowIDsForChecks)
-        for chipID in chipBlockIDs where !displayed.contains(chipID) {
+        // T4: consecutive chips share ONE row, presented by the run's first chip,
+        // so a chip is visible either as its own row or inside a displayed one.
+        let leaderByFollower = transcript.qaChipRunLeaderByFollowerForChecks
+        for chipID in chipBlockIDs
+            where !displayed.contains(chipID) && !displayed.contains(leaderByFollower[chipID] ?? chipID) {
             throw fail(
                 "delegation chips: chip \(chipID.rawValue) is not in the displayed rows — the "
                 + "delegation is invisible, which is the live defect"
@@ -1145,9 +1150,12 @@ extension AgentFirstPaintChecks {
                 }
                 row.layoutSubtreeIfNeeded()
                 chip.layoutSubtreeIfNeeded()
+                // The reading-column clause binds the chip that opens a line; the
+                // rest of a line flows after it (T4).
+                let opensALine = row.chips.first(where: { abs($0.frame.minY - chip.frame.minY) < 0.5 }) === chip
                 guard abs(chip.qaContentGap - CGFloat(Space.s)) < 0.5,
                       abs(chip.qaContentMidX - chip.bounds.midX) < 0.5,
-                      abs((chip.frame.minX + chip.qaTitleMinX) - ToolCallView.detailIndent) < 0.5 else {
+                      !opensALine || abs((chip.frame.minX + chip.qaTitleMinX) - ToolCallView.detailIndent) < 0.5 else {
                     throw fail(
                         "delegation chips: explicit icon/title geometry is not centred internally "
                         + "and aligned to the transcript action reading column"
@@ -1234,6 +1242,310 @@ extension AgentFirstPaintChecks {
                 + "(landed=\(noticeLanded), rows \(rowsBeforeNotice) -> \(transcript.qaSemanticRowCount))"
             )
         }
+    }
+
+    /// T4 (0.7.26). Dylan, with a screenshot: an agent that spawned several
+    /// subagents showed one chip per transcript row, stacked, each a different
+    /// width and each reading "Name ·" with blank capsule after the dot. Two
+    /// defects. The status word WAS composed — the dot is its separator — but
+    /// the attributed title carried no paragraph style, so the label's own
+    /// word-wrapping (not the field's truncation) applied, and at the exact width
+    /// the capsule granted it the last word broke onto a second line the label is
+    /// too short to show. And every chip was its own full-width row.
+    ///
+    /// Driven through the real pipeline: `.childAgentSpawned` → the tile's
+    /// projection → `AgentTranscriptListView`'s display projection → the
+    /// registered renderer, laid out in an offscreen window. The one stand-in is
+    /// the status SOURCE: this tile has no supervisor, so the context carries a
+    /// stub with the production `AgentReferenceStatusSource` shape. The
+    /// supervisor → source half is `--agent-supervisor-check` section 21.
+    @MainActor
+    private static func checkConsecutiveSubagentChipsFlowAndWrapWithTheirStatus() throws {
+        let names = [
+            "Experiment 3 name-keying",
+            "Experiment 4 plants vs ignite",
+            "Experiment 5 side-by-side",
+            "Experiment 6 tidy",
+        ]
+        let childIDs = names.map { _ in UUID() }
+        let parentAgentID = UUID()
+        final class StatusStub {
+            var states: [UUID: InboxState] = [:]
+            var subscribers: [UUID: (agentID: UUID, callback: (InboxState?) -> Void)] = [:]
+            func publish(_ state: InboxState, for agentID: UUID) {
+                states[agentID] = state
+                for subscriber in subscribers.values where subscriber.agentID == agentID {
+                    subscriber.callback(state)
+                }
+            }
+        }
+        let stub = StatusStub()
+        for id in childIDs.prefix(3) { stub.states[id] = .working }
+        // `.ready` carries no label: this chip must read as its bare name.
+        stub.states[childIDs[3]] = .ready
+        let statusSource = AgentReferenceStatusSource(
+            current: { stub.states[$0] },
+            subscribe: { agentID, callback in
+                let token = UUID()
+                stub.subscribers[token] = (agentID, callback)
+                return token
+            },
+            unsubscribe: { stub.subscribers.removeValue(forKey: $0) }
+        )
+        guard let workingLabel = InboxState.working.label, !workingLabel.isEmpty else {
+            throw fail("subagent chip flow: InboxState.working has no label to witness")
+        }
+
+        let wide = NSSize(width: 1280, height: 420)
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "subagent-chip-flow",
+            frame: TileFrame(x: 0, y: 0, width: Double(wide.width), height: Double(wide.height)),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: wide),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+
+        let thread = tile.qaThreadIdForChecks
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-chip-flow"))
+        for (index, name) in names.enumerated() {
+            tile.ingest(.childAgentSpawned(
+                threadId: thread,
+                childAgentID: childIDs[index],
+                parentAgentID: parentAgentID,
+                displayName: name,
+                sourceItemID: nil,
+                provider: "claude",
+                spawnedAt: Date(timeIntervalSince1970: 0)))
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("subagent chip flow: the tile has no transcript")
+        }
+        transcript.flushPendingVisualUpdate()
+        try transcript.updateRenderContext(AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: .dark, agentStatus: statusSource))
+
+        func settle() {
+            // A status tick re-measures on the next main-queue turn, never from
+            // inside the layout pass that noticed it.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            transcript.layoutSubtreeIfNeeded()
+            transcript.collectionView.layoutSubtreeIfNeeded()
+        }
+        func chips() throws -> [AgentReferenceChipView] {
+            var found: [String: AgentReferenceChipView] = [:]
+            func walk(_ view: NSView) {
+                if let chip = view as? AgentReferenceChipView, let id = chip.identifier?.rawValue {
+                    found[id] = chip
+                }
+                view.subviews.forEach(walk)
+            }
+            walk(transcript.collectionView)
+            return try childIDs.map { id in
+                guard let chip = found["agent.reference.\(id.uuidString)"] else {
+                    throw fail(
+                        "subagent chip flow: no chip view materialized for child \(id) "
+                        + "(found \(found.count) of \(childIDs.count))")
+                }
+                return chip
+            }
+        }
+        /// Inked pixels in the trailing `word` of a chip's rendered title. The
+        /// assertion is on PIXELS because the defect was a correct string the
+        /// label never drew.
+        func inkedPixels(ofTrailing word: String, in chip: AgentReferenceChipView) throws -> Int {
+            let label = chip.qaTitleLabel
+            let rep = try UIProbe.bitmap(of: label, id: "subagent-chip-title")
+            let text = label.attributedStringValue
+            let font = text.length > 0
+                ? (text.attribute(.font, at: text.length - 1, effectiveRange: nil) as? NSFont)
+                : nil
+            let wordWidth = (word as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 12)]).width
+            let textWidth = ceil(text.size().width)
+            let scale = CGFloat(rep.pixelsWide) / max(1, label.bounds.width)
+            let startX = Int(((textWidth - wordWidth) * scale).rounded(.down))
+            let endX = min(rep.pixelsWide, Int((textWidth * scale).rounded(.up)))
+            var inked = 0
+            for x in max(0, startX)..<max(max(0, startX), endX) {
+                for y in 0..<rep.pixelsHigh where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.3 {
+                    inked += 1
+                }
+            }
+            return inked
+        }
+        func assertStatusReads(_ chips: [AgentReferenceChipView], phase: String) throws {
+            for (index, chip) in chips.enumerated() {
+                let expectsLabel = stub.states[childIDs[index]]?.label != nil
+                let expected = expectsLabel ? "\(names[index])  ·  \(workingLabel)" : names[index]
+                guard chip.qaTitleText == expected else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) composes \"\(chip.qaTitleText)\", "
+                        + "expected \"\(expected)\"")
+                }
+                let titleWidth = ceil(chip.qaTitleLabel.attributedStringValue.size().width)
+                guard chip.qaTitleLabel.frame.width >= titleWidth - 0.5,
+                      chip.qaTitleLabel.frame.maxX <= chip.bounds.width + 0.5 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index)'s title is clipped — label "
+                        + "\(chip.qaTitleLabel.frame.width)pt for a \(titleWidth)pt title in a "
+                        + "\(chip.bounds.width)pt capsule")
+                }
+                // AppKit's own answer to "is this cell's text truncated here".
+                if let cell = chip.qaTitleLabel.cell,
+                   cell.expansionFrame(withFrame: chip.qaTitleLabel.bounds, in: chip.qaTitleLabel) != .zero {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index)'s title \"\(chip.qaTitleText)\" is "
+                        + "truncated in a \(chip.qaTitleLabel.bounds.width)pt label")
+                }
+                guard expectsLabel else { continue }
+                let inked = try inkedPixels(ofTrailing: workingLabel, in: chip)
+                guard inked > 0 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) composes \"\(chip.qaTitleText)\" "
+                        + "but paints nothing where \"\(workingLabel)\" belongs — the status word "
+                        + "wrapped out of the label, so the capsule reads \"Name ·\" (Dylan's screenshot)")
+                }
+            }
+        }
+        /// Frames in the row's own space, plus the line each chip sits on.
+        func assertFlow(_ chips: [AgentReferenceChipView], phase: String) throws -> Int {
+            guard let row = chips.first?.superview as? AgentReferenceChipRowView,
+                  chips.allSatisfy({ $0.superview === row }) else {
+                let rows = Set(chips.compactMap { $0.superview.map(ObjectIdentifier.init) })
+                throw fail(
+                    "subagent chip flow (\(phase)): \(chips.count) consecutive chips render in "
+                    + "\(rows.count) transcript rows — one chip per row, stacked, instead of one "
+                    + "row that lays them out left to right")
+            }
+            let frames = chips.map { row.convert($0.bounds, from: $0) }
+            let lineHeight = AgentReferenceChipView.height(zoom: .default)
+            var lineStarts: [CGFloat] = []
+            for frame in frames where !lineStarts.contains(where: { abs($0 - frame.minY) < 0.5 }) {
+                lineStarts.append(frame.minY)
+            }
+            var gaps: [CGFloat] = []
+            for index in frames.indices.dropFirst() {
+                let previous = frames[index - 1]
+                let frame = frames[index]
+                if abs(previous.minY - frame.minY) < 0.5 {
+                    guard frame.minX > previous.maxX else {
+                        throw fail(
+                            "subagent chip flow (\(phase)): chip \(index) does not follow chip "
+                            + "\(index - 1) on its line (\(frame) after \(previous))")
+                    }
+                    gaps.append(frame.minX - previous.maxX)
+                } else {
+                    guard abs(frame.minX - frames[0].minX) < 0.5 else {
+                        throw fail(
+                            "subagent chip flow (\(phase)): a wrapped line starts at x=\(frame.minX), "
+                            + "not at the row's leading inset \(frames[0].minX)")
+                    }
+                }
+            }
+            if let first = gaps.first, gaps.contains(where: { abs($0 - first) > 0.5 }) {
+                throw fail("subagent chip flow (\(phase)): the gap between chips is not constant: \(gaps)")
+            }
+            guard abs(row.bounds.height - CGFloat(lineStarts.count) * lineHeight) < 0.5 else {
+                throw fail(
+                    "subagent chip flow (\(phase)): \(lineStarts.count) line(s) of chips in a "
+                    + "\(row.bounds.height)pt row — the measured height disagrees with the wrap")
+            }
+            for (index, frame) in frames.enumerated() {
+                guard frame.minX >= -0.5, frame.maxX <= row.bounds.width + 0.5,
+                      frame.minY >= -0.5, frame.maxY <= row.bounds.height + 0.5 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) at \(frame) spills out of its "
+                        + "\(row.bounds.size) row")
+                }
+            }
+            // The first chip keeps the transcript's reading column: its label
+            // lands where a tool action title does.
+            guard abs(frames[0].minX + chips[0].qaTitleMinX - ToolCallView.detailIndent) < 0.5 else {
+                throw fail(
+                    "subagent chip flow (\(phase)): the first chip's label sits at "
+                    + "\(frames[0].minX + chips[0].qaTitleMinX), not on the tool title column "
+                    + "\(ToolCallView.detailIndent)")
+            }
+            return lineStarts.count
+        }
+
+        /// Optional visual witness: `CONTINUUM_AGENT_REFERENCE_FLOW_CAPTURE` names a
+        /// directory that receives the row at each phase.
+        func capture(_ chips: [AgentReferenceChipView], as phase: String) throws {
+            guard let directory = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_REFERENCE_FLOW_CAPTURE"],
+                  let row = chips.first?.superview else { return }
+            let rep = try UIProbe.bitmap(of: row, id: "agent-reference-chip-flow-\(phase)")
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                throw fail("subagent chip flow: could not encode the requested visual witness")
+            }
+            try png.write(
+                to: URL(fileURLWithPath: directory).appendingPathComponent("chip-flow-\(phase).png"),
+                options: .atomic)
+        }
+
+        settle()
+        let wideChips = try chips()
+        try assertStatusReads(wideChips, phase: "wide")
+        let wideLines = try assertFlow(wideChips, phase: "wide")
+        guard wideLines == 1 else {
+            throw fail("subagent chip flow (wide): four chips took \(wideLines) lines in a \(wide.width)pt tile")
+        }
+        try capture(wideChips, as: "wide")
+
+        // Narrow: a width where the four chips wrap, AND where the status tick
+        // below adds a line — so the tick has to move the row's measured height,
+        // not merely repaint a label. Chosen from the production chip widths and
+        // flow; everything asserted afterwards is read back off the views.
+        guard let wideRow = wideChips.first?.superview as? AgentReferenceChipRowView else {
+            throw fail("subagent chip flow: the wide chips have no row")
+        }
+        let chrome = wide.width - wideRow.bounds.width
+        func predictedLines(lastIsWorking: Bool, rowWidth: CGFloat) -> Int {
+            let widths = names.enumerated().map { index, name in
+                AgentReferenceChipView.preferredWidth(
+                    name: name, label: index == 3 && !lastIsWorking ? nil : workingLabel, zoom: .default)
+            }
+            let height = AgentReferenceChipRowView.flow(widths: widths, width: rowWidth, zoom: .default).height
+            return Int((height / AgentReferenceChipView.height(zoom: .default)).rounded())
+        }
+        guard let narrowRowWidth = stride(from: wideRow.bounds.width, through: 160, by: -1).first(where: { width in
+            let before = predictedLines(lastIsWorking: false, rowWidth: width)
+            return before >= 2 && predictedLines(lastIsWorking: true, rowWidth: width) > before
+        }) else {
+            throw fail("subagent chip flow: no width wraps these chips and lets a status tick add a line")
+        }
+        window.setContentSize(NSSize(width: narrowRowWidth + chrome, height: wide.height))
+        settle()
+        let narrowChips = try chips()
+        try assertStatusReads(narrowChips, phase: "narrow")
+        let narrowLines = try assertFlow(narrowChips, phase: "narrow")
+        guard narrowLines == predictedLines(lastIsWorking: false, rowWidth: narrowRowWidth), narrowLines >= 2 else {
+            throw fail(
+                "subagent chip flow (narrow): \(narrowLines) line(s) in a \(narrowRowWidth)pt row, expected "
+                + "\(predictedLines(lastIsWorking: false, rowWidth: narrowRowWidth))")
+        }
+        try capture(narrowChips, as: "narrow")
+
+        // A live status tick widens the chip that read as its bare name, which
+        // pushes it onto a new line. The row must re-measure to the new wrap —
+        // never clip the line it no longer has room for.
+        stub.publish(.working, for: childIDs[3])
+        settle()
+        let tickedChips = try chips()
+        try assertStatusReads(tickedChips, phase: "after a status tick")
+        let tickedLines = try assertFlow(tickedChips, phase: "after a status tick")
+        guard tickedLines == narrowLines + 1 else {
+            throw fail(
+                "subagent chip flow (after a status tick): \(tickedLines) line(s), expected the tick to "
+                + "wrap the widened chip onto line \(narrowLines + 1)")
+        }
+
+        try capture(tickedChips, as: "ticked")
     }
 
 }
