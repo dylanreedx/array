@@ -127,7 +127,9 @@ func runAgentSteeringChecks() async throws {
         try await eventually("\(kind): a delivered steer must be echoed once the provider confirms it") {
             h.echoes == ["change course"] && h.supervisor.pendingSteers(for: h.id).isEmpty
         }
-        try expect(h.completedTurns == [.completed], "\(kind): steering must not end the turn, got \(h.completedTurns)")
+        try await eventually("\(kind): steering must not end the turn, got \(h.completedTurns)") {
+            h.completedTurns == [.completed]
+        }
     }
 
     // 2. A held steer whose turn ends before any tool boundary runs NEXT,
