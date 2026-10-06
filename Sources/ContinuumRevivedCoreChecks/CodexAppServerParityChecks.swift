@@ -295,6 +295,18 @@ private func runCodexAppServerTranslatorMappingChecks() {
         """#)
     expect(usage == [.tokenUsageUpdated(threadId: "th-SECRET-THREAD", snapshot: TokenUsageSnapshot(inputTokens: 100, outputTokens: 20, totalCostUsd: nil))],
            "thread/tokenUsage/updated must map to tokenUsageUpdated off the cumulative `total` block")
+    // T1 — `last` is the request and `modelContextWindow` its window: the live
+    // occupancy reading, never the cumulative `total`. Numbers from the
+    // committed single-agent capture's second request.
+    let occupancy = translator.translate(line: #"""
+        {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"th-SECRET-THREAD","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":32246,"outputTokens":153,"totalTokens":32399},"last":{"cachedInputTokens":15104,"inputTokens":16199,"outputTokens":62,"totalTokens":16261},"modelContextWindow":258400}}}
+        """#).compactMap { event -> AgentContextWindowSnapshot? in
+            guard case let .contextWindowUpdated(_, snapshot) = event else { return nil }
+            return snapshot
+        }
+    expect(occupancy.count == 1 && occupancy[0].usedTokens == 16_261 && occupancy[0].maxTokens == 258_400
+            && occupancy[0].source == .codexRolloutTokenCount,
+           "thread/tokenUsage/updated must map `last.totalTokens`/`modelContextWindow` to the occupancy reading, got \(occupancy)")
 
     // turn/completed: no standalone turn.failed frame exists — a failure
     // folds into turn/completed with turn.status == "failed" and turn.error
