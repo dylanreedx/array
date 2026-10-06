@@ -18,6 +18,13 @@ public extension WorkspaceAPIOp {
         .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
         .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply,
     ]
+
+    /// Outside the preset, but not refused: the service asks the user through
+    /// the trusted approval UI on first use (`canvas.apply`, `agent.delegate`,
+    /// `agent.message`), and "allow for session" covers the rest.
+    static let approvalGatedOperations: Set<WorkspaceAPIOp> = [
+        .canvasApply, .agentDelegate, .agentMessage,
+    ]
 }
 
 // MARK: - canvas.query

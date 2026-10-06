@@ -942,9 +942,14 @@ public final class CodexAgentRunner: @unchecked Sendable {
     }
 
     private func childEnvironment() -> [String: String] {
-        var environment = PiAgentRunner.childEnvironment()
-        if let workspaceMCP = config.workspaceMCP { environment.merge(workspaceMCP.environment) { _, new in new } }
-        return environment
+        Self.childEnvironment(workspaceMCP: config.workspaceMCP)
+    }
+
+    /// The MCP server's endpoint and token reach it through its own config
+    /// (`mcp_servers.array_workspace.env`), never through codex's environment,
+    /// which every shell command codex runs inherits.
+    public static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
+        PiAgentRunner.childEnvironment()
     }
 }
 

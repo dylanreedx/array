@@ -415,6 +415,12 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
+# T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
+# Parity against pi's allowlist, one catalog for both transports, the Claude and
+# Codex guidance/allowance/timeout projections, and the capability token kept out
+# of every agent's environment, argv and config. Its own arm because the bare
+# CoreChecks run is KNOWN-RED and never reached this section.
+run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from

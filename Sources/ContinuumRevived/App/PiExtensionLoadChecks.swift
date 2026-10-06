@@ -166,6 +166,13 @@ enum PiExtensionLoadChecks {
         guard let control = bundled.last else {
             throw Failure(message: "no bundled extensions to control against")
         }
+        // The workspace-tools extension reads its tools from the shared catalog
+        // beside it, so every scratch copy gets that catalog too: the syntax
+        // control must be rejected for its syntax alone.
+        guard let catalog = PiExtensionInstaller.bundledExtensionURL(fileName: WorkspaceMCPToolCatalog.fileName) else {
+            throw Failure(message: "\(WorkspaceMCPToolCatalog.fileName) is not in the Core resource bundle — pi's workspace tools and the MCP catalog would both be empty")
+        }
+        try fileManager.copyItem(at: catalog, to: scratch.appendingPathComponent(WorkspaceMCPToolCatalog.fileName))
         let brokenURL = scratch.appendingPathComponent("broken-\(control.name)")
         let original = try String(contentsOfFile: control.path, encoding: .utf8)
         try ("function ( { — a deliberate syntax error, see PiExtensionLoadChecks\n" + original)
@@ -178,6 +185,24 @@ enum PiExtensionLoadChecks {
             throw Failure(message: "POSITIVE CONTROL FAILED: pi accepted \(control.name) with a syntax error injected (exit 0). This pi does not report load failures, so the GREEN results above witness nothing.")
         }
         print("positive control: pi rejected a deliberately broken \(control.name) (exit \(controlOutcome.status))")
+
+        // T3: pi's workspace tools and Claude/Codex's MCP tools are ONE
+        // definition only if pi really reads the catalog. The intact extension
+        // must load beside it and be rejected without it.
+        let workspaceName = PiExtensionInstaller.workspaceToolsExtensionFileName
+        for (label, withCatalog) in [("with", true), ("without", false)] {
+            let directory = scratch.appendingPathComponent("catalog-\(label)", isDirectory: true)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fileManager.copyItem(atPath: runnerPath, toPath: directory.appendingPathComponent(workspaceName).path)
+            if withCatalog {
+                try fileManager.copyItem(at: catalog, to: directory.appendingPathComponent(WorkspaceMCPToolCatalog.fileName))
+            }
+            let outcome = try loadExtension(command: command, extensionPath: directory.appendingPathComponent(workspaceName).path, scratch: scratch)
+            guard !outcome.timedOut, (outcome.status == 0) == withCatalog else {
+                throw Failure(message: "\(workspaceName) \(label) \(WorkspaceMCPToolCatalog.fileName) beside it exited \(outcome.status) — pi must load it only from the shared catalog. stderr: \(tail(outcome.stderr))")
+            }
+        }
+        print("catalog control: pi loaded \(workspaceName) beside \(WorkspaceMCPToolCatalog.fileName) and rejected it without")
         return true
     }
 }
