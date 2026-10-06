@@ -197,5 +197,6 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
     var qaFraction: Double? { presentation.fraction }
     var qaLabel: String { presentation.label }
     var qaDetail: String { presentation.detailText }
+    var qaThresholdFraction: Double? { presentation.providerThresholdFraction }
     var qaIntrinsicSide: CGFloat { intrinsicContentSize.width }
 }

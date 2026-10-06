@@ -96,6 +96,10 @@ func runWorkspaceMCPChecks() {
     expect(!codexOverrides.contains { $0.contains("secret") }, "Codex MCP config leaked the capability token")
     expect(codexOverrides.contains("mcp_servers.array_workspace.tool_timeout_sec=\(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)"),
            "Codex's 60 s default MCP tool timeout would abandon a pending approval")
+    // RED before T4b: codex 0.159.3 refused every Array tool call under
+    // approval_policy=never without it (measured against a stand-in server).
+    expect(codexOverrides.contains("mcp_servers.array_workspace.default_tools_approval_mode=\"approve\""),
+           "Codex refuses an unapproved MCP call under approval_policy=never; Array's own approval must be the only gate")
     expect(config.environment.keys.allSatisfy { key in codexOverrides.contains { $0.hasPrefix("mcp_servers.array_workspace.env.\(key)=") } },
            "Codex's MCP server config must carry the server env block: \(codexOverrides)")
     expect(codexOverrides.contains { $0.hasPrefix("developer_instructions=") && $0.contains("array_delegate") },

@@ -138,5 +138,50 @@ func runAgentContextOccupancyChecks() {
     expect(AgentModelCatalog.parse(modelsStoreContextWindows: Data("not json".utf8)).isEmpty,
            "an unreadable store must parse to no windows rather than throwing or inventing")
 
-    print("AgentContextOccupancy checks passed: per-provider prompt composition (claude/pi sum cache, codex uses per-request occupancy), Pi Luna regression, enrichment only with a published window, authoritative snapshots preserved, and models-store contextWindow parsing")
+    // T1 — `AgentContextMeter`, the one owner of the reading. The supervisor
+    // folds every snapshot through it (witnessed end to end through a tile in
+    // `--agent-compaction-ui-check`); these pin the fold itself.
+    let policy = AgentAutomaticCompactionPolicy(enabled: true, thresholdTokens: 160_000)
+    let settingsOnly = AgentContextWindowSnapshot(
+        automaticCompactionPolicy: policy, observedAt: observedAt,
+        source: .unknown("pi-get-state"), freshness: .live)
+    let piReading = AgentContextMeter.reading(after: pi, current: nil, window: 200_000)
+    expect(piReading.usedTokens == 166_046 && piReading.maxTokens == 200_000,
+           "a prompt-bearing snapshot becomes the reading over the resolved window")
+    let merged = AgentContextMeter.reading(after: settingsOnly, current: piReading, window: 200_000)
+    expect(merged.usedTokens == 166_046 && merged.automaticCompactionPolicy == policy,
+           "a settings-only snapshot must merge into the reading, never blank it")
+    let next = AgentContextMeter.reading(after: claude, current: merged, window: 200_000)
+    expect(next.usedTokens == 42_000 && next.automaticCompactionPolicy == policy,
+           "the next usage snapshot must keep the policy it does not carry")
+    expect(next.totalCostUsd == nil || next.totalCostUsd == merged.totalCostUsd,
+           "a snapshot without cost must not invent one")
+    let afterRunSum = AgentContextMeter.reading(after: claudeRunSum, current: next, window: 200_000)
+    expect(afterRunSum.usedTokens == 42_000,
+           "cumulative accounting must never become the reading, got \(String(describing: afterRunSum.usedTokens))")
+    let noWindowReading = AgentContextMeter.reading(after: claude, current: nil, window: nil)
+    expect(noWindowReading.usedTokens == 42_000 && noWindowReading.maxTokens == nil,
+           "with no window the reading is the bare prompt count, never a guessed denominator")
+    func lifecycle(_ phase: AgentCompactionPhase, after: AgentCompactionTokenReading? = nil) -> AgentCompactionLifecycleEvent {
+        AgentCompactionLifecycleEvent(
+            phase: phase, trigger: .threshold, afterTokens: after, provider: "pi", observedAt: observedAt)
+    }
+    let dimmed = AgentContextMeter.reading(after: lifecycle(.running), current: next, window: 200_000)
+    expect(dimmed?.compacting == true && dimmed?.usedTokens == 42_000,
+           "a running compaction keeps the last reading, marked compacting")
+    let estimated = AgentContextMeter.reading(
+        after: lifecycle(.succeeded, after: AgentCompactionTokenReading(12_000, precision: .estimated)),
+        current: dimmed, window: 200_000)
+    expect(estimated?.usedTokens == 12_000 && estimated?.usedTokensEstimated == true
+            && estimated?.compacting == nil && estimated?.automaticCompactionPolicy == policy,
+           "a succeeded compaction's estimated after becomes the reading, marked estimated, undimmed")
+    let unknownAfter = AgentContextMeter.reading(after: lifecycle(.succeeded), current: dimmed, window: 200_000)
+    expect(unknownAfter?.usedTokens == nil && unknownAfter?.maxTokens == 200_000,
+           "a compaction with no after leaves no pre-compaction number standing")
+    expect(AgentContextMeter.reading(after: lifecycle(.failed), current: dimmed, window: 200_000)?.compacting == nil,
+           "a failed compaction lifts the dimming")
+    expect(AgentContextMeter.reading(after: lifecycle(.failed), current: next, window: 200_000) == nil,
+           "a lifecycle event that changes nothing publishes nothing")
+
+    print("AgentContextOccupancy checks passed: per-provider prompt composition (claude/pi sum cache, codex uses per-request occupancy), Pi Luna regression, enrichment only with a published window, authoritative snapshots preserved, models-store contextWindow parsing, and the AgentContextMeter fold (merge, never replace; compaction dim/after/estimate)")
 }

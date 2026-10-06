@@ -276,6 +276,27 @@ public struct CodexAppServerEventTranslator {
             }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .fileChange, title: "Edit")]
 
+        case "mcpToolCall":
+            // T4b (0.7.26) — previously swallowed, so every MCP call drew no row:
+            // Array's own `array_workspace` tools included, which left a codex
+            // delegation's chip nothing to fold into and a refused delegate
+            // silent. exec's `mcp_tool_call` mapping: tool and server are
+            // identifiers, the arguments stay opaque. The item id is the call id
+            // codex hands the server as `_meta.callId` (measured on 0.159.3), and
+            // `array-workspace-mcp` makes it the request id a delegate's chip
+            // carries — which is what supersedes this row.
+            let title = (item["tool"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "MCP tool"
+            if let onRuntimeObservation {
+                let server = (item["server"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .started,
+                    toolName: title,
+                    fields: server.map { [(key: "server", value: $0)] } ?? [],
+                    observedAt: now()
+                )))
+            }
+            return [.itemStarted(threadId: threadId, itemId: itemId, kind: .mcpToolCall, title: title)]
+
         default:
             // userMessage (our own prompt echoed back — exec has no
             // equivalent), agentMessage/reasoning (no item.started analogue in
@@ -404,9 +425,35 @@ public struct CodexAppServerEventTranslator {
                 kind: .fileChange,
                 status: ok ? .completed : .failed)]
 
+        case "mcpToolCall":
+            // A refusal arrives as `status: failed` with an `isError` result, or
+            // with `error` when codex itself declined the call; either text is
+            // the row's error, never dropped.
+            if let onRuntimeObservation {
+                onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
+                    phase: .ended,
+                    outputPreview: Self.mcpOutputPreview(item),
+                    observedAt: now())))
+            }
+            return [.itemCompleted(
+                threadId: threadId,
+                itemId: itemId,
+                kind: .mcpToolCall,
+                status: (item["status"] as? String) == "failed" ? .failed : .completed)]
+
         default:
             return []
         }
+    }
+
+    /// `error.message`, else the result's joined text blocks.
+    private static func mcpOutputPreview(_ item: [String: Any]) -> String? {
+        let error = (item["error"] as? [String: Any])?["message"] as? String
+        let text = error ?? ((item["result"] as? [String: Any])?["content"] as? [[String: Any]])?
+            .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n")
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     // MARK: - token usage
@@ -415,22 +462,41 @@ public struct CodexAppServerEventTranslator {
     /// `threadId`/`turnId` rather than riding `turn.completed`. `total` is the
     /// cumulative-for-session figure — the same accounting semantics
     /// `CodexEventTranslator` reads off exec's `turn.completed.usage`, so this
-    /// maps to the identical `TokenUsageSnapshot`. `last` (this request's own
-    /// tokens) and `modelContextWindow` are NOT mapped here — exact occupancy
-    /// stays out of this ticket's scope; noted as a measured OPPORTUNITY in the
-    /// parity report, not implemented.
+    /// maps to the identical `TokenUsageSnapshot`.
+    ///
+    /// `last` is this REQUEST's own tokens and `modelContextWindow` its limit —
+    /// the occupancy reading, live and mid-turn (T1). `last.totalTokens` is
+    /// what codex's own context indicator and the rollout path
+    /// (`CodexRolloutTelemetry`) read; `total` is cumulative and never reaches
+    /// the ring.
     private func translateTokenUsage(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
-              let usage = params["tokenUsage"] as? [String: Any],
-              let total = usage["total"] as? [String: Any]
+              let usage = params["tokenUsage"] as? [String: Any]
         else { return [] }
-        let input = Self.intValue(total["inputTokens"])
-        let output = Self.intValue(total["outputTokens"])
-        let sum = (input ?? 0) + (output ?? 0)
-        guard sum > 0 else { return [] }
-        return [.tokenUsageUpdated(
-            threadId: threadId,
-            snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil))]
+        var events: [AgentRuntimeEvent] = []
+        if let total = usage["total"] as? [String: Any] {
+            let input = Self.intValue(total["inputTokens"])
+            let output = Self.intValue(total["outputTokens"])
+            if (input ?? 0) + (output ?? 0) > 0 {
+                events.append(.tokenUsageUpdated(
+                    threadId: threadId,
+                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil)))
+            }
+        }
+        if let last = usage["last"] as? [String: Any],
+           let used = Self.intValue(last["totalTokens"]), used > 0 {
+            events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
+                usedTokens: used,
+                maxTokens: Self.intValue(usage["modelContextWindow"]).flatMap { $0 > 0 ? $0 : nil },
+                inputTokens: Self.intValue(last["inputTokens"]),
+                outputTokens: Self.intValue(last["outputTokens"]),
+                cacheReadTokens: Self.intValue(last["cachedInputTokens"]),
+                cacheWriteTokens: Self.intValue(last["cacheWriteInputTokens"]),
+                observedAt: now(),
+                source: .codexRolloutTokenCount,
+                freshness: .live)))
+        }
+        return events
     }
 
     // MARK: - turn completion

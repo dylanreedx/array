@@ -3876,6 +3876,9 @@ enum ContinuumApp {
         // re-check) so the picker offers whatever providers the user has
         // authed in pi. QA never enables this and keeps the frozen fallback.
         AgentModelCatalog.shared.enableLiveRefresh()
+        // Session titles: each harness titles with its own CLI. Same opt-in rule
+        // as the catalogue, so no check can ever spend a real provider call.
+        AgentSupervisor.enableLiveNameTitling()
 
         // Every `--*-check` flag is handled above and exits. Reaching here with
         // one still on the command line means it was MISSPELLED or belongs to a

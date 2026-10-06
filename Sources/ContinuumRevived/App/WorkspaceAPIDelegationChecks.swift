@@ -777,8 +777,10 @@ func runWorkspaceAPIDelegationChecks() async throws {
                    "\(name)'s MCP description must carry pi's description and every guideline")
     }
 
-    func toolCall(_ name: String, _ arguments: [String: Any]) async throws -> (isError: Bool, reply: [String: Any]) {
-        let response = try await client.request("tools/call", ["name": name, "arguments": arguments])
+    func toolCall(_ name: String, _ arguments: [String: Any], meta: [String: Any]? = nil) async throws -> (isError: Bool, reply: [String: Any]) {
+        var params: [String: Any] = ["name": name, "arguments": arguments]
+        if let meta { params["_meta"] = meta }
+        let response = try await client.request("tools/call", params)
         guard let result = response["result"] as? [String: Any],
               let reply = result["structuredContent"] as? [String: Any] else {
             throw Failure(message: "\(name): no structured result: \(response)")
@@ -802,9 +804,14 @@ func runWorkspaceAPIDelegationChecks() async throws {
     let childrenBeforeMCP = Set(supervisor.children(of: parentId))
     let tilesBeforeMCP = agentTileCount()
     let mcpMarker = "MCP-TASK-5e0c71"
+    // claude names its call in `_meta` (measured, 2.1.291); codex's spelling is
+    // asserted below. T4b: that id must become the operation AND the chip's
+    // `sourceItemID`, or the chip cannot supersede the call's transcript row.
+    let claudeToolUseID = "toolu_01McpDelegateWitness0001"
     let delegated = try await toolCall("array_delegate", ["task": "\(mcpMarker): summarise the ledger",
                                                           "idempotencyKey": "mcp-k1",
-                                                          "presentation": ["camera": "preserve"]])
+                                                          "presentation": ["camera": "preserve"]],
+                                       meta: ["claudecode/toolUseId": claudeToolUseID])
     try expect(!delegated.isError && delegated.reply["status"] as? String == "ok",
                "an approved MCP delegation succeeds: \(delegated.reply)")
     try expect(mcpPrompts.map(\.op) == [.agentDelegate], "the MCP delegation reached the trusted approval UI once: \(mcpPrompts.map(\.op))")
@@ -817,6 +824,29 @@ func runWorkspaceAPIDelegationChecks() async throws {
         throw Failure(message: "an MCP delegation must create exactly one child and report it: new children \(newChildren), result \(delegatedResult)")
     }
     try expect(agentTileCount() == tilesBeforeMCP + 1, "exactly one new managed-agent tile, got \(agentTileCount() - tilesBeforeMCP)")
+    /// The `sourceItemID` the supervisor's chip for `child` carried on the
+    /// parent's own stream (replayed from history to a fresh subscriber).
+    func chipSource(for child: AgentID) async -> String? {
+        final class Seen: @unchecked Sendable { var source: String?? }
+        let seen = Seen()
+        let stream = supervisor.events(for: parentId)
+        let reader = Task { @MainActor in
+            for await event in stream {
+                if case let .childAgentSpawned(_, childID, _, _, source, _, _) = event, childID == child.rawValue {
+                    seen.source = .some(source)
+                    return
+                }
+            }
+        }
+        defer { reader.cancel() }
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { seen.source != nil }
+        return seen.source ?? nil
+    }
+    try expect(mcpOperation == claudeToolUseID,
+               "the MCP delegation's operationId must be claude's tool_use id from _meta, got \(mcpOperation)")
+    let claudeChipSource = await chipSource(for: mcpChild)
+    try expect(claudeChipSource == claudeToolUseID,
+               "the chip for an MCP delegation must name claude's tool_use id, got \(String(describing: claudeChipSource)) — its tool row can never fold into it")
     guard let mcpSnapshot = canvas.navigationTileSnapshot(for: mcpTile) else {
         throw Failure(message: "the MCP child's tile has no navigation snapshot")
     }
@@ -860,6 +890,22 @@ func runWorkspaceAPIDelegationChecks() async throws {
                && (siblingMessage.reply["error"] as? [String: Any])?["code"] as? String == "permission_denied",
                "a sibling is permission_denied, flagged isError so the client reports it as a failure: \(siblingMessage)")
     try expect(mcpPrompts.count == promptsBeforeSibling, "nobody is asked about a target that was never messageable")
+
+    // codex names its call `_meta.callId` — its `mcpToolCall` item id (measured,
+    // 0.159.3). The same rule: that id is the operation and the chip's source.
+    let codexCallID = "exec-0562414f-29fc-47c6-962d-90fe1e889886"
+    let childrenBeforeCodex = Set(supervisor.children(of: parentId))
+    let codexDelegated = try await toolCall("array_delegate", ["task": "MCP-TASK-codex: audit the appcast",
+                                                               "idempotencyKey": "mcp-k2",
+                                                               "presentation": ["camera": "preserve"]],
+                                            meta: ["callId": codexCallID, "threadId": "01a1123a-f3f3-7652-bd37-5fb118f1ffc0"])
+    let codexChildren = Set(supervisor.children(of: parentId)).subtracting(childrenBeforeCodex)
+    try expect(!codexDelegated.isError && codexChildren.count == 1
+               && (codexDelegated.reply["result"] as? [String: Any])?["operationId"] as? String == codexCallID,
+               "a codex-shaped MCP delegation's operationId must be codex's callId: \(codexDelegated.reply)")
+    let codexChipSource = await chipSource(for: codexChildren.first!)
+    try expect(codexChipSource == codexCallID,
+               "the chip for a codex MCP delegation must name its callId, got \(String(describing: codexChipSource))")
     client.close()
 
     supervisor.stopAll()

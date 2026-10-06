@@ -715,7 +715,37 @@ func runClaudeContextOccupancyChecks() {
            "claude occupancy: a stored result-usage occupancy must be dropped, not re-published; "
            + "got \(String(describing: sanitized.usedTokens))/\(String(describing: sanitized.maxTokens))")
 
+    // T1 — claude 2.1.291 on `claude-opus-5-5`. The request's prompt arrives on
+    // `message_start`, before anything streams, and the window is claude's own
+    // statement in `result.modelUsage` (pi's models-store lacks this model).
+    let opusURL = fixtureURL.deletingLastPathComponent()
+        .appendingPathComponent("claude-2.1.291-opus-turn.jsonl", isDirectory: false)
+    guard let opusText = try? String(contentsOf: opusURL, encoding: .utf8) else {
+        expect(false, "claude occupancy: the committed 2.1.291 capture is missing")
+        return
+    }
+    let opusLines = opusText.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    var opusTranslator = ClaudeEventTranslator(runToken: "run2", now: { Date(timeIntervalSinceReferenceDate: 99) })
+    var firstReading: (line: Int, snapshot: AgentContextWindowSnapshot)?
+    var opusSnapshots: [AgentContextWindowSnapshot] = []
+    for (index, line) in opusLines.enumerated() {
+        for event in opusTranslator.translate(line: line) {
+            guard case let .contextWindowUpdated(_, snapshot) = event else { continue }
+            if firstReading == nil { firstReading = (index, snapshot) }
+            opusSnapshots.append(snapshot)
+        }
+    }
+    expect(firstReading.map { opusLines[$0.line].contains("\"message_start\"") } == true
+            && firstReading.flatMap { AgentContextOccupancy.promptTokens(from: $0.snapshot) } == 21_936,
+           "claude occupancy: message_start must publish the request's prompt (2 + 11,239 + 10,695) "
+           + "before the first assistant frame; got \(String(describing: firstReading))")
+    expect(opusSnapshots.last?.maxTokens == 1_000_000
+            && opusSnapshots.last.flatMap { AgentContextOccupancy.promptTokens(from: $0) } == 21_936,
+           "claude occupancy: the result must carry claude's stated 1M window for the init model "
+           + "over the last request's prompt; got \(String(describing: opusSnapshots.last))")
+
     print("Claude context occupancy checks passed: the real capture reads 26,081 from its last "
           + "main-thread request (13% of 200k), never the run's summed 51,671 (the 348% reading) "
-          + "and never the subagent's 13,665; cost accounting keeps the sum")
+          + "and never the subagent's 13,665; cost accounting keeps the sum; 2.1.291 publishes "
+          + "the prompt on message_start and states its own 1M window")
 }

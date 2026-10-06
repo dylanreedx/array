@@ -58,6 +58,9 @@ public struct ClaudeEventTranslator {
     /// means this run has produced no assistant response yet, and in that state
     /// the result publishes no occupancy at all.
     private var lastMainThreadPromptUsage: (input: Int?, cacheRead: Int?, cacheWrite: Int?)?
+    /// The bare model id `system/init` reported — the key of this run's entry in
+    /// `result.modelUsage`, where claude states the model's context window.
+    private var model: String?
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -146,6 +149,7 @@ public struct ClaudeEventTranslator {
             // it there is no denominator and the ring stays empty.
             if let model = (object["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !model.isEmpty {
+                self.model = model
                 // Qualified HERE, where the provider is known, so the consumer
                 // does a plain catalogue lookup and holds no provider knowledge.
                 // claude reports a bare id (`claude-opus-5`); the catalogue is
@@ -195,7 +199,7 @@ public struct ClaudeEventTranslator {
         // it keeps its one chip and stays an index, never a mirror.
         case "stream_event":
             if let parentToolUseID = Self.subagentParentToolUseID(object) {
-                routeSubagentEvents(translateStreamEvent(object), for: parentToolUseID)
+                routeSubagentEvents(translateStreamEvent(object, isSubagent: true), for: parentToolUseID)
                 return []
             }
             return translateStreamEvent(object)
@@ -282,7 +286,22 @@ public struct ClaudeEventTranslator {
 
     // MARK: - stream_event (partial-message deltas)
 
-    private func translateStreamEvent(_ object: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateStreamEvent(
+        _ object: [String: Any], isSubagent: Bool = false
+    ) -> [AgentRuntimeEvent] {
+        // OCCUPANCY, at the moment a request is SENT. `message_start` carries the
+        // request's full usage — input plus both cache counters, its whole
+        // prompt — before a single token streams back, so the ring moves when
+        // the model is asked, not once the frame completes. Same arithmetic and
+        // same subagent rule as the assistant frame below.
+        if !isSubagent,
+           let event = object["event"] as? [String: Any],
+           (event["type"] as? String) == "message_start",
+           let message = event["message"] as? [String: Any],
+           let usage = message["usage"] as? [String: Any],
+           let snapshot = mainThreadPromptSnapshot(usage) {
+            return [.contextWindowUpdated(threadId: threadId, snapshot: snapshot)]
+        }
         guard let event = object["event"] as? [String: Any],
               (event["type"] as? String) == "content_block_delta",
               let delta = event["delta"] as? [String: Any],
@@ -334,28 +353,9 @@ public struct ClaudeEventTranslator {
         // the ring would show a bare token count where the parent shows a
         // percentage. A witness that asserts this through the parent's event list
         // is vacuous — it has to read the child channel (`onSubagentEvent`).
-        if !isSubagent, let usage = message["usage"] as? [String: Any] {
-            let input = Self.intValue(usage["input_tokens"])
-            let cacheRead = Self.intValue(usage["cache_read_input_tokens"])
-            let cacheWrite = Self.intValue(usage["cache_creation_input_tokens"])
-            let prompt = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
-            if prompt > 0 {
-                lastMainThreadPromptUsage = (input, cacheRead, cacheWrite)
-                events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
-                    usedTokens: nil,
-                    maxTokens: nil,
-                    inputTokens: input,
-                    outputTokens: Self.intValue(usage["output_tokens"]),
-                    cacheReadTokens: cacheRead,
-                    cacheWriteTokens: cacheWrite,
-                    totalProcessedTokens: nil,
-                    totalCostUsd: nil,
-                    automaticCompaction: nil,
-                    observedAt: now(),
-                    source: .claudeAssistantUsage,
-                    freshness: .live
-                )))
-            }
+        if !isSubagent, let usage = message["usage"] as? [String: Any],
+           let snapshot = mainThreadPromptSnapshot(usage) {
+            events.append(.contextWindowUpdated(threadId: threadId, snapshot: snapshot))
         }
         for block in content {
             guard (block["type"] as? String) == "tool_use",
@@ -559,6 +559,24 @@ public struct ClaudeEventTranslator {
         ]
     }
 
+    /// One main-conversation request's prompt, from its `usage` block, recorded
+    /// so the `result` can close the turn on it. Nil for an all-zero block.
+    private mutating func mainThreadPromptSnapshot(_ usage: [String: Any]) -> AgentContextWindowSnapshot? {
+        let input = Self.intValue(usage["input_tokens"])
+        let cacheRead = Self.intValue(usage["cache_read_input_tokens"])
+        let cacheWrite = Self.intValue(usage["cache_creation_input_tokens"])
+        guard (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0) > 0 else { return nil }
+        lastMainThreadPromptUsage = (input, cacheRead, cacheWrite)
+        return AgentContextWindowSnapshot(
+            inputTokens: input,
+            outputTokens: Self.intValue(usage["output_tokens"]),
+            cacheReadTokens: cacheRead,
+            cacheWriteTokens: cacheWrite,
+            observedAt: now(),
+            source: .claudeAssistantUsage,
+            freshness: .live)
+    }
+
     // MARK: - result (usage + turn completion)
 
     private func translateResult(_ object: [String: Any]) -> [AgentRuntimeEvent] {
@@ -599,10 +617,20 @@ public struct ClaudeEventTranslator {
                 // does not blank the ring. When no assistant frame reported
                 // usage in this run there is nothing to carry: emit no
                 // occupancy rather than the summed number.
+                //
+                // The WINDOW is claude's own statement:
+                // `modelUsage[<init model>].contextWindow` (1,000,000 for
+                // `claude-opus-5-5` on 2.1.291, a model pi's models-store does not
+                // list). Read for this run's model only — `modelUsage` can carry
+                // other models a run touched.
+                let window = model
+                    .flatMap { (object["modelUsage"] as? [String: Any])?[$0] as? [String: Any] }
+                    .flatMap { Self.intValue($0["contextWindow"]) }
+                    .flatMap { $0 > 0 ? $0 : nil }
                 if let prompt = lastMainThreadPromptUsage {
                     events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
                         usedTokens: nil,
-                        maxTokens: nil,
+                        maxTokens: window,
                         inputTokens: prompt.input,
                         outputTokens: output,
                         cacheReadTokens: prompt.cacheRead,
