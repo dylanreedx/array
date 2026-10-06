@@ -286,7 +286,13 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     public var revision: WorkspaceRevision
     public var interactionGeneration: UInt64
     public var coverage: WorkspaceCoverage
+    /// Operations this caller can invoke now: allowed by a live grant AND
+    /// reachable through a tool it actually has.
     public var capabilities: [WorkspaceAPIOp]
+    /// Operations it has a tool for that first ask the user in Array. Absent
+    /// from `capabilities`, which is a promise, but not impossible either —
+    /// read as "impossible", a model never tries to delegate at all.
+    public var approvalRequired: [WorkspaceAPIOp]
     public var recentOperations: [WorkspaceRecentOperation]
     public var observedAt: Date
 
@@ -301,6 +307,7 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
         interactionGeneration: UInt64,
         coverage: WorkspaceCoverage,
         capabilities: [WorkspaceAPIOp],
+        approvalRequired: [WorkspaceAPIOp] = [],
         recentOperations: [WorkspaceRecentOperation],
         observedAt: Date
     ) {
@@ -314,6 +321,7 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
         self.interactionGeneration = interactionGeneration
         self.coverage = coverage
         self.capabilities = capabilities
+        self.approvalRequired = approvalRequired
         self.recentOperations = recentOperations
         self.observedAt = observedAt
     }

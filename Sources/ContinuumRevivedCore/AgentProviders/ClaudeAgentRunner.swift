@@ -262,7 +262,18 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             + sessionArgs
             + extraArgs
         if let workspaceMCP {
-            args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
+            // The guidance line rides in the system prompt because Claude
+            // defers MCP tools behind tool search: without it the model never
+            // learns Array's tools exist and reaches for tmux or curl instead.
+            // Measured on claude 2.1.291 (-p, haiku): outside bypass mode every
+            // MCP call is denied ("you haven't granted it yet") until
+            // `--allowedTools mcp__array_workspace` names the server, so Array's
+            // own approval is the only gate; `--disallowedTools ListAgents`
+            // removes the tool that listed tmux peers as if they were tiles.
+            args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
+                     "--allowedTools", "mcp__array_workspace",
+                     "--disallowedTools", "ListAgents",
+                     "--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         }
         // `--mcp-config` accepts a variadic list. Terminate option parsing so
         // Claude cannot interpret the user's prompt as another config path.
@@ -549,10 +560,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         return (exitCode, errText)
     }
 
-    private static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
-        var environment = PiAgentRunner.childEnvironment()
-        if let workspaceMCP { environment.merge(workspaceMCP.environment) { _, new in new } }
-        return environment
+    /// The MCP server's endpoint and token reach it through its own config
+    /// (`WorkspaceMCPConfiguration.claudeMCPConfigJSON`), never through
+    /// claude's environment: every Bash call claude makes inherits that, and
+    /// `env` printed the capability token into a transcript.
+    public static func childEnvironment(workspaceMCP: WorkspaceMCPConfiguration?) -> [String: String] {
+        PiAgentRunner.childEnvironment()
     }
 
     // MARK: - queue-confined line assembly

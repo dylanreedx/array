@@ -109,6 +109,14 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         return (kept, true)
     }
 
+    /// The courier as last written, or nil when there is none (or it is
+    /// unreadable). `operation.get` reads it for a delegated child's answer.
+    public static func read(parentCwd: String, handle: String) -> SpawnResultFile? {
+        guard let handle = validatedHandle(handle),
+              let data = try? Data(contentsOf: url(parentCwd: parentCwd, handle: handle)) else { return nil }
+        return try? JSONCodec.makeDecoder().decode(SpawnResultFile.self, from: data)
+    }
+
     /// Atomic write via the records' own idiom (no backups: one file per call,
     /// last status wins). Failures are reported, not thrown — a result file is
     /// best-effort courier state and must never fail a spawn.
