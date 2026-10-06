@@ -20,6 +20,8 @@ import Foundation
 //   BACKGROUND  (claude) starts a `sleep` job in the process group, writes its
 //               pid to bg.pid and reports one background task
 //   PLAIN       0.6 s of text generation with no tool boundary
+//   LONG        up to 10 s of text generation with no tool boundary, for an
+//               interrupt — a steer sent meanwhile stays held by Array
 //   CRASH       exits 3 mid-turn without a result
 //   anything else: a short text reply
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
@@ -109,7 +111,7 @@ def record(line):
         f.write(line.rstrip("\n") + "\n")
 
 def shape(text):
-    for word in ("TOOL", "SLOW", "BACKGROUND", "PLAIN", "CRASH"):
+    for word in ("TOOL", "SLOW", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
         if word in text:
             return word
     return "TEXT"
@@ -200,6 +202,14 @@ def run_turn(msg):
             say("steered: " + text_of(steer))
     if kind == "PLAIN":
         time.sleep(0.6)
+    if kind == "LONG":
+        interrupted.clear()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if interrupted.is_set():
+                result(True, "error_during_execution")
+                return
+            time.sleep(0.02)
     say("ok")
     result()
 
@@ -248,6 +258,13 @@ def run_turn(turn_id, text):
         out({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fake", "type": "commandExecution", "status": "completed"}}})
     if kind == "PLAIN":
         time.sleep(0.6)
+    if kind == "LONG":
+        interrupted.clear()
+        deadline = time.time() + 10
+        while time.time() < deadline and not interrupted.is_set():
+            time.sleep(0.02)
+        if interrupted.is_set():
+            status = "interrupted"
     with lock:
         state["turn"] = None
     out({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": turn_id, "status": status}}})
@@ -340,6 +357,13 @@ def run_turn(text):
                 out({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "steered: " + steer}})
     if kind == "PLAIN":
         time.sleep(0.6)
+    if kind == "LONG":
+        deadline = time.time() + 10
+        while time.time() < deadline and not aborted.is_set():
+            time.sleep(0.02)
+        if aborted.is_set():
+            finish("aborted")
+            return
     finish("stop")
 
 for line in sys.stdin:

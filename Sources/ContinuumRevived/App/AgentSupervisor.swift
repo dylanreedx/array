@@ -1291,7 +1291,7 @@ final class AgentSupervisor {
         if phase == .succeeded {
             if !pausedQueues.contains(id) { drainQueue(for: id) }
         } else {
-            pausedQueues.insert(id)
+            pauseQueue(id, .afterCompaction)
         }
         notifyTurnCapabilitiesChanged(id)
     }
@@ -1314,6 +1314,13 @@ final class AgentSupervisor {
     /// the held queue is not auto-drained into a turn they did not ask for.
     /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
     private var pausedQueues: Set<AgentID> = []
+    /// T5b — why each paused queue is held, for the rail's "Paused after …".
+    private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
+
+    private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
+        pausedQueues.insert(id)
+        queuePauseReasons[id] = reason
+    }
     /// The outcome of the turn that just freed a runner slot, read by
     /// `clearRunner` — the one moment the slot is actually free to accept the
     /// next send. Set in `deliver`'s `.turnCompleted` handling, same as the
@@ -2011,7 +2018,7 @@ final class AgentSupervisor {
             if record.inFlightCompaction?.phase == .indeterminate
                 || record.inFlightCompaction?.phase == .failed
                 || record.inFlightCompaction?.phase == .cancelled {
-                pausedQueues.insert(record.id)
+                pauseQueue(record.id, .afterCompaction)
             }
             // A root that came back stops being stale. Without this an agent marked
             // on an earlier sweep would read as both stale and live to the Phase 3
@@ -2022,7 +2029,7 @@ final class AgentSupervisor {
             // the user: it never auto-resumes into a turn nobody is watching.
             if let queueFile = submissionRecoveryStore?.layout.queuedMessagesFile(for: record.id),
                ((try? Data(contentsOf: queueFile))?.count ?? 0) > 2 {
-                pausedQueues.insert(record.id)
+                pauseQueue(record.id, .afterRelaunch)
             }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
@@ -6509,13 +6516,19 @@ final class AgentSupervisor {
         runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
     }
 
-    /// "Clear queued" — every chip at once, still without touching the turn in
-    /// flight.
+    /// "Clear" — every queued follow-up at once, still without touching the turn
+    /// in flight. T5b: held steers are their own rail section and stay.
     func clearQueuedMessages(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
-        queuedWorkItemsCache[id] = []
+        let followUps = (queuedWorkItemsCache[id] ?? []).filter {
+            if case .prompt(let message) = $0 { return !message.isSteer }
+            return true
+        }.map(\.id)
+        queuedWorkItemsCache[id]?.removeAll { followUps.contains($0.id) }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) { await store.clearQueue(for: id) }
+        runQueueOp(for: id) {
+            for itemID in followUps { _ = await store.removeQueuedMessage(id: itemID, for: id) }
+        }
     }
 
     /// Explicit resume after an interrupt, distinct from the next Send: this
@@ -6547,7 +6560,7 @@ final class AgentSupervisor {
     private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
         guard submissionRecoveryStore != nil else { return }
         if outcome == .interrupted {
-            pausedQueues.insert(id)
+            pauseQueue(id, .afterStop)
             notifyTurnCapabilitiesChanged(id)
             return
         }
@@ -6577,7 +6590,7 @@ final class AgentSupervisor {
                     self.records[id] = record
                     self.persist(record)
                 }
-                self.pausedQueues.insert(id)
+                self.pauseQueue(id, .held)
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
@@ -6589,7 +6602,7 @@ final class AgentSupervisor {
                     for: id) else {
                     await store.requeueWorkItemAtFront(workItem, for: id)
                     self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
-                    self.pausedQueues.insert(id)
+                    self.pauseQueue(id, .afterCompaction)
                     self.notifyTurnCapabilitiesChanged(id)
                     return
                 }
@@ -6660,18 +6673,34 @@ final class AgentSupervisor {
         return held + delivering
     }
 
-    /// T5 — the plain rail until T5b: held and delivering steers first, labelled,
-    /// then the queue. A delivering steer's chip cannot be removed (its id is in
-    /// no queue), which is the truth: it is the provider's now.
-    func railMessages(for id: AgentID) -> [AgentComposerQueuedMessage] {
-        let steers = pendingSteers(for: id).map { steer in
-            AgentComposerQueuedMessage(
-                id: steer.id,
-                text: (steer.state == .held ? "Steer \u{00B7} " : "Steer \u{00B7} sending \u{00B7} ") + steer.text,
-                queuedAt: Date.distantPast,
-                isSteer: true)
+    /// T5b — the steering/queue rail: held then delivering steers, then the
+    /// follow-ups in drain order, and why the queue is paused if it is.
+    func queueRailState(for id: AgentID) -> ComposerQueueRailState {
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        var state = ComposerQueueRailState()
+        for item in queuedWorkItemsCache[id] ?? [] {
+            switch item {
+            case .prompt(let message):
+                let entry = ComposerQueueRailState.Item(
+                    id: message.id, text: message.text,
+                    attachmentCount: message.imageAttachments.count + message.fileReferences.count,
+                    kind: message.isSteer ? .heldSteer : .queued)
+                if message.isSteer { state.steers.append(entry) } else { state.queued.append(entry) }
+            case .compaction(let compaction):
+                state.queued.append(ComposerQueueRailState.Item(
+                    id: compaction.id,
+                    text: compaction.focus?.isEmpty == false ? "Compact context with focus" : "Compact context",
+                    attachmentCount: 0, kind: .compaction))
+            }
         }
-        return steers + queuedMessages(for: id).filter { !$0.isSteer }
+        state.steers += (deliveringSteers[id] ?? []).map {
+            ComposerQueueRailState.Item(
+                id: $0.id, text: $0.message.text,
+                attachmentCount: $0.message.imageAttachments.count + $0.message.fileReferences.count,
+                kind: .deliveringSteer)
+        }
+        if pausedQueues.contains(id) { state.pause = queuePauseReasons[id] ?? .held }
+        return state
     }
 
     /// A supervisor-started prompt no composer painted (a drained follow-up, a

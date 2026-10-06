@@ -463,6 +463,19 @@ enum AgentFirstPaintChecks {
         guard press(.shift, draft: "newline") == nil else {
             throw fail("working Return keys: ⇧↩ must stay a native newline, got \(sink.receivedIntents)")
         }
+        // T5b — the hint under the draft names those chords while the turn
+        // works, and an idle composer shows no hint at all, as before.
+        let workingHint = "\u{21A9} steer   \u{2325}\u{21A9} queue   \u{2318}\u{21A9} force send"
+        guard composer.qaKeyHint == workingHint else {
+            throw fail("working Return keys: the hint line must read '\(workingHint)', got \(composer.qaKeyHint ?? "nil")")
+        }
+        composer.updateTurnSnapshot(.init(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: false),
+            turnStartedAt: nil))
+        guard composer.qaKeyHint == nil else {
+            throw fail("working Return keys: an idle composer must show no hint, got \(composer.qaKeyHint ?? "")")
+        }
     }
 
     /// A slash choice edits the draft; Enter submits the selected command and all

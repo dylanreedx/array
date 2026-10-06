@@ -585,10 +585,18 @@ final class ManagedAgentTileNSView: TileNSView {
             composer.onResumeQueue = { [weak supervisor] in
                 supervisor?.resumeQueue(for: agentID)
             }
-            composer.updateQueuedMessages(
-                supervisor.railMessages(for: agentID),
-                paused: supervisor.isQueuePaused(for: agentID)
-            )
+            // T5b: the rail's per-item verbs. Send-now on a follow-up is D2's
+            // force send; on a held steer it hands the steer over at once.
+            composer.onSendQueuedMessageNow = { [weak supervisor] messageID in
+                Task { @MainActor in _ = await supervisor?.sendQueuedItemNow(messageID, for: agentID) }
+            }
+            composer.onMoveQueuedMessage = { [weak supervisor] messageID, index in
+                supervisor?.moveQueuedItem(messageID, toFollowUpIndex: index, for: agentID)
+            }
+            composer.onTakeQueuedMessageForEditing = { [weak supervisor] messageID in
+                await supervisor?.takeQueuedItemForEditing(messageID, for: agentID)
+            }
+            composer.updateQueueRail(supervisor.queueRailState(for: agentID))
             // T5 — a prompt the supervisor started itself (a drained follow-up,
             // a delivered steer) has no composer bubble; show it when it runs.
             if let token = promptEchoObserverToken { supervisor.removePromptEchoObserver(token, for: agentID) }
@@ -2052,10 +2060,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // chips stay in lockstep with the primary control's own repaint.
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
-                v2Composer?.updateQueuedMessages(
-                    supervisor.railMessages(for: agentID),
-                    paused: supervisor.isQueuePaused(for: agentID)
-                )
+                v2Composer?.updateQueueRail(supervisor.queueRailState(for: agentID))
             }
             // TR-06: the reply chips are a function of the turn state as well as
             // the document, and queueing moves ONLY the state — it appends no
@@ -3198,6 +3203,9 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.qaReplyOptionChipAccessibilityLabels ?? []
     }
     var qaComposerDraftText: String { v2Composer?.qaDraftText ?? "" }
+    /// T5b — the installed composer itself, so a check drives its real rail,
+    /// key path and hint line rather than a copy.
+    var qaComposerForChecks: AgentComposerView? { v2Composer }
     /// Drives the composer's real draft-apply path, so clearing a draft in a
     /// check runs the same observer production runs.
     func qaSetComposerDraftForChecks(_ text: String) {
