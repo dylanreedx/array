@@ -1669,6 +1669,9 @@ enum ContinuumApp {
                     // T5: the supervisor's steering, force-send, interrupt and
                     // queue semantics share this leg's queue machinery.
                     try await runAgentSteeringChecks()
+                    // T5b: the steering/queue rail over that same API, through
+                    // a real tile and composer.
+                    try await runAgentQueueRailChecks()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
