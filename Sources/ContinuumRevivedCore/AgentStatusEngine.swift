@@ -372,9 +372,11 @@ public enum AgentContextWindowTelemetrySource: Equatable, Sendable, Codable {
     /// `input_tokens` is already the total, cache counters are a subset — not
     /// authoritative occupancy).
     case codexTurnUsage
-    /// Codex's rollout-log `event_msg/token_count`: `last_token_usage` is the
-    /// most recent model request and `model_context_window` is that request's
-    /// provider-reported limit.
+    /// Codex's per-request usage: the rollout log's `event_msg/token_count`
+    /// (`last_token_usage`, `model_context_window`) or app-server's
+    /// `thread/tokenUsage/updated` (`last`, `modelContextWindow`) — the same
+    /// `TokenUsageInfo` on two transports. The most recent model request and
+    /// that request's provider-reported limit.
     case codexRolloutTokenCount
     case providerSessionStats
     /// claude's `system/compact_boundary` frame. `compact_metadata.post_tokens`
@@ -636,6 +638,12 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public var automaticCompaction: Bool?
     public var contextEpoch: UInt64?
     public var automaticCompactionPolicy: AgentAutomaticCompactionPolicy?
+    /// `usedTokens` is the provider's ESTIMATE (pi's `estimatedTokensAfter`),
+    /// not a count; the meter marks it "≈". Nil means a measured count.
+    public var usedTokensEstimated: Bool?
+    /// A compaction is running: `usedTokens` is the last reading from BEFORE it,
+    /// kept on screen dimmed until the boundary replaces it. Never persisted.
+    public var compacting: Bool?
     public var observedAt: Date
     public var source: AgentContextWindowTelemetrySource
     public var freshness: AgentContextWindowFreshness
@@ -653,6 +661,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         automaticCompaction: Bool? = nil,
         contextEpoch: UInt64? = nil,
         automaticCompactionPolicy: AgentAutomaticCompactionPolicy? = nil,
+        usedTokensEstimated: Bool? = nil,
+        compacting: Bool? = nil,
         observedAt: Date,
         source: AgentContextWindowTelemetrySource,
         freshness: AgentContextWindowFreshness
@@ -669,6 +679,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
         self.automaticCompaction = automaticCompaction
         self.contextEpoch = contextEpoch
         self.automaticCompactionPolicy = automaticCompactionPolicy
+        self.usedTokensEstimated = usedTokensEstimated
+        self.compacting = compacting
         self.observedAt = observedAt
         self.source = source
         self.freshness = freshness

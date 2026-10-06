@@ -1138,7 +1138,6 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
 
         let threadId = Self.threadId(for: id)
-        let operationEpoch = record.contextEpoch
         deliver(.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
             operationID: request.operationID,
             phase: .requested,
@@ -1159,7 +1158,7 @@ final class AgentSupervisor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try compacting.compact(request) { event in
-                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                    let bound = event.withThreadId(threadId)
                     DispatchQueue.main.async {
                         if case .compactionChanged(_, let lifecycle) = bound,
                            [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
@@ -1749,13 +1748,6 @@ final class AgentSupervisor {
         // immutable agent ID; no raw runtime payload or path enters the event log.
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
-
-    /// The concrete `provider/model` the harness resolved this agent's model to,
-    /// as the harness reported it. The context meter's denominator key. It
-    /// mattered most while the Claude harness offered aliases (`anthropic/opus`)
-    /// that were not catalogue keys; the catalogue is explicit ids now, but a
-    /// harness-reported id still beats the record's stored one.
-    func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
 
     /// The account quota for THIS agent's harness, or nil when the provider has
     /// reported none. Pi reports no account windows at all, so nil there is
@@ -2807,7 +2799,6 @@ final class AgentSupervisor {
             }
         }
         let threadId = Self.threadId(for: id)
-        let operationEpoch = record.contextEpoch
         // The translators mint `.turnCompleted` only from a provider result line.
         // A CLI that dies without one (crash mid-line, init never parsed, silent
         // exit 0) must not leave the turn open forever — the supervisor watches
@@ -2824,7 +2815,7 @@ final class AgentSupervisor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try runner.run(prompt: prompt) { event in
-                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                    let bound = event.withThreadId(threadId)
                     switch bound {
                     case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
                         crossedPiPersistenceWatermark.set()
@@ -5104,6 +5095,39 @@ final class AgentSupervisor {
         return contextWindowSnapshots[id] ?? record.lastContextWindow
     }
 
+    /// The context meter's denominator, resolved here and nowhere else. A
+    /// window the provider states wins and is remembered on the record for the
+    /// model it belongs to, so the next turn's first request has it; then pi's
+    /// models-store. Never guessed from a family name: `claude-opus-4-5` is 200k
+    /// and `claude-opus-5` 1M, so a wrong guess misreports occupancy by 5x.
+    private func contextWindow(for id: AgentID, stated: Int?) -> Int? {
+        guard var record = records[id] else { return nil }
+        let model = record.resolvedModelId ?? record.model
+        if let stated, stated > 0 {
+            if record.providerContextWindows[model] != stated {
+                record.providerContextWindows[model] = stated
+                records[id] = record
+                persist(record)
+            }
+            return stated
+        }
+        if let remembered = record.providerContextWindows[model] { return remembered }
+        if let resolved = record.resolvedModelId,
+           let window = AgentModelCatalog.shared.contextWindow(for: resolved) {
+            return window
+        }
+        return AgentModelCatalog.shared.contextWindow(for: record.model)
+    }
+
+    private static func endsInTurnCompaction(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnCompleted, .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            return true
+        default:
+            return false
+        }
+    }
+
     func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
         guard let record = records[id] else { return nil }
         let facts = turnFacts[id] ?? TurnFacts()
@@ -6509,15 +6533,33 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
     }
 
-    private func deliver(_ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+    /// `meterPublished` marks the supervisor's own context-meter reading (after
+    /// a compaction event) so it is delivered as-is rather than folded again.
+    private func deliver(
+        _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
+    ) {
         var event = incomingEvent
-        if case .contextWindowUpdated(let threadId, var snapshot) = event,
-           let epoch = records[id]?.contextEpoch {
-            if let observedEpoch = snapshot.contextEpoch, observedEpoch != epoch { return }
-            snapshot.contextEpoch = epoch
-            event = .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
+        // T1 — the context meter has ONE owner. Every provider snapshot folds
+        // into the agent's current reading (`AgentContextMeter`) and the tile is
+        // handed the result, so a settings-only snapshot cannot blank the ring
+        // and a usage snapshot cannot drop the policy tick.
+        //
+        // Staleness is the runner generation's job, not an epoch's: `deliver(_:
+        // from:generation:to:)` rejects every non-terminal event from a runner
+        // that no longer owns the agent. The old operation-start epoch stamp also
+        // dropped the CURRENT operation's own post-compaction readings — claude's
+        // compact_boundary snapshot, and every request after an in-turn
+        // compaction — so the ring froze on the pre-compaction number.
+        if case .contextWindowUpdated(let threadId, let snapshot) = event, let record = records[id] {
+            var reading = meterPublished ? snapshot : AgentContextMeter.reading(
+                after: snapshot,
+                current: contextWindowSnapshot(for: id),
+                window: contextWindow(for: id, stated: snapshot.maxTokens))
+            reading.contextEpoch = record.contextEpoch
+            event = .contextWindowUpdated(threadId: threadId, snapshot: reading)
         }
-        if case .compactionChanged(_, let lifecycle) = event {
+        var publishedMeter: (threadId: String, snapshot: AgentContextWindowSnapshot)?
+        if case .compactionChanged(let threadId, let lifecycle) = event {
             if lifecycle.phase == .running {
                 compactingAgents.insert(id)
                 notifyTurnCapabilitiesChanged(id)
@@ -6529,31 +6571,19 @@ final class AgentSupervisor {
                 guard seen.insert(boundaryID).inserted else { return }
                 seenCompactionBoundaryIDs[id] = seen
             }
+            // The meter follows the lifecycle: dimmed while running, the
+            // boundary's `after` once it succeeds (exact or estimated), undimmed
+            // on failure. Published as its own `.contextWindowUpdated` after
+            // this event — the tile renders nothing else.
+            if let meter = AgentContextMeter.reading(
+                after: lifecycle,
+                current: contextWindowSnapshot(for: id),
+                window: contextWindow(for: id, stated: nil)) {
+                publishedMeter = (threadId, meter)
+            }
             if var record = records[id] {
                 if lifecycle.phase == .succeeded {
                     record.contextEpoch &+= 1
-                    if let after = lifecycle.afterTokens, after.precision == .exact {
-                        let previous = record.lastContextWindow
-                        let automatic: Bool?
-                        switch lifecycle.trigger {
-                        case .manual: automatic = false
-                        case .providerAutomatic, .threshold, .overflowRecovery: automatic = true
-                        case .unknown: automatic = nil
-                        }
-                        record.lastContextWindow = AgentContextWindowSnapshot(
-                            usedTokens: after.value,
-                            maxTokens: previous?.maxTokens,
-                            automaticCompaction: automatic,
-                            contextEpoch: record.contextEpoch,
-                            automaticCompactionPolicy: previous?.automaticCompactionPolicy,
-                            observedAt: lifecycle.observedAt,
-                            source: previous?.source ?? .unknown("compaction-boundary"),
-                            freshness: .live)
-                        contextWindowSnapshots[id] = record.lastContextWindow
-                    } else {
-                        record.lastContextWindow = nil
-                        contextWindowSnapshots[id] = nil
-                    }
                     record.inFlightCompaction = nil
                 } else if lifecycle.phase == .requested || lifecycle.phase == .running {
                     record.inFlightCompaction = AgentCompactionJournal(
@@ -6638,10 +6668,14 @@ final class AgentSupervisor {
             // only an actual change forces the write, so this adds at most one
             // AtomicWriter write per turn — never one per token.
             var contextTelemetryChanged = false
-            if case let .contextWindowUpdated(_, snapshot) = event,
-               record.lastContextWindow != snapshot {
-                record.lastContextWindow = snapshot
-                contextTelemetryChanged = true
+            if case var .contextWindowUpdated(_, snapshot) = event {
+                // A running compaction is a live fact, not telemetry: persisted,
+                // it would dim a relaunched meter that no event ever undims.
+                snapshot.compacting = nil
+                if record.lastContextWindow != snapshot {
+                    record.lastContextWindow = snapshot
+                    contextTelemetryChanged = true
+                }
             }
             // WS4 · A terminal event that lands while a human is ACTIVELY LOOKING
             // at this agent is a visit at the moment it lands: it counts as read
@@ -6724,6 +6758,32 @@ final class AgentSupervisor {
 
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
+        }
+
+        // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
+        // `compaction_start`) has no operation of its own to finish it; only a
+        // terminal lifecycle event did, and a provider that never sends one left
+        // the agent "compacting" until relaunch, which then paused its queue as
+        // an indeterminate operation. The turn (or the runner) ending ends it. A
+        // manual operation is `finishCompaction`'s, never this.
+        if Self.endsInTurnCompaction(event), compactingAgents.contains(id),
+           !activeCompactionOperations.contains(id) {
+            compactingAgents.remove(id)
+            if var record = records[id], record.inFlightCompaction?.phase == .running {
+                record.inFlightCompaction = nil
+                records[id] = record
+                persist(record)
+            }
+            if publishedMeter == nil, var meter = contextWindowSnapshot(for: id), meter.compacting == true {
+                meter.compacting = nil
+                publishedMeter = (Self.threadId(for: id), meter)
+            }
+            notifyTurnCapabilitiesChanged(id)
+        }
+        if let publishedMeter {
+            deliver(
+                .contextWindowUpdated(threadId: publishedMeter.threadId, snapshot: publishedMeter.snapshot),
+                to: id, now: now, meterPublished: true)
         }
 
         // A spawned child's turn ending is the moment its result becomes

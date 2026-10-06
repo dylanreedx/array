@@ -493,19 +493,27 @@ enum UIProbeGeometry {
         try require(statePresentations.first { $0.0 == .stale }?.1.detailText.contains("Freshness: stale") == true,
                     "a stale context reading must disclose staleness in its tooltip")
 
-        // Per-turn usage (claude/codex) reports token counts but no context
-        // window max, so occupancy % is unknowable — but the count IS known and
-        // must show instead of a bare "unknown" (the "status reverted to
-        // unknown after the response" report).
-        let perTurnCount = AgentContextWindowSnapshot(
+        // A request's usage with no known window for the model: occupancy % is
+        // unknowable, but the PROMPT count is known and must show instead of a
+        // bare "unknown" (the "status reverted to unknown after the response"
+        // report). The prompt — input plus both cache counters — and nothing
+        // else: this used to show the processed total, which at turn end was the
+        // run's SUM (T1, `.plans/69`).
+        let perRequestCount = AgentContextWindowSnapshot(
+            inputTokens: 10, outputTokens: 40, cacheReadTokens: 17_900, cacheWriteTokens: 6_496,
+            totalProcessedTokens: 98_446, totalCostUsd: 0.015, observedAt: now,
+            source: .claudeAssistantUsage, freshness: .live)
+        let count = AgentRadialContextMeterPresenter.present(perRequestCount, policy: policy)
+        try require(count.state == .known && count.fraction == nil,
+                    "a request's usage without a max must present a known token count, not an occupancy fraction (state \(count.state.rawValue), fraction \(String(describing: count.fraction)))")
+        try require(count.label == "24.4k",
+                    "a request's usage must show its prompt tokens, not 'unknown' or the processed total, got \(count.label)")
+        let runSum = AgentContextWindowSnapshot(
             inputTokens: 10, outputTokens: 40, cacheReadTokens: 17_900, cacheWriteTokens: 6_496,
             totalProcessedTokens: 24_446, totalCostUsd: 0.015, observedAt: now,
             source: .claudeResultUsage, freshness: .live)
-        let count = AgentRadialContextMeterPresenter.present(perTurnCount, policy: policy)
-        try require(count.state == .known && count.fraction == nil,
-                    "per-turn usage without a max must present a known token count, not an occupancy fraction (state \(count.state.rawValue), fraction \(String(describing: count.fraction)))")
-        try require(count.label == "24.4k",
-                    "per-turn usage must show the token count, not 'unknown', got \(count.label)")
+        try require(AgentRadialContextMeterPresenter.present(runSum, policy: policy).label == "unknown",
+                    "a cumulative result block states no prompt and must not print a count")
 
         let over = AgentRadialContextMeterPresenter.present(overCapacity, policy: policy)
         let overPercent = expectedRawPercent(used: 180_000, max: 128_000)
@@ -6193,7 +6201,7 @@ enum UIProbeGeometry {
         guard meterRow.qaContextFraction == 42_000.0 / 200_000.0,
               meterRow.qaContextState == .known,
               meterRow.qaContextText == "21%",
-              meterRow.qaContextDetail.contains("prompt tokens sent on the last completed turn") else {
+              meterRow.qaContextDetail.contains("prompt tokens of the latest model request") else {
             throw fail("\(label): a derived-occupancy snapshot must fill the radial meter with a real percentage and disclose the derivation, fraction \(String(describing: meterRow.qaContextFraction)) text \(meterRow.qaContextText)")
         }
 

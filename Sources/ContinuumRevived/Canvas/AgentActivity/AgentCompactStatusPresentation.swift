@@ -511,13 +511,20 @@ enum AgentRadialContextMeterPresenter {
         // overflows before the provider compacts it.
         let rawPercent = arithmetic.map { Int(($0.fraction * 100).rounded()) }
         let renderFraction = arithmetic?.fraction
-        // Non-authoritative sources (claude/codex per-turn usage) carry token
-        // counts but no context-window max, so occupancy % is unknowable. Show
-        // the token count we DO have ("24.4k") rather than a bare "unknown".
-        let countLabel = arithmetic == nil ? processedTokenLabel(snapshot) : nil
+        // No window for this model: occupancy % is unknowable, but the prompt
+        // the last request carried IS known. Show that count ("21.9k") rather
+        // than a bare "unknown" — and never a processed or summed figure.
+        let countLabel = arithmetic == nil ? promptTokenLabel(snapshot) : nil
+        // A provider's estimate (pi's `estimatedTokensAfter`) reads as one.
+        let approx = snapshot.usedTokensEstimated == true ? "≈" : ""
         let state: AgentRadialContextMeterState
         let marker: String?
-        if case .stale = snapshot.freshness {
+        if snapshot.compacting == true {
+            // The last reading stays on screen, dimmed, while the provider
+            // compacts; the boundary replaces it.
+            state = .stale
+            marker = nil
+        } else if case .stale = snapshot.freshness {
             state = .stale
             marker = "⏱"
         } else if let fraction = arithmetic?.fraction {
@@ -546,21 +553,21 @@ enum AgentRadialContextMeterPresenter {
         // meter's subdued state — leading the row with it made a perfectly good
         // last-known value read as a failure.
         if let countLabel, arithmetic == nil {
-            visualLabel = countLabel
+            visualLabel = approx + countLabel
         } else {
             switch (state, rawPercent) {
             case (.unknown, _):
                 visualLabel = "unknown"
             case (.stale, let value?):
-                visualLabel = "\(value)%"
+                visualLabel = "\(approx)\(value)%"
             case (.stale, nil):
                 visualLabel = "unknown"
             case (.warning, let value?):
-                visualLabel = "⚠︎ \(value)%"
+                visualLabel = "⚠︎ \(approx)\(value)%"
             case (.critical, let value?):
-                visualLabel = "! \(value)%"
+                visualLabel = "! \(approx)\(value)%"
             case (_, let value?):
-                visualLabel = "\(value)%"
+                visualLabel = "\(approx)\(value)%"
             case (_, nil):
                 visualLabel = "unknown"
             }
@@ -618,11 +625,13 @@ enum AgentRadialContextMeterPresenter {
             let percent = Int((arithmetic.fraction * 100).rounded())
             lines.append("Authoritative context: \(arithmetic.used) / \(arithmetic.max) tokens (\(percent)%)")
             if !snapshot.source.isAuthoritativeForContextOccupancy {
-                lines.append("Occupancy note: prompt tokens sent on the last completed turn, over the model's published context window. Accurate as of that turn; it does not move mid-turn.")
+                lines.append("Occupancy note: prompt tokens of the latest model request, over the model's context window. It moves with each request.")
             }
         } else {
             lines.append("Authoritative context: unknown")
-            if !snapshot.source.isAuthoritativeForContextOccupancy {
+            if let count = promptTokenLabel(snapshot) {
+                lines.append("Occupancy note: the latest request carried \(count) prompt tokens; no context-window size is known for this model, so no percentage is shown.")
+            } else if !snapshot.source.isAuthoritativeForContextOccupancy {
                 lines.append("Occupancy note: no published context-window size for this model, so no percentage is shown.")
             } else if let used = snapshot.usedTokens, used < 0 {
                 lines.append("Occupancy note: invalid negative used token count was rejected.")
@@ -631,6 +640,12 @@ enum AgentRadialContextMeterPresenter {
             } else {
                 lines.append("Occupancy note: authoritative source did not provide valid used/max context window.")
             }
+        }
+        if snapshot.usedTokensEstimated == true {
+            lines.append("Estimate: the provider estimated this size after compacting; the next request reports the exact count.")
+        }
+        if snapshot.compacting == true {
+            lines.append("Compacting: this reading is from before the compaction now running.")
         }
         lines.append("Threshold policy: \(policy.detailLabel)")
         lines.append("Source: \(source)")
@@ -667,18 +682,12 @@ enum AgentRadialContextMeterPresenter {
         return lines.joined(separator: "\n")
     }
 
-    /// A compact token-count label for sources that report usage but no
-    /// context-window max (claude/codex per-turn usage): the total processed
-    /// tokens, else input+output. Nil when there is nothing to show.
-    private static func processedTokenLabel(_ snapshot: AgentContextWindowSnapshot) -> String? {
-        let total: Int
-        if let processed = snapshot.totalProcessedTokens, processed > 0 {
-            total = processed
-        } else {
-            let sum = [snapshot.inputTokens, snapshot.outputTokens].compactMap { $0 }.reduce(0, +)
-            guard sum > 0 else { return nil }
-            total = sum
-        }
+    /// A compact count of the latest request's PROMPT tokens, for a model with
+    /// no known window. Never the processed total or input+output: those were
+    /// the "8" mid-turn and the run's sum at turn end. Nil for cumulative
+    /// accounting, which states no prompt at all.
+    private static func promptTokenLabel(_ snapshot: AgentContextWindowSnapshot) -> String? {
+        guard let total = AgentContextMeter.promptTokens(of: snapshot), total > 0 else { return nil }
         if total >= 1_000_000 {
             return String(format: "%.1fM", Double(total) / 1_000_000)
         } else if total >= 1_000 {
@@ -710,8 +719,9 @@ enum AgentRadialContextMeterPresenter {
         case .claudeAssistantUsage: return "last request usage"
         case .claudeResultUsage: return "per-turn usage"
         case .codexTurnUsage: return "per-turn usage"
-        case .codexRolloutTokenCount: return "Codex rollout token count"
+        case .codexRolloutTokenCount: return "Codex last request usage"
         case .claudeCompactBoundary: return "after compaction"
+        case .unknown("compaction"): return "after compaction"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }
