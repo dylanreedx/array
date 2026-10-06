@@ -7926,20 +7926,25 @@ private func runComposerKeyContractChecks() throws -> Int {
         throw fail("Shift+Return did not stay on the native newline path")
     }
 
+    // T5 (D1): ⌘↩ force-sends and ⌥↩ queues while a turn works; on a composer
+    // with no working turn both are a send. Neither edits the draft.
     let beforeModifiedReturn = textView.string
     dispatch(try key(36, "\r", .command))
-    guard sendCount == 1, textView.string == beforeModifiedReturn else {
-        throw fail("Command+Return was repurposed or did not preserve native text behavior")
+    guard sendCount == 2, textView.string == beforeModifiedReturn else {
+        throw fail("Command+Return with content must submit (D1 force send) without editing; sends \(sendCount), got '\(textView.string)'")
     }
     dispatch(try key(36, "\r", .option))
-    guard sendCount == 1, textView.string == beforeModifiedReturn + "\n" else {
-        throw fail("Option+Return was repurposed or did not preserve native newline behavior; got '\(textView.string)'")
+    guard sendCount == 3, textView.string == beforeModifiedReturn else {
+        throw fail("Option+Return with content must submit (D1 queue) without editing; sends \(sendCount), got '\(textView.string)'")
     }
-
+    dispatch(try key(36, "\r", [.command, .shift]))
+    guard sendCount == 3, textView.string == beforeModifiedReturn + "\n" || textView.string == beforeModifiedReturn else {
+        throw fail("a Return chord outside D1 must stay native; got '\(textView.string)'")
+    }
     textView.string = "   "
     textView.setSelectedRange(NSRange(location: 3, length: 0))
     dispatch(try key(36, "\r"))
-    guard sendCount == 1, textView.string == "   \n" else {
+    guard sendCount == 3, textView.string == "   \n" else {
         throw fail("whitespace-only Return sent instead of remaining native editing")
     }
 
@@ -7959,7 +7964,7 @@ private func runComposerKeyContractChecks() throws -> Int {
             hasTrimmedContent: true,
             suggestionsVisible: false
           ) == .nativeTextSystem,
-          sendCount == 1,
+          sendCount == 3,
           !textView.hasMarkedText(),
           textView.string == "compose \n",
           textView.selectedRange() == NSRange(location: 9, length: 0) else {
@@ -7968,7 +7973,7 @@ private func runComposerKeyContractChecks() throws -> Int {
 
     textView.suggestionsAreVisible = true
     dispatch(try key(53, "\u{1b}"))
-    guard dismissCount == 1, sendCount == 1, !textView.suggestionsAreVisible else {
+    guard dismissCount == 1, sendCount == 3, !textView.suggestionsAreVisible else {
         throw fail("Escape did not dismiss suggestions first, or unexpectedly emitted send/stop-like work")
     }
     dispatch(try key(53, "\u{1b}"))
