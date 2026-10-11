@@ -367,7 +367,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         #"{"type":"control_request","request_id":"\#(requestId)","request":{"subtype":"interrupt","cancel_queued":true}}"#
     }
 
-    public enum RunError: Error, CustomStringConvertible {
+    public enum RunError: Error, CustomStringConvertible, AgentRunFailureDescribing {
         case launchFailed(String)
         case claudeFailed(exitCode: Int32, stderr: String)
 
@@ -378,6 +378,21 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             case .claudeFailed(let exitCode, let stderr):
                 return "claudeFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
             }
+        }
+
+        public var userFacingDescription: String {
+            switch self {
+            case .launchFailed(let message):
+                return "Claude Code could not start: \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .claudeFailed(let exitCode, let stderr):
+                let head = "Claude Code exited (code \(exitCode)) without finishing the turn"
+                return AgentFailureText.stderrTail(stderr).map { "\(head): \($0)" } ?? "\(head)."
+            }
+        }
+
+        public var isProcessLoss: Bool {
+            if case .claudeFailed = self { return true }
+            return false
         }
     }
 
@@ -618,9 +633,15 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             modes = [order.first, order.retry]
         }
         for (index, mode) in modes.enumerated() {
+            let wasWarm = queue.sync { child != nil }
             try ensureStarted(mode: mode)
             let waiter: TurnWaiter = try queue.sync {
                 guard turn == nil else { throw RunError.launchFailed("a claude turn is already in flight") }
+                // S3: a failure reports only its own turn's stderr. The buffer
+                // used to reset per PROCESS, so turn N's error carried every
+                // earlier turn's diagnostics. A cold process keeps what its
+                // boot wrote: the resume self-heal reads it.
+                if wasWarm { stderrBuffer.removeAll() }
                 // A turn claude began on its own that nobody adopted yet comes
                 // first: its events precede this prompt's, and this prompt's turn
                 // only starts after it.

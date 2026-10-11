@@ -2882,6 +2882,9 @@ final class AgentSupervisor {
         // for the terminal event itself and closes the turn when the runner
         // returns or throws without having delivered one.
         let sawTurnCompleted = TerminalDeliveryLatch()
+        // The provider already reported THIS turn failed, in its own words. A
+        // runner that then throws is echoing that failure, not adding one.
+        let sawFailedTurn = TerminalDeliveryLatch()
         // Stop retires the live runner slot synchronously, so a provider event
         // already emitted but still queued on the main actor is intentionally
         // rejected by the generation gate. Preserve only Pi's run-local
@@ -2922,6 +2925,7 @@ final class AgentSupervisor {
                     }
                     DispatchQueue.main.async {
                         if case .turnCompleted = bound { sawTurnCompleted.set() }
+                        if case .turnCompleted(_, _, .failed, _) = bound { sawFailedTurn.set() }
                         self?.deliver(
                             bound, from: runner, generation: runnerGeneration, to: id)
                     }
@@ -2938,6 +2942,10 @@ final class AgentSupervisor {
                     let message = "The \(harnessName) process exited without reporting a result."
                     self.appendAgentDiagnostics(
                         "harness=\(harnessName) exit=no-result \(message)", agentID: id)
+                    // S3: the process went away; the user did not stop it.
+                    if self.runnerGenerationTokens[id] == runnerGeneration {
+                        self.turnFacts[id]?.presence.settleProcessLost(message: message, at: Date())
+                    }
                     self.deliver(
                         .turnCompleted(
                             threadId: threadId,
@@ -2949,7 +2957,11 @@ final class AgentSupervisor {
                         to: id)
                 }
             } catch {
-                let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
+                // S3: the words a person reads, not a Swift error value; the
+                // detailed form still goes to the diagnostics log below.
+                let diagnostic = SecretRedactor.redactLocalDiagnostics(String(describing: error))
+                let message = SecretRedactor.redactLocalDiagnostics(
+                    (error as? AgentRunFailureDescribing)?.userFacingDescription ?? String(describing: error))
                 let runnerSaidStopped = error is AgentRunStopped
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -2991,11 +3003,14 @@ final class AgentSupervisor {
                             to: id)
                         return
                     }
-                    fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(message)\n", stderr)
+                    fputs("AgentSupervisor: runner failed for agent \(id.rawValue.uuidString): \(diagnostic)\n", stderr)
                     // The fputs above is /dev/null for a GUI launched via `open`;
                     // this line is the trail that survives the process.
                     self.appendAgentDiagnostics(
-                        "harness=\(harnessName) exit=threw \(message)", agentID: id)
+                        "harness=\(harnessName) exit=threw \(diagnostic)", agentID: id)
+                    // One failure, one row: the provider already said this turn
+                    // failed, and the runner's throw is that same failure.
+                    if sawFailedTurn.isSet { return }
                     self.deliver(
                         .runtimeError(threadId: threadId, message: message),
                         from: runner,

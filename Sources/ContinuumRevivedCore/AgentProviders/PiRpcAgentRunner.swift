@@ -26,9 +26,11 @@ import Foundation
 public final class PiRpcAgentRunner: @unchecked Sendable {
     public typealias Config = PiAgentRunner.Config
 
-    public enum RunError: Error, CustomStringConvertible {
+    public enum RunError: Error, CustomStringConvertible, AgentRunFailureDescribing {
         case launchFailed(String)
         case commandFailed(command: String, message: String)
+        /// The rpc process exited with a turn or compaction in flight.
+        case exitedMidTurn(operation: String, stderr: String)
 
         public var description: String {
             switch self {
@@ -36,7 +38,26 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
                 return "launchFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             case .commandFailed(let command, let message):
                 return "commandFailed(\(command): \(SecretRedactor.redactLocalDiagnostics(message)))"
+            case .exitedMidTurn(let operation, let stderr):
+                return "exitedMidTurn(\(operation), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
             }
+        }
+
+        public var userFacingDescription: String {
+            switch self {
+            case .launchFailed(let message):
+                return "Pi could not start: \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .commandFailed(let command, let message):
+                return "Pi refused \(command): \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .exitedMidTurn(let operation, let stderr):
+                let head = "Pi exited without finishing the \(operation)"
+                return AgentFailureText.stderrTail(stderr).map { "\(head): \($0)" } ?? "\(head)."
+            }
+        }
+
+        public var isProcessLoss: Bool {
+            if case .exitedMidTurn = self { return true }
+            return false
         }
     }
 
@@ -126,12 +147,14 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             self?.queue.sync {
                 guard let self else { return }
                 if let semaphore = self.turnSemaphore {
-                    self.turnOutcomeError = RunError.launchFailed("pi rpc process exited mid-turn")
+                    // Let the pipe's last bytes land before reading the tail.
+                    Thread.sleep(forTimeInterval: 0.05)
+                    self.turnOutcomeError = RunError.exitedMidTurn(operation: "turn", stderr: self.transport.stderrTail.text)
                     self.turnSemaphore = nil
                     semaphore.signal()
                 }
                 if let semaphore = self.compactionSemaphore {
-                    self.compactionOutcomeError = RunError.launchFailed("pi rpc process exited during compaction")
+                    self.compactionOutcomeError = RunError.exitedMidTurn(operation: "compaction", stderr: self.transport.stderrTail.text)
                     self.compactionSemaphore = nil
                     semaphore.signal()
                 }

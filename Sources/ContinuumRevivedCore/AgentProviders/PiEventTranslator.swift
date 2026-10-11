@@ -410,7 +410,9 @@ public struct PiEventTranslator {
         switch rawReason.lowercased() {
         case "error", "failed", "failure":
             pendingRunOutcome = .failed
-            pendingRunErrorMessage = rawReason
+            // pi carries the provider's failure on the assistant message.
+            pendingRunErrorMessage = AgentFailureText.providerMessage(message["errorMessage"] as? String)
+                ?? rawReason
         case "aborted", "interrupted":
             pendingRunOutcome = .interrupted
             pendingRunErrorMessage = nil

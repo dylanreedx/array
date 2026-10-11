@@ -126,6 +126,9 @@ public final class PiRpcTransport: @unchecked Sendable {
 
     public var isRunning: Bool { queue.sync { child != nil && exitedCode == nil } }
 
+    /// The tail of what pi wrote to stderr — the only place a crash says why.
+    public let stderrTail = AgentStderrTail()
+
     // MARK: - Lifecycle
 
     public func start(
@@ -161,11 +164,13 @@ public final class PiRpcTransport: @unchecked Sendable {
             }
             self?.queue.sync { self?.consume(chunk) }
         }
-        // Drained and discarded, same rationale as `PiAgentRunner`: an unread
-        // stderr pipe fills and blocks the child. Nothing today needs rpc's
-        // stderr surfaced.
+        // Drained (an unread stderr pipe fills and blocks the child) into a
+        // bounded tail: a pi that dies mid-turn used to say only "process
+        // exited mid-turn", while its own stderr said why.
+        stderrTail.reset()
+        let tail = stderrTail
         spawned.standardError.readabilityHandler = { handle in
-            _ = handle.availableData
+            tail.append(handle.availableData)
         }
     }
 

@@ -27,7 +27,13 @@ import Foundation
 //   PLAIN       0.6 s of text generation with no tool boundary
 //   LONG        up to 10 s of text generation with no tool boundary, for an
 //               interrupt — a steer sent meanwhile stays held by Array
-//   CRASH       exits 3 mid-turn without a result
+//   CRASH       writes a diagnostic line to stderr, then exits 3 mid-turn
+//               without a result
+//   VANISH      exits 0 mid-turn without a result and without a word
+//   APIERROR    the provider's own in-band failure for an expired login
+//               (claude: an `is_error` result whose subtype says "success";
+//               codex: turn/completed failed with an error message; pi: a
+//               turn_end whose stopReason is "error" with an errorMessage)
 //   DELAYSTART  (combines with any shape) holds ~1.2 s before the provider's
 //               own turn-start signal, after its session-ready signal, so a
 //               check can sample the spawn window production really crosses
@@ -120,12 +126,18 @@ def record(line):
     with open(os.path.join(HERE, "stdin.jsonl"), "a") as f:
         f.write(line.rstrip("\n") + "\n")
 
+def crash():
+    sys.stderr.write("fatal: lost connection to the model provider (ECONNRESET)\n")
+    sys.stderr.flush()
+    time.sleep(0.05)
+    os._exit(3)
+
 def delay_start(text):
     if "DELAYSTART" in text:
         time.sleep(1.2)
 
 def shape(text):
-    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
+    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH"):
         if word in text:
             return word
     return "TEXT"
@@ -206,7 +218,14 @@ def run_turn(msg):
     replay(msg)
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "APIERROR":
+        out({"type": "result", "subtype": "success", "is_error": True, "session_id": SID,
+             "result": "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+             "usage": {"input_tokens": 0, "output_tokens": 0}})
+        return
     if text.startswith("/compact"):
         out({"type": "system", "subtype": "compact_boundary", "session_id": SID, "compact_metadata": {"trigger": "manual", "pre_tokens": 1000, "post_tokens": 100}})
         result()
@@ -288,7 +307,15 @@ def run_turn(turn_id, text):
     out({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": turn_id}}})
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "APIERROR":
+        with lock:
+            state["turn"] = None
+        out({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": turn_id, "status": "failed",
+             "error": {"message": "unexpected status 401 Unauthorized: your access token has expired", "codexErrorInfo": "unauthorized"}}}})
+        return
     status = "completed"
     if kind in ("TOOL", "SLOW"):
         interrupted.clear()
@@ -401,7 +428,18 @@ def run_turn(text):
     out({"type": "turn_start"})
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "APIERROR":
+        out({"type": "turn_end", "message": {"role": "assistant", "stopReason": "error",
+             "errorMessage": "401 Unauthorized: OAuth token expired for provider openai-codex"}})
+        out({"type": "agent_end", "willRetry": False})
+        with lock:
+            state["active"] = False
+        out({"type": "agent_settled"})
+        idle.set()
+        return
     if kind in ("TOOL", "SLOW"):
         out({"type": "tool_execution_start", "toolCallId": "tc-fake", "toolName": "bash", "args": {"command": "true"}})
         deadline = time.time() + (10 if kind == "SLOW" else 1.5)

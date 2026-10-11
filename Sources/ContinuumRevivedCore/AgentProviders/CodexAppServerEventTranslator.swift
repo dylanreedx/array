@@ -514,7 +514,11 @@ public struct CodexAppServerEventTranslator {
         let failed = (turn["status"] as? String) == "failed"
         var code: String?
         if failed, let error = turn["error"] as? [String: Any] {
-            code = (error["code"] as? String) ?? (error["type"] as? String)
+            // The API's own account/transport failure in its own words
+            // ("unexpected status 401 Unauthorized"); otherwise the short code.
+            code = AgentFailureText.providerMessage(error["message"] as? String)
+                ?? (error["code"] as? String) ?? (error["type"] as? String)
+                ?? (error["codexErrorInfo"] as? String)
         }
         // T5 — `turn/interrupt` ends the turn `interrupted`; reporting that as
         // completed drained the queue into a turn the user had just stopped.

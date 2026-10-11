@@ -650,15 +650,25 @@ public struct ClaudeEventTranslator {
             }
         }
 
-        // errorMessage is the SUBTYPE ("error_max_turns"), never the result
-        // body — the body can quote tool output (I5). Launch/auth failures
-        // don't reach here at all: the runner surfaces those from exit+stderr.
+        // errorMessage is the SUBTYPE ("error_max_turns") unless the result
+        // body is the API's own account/transport failure ("API Error: 401
+        // …", "Please run /login"): a body that could quote tool output never
+        // crosses (I5, `AgentFailureText.providerMessage`). A persistent
+        // process reports an expired login exactly here — as an `is_error`
+        // result whose subtype is "success", which used to render as the word
+        // "success" in a red row.
         let subtype = object["subtype"] as? String
+        var errorMessage: String?
+        if isError {
+            errorMessage = AgentFailureText.providerMessage(object["result"] as? String)
+                ?? (subtype == "success" || subtype == nil
+                    ? "Claude Code reported an error without details." : subtype)
+        }
         events.append(.turnCompleted(
             threadId: threadId,
             turnId: currentTurnId,
             outcome: isError ? .failed : .completed,
-            errorMessage: isError ? subtype : nil
+            errorMessage: errorMessage
         ))
         events.append(.sessionStateChanged(.ready))
         return events

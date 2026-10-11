@@ -25,6 +25,7 @@ func runAgentPresenceChecks() async throws {
     var summary: [String] = []
     summary.append(try await AgentPresenceChecks.checkSpawnWindowNeverReadsIdle(originalPath: originalPath))
     summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath))
+    summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath))
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -331,5 +332,94 @@ enum AgentPresenceChecks {
                        "\(kind): the held prompt must appear exactly once in the transcript")
         }
         return "a signed-out claude, codex and pi each refused twice with two 'Not sent' notices naming their own login and withdrew the bubble; a prompt sent while each CLI was starting was held, read 'Waiting for … to finish starting', and ran once readiness landed"
+    }
+
+    // MARK: - P0-3 — a failure says what happened and who caused it
+
+    /// The error rows a tile shows for the turn just run.
+    static func errorRows(_ bench: Bench) -> [String] {
+        bench.tile.qaDocumentForChecks.entries.compactMap { entry -> String? in
+            for block in entry.blocks {
+                if case let .error(payload) = block.payload { return payload.message }
+            }
+            return nil
+        }
+    }
+
+    /// A provider's in-band failure (an expired login) shows the provider's
+    /// own words — claude's used to read "success" — and a process that dies
+    /// mid-turn shows its stderr, once, and is never "You stopped".
+    static func checkFailuresSayWhatHappened(originalPath: String) async throws -> String {
+        var violations: [String] = []
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let bench = try Bench(kind, originalPath: originalPath)
+            defer { bench.tearDown() }
+            try await Task.sleep(for: .milliseconds(300))
+
+            // In-band provider failure.
+            var completed = bench.turnCompletedCount
+            try bench.pressReturn("APIERROR please")
+            try await eventually("\(kind): the APIERROR turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            var rows = errorRows(bench)
+            if rows.count != 1 || !(rows.first ?? "").contains("401") || (rows.first ?? "").lowercased() == "success" {
+                violations.append("\(kind) in-band: error rows \(rows), expected one carrying the provider's 401")
+            }
+            let failedPresence = bench.supervisor.turnPresence(for: bench.id)
+            if case .failed = failedPresence?.phase, failedPresence?.errorText?.contains("401") == true {} else {
+                violations.append("\(kind) in-band: presence \(String(describing: failedPresence?.phase)) / \(String(describing: failedPresence?.errorText))")
+            }
+            if bench.tile.qaPageZoomHeaderView.qaState != AgentStatusVocabulary.failed {
+                violations.append("\(kind) in-band: header read '\(bench.tile.qaPageZoomHeaderView.qaState)'")
+            }
+
+            // Process lost mid-turn.
+            let rowsBefore = errorRows(bench).count
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("CRASH please")
+            try await eventually("\(kind): the CRASH turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            rows = Array(errorRows(bench).dropFirst(rowsBefore))
+            if rows.count != 1 || !(rows.first ?? "").contains("lost connection to the model provider") {
+                violations.append("\(kind) crash: error rows \(rows), expected ONE carrying the CLI's stderr")
+            }
+            if rows.contains(where: { $0.contains("Failed(exitCode") || $0.contains("RunError") }) {
+                violations.append("\(kind) crash: an error row shows a Swift error value: \(rows)")
+            }
+            if bench.tile.qaTailStatusText.hasPrefix("You stopped") {
+                violations.append("\(kind) crash: the tail blames the user: '\(bench.tile.qaTailStatusText)'")
+            }
+            let lost = bench.supervisor.turnPresence(for: bench.id)
+            if lost?.settleCause == .stoppedByUser {
+                violations.append("\(kind) crash: presence recorded the user's Stop for a crash")
+            }
+
+            // A process that leaves without a word or a result.
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("VANISH please")
+            try await eventually("\(kind): the VANISH turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            let vanished = bench.supervisor.turnPresence(for: bench.id)
+            if bench.tile.qaTailStatusText.hasPrefix("You stopped") || vanished?.settleCause == .stoppedByUser {
+                violations.append("\(kind) vanish: blamed the user: tail '\(bench.tile.qaTailStatusText)', presence \(String(describing: vanished?.phase))")
+            }
+            let vanishedSaysSo: Bool
+            switch vanished?.phase {
+            case .settled(.processLost)?: vanishedSaysSo = bench.tile.qaTailStatusText.hasPrefix("Ended after")
+            case .failed?: vanishedSaysSo = errorRows(bench).last?.contains("exited without finishing") == true
+            default: vanishedSaysSo = false
+            }
+            if !vanishedSaysSo {
+                violations.append("\(kind) vanish: did not say the process left: presence \(String(describing: vanished?.phase)), tail '\(bench.tile.qaTailStatusText)', last error \(errorRows(bench).last ?? "none")")
+            }
+        }
+        try expect(violations.isEmpty, "failures must say what happened: " + violations.joined(separator: " | "))
+        return "an expired login on claude, codex and pi each showed one error row with the provider's own 401 and read Failed; a CLI that died mid-turn showed its stderr in one error row, and one that vanished without a result said the process left — neither ever read 'You stopped'"
     }
 }
