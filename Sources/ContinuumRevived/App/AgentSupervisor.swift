@@ -3093,7 +3093,8 @@ final class AgentSupervisor {
             case .missing:
                 return "\(harness.rawValue) is not installed. Open Help ▸ Environment Setup…"
             case .loggedOut:
-                return "\(harness.rawValue) is logged out. Sign in with its own login command, then try again."
+                // CLAUDE.md non-negotiable 3: the CLI's own login, never a key.
+                return "\(harness.rawValue) is signed out — \(signInInstruction(for: harness)), then send again."
             case .unavailable(let reason):
                 return "\(harness.rawValue) is unavailable (\(reason)). Open Help ▸ Environment Setup…"
             case .ready:
@@ -3120,6 +3121,83 @@ final class AgentSupervisor {
             return "\(harness.rawValue) cannot run \(record.model). Pick a model this harness owns."
         }
         return nil
+    }
+
+    /// How to sign a harness back in with its OWN login flow.
+    static func signInInstruction(for harness: AgentHarness) -> String {
+        switch harness {
+        case .claudeCode: return "run `claude` in a terminal and use /login"
+        case .codex: return "run `codex login` in a terminal"
+        case .pi: return "run `pi` in a terminal and use /login <provider>"
+        }
+    }
+
+    /// The agent's CLI readiness probe is still out — the seconds after launch.
+    private func isStillStarting(_ id: AgentID) -> Bool {
+        guard let harness = records[id]?.harness else { return false }
+        return AgentModelCatalog.shared.snapshot(for: harness).readiness == .checking
+    }
+
+    /// S3 (T3's `sendQueuesBehindSetup`): a prompt sent while its CLI is still
+    /// starting is HELD and sent the moment readiness lands, never refused —
+    /// "try again in a moment" made the user do the waiting. Any other
+    /// readiness refusal returns `.harnessNotReady`, whose words are
+    /// `sendRefusal(for:)`. nil means: go ahead and send.
+    private func holdOrRefuseForReadiness(_ prepared: PreparedAgentPrompt, for id: AgentID) -> IntentAcceptance? {
+        guard let refusal = sendRefusal(for: id) else { return nil }
+        guard isStillStarting(id), heldForReadiness[id] == nil, runners[id] == nil,
+              let harness = records[id]?.harness else {
+            warn("AgentSupervisor.accept: \(refusal)")
+            pendingReturnStamps[id] = nil
+            return .refused(.harnessNotReady)
+        }
+        heldForReadiness[id] = prepared
+        let returnedAt = pendingReturnStamps.removeValue(forKey: id)
+        turnFacts[id, default: TurnFacts()].presence.arm(at: returnedAt ?? Date())
+        turnFacts[id]?.presence.noteStartupDetail("Waiting for \(harness.rawValue) to finish starting")
+        installReadinessObserverIfNeeded()
+        notifyTurnCapabilitiesChanged(id)
+        return .accepted
+    }
+
+    private var heldForReadiness: [AgentID: PreparedAgentPrompt] = [:]
+    private var readinessObserver: NSObjectProtocol?
+
+    private func installReadinessObserverIfNeeded() {
+        guard readinessObserver == nil else { return }
+        readinessObserver = NotificationCenter.default.addObserver(
+            forName: AgentModelCatalog.didRefreshNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.releaseHeldPrompts() }
+        }
+    }
+
+    /// Readiness moved: send what was held, or say why it cannot go.
+    func releaseHeldPrompts() {
+        for (id, prepared) in heldForReadiness {
+            if isStillStarting(id) { continue }
+            heldForReadiness[id] = nil
+            if let refusal = sendRefusal(for: id) {
+                turnFacts[id]?.presence.reduce(.runtimeError(threadId: nil, message: refusal), at: Date())
+                appendLocalNotice(id: id, key: "send-not-sent", title: "Not sent", body: refusal)
+                notifyTurnCapabilitiesChanged(id)
+                continue
+            }
+            if !sendPrepared(prepared, to: id) {
+                notifyTurnCapabilitiesChanged(id)
+            }
+        }
+    }
+
+    /// Stop on a held prompt withdraws it. True when there was one.
+    private func cancelHeldPrompt(for id: AgentID) -> Bool {
+        guard heldForReadiness.removeValue(forKey: id) != nil else { return false }
+        turnFacts[id]?.presence.noteStopRequested()
+        turnFacts[id]?.presence.reduce(.sessionStateChanged(.stopped), at: Date())
+        appendLocalNotice(id: id, key: "send-withdrawn", title: "Not sent",
+                          body: "You stopped this message before the agent started.")
+        notifyTurnCapabilitiesChanged(id)
+        return true
     }
 
     /// Text-only compatibility wrapper for existing callers and checks.
@@ -5268,7 +5346,7 @@ final class AgentSupervisor {
             state = .working
         } else if facts.execution == .working {
             state = .working
-        } else if runners[id] != nil, facts.presence.phase == .starting {
+        } else if runners[id] != nil || heldForReadiness[id] != nil, facts.presence.phase == .starting {
             // A runner is bound, a prompt was accepted, and the provider has not
             // reported a turn yet. This used to fall through to `.ready`, which is
             // why the tile said "idle" with a disabled composer while `canStop` was
@@ -5309,13 +5387,13 @@ final class AgentSupervisor {
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
-                canSend: !mirrored && !occupied && state.acceptsNewTurn,
+                canSend: !mirrored && !occupied && heldForReadiness[id] == nil && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
                 // genuinely kills a spawning (pre-turnStarted) or draining
                 // (post-settle) process, so gating on `execution == .working`
                 // under-advertised the transport — and painted the two windows
                 // "Unavailable" on the composer.
-                canStop: !mirrored && occupied && record.capabilities.canStop,
+                canStop: !mirrored && (occupied || heldForReadiness[id] != nil) && record.capabilities.canStop,
                 canSteer: steerable && occupied,
                 canQueue: queueable && occupied,
                 // NOT gated on `occupied`. A held request is exactly the state
@@ -5412,10 +5490,11 @@ final class AgentSupervisor {
             let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
-            guard sendPrepared(
-                PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID),
-                to: agentID
-            ) else { return .refused(.invalidAttachment) }
+            let prepared = PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: agentID)
+            // S3: the refusal carries its reason, and a CLI that is merely still
+            // starting holds the prompt instead of refusing it.
+            if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
+            guard sendPrepared(prepared, to: agentID) else { return .refused(.turnNotReady) }
             // B4: an explicit Send releases a queue this agent's last turn left
             // paused after an interrupt — the user looked, and is choosing to act.
             pausedQueues.remove(agentID)
@@ -5425,23 +5504,26 @@ final class AgentSupervisor {
             prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return .refused(.emptyDraft) }
             guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+            if let refusal = sendRefusal(for: agentID), !isStillStarting(agentID) {
+                warn("AgentSupervisor.accept: \(refusal)")
+                return .refused(.harnessNotReady)
+            }
             do {
-                let prepared = try await attachmentStore.preparePromptAttachments(
+                let preparedAttachments = try await attachmentStore.preparePromptAttachments(
                     for: agentID,
                     draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
                 )
-                guard sendPrepared(
-                    PreparedAgentPrompt(
-                        prompt: AgentPrompt(
-                            text: prompt.text,
-                            imageAttachments: prepared,
-                            fileReferences: prompt.fileReferences
-                        ),
-                        expectedAgentID: agentID
+                let prepared = PreparedAgentPrompt(
+                    prompt: AgentPrompt(
+                        text: prompt.text,
+                        imageAttachments: preparedAttachments,
+                        fileReferences: prompt.fileReferences
                     ),
-                    to: agentID
-                ) else {
-                    return .refused(.invalidAttachment)
+                    expectedAgentID: agentID
+                )
+                if let held = holdOrRefuseForReadiness(prepared, for: agentID) { return held }
+                guard sendPrepared(prepared, to: agentID) else {
+                    return .refused(.turnNotReady)
                 }
             } catch {
                 warn("AgentSupervisor.accept: attachment preparation refused for agent \(agentID.rawValue.uuidString): invalid managed attachment")
@@ -5450,6 +5532,9 @@ final class AgentSupervisor {
             pausedQueues.remove(agentID)
             return .accepted
         case .stop:
+            // A prompt held for a starting CLI has no runner to stop; Stop
+            // withdraws it instead.
+            if cancelHeldPrompt(for: agentID) { return .accepted }
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
                 return .refused(.noTurnInProgress)
             }
@@ -6382,12 +6467,19 @@ final class AgentSupervisor {
     /// left the second `/clear` with no boundary marker at all, while `accept`
     /// still returned `.accepted` and the composer still cleared the draft.
     private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
-        guard transcriptStore != nil else { return }
         let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
         arrayOwnedNoticeCounts[id] = ordinal
+        let noticeID = "\(key)#\(ordinal)"
+        // S3: the live tile hears it now. This used to reach only the
+        // persisted projection, so `/status` showed a bubble, dropped the gyro
+        // and said nothing until the tile next re-attached.
+        for observe in (localNoticeObservers[id] ?? [:]).values {
+            observe(AgentLocalNotice(id: noticeID, title: title, body: body))
+        }
+        guard transcriptStore != nil else { return }
         var projection = transcriptProjections[id]
             ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
-        projection.appendNotice(id: "\(key)#\(ordinal)", title: title, text: body)
+        projection.appendNotice(id: noticeID, title: title, text: body)
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
     }
@@ -6700,6 +6792,7 @@ final class AgentSupervisor {
     /// timer left over from an earlier one cannot release a later one early.
     private var deferredForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool, token: UUID)] = [:]
     private var promptEchoObservers: [AgentID: [UUID: (AgentPrompt) -> Void]] = [:]
+    private var localNoticeObservers: [AgentID: [UUID: (AgentLocalNotice) -> Void]] = [:]
 
     /// One pending steer for the rail: still HELD (editable, cancellable) or
     /// DELIVERING (handed over, awaiting the provider's receipt).
@@ -6764,6 +6857,18 @@ final class AgentSupervisor {
 
     func removePromptEchoObserver(_ token: UUID, for id: AgentID) {
         promptEchoObservers[id]?[token] = nil
+    }
+
+    /// An Array-authored notice (a command's reply, a held prompt that could
+    /// not go) as it is written, for a tile that is showing this agent now.
+    func addLocalNoticeObserver(for id: AgentID, _ observe: @escaping (AgentLocalNotice) -> Void) -> UUID {
+        let token = UUID()
+        localNoticeObservers[id, default: [:]][token] = observe
+        return token
+    }
+
+    func removeLocalNoticeObserver(_ token: UUID, for id: AgentID) {
+        localNoticeObservers[id]?[token] = nil
     }
 
     private func echoPrompt(_ prompt: AgentPrompt, for id: AgentID) {
@@ -7784,6 +7889,13 @@ private enum AgentSupervisorCheckWriteFault: Error {
 
 private final class AgentSupervisorCheckWriteState {
     var didInjectPostCommitFault = false
+}
+
+/// One Array-authored transcript notice, as published to a live tile.
+struct AgentLocalNotice: Equatable {
+    let id: String
+    let title: String
+    let body: String
 }
 
 /// A runner that emits a fixed script instead of spawning Pi. `holdUntilStopped`

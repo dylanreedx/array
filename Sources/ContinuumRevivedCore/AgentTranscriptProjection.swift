@@ -484,6 +484,17 @@ public struct AgentTranscriptProjection: Sendable {
         try appendUserPrompt(id: id, prompt: AgentPrompt(text))
     }
 
+    /// Takes back a locally echoed prompt that was never sent (the supervisor
+    /// refused it). Only a `.localPrompt` entry can be withdrawn; provider
+    /// history is never edited here.
+    @discardableResult
+    public mutating func withdrawLocalPrompt(id: AgentNodeID) throws -> [AgentDocumentPatch] {
+        guard let entry = document.entries.first(where: { $0.id == id }),
+              case .localPrompt = entry.provenance else { return [] }
+        compatibilityIDs[id] = nil
+        return try applyReturningPatches([.removeEntry(id: id)])
+    }
+
     /// Adds an idempotent Continuum-authored notice. The heading child keeps
     /// the title semantic while the notice payload remains the compatibility
     /// body projected by the temporary card path.

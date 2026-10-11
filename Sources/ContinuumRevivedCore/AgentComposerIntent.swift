@@ -47,6 +47,10 @@ public enum IntentRefusal: String, Equatable, Sendable {
     /// agent and remains transportable. Keep this deliberately opaque: storage
     /// paths and provider diagnostics never cross the UI-facing refusal seam.
     case invalidAttachment
+    /// The agent's CLI cannot take a prompt right now (signed out, not
+    /// installed, a model it cannot run). The words are the supervisor's
+    /// `sendRefusal(for:)`, the one copy of that rule.
+    case harnessNotReady
 }
 
 /// Provider response shape compiled at the provider-neutral seam. The current

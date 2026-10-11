@@ -134,6 +134,9 @@ public struct AgentTurnPresence: Equatable, Sendable {
     /// the caller), if it failed.
     public private(set) var errorText: String?
     public private(set) var retry: Retry?
+    /// What a `starting` submission is waiting on, when Array knows ("Waiting
+    /// for Claude Code to finish starting"). Cleared once the turn moves on.
+    public private(set) var startupDetail: String?
     private var openTools: [OpenTool] = []
     private var stopRequested = false
 
@@ -184,8 +187,15 @@ public struct AgentTurnPresence: Equatable, Sendable {
         lastTool = nil
         errorText = nil
         retry = nil
+        startupDetail = nil
         openTools = []
         stopRequested = false
+    }
+
+    /// Names what a starting submission is waiting on (nil clears it).
+    public mutating func noteStartupDetail(_ detail: String?) {
+        guard phase == .starting else { return }
+        startupDetail = detail
     }
 
     /// The user asked the live turn to stop. Remembered so the turn's end
@@ -221,6 +231,7 @@ public struct AgentTurnPresence: Equatable, Sendable {
             // its own submission — but a repeated start inside a live one is not.
             if !isLive { arm(at: now) }
             if phase == .starting { phase = .thinking }
+            startupDetail = nil
             turnStartedAt = turnStartedAt.map { min($0, now) } ?? now
             retry = nil
             lastProviderActivityAt = now
@@ -308,6 +319,7 @@ public struct AgentTurnPresence: Equatable, Sendable {
         guard isLive else { return false }
         if phase == .starting {
             phase = .thinking
+            startupDetail = nil
             turnStartedAt = turnStartedAt ?? now
         }
         lastProviderActivityAt = now
@@ -319,6 +331,7 @@ public struct AgentTurnPresence: Equatable, Sendable {
         settledAt = now
         openTools = []
         retry = nil
+        startupDetail = nil
         stopRequested = false
         if submittedAt == nil, turnStartedAt == nil { submittedAt = now }
     }

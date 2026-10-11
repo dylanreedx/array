@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Darwin
@@ -23,6 +24,7 @@ func runAgentPresenceChecks() async throws {
     }
     var summary: [String] = []
     summary.append(try await AgentPresenceChecks.checkSpawnWindowNeverReadsIdle(originalPath: originalPath))
+    summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath))
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -136,6 +138,33 @@ enum AgentPresenceChecks {
             events.filter { $0 == .sessionStateChanged(.ready) }.count
         }
 
+        var harness: AgentHarness {
+            switch kind {
+            case .claude: return .claudeCode
+            case .codex: return .codex
+            case .pi: return .pi
+            }
+        }
+
+        /// The tile document's text, entry by entry, for outcome assertions.
+        func entryTexts(role: AgentEntryRole) -> [String] {
+            tile.qaDocumentForChecks.entries.filter { $0.role == role }.map { String(describing: $0.blocks) }
+        }
+
+        var spawns: Int { AgentSteeringQAFakes.spawnCount(in: bin) }
+        var promptTexts: [String] {
+            AgentSteeringQAFakes.receivedFrames(in: bin).compactMap { frame in
+                if frame["type"] as? String == "prompt" { return frame["message"] as? String }
+                if frame["method"] as? String == "turn/start" {
+                    return ((frame["params"] as? [String: Any])?["input"] as? [[String: Any]])?.first?["text"] as? String
+                }
+                if frame["type"] as? String == "user", let message = frame["message"] as? [String: Any] {
+                    return message["content"] as? String
+                }
+                return nil
+            }
+        }
+
         func tearDown() {
             window.orderOut(nil)
             supervisor.stopAll()
@@ -225,5 +254,82 @@ enum AgentPresenceChecks {
                    "Return must read Starting on every surface until the provider starts the turn: "
                    + allViolations.joined(separator: " | "))
         return "the spawn window read Starting on the supervisor, header, compact row and tail through every harness's real ready-before-start prefix (\(sampled.joined(separator: ", ")) samples/after-ready)"
+    }
+
+    // MARK: - P0-2 — a refusal says why, every time, and never leaves a ghost
+
+    /// A signed-out CLI refuses with ITS reason and its own login instruction,
+    /// on every Return (the notice used to dedupe itself away after the first),
+    /// and the bubble is withdrawn rather than left looking sent. A CLI that
+    /// is merely still starting HOLDS the prompt and sends it once readiness
+    /// lands, instead of telling the user to try again.
+    static func checkRefusalsSayWhyEveryTime(originalPath: String) async throws -> String {
+        let catalog = AgentModelCatalog.shared
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let bench = try Bench(kind, originalPath: originalPath)
+            defer {
+                catalog.apply(readiness: .ready, for: bench.harness)
+                bench.tearDown()
+            }
+            // Let the composer's draft binding finish loading the (empty)
+            // persisted draft, as it has long before a person types.
+            try await Task.sleep(for: .milliseconds(300))
+            // Signed out: twice.
+            catalog.apply(readiness: .loggedOut, for: bench.harness)
+            let draft = "please fix the login page"
+            for attempt in 1...2 {
+                let before = bench.entryTexts(role: .system).count
+                if attempt == 1 { try bench.pressReturn(draft) } else {
+                    // The refused draft is still in the composer: Return again.
+                    let composer = try bench.composer
+                    try await eventually("\(kind): a refused draft must come back to the composer for a retry, got '\(composer.qaDraftText)'") {
+                        composer.qaDraftText == draft
+                    }
+                    try bench.pressReturn(composer.qaDraftText)
+                }
+                try await eventually("\(kind) attempt \(attempt): a signed-out refusal must append a notice every time; system entries \(bench.entryTexts(role: .system))") {
+                    bench.entryTexts(role: .system).count > before
+                }
+                let notice = bench.entryTexts(role: .system).last ?? ""
+                try expect(notice.contains("Not sent") && notice.contains("signed out")
+                           && notice.contains(AgentSupervisor.signInInstruction(for: bench.harness)),
+                           "\(kind) attempt \(attempt): the notice must say Not sent, signed out, and how to sign in with the CLI's own login; got \(notice)")
+                try expect(!bench.entryTexts(role: .user).contains { $0.contains(draft) },
+                           "\(kind) attempt \(attempt): the refused bubble is still in the transcript, reading as sent")
+            }
+            try expect(bench.spawns == 0, "\(kind): a signed-out CLI was spawned \(bench.spawns) times")
+
+            // Still starting: held, then sent once readiness lands.
+            catalog.apply(readiness: .checking, for: bench.harness)
+            try bench.pressReturn("HELD PLAIN reply")
+            try await eventually("\(kind): a prompt sent while the CLI is starting must be accepted and held, draft '\((try? bench.composer.qaDraftText) ?? "?")'") {
+                ((try? bench.composer.qaDraftText) ?? "x").isEmpty
+            }
+            let held = bench.supervisor.turnPresence(for: bench.id)
+            try expect(held?.phase == .starting && held?.startupDetail?.contains("finish starting") == true,
+                       "\(kind): a held prompt must read Starting and say what it waits on, got \(String(describing: held?.phase)) / \(String(describing: held?.startupDetail))")
+            try expect(bench.tile.qaPageZoomHeaderView.qaState == AgentStatusVocabulary.starting,
+                       "\(kind): the header read '\(bench.tile.qaPageZoomHeaderView.qaState)' for a held prompt")
+            try await eventually("\(kind): the tail must say what the held prompt waits on, got '\(bench.tile.qaTailStatusText)'") {
+                bench.tile.qaThinkingIndicatorVisible && bench.tile.qaTailStatusText.hasPrefix("Waiting for")
+            }
+            // One clock, from THIS Return: not from an earlier refused attempt.
+            let tailSeconds = bench.tile.qaTailStatusText.split(separator: "·").last
+                .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "s", with: "") }
+                .flatMap { Int($0) }
+            try expect((tailSeconds ?? 99) <= 2 && (held?.startedAt.map { Date().timeIntervalSince($0) < 3 } ?? false),
+                       "\(kind): the held prompt's clock did not start at its own Return: tail '\(bench.tile.qaTailStatusText)', presence started \(String(describing: held?.startedAt))")
+            try expect(bench.spawns == 0 && bench.promptTexts.isEmpty,
+                       "\(kind): a held prompt reached the CLI before readiness (\(bench.promptTexts))")
+            catalog.apply(readiness: .ready, for: bench.harness)
+            NotificationCenter.default.post(name: AgentModelCatalog.didRefreshNotification, object: catalog)
+            try await eventually("\(kind): the held prompt must run once readiness lands, prompts \(bench.promptTexts)") {
+                bench.promptTexts == ["HELD PLAIN reply"] && bench.turnCompletedCount == 1
+                    && !bench.supervisor.isRunning(bench.id)
+            }
+            try expect(bench.entryTexts(role: .user).filter { $0.contains("HELD PLAIN reply") }.count == 1,
+                       "\(kind): the held prompt must appear exactly once in the transcript")
+        }
+        return "a signed-out claude, codex and pi each refused twice with two 'Not sent' notices naming their own login and withdrew the bubble; a prompt sent while each CLI was starting was held, read 'Waiting for … to finish starting', and ran once readiness landed"
     }
 }

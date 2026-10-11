@@ -183,6 +183,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
     private var capabilityObserverToken: UUID?
     private var promptEchoObserverToken: UUID?
+    private var localNoticeObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
     private let toolDetailStore = AgentToolDetailStore()
@@ -391,6 +392,9 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
             self?.beginOptimisticSubmission(prompt)
+        }
+        v2Composer?.onSubmissionRefused = { [weak self] refusal in
+            self?.pendingSubmissionRefusal = refusal
         }
         v2Composer?.onSubmissionFinished = { [weak self] accepted in
             self?.finishOptimisticSubmission(accepted: accepted)
@@ -634,6 +638,16 @@ final class ManagedAgentTileNSView: TileNSView {
             promptEchoObserverToken = supervisor.addPromptEchoObserver(for: agentID) { [weak self] prompt in
                 guard self?.attachedAgentID == agentID else { return }
                 self?.appendUserPrompt(prompt)
+            }
+            // S3: Array's own replies (`/status`, a held prompt that could not
+            // go) land in the live transcript as they are written.
+            if let token = localNoticeObserverToken { supervisor.removeLocalNoticeObserver(token, for: agentID) }
+            localNoticeObserverToken = supervisor.addLocalNoticeObserver(for: agentID) { [weak self] notice in
+                guard let self, self.attachedAgentID == agentID else { return }
+                self.model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
+                self.synchronizeV2Transcript(final: true)
+                self.refreshCompactStatus()
+                self.refreshTranscriptThinkingIndicator()
             }
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
@@ -1000,6 +1014,10 @@ final class ManagedAgentTileNSView: TileNSView {
             agentSource?.removePromptEchoObserver(promptEchoObserverToken, for: agentID)
             self.promptEchoObserverToken = nil
         }
+        if let localNoticeObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeLocalNoticeObserver(localNoticeObserverToken, for: agentID)
+            self.localNoticeObserverToken = nil
+        }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
         }
@@ -1315,16 +1333,44 @@ final class ManagedAgentTileNSView: TileNSView {
         "Agent unavailable — its Home folder no longer exists. Restore the folder and relaunch to continue."
 
     /// Says why a prompt was not sent, in the transcript where the user is already
-    /// looking. The id carries the reason so the same refusal twice is one notice
-    /// (the projection rejects a duplicate id) while a CHANGED reason — "still
-    /// starting up" giving way to "logged out" — appends and is seen.
+    /// looking. EVERY refusal appends: the id used to carry only the reason's
+    /// hash, so the second identical refusal was dropped as a duplicate and the
+    /// user saw their bubble and nothing else — the void.
     func showSendRefusedNotice(_ text: String) {
+        sendRefusalOrdinal += 1
         model.appendNotice(
-            id: "notice-send-refused-\(text.hashValue)",
-            title: "not sent",
+            id: "notice-send-refused-\(sendRefusalOrdinal)",
+            title: "Not sent",
             text: text
         )
         synchronizeV2Transcript(final: true)
+    }
+
+    private var sendRefusalOrdinal = 0
+    /// The reason the composer reported for the submission now resolving.
+    private var pendingSubmissionRefusal: IntentRefusal?
+
+    /// The words for a refused submission: the supervisor's own reason for a
+    /// CLI that cannot take it, never a generic "not sent".
+    private func refusalText(for refusal: IntentRefusal?) -> String {
+        let retry = "Your message is back in the composer — press Return to retry."
+        switch refusal {
+        case .harnessNotReady?:
+            if let agentID = attachedAgentID, let reason = agentSource?.sendRefusal(for: agentID) {
+                return "\(reason) \(retry)"
+            }
+            return "The agent's CLI is not ready. \(retry)"
+        case .turnNotReady?:
+            return "The agent is still busy with the last message. \(retry)"
+        case .invalidAttachment?:
+            return "An attachment could not be sent — remove it and try again."
+        case .unknownAgent?:
+            return "There is no agent behind this tile to send to."
+        case .unsupported?:
+            return "This agent can\u{2019}t run that. \(retry)"
+        case .emptyDraft?, .noTurnInProgress?, nil:
+            return "Message was not sent. \(retry)"
+        }
     }
 
     /// The same notice seam, for a tile ACTION that failed — a chip click that
@@ -1479,25 +1525,31 @@ final class ManagedAgentTileNSView: TileNSView {
     private var presenceBeforeOptimisticSubmission: AgentTurnPresence?
 
     private func finishOptimisticSubmission(accepted: Bool) {
-        guard pendingOptimisticSubmissionID != nil else { return }
+        guard let optimisticID = pendingOptimisticSubmissionID else { return }
         pendingOptimisticSubmissionID = nil
         let armedLocally = presenceBeforeOptimisticSubmission
         presenceBeforeOptimisticSubmission = nil
+        let refusal = pendingSubmissionRefusal
+        pendingSubmissionRefusal = nil
         guard accepted else {
             if let armedLocally { localPresence = armedLocally }
             transcriptCollectionFixture?.setTurnInFlight(false)
             refreshCompactStatus()
             transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
-            showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
+            // The bubble never went anywhere: take it back (the draft is in the
+            // composer) and say "Not sent" with the real reason, every time.
+            model.withdrawLocalPrompt(id: optimisticID)
+            showSendRefusedNotice(refusalText(for: refusal))
             return
         }
         // Array-owned slash commands are accepted without starting a provider
         // turn. The old unconditional "Starting" paint left their gyro spinning
         // forever because no runtime event exists to take it down. At acceptance
-        // time the supervisor has already installed a runner for every command
-        // that really does start one, so process ownership is the truthful split.
+        // time the supervisor has already armed its presence for every prompt
+        // that really does start a turn (or is held for a starting CLI), so the
+        // presence owner is the truthful split.
         guard let agentID = attachedAgentID,
-              agentSource?.isRunning(agentID) == true else {
+              agentSource?.turnPresence(for: agentID)?.isLive == true else {
             if let armedLocally { localPresence = armedLocally }
             transcriptCollectionFixture?.setTurnInFlight(false)
             refreshCompactStatus()
@@ -1725,7 +1777,9 @@ final class ManagedAgentTileNSView: TileNSView {
                 accountQuota: currentAccountQuota(),
                 enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: presented.activity, liveToolVerb: liveToolVerb?.text))
+            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(
+                for: presented.activity, liveToolVerb: liveToolVerb?.text,
+                startupDetail: currentPresence.startupDetail))
             syncCompactStatusTick(for: presented.activity)
             return
         }
@@ -1909,7 +1963,8 @@ final class ManagedAgentTileNSView: TileNSView {
     /// Attention and idle states return nil — those are the footer's, or nobody's.
     private static func tailStatusText(
         for activity: AgentCompactStatusPresentation.Activity,
-        liveToolVerb: String? = nil
+        liveToolVerb: String? = nil,
+        startupDetail: String? = nil
     ) -> String? {
         guard !activity.isSilent, !footerRetainsPhase(activity.phase), !activity.text.isEmpty else {
             return nil
@@ -1920,6 +1975,9 @@ final class ManagedAgentTileNSView: TileNSView {
         switch activity.phase {
         case .reading, .searching, .editing, .running:
             text = liveToolVerb ?? activity.text
+        case .starting:
+            // What the submission is waiting on, when Array knows.
+            text = startupDetail ?? activity.text
         default:
             text = activity.text
         }
