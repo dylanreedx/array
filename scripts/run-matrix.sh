@@ -607,6 +607,11 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# Confidence pass S2: a tile dropped into another zone of its own project moves
+# to that zone's layer at its WORLD frame, persists the new stamp, and undoes.
+# Membership used to be re-read from the retired flat snapshot, so after the
+# mount no tile could ever change zone.
+run_app_check .build/debug/Array --zone-layer-move-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate

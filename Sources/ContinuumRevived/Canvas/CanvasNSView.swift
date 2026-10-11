@@ -1944,7 +1944,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// distance beyond its zone detaches it to bare canvas. Returns true if changed.
     @discardableResult
     func reevaluateZoneMembership(forMovedTile tileId: UUID, notifyChange: Bool = true) -> Bool {
-        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return false }
+        // Once the flat scene is retired a tile lives in a layer, and the flat
+        // snapshot this used to read held only the boot project's launch-time
+        // tiles: a layer tile returned false here, so it could never change zone.
+        if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }) {
+            return reevaluateLayerMembership(forMovedTile: tileId, in: layer, notifyChange: notifyChange)
+        }
+        guard flatCompatibilitySceneActive,
+              let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return false }
         let cx = tile.frame.x + tile.frame.width / 2
         let cy = tile.frame.y + tile.frame.height / 2
         let current = tileZoneMembership[tileId]
@@ -1996,6 +2003,65 @@ final class CanvasNSView: NSView, TokenThemed {
             if notifyChange { delegate?.canvasDidChange(self) }
         }
         return changed
+    }
+
+    /// The layer half of `reevaluateZoneMembership`: a drop whose centre lands in
+    /// another zone of the SAME project moves the record to that zone's layer at
+    /// an unchanged WORLD frame. A layer tile cannot break out to bare canvas
+    /// (unzoned project tiles have nowhere to live) and cannot change project
+    /// here (that is a storage transfer between two `.array/` stores), so both
+    /// leave membership as it was.
+    private func reevaluateLayerMembership(forMovedTile tileId: UUID, in layer: ZoneLayer, notifyChange: Bool) -> Bool {
+        guard let tile = layer.tiles.first(where: { $0.id == tileId }) else { return false }
+        let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+        let cx = world.x + world.width / 2
+        let cy = world.y + world.height / 2
+        let current = layer.placement.zoneId
+        let containing = liveZones.reversed().first { z in
+            let f = CanvasEngine.zoneWorldFrame(z)
+            return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+        }
+        guard let containing, containing.zoneId != current,
+              let projectId = layer.placement.projectId,
+              containing.projectId == projectId,
+              transferLayerTile(tileId, toZone: containing.zoneId)
+        else { return false }
+        growZoneToFitMembers(containing.zoneId, notifyChange: notifyChange)
+        if isAutoLayoutEnabled {
+            applyAutoLayout(.settle(zoneId: current, anchor: nil, pin: false), baseline: autoLayoutScene())
+        } else {
+            layoutAllTiles()
+        }
+        if notifyChange { delegate?.canvasDidChange(self) }
+        return true
+    }
+
+    /// Move one record from the layer holding it to `zoneId`'s layer, keeping its
+    /// WORLD frame exactly and its view. Same project only: both layers persist
+    /// into the same `canvas.json`, so this changes the stamp and nothing else.
+    @discardableResult
+    private func transferLayerTile(_ tileId: UUID, toZone zoneId: UUID) -> Bool {
+        guard let source = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
+              source.placement.zoneId != zoneId,
+              let destination = zoneLayers.first(where: { $0.placement.zoneId == zoneId }),
+              destination.placement.projectId != nil,
+              destination.placement.projectId == source.placement.projectId,
+              let index = source.tiles.firstIndex(where: { $0.id == tileId })
+        else { return false }
+        var record = source.tiles[index]
+        let world = CanvasEngine.worldFrame(tile: record, in: source.placement)
+        guard let local = CanvasEngine.worldToZoneLocalPreservingWorld(world, zoneOrigin: destination.placement.origin)
+        else { return false }
+        record.frame = local
+        record.zoneId = zoneId
+        source.tiles.remove(at: index)
+        let view = source.tileViews.removeValue(forKey: tileId)
+        destination.tiles.append(record)
+        if let view { destination.tileViews[tileId] = view }
+        tileZoneMembership[tileId] = zoneId
+        _layoutLayerTile(record, in: destination)
+        delegate?.canvasSidebarModelDidChange(self)
+        return true
     }
 
     /// Rest-state magnetism after a committed tile MOVE: the moved tile's zone
@@ -2583,6 +2649,15 @@ final class CanvasNSView: NSView, TokenThemed {
         previous: CanvasGeometrySnapshot? = nil,
         notifyCommit: Bool = true
     ) -> Bool {
+        // A snapshot from before a cross-zone drop (undo) names the zone the tile
+        // left. Put the record back in that zone's layer first; the frames below
+        // are then planned against the layer that really holds it.
+        for value in snapshot.tiles {
+            guard let zoneId = value.zoneId,
+                  let holder = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == value.tileId }) }),
+                  holder.placement.zoneId != zoneId else { continue }
+            transferLayerTile(value.tileId, toZone: zoneId)
+        }
         let layerWorldFramesBeforeSnapshot = zoneLayers.flatMap { layer in
             layer.tiles.indices.map { index in
                 (layer: layer, index: index, frame: CanvasEngine.worldFrame(
@@ -2735,7 +2810,8 @@ final class CanvasNSView: NSView, TokenThemed {
         let placements = firstWinsDictionary(allZonePlacements().map { ($0.zoneId, $0) })
         var layout = CanvasLayoutTransaction(
             tileFrames: firstWinsDictionary(snapshot.tiles.map { ($0.tileId, $0.frame) }),
-            zonePlacements: [:]
+            zonePlacements: [:],
+            tileZoneIds: firstWinsDictionary(snapshot.tiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
         )
         for zone in snapshot.zones {
             guard var placement = placements[zone.zoneId] else { continue }
@@ -6312,11 +6388,19 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     /// Permanently retire the boot-only flat scene before the first workspace
-    /// swap. Its model remains intact for its owning ProjectStore, but none of
-    /// its views or indexes may leak into the arriving workspace canvas.
+    /// swap. None of its views, indexes or tiles may leak into the arriving
+    /// workspace canvas.
+    ///
+    /// The tiles go too. Kept, they were the boot project's launch-time frames
+    /// under the same ids the layers own, and every reader not gated on the
+    /// flag answered from them: membership after a drag judged a tile at
+    /// where it was at launch, so no tile could ever change zone after the
+    /// mount. Nothing may persist them (`flatCanvasStateForPersistence` throws
+    /// once retired), so nothing is lost. Witness: `--zone-layer-move-check`.
     func retireFlatCompatibilityScene() {
         guard flatCompatibilitySceneActive else { return }
         flatCompatibilitySceneActive = false
+        canvasState.tiles.removeAll()
         for (_, view) in tileViews {
             // M1.4: same removal, same contract -- the boot scene's agent tiles
             // leak exactly as a zone layer's do.

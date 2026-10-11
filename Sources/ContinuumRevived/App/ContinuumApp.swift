@@ -1127,6 +1127,21 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Confidence pass S2: tiles never vanish, and every visible zone can hold tiles.
+        let zoneTruthLegs: [(String, () throws -> URL)] = [
+            ("--zone-layer-move-check", ZoneTruthChecks.runLayerMove),
+        ]
+        for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
+            do {
+                _ = NSApplication.shared
+                let artifact = try leg()
+                print("ContinuumRevivedZoneTruthChecks \(flag) passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL \(flag): \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--zone-arming-check") {
             do {
                 _ = NSApplication.shared
@@ -15323,6 +15338,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 for index in updated.tiles.indices {
                     guard let worldFrame = transaction.tileFrames[updated.tiles[index].id] else { continue }
                     updated.tiles[index].frame = worldFrame
+                    // Membership commits with geometry: a cross-zone drop must not
+                    // leave the old stamp behind the new frame.
+                    if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
+                       document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
+                        updated.tiles[index].zoneId = zoneId
+                    }
                     changed = true
                 }
                 if changed { projectWrites.append((projectStore, original, updated)) }
