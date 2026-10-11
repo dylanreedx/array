@@ -800,9 +800,11 @@ run_app_check .build/debug/Array --agent-tile-binding-check
 # z-order identical in the model and on disk; the replaced view retires once.
 # A real palette spawn into the same zone must still move things.
 run_app_check .build/debug/Array --tile-materialize-check
-# A tile's own project owns its runtimes, never the armed zone's: switching
-# away frees the departed projects' Ghostty surfaces, and quitting with A1 armed
-# leaves no surface of A1 or A2 alive at ghostty_app_free.
+# A tile's own project owns everything done to it, never the armed zone's: with
+# project A1 armed, A2's note and file-tree saves, its tile closes (canvas.json,
+# stores, surface), a status write and a link opened beside its tile all land in
+# A2; switching away and quitting leave no Ghostty surface alive at
+# ghostty_app_free.
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check

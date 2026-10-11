@@ -12,9 +12,15 @@ import Foundation
 /// screen, live and simply not armed — and asserts the outcome in A2's files and
 /// A2's controller, with A1's left alone.
 ///
+///  - note edits and file-tree state save into A2's `.array/`, never A1's, after
+///    a mount, after a switch away and back, and for a note spawned into A2;
+///  - closing A2's terminal, browser and note removes them from A2's
+///    `canvas.json` and stores and frees the terminal's surface, and a remount
+///    does not bring them back;
 ///  - switching away frees the departed projects' Ghostty surfaces, and no
 ///    surface of any mounted project is alive when the quit teardown reaches
-///    `ghostty_app_free`.
+///    `ghostty_app_free`;
+///  - an agent-status write and a web link opened beside A2's tile land in A2.
 ///
 /// Terminals run a real shell in a real (off-display) window, with tmux and the
 /// delete confirmation turned off through the volatile argument domain only —
@@ -150,8 +156,11 @@ enum TileProjectScopeChecks {
         var manifest: [String: Any] = [:]
         var failures: [String] = []
         let scenarios: [(String, (Fixture) throws -> [String: Any])] = [
+            ("notes-and-trees-save-to-owner", notesAndTreesSaveToOwner),
+            ("close-in-unarmed-zone", closeInUnarmedZone),
             ("switch-away-frees-departed-surfaces", switchAwayFreesDepartedSurfaces),
-            ("quit-frees-every-surface", quitFreesEverySurface)
+            ("quit-frees-every-surface", quitFreesEverySurface),
+            ("status-and-link-in-unarmed-zone", statusAndLinkInUnarmedZone)
         ]
         for (label, body) in scenarios {
             let fixture = try Fixture(label: "project-scope-\(label)")
@@ -181,6 +190,124 @@ enum TileProjectScopeChecks {
                           + failures.joined(separator: "\n  "))
         }
         return artifact
+    }
+
+    /// A note typed into, and a file tree's state, in project A2 while A1 is armed.
+    private static func notesAndTreesSaveToOwner(_ fixture: Fixture) throws -> [String: Any] {
+        func editNote(tile tileId: UUID, note noteId: UUID, _ text: String, step: String) throws {
+            let m = try fixture.requireMounted(step)
+            guard let view = m.canvas.tileView(for: tileId) as? NoteTileNSView else {
+                throw Failure(message: "\(step): tile \(tileId.uuidString.suffix(4)) is not a live note view")
+            }
+            view.textView.string = text
+            view.onTextChange?()
+            try m.runtime.flushMountedWorkspaceState()
+            try expect(noteBytes(fixture, Fixture.projectA2, noteId) == text,
+                       "\(step): project A2's note file holds \(noteBytes(fixture, Fixture.projectA2, noteId).map { "\"\($0)\"" } ?? "nothing"), not the edit")
+            try expect(noteBytes(fixture, Fixture.projectA1, noteId) == nil,
+                       "\(step): the edit was written into project A1's .array/notes")
+        }
+
+        // 1. The hydrated note, at mount.
+        try editNote(tile: Fixture.noteA2a, note: Fixture.noteA2a, "edited at mount", step: "mounted note")
+
+        // 2. The hydrated file tree. Its sidecar on disk is made stale, so only a
+        //    write from the live view through A2's own flush can restore it.
+        let staleQuery = "stale-on-disk"
+        try store(fixture, Fixture.projectA2).saveFileTreeState(FileTreeState(tiles: [
+            FileTreeTile(tileId: treeA2, rootPath: fixture.projectRoots[Fixture.projectA2]!.path, expandedPaths: [],
+                         selectedPath: nil, searchQuery: staleQuery, ignoredNames: [], gitBadges: .off)
+        ]))
+        let m = try fixture.requireMounted("tree")
+        guard let tree = m.canvas.tileView(for: treeA2) as? FileTreeTileNSView, !tree.isRecoverableError else {
+            throw Failure(message: "precondition: file tree A2 did not restore live")
+        }
+        tree.onPersist?(tree.currentFileTreeTile)
+        try m.runtime.flushMountedWorkspaceState()
+        let a2Tree = try store(fixture, Fixture.projectA2).tryLoadFileTreeState()?.tiles.first { $0.tileId == treeA2 }
+        try expect(a2Tree?.searchQuery == "",
+                   "file tree: project A2's sidecar still reads \(a2Tree.map { "\"\($0.searchQuery)\"" } ?? "nothing"); the live view was never saved to its own project")
+        let a1Trees = try store(fixture, Fixture.projectA1).tryLoadFileTreeState()?.tiles.map(\.tileId) ?? []
+        try expect(!a1Trees.contains(treeA2), "file tree: A2's tree was written into project A1's file-tree sidecar")
+
+        // 3. After a switch away and back: Phase A builds the arriving views
+        //    before the arriving project is the active one.
+        try fixture.switchTo(Fixture.workspaceB)
+        try fixture.switchTo(Fixture.workspaceA)
+        try expect(m.runtime.qaArmedZoneId == Fixture.zoneA1,
+                   "precondition: zone A1 is not armed after switching back")
+        try editNote(tile: Fixture.noteA2a, note: Fixture.noteA2a, "edited after a switch back", step: "note after switch back")
+
+        // 4. A note SPAWNED into A2, typed into after A1 is armed again.
+        try fixture.armByClick(Fixture.zoneA2)
+        try expect(m.runtime.activeController?.project.id == Fixture.projectA2,
+                   "precondition: clicking zone A2 did not make project A2 active")
+        let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newNote)
+        let spawned = m.canvas.allWorkspaceTiles().filter { !before.contains($0.id) }
+        guard spawned.count == 1, let spawnedNote = spawned.first, spawnedNote.kind == .note,
+              let spawnedNoteId = spawnedNote.metadata.noteId else {
+            throw Failure(message: "precondition: the palette spawned \(spawned.map(\.kind.rawValue)), not one note")
+        }
+        try expect(m.canvas.zoneId(containing: spawnedNote.id) == Fixture.zoneA2,
+                   "precondition: the spawned note is not in zone A2")
+        // Let the spawn's own pending saves land, so the edit below is the only
+        // thing left for a flush to write.
+        fixture.drain()
+        try fixture.armByClick(Fixture.zoneA1)
+        try expect(m.runtime.activeController?.project.id == Fixture.projectA1,
+                   "precondition: clicking zone A1 did not make project A1 active")
+        try editNote(tile: spawnedNote.id, note: spawnedNoteId, "typed after arming A1", step: "spawned note")
+        return ["spawnedNote": spawnedNoteId.uuidString]
+    }
+
+    /// Close A2's terminal, browser and note through the tile's own close
+    /// action — the one the × button and the context menu's Close both fire.
+    private static func closeInUnarmedZone(_ fixture: Fixture) throws -> [String: Any] {
+        let window = try attachWindow(fixture)
+        defer { window.close() }
+        let m = try fixture.requireMounted("close")
+        let a2 = try controller(fixture, Fixture.projectA2, "close")
+        guard let terminalView = m.canvas.tileView(for: terminalA2) as? TerminalTileNSView,
+              pump(until: 5, { terminalView.runtime.qaTerminalView?.surface != nil }) else {
+            throw Failure(message: "precondition: terminal A2 has no live surface")
+        }
+        let terminalRuntime = terminalView.runtime
+        try expect(m.canvas.tileView(for: browserA2) is BrowserTileNSView, "precondition: browser A2 is not live")
+        try expect(noteBytes(fixture, Fixture.projectA2, Fixture.noteA2a) != nil, "precondition: note A2a has no body file")
+        let closed = [terminalA2, browserA2, Fixture.noteA2a]
+        for id in closed {
+            guard let view = m.canvas.tileView(for: id), let close = view.onClose else {
+                throw Failure(message: "precondition: tile \(id.uuidString.suffix(4)) has no close action")
+            }
+            close()
+        }
+        fixture.drain(0.3)
+
+        let onDisk = canvasTileIds(fixture, Fixture.projectA2)
+        let kept = closed.filter { onDisk.contains($0) }
+        try expect(kept.isEmpty, "project A2's canvas.json still holds closed tile(s) \(kept.map { $0.uuidString.suffix(4) })")
+        try expect(canvasTileIds(fixture, Fixture.projectA1).contains(terminalA1), "project A1's canvas lost its own terminal")
+        try expect(!a2.runtimes.contains { $0.tileId == terminalA2 }, "project A2's controller still holds the closed terminal's runtime")
+        try expect(!a2.browserRuntimes.contains { $0.tileId == browserA2 }, "project A2's controller still holds the closed browser's runtime")
+        try expect(terminalRuntime.qaTerminalView?.surface == nil, "the closed terminal's Ghostty surface is still alive")
+        let browserState = try store(fixture, Fixture.projectA2).tryLoadBrowserState()
+        try expect(!(browserState?.tiles.contains { $0.tileId == browserA2 } ?? false),
+                   "project A2's browser state still holds the closed browser, which resurrects it")
+        try expect(noteBytes(fixture, Fixture.projectA2, Fixture.noteA2a) == nil, "project A2 still holds the closed note's body")
+        let sessions = try store(fixture, Fixture.projectA2).listSessions()
+        try expect(!sessions.contains { $0.tileId == terminalA2 }, "project A2 still holds the closed terminal's session descriptor")
+
+        // Positive control: the armed project's own terminal closes too.
+        m.canvas.tileView(for: terminalA1)?.onClose?()
+        fixture.drain(0.3)
+        try expect(!canvasTileIds(fixture, Fixture.projectA1).contains(terminalA1), "control: closing A1's own terminal left it in A1's canvas.json")
+
+        try fixture.remount(crash: false)
+        let remounted = try fixture.requireMounted("remount")
+        let back = (closed + [terminalA1]).filter { remounted.canvas.tileRecord(for: $0) != nil }
+        try expect(back.isEmpty, "a remount brought closed tile(s) back: \(back.map { $0.uuidString.suffix(4) })")
+        return ["closed": closed.map(\.uuidString)]
     }
 
     /// The live terminals of both projects, each with a surface.
@@ -223,4 +350,35 @@ enum TileProjectScopeChecks {
         return ["surfacesAtShutdown": delegate.qaLiveTerminalSurfacesAtGhosttyShutdown ?? -1]
     }
 
+    /// The agent-status write, and an Array-opened web link beside A2's note.
+    private static func statusAndLinkInUnarmedZone(_ fixture: Fixture) throws -> [String: Any] {
+        let m = try fixture.requireMounted("status")
+        let a2Store = store(fixture, Fixture.projectA2)
+        guard var session = try a2Store.listSessions().first(where: { $0.tileId == terminalA2 }) else {
+            throw Failure(message: "precondition: project A2 has no session for terminal A2")
+        }
+        session.agentDescriptor = AgentDescriptor(agentKind: .claude, worktreePath: nil, status: .working,
+                                                  statusUpdatedAt: Date(timeIntervalSince1970: 1_900_000_000))
+        try a2Store.saveSession(session)
+        m.delegate.qaUpdateAgentStatus(terminalA2, .done)
+        // The raw file: `loadSession` reports every restored agent as `.stale`.
+        let sessionFile = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!).sessionFile(id: session.id)
+        let written = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: Data(contentsOf: sessionFile))
+            .agentDescriptor?.status
+        try expect(written == .done, "the status write left project A2's descriptor at \(String(describing: written))")
+
+        let a1Before = canvasTileIds(fixture, Fixture.projectA1)
+        let a2Before = canvasTileIds(fixture, Fixture.projectA2)
+        let opened = m.delegate.openAgentWebLink(
+            URL(string: "https://project-scope.invalid/")!, target: .array, sourceTileId: Fixture.noteA2a)
+        try expect(opened, "precondition: the web link did not open a tile")
+        fixture.drain(0.3)
+        let a1New = canvasTileIds(fixture, Fixture.projectA1).subtracting(a1Before)
+        let a2New = canvasTileIds(fixture, Fixture.projectA2).subtracting(a2Before)
+        try expect(a1New.isEmpty, "the browser opened beside A2's note was persisted into project A1's canvas.json")
+        try expect(a2New.count == 1, "project A2's canvas.json gained \(a2New.count) tile(s) for the opened link, not 1")
+        let a2 = try controller(fixture, Fixture.projectA2, "link")
+        try expect(a2.browserRuntimes.contains { a2New.contains($0.tileId) }, "the opened browser's runtime is not held by project A2's controller")
+        return ["opened": a2New.first?.uuidString ?? ""]
+    }
 }
