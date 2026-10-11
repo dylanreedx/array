@@ -8,6 +8,9 @@ final class WorkspaceNotificationView: NSView {
     private let icon = NSImageView()
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let dismissButton = NSButton(title: "", target: nil, action: nil)
+    /// An offered repair ("Recover"): shown only with a message that carries one.
+    private let actionButton = NSButton(title: "", target: nil, action: nil)
+    private var actionHandler: (() -> Void)?
     private var expiration: Timer?
     private(set) var kind: Kind = .warning
     var onDismiss: (() -> Void)?
@@ -27,7 +30,12 @@ final class WorkspaceNotificationView: NSView {
         dismissButton.target = self
         dismissButton.action = #selector(dismiss)
         dismissButton.setAccessibilityLabel("Dismiss notification")
-        let row = NSStackView(views: [icon, messageLabel, dismissButton])
+        actionButton.bezelStyle = .rounded
+        actionButton.controlSize = .small
+        actionButton.target = self
+        actionButton.action = #selector(performAction)
+        actionButton.isHidden = true
+        let row = NSStackView(views: [icon, messageLabel, actionButton, dismissButton])
         row.orientation = .horizontal
         row.alignment = .top
         row.spacing = 10
@@ -52,10 +60,17 @@ final class WorkspaceNotificationView: NSView {
     required init?(coder: NSCoder) { nil }
     isolated deinit { expiration?.invalidate() }
 
-    func show(_ message: String?, kind: Kind = .warning) {
+    /// The offered action's title, when one is showing.
+    var actionTitle: String? { actionButton.isHidden ? nil : actionButton.title }
+
+    func show(_ message: String?, kind: Kind = .warning, action: (title: String, handler: () -> Void)? = nil) {
         expiration?.invalidate()
         expiration = nil
         self.kind = kind
+        actionHandler = action?.handler
+        actionButton.title = action?.title ?? ""
+        actionButton.setAccessibilityLabel(action?.title)
+        actionButton.isHidden = action == nil
         messageLabel.stringValue = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         isHidden = messageLabel.stringValue.isEmpty
         icon.image = CanvasSymbolImage.image(named: kind == .success ? "checkmark.circle" : kind == .error ? "exclamationmark.circle" : "exclamationmark.triangle")
@@ -63,12 +78,21 @@ final class WorkspaceNotificationView: NSView {
         applyColors()
         if !isHidden {
             NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [.announcement: messageLabel.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
-            if kind == .success {
+            if kind == .success, action == nil {
                 expiration = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated { self?.dismiss() }
                 }
             }
         }
+    }
+
+    /// Runs the offered action once. The message goes first, so the action's
+    /// own outcome message is not dismissed by it.
+    @objc func performAction() {
+        let handler = actionHandler
+        actionHandler = nil
+        dismiss()
+        handler?()
     }
 
     @objc func dismiss() {

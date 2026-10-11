@@ -624,6 +624,11 @@ run_app_check .build/debug/Array --canvas-unreadable-check
 # deletes them, the canvas re-arms off the closed zone, and a project's last
 # zone closing releases it from the workspace.
 run_app_check .build/debug/Array --zone-close-strand-check
+# Confidence pass S2: tiles stamped with a zone no registered workspace holds
+# (Dylan's harmony/selectus shapes) were hidden forever. The mount now preserves
+# and classifies them and offers Recover, which brings each project's group back
+# into a new zone of its own, layout exact, overlapping nothing.
+run_app_check .build/debug/Array --stranded-tile-recovery-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate

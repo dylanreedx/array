@@ -376,4 +376,165 @@ enum ZoneTruthChecks {
         }
         return try writeArtifact("zone-close-strand", manifest)
     }
+
+    // MARK: - --stranded-tile-recovery-check
+
+    /// G (prod state, 2026-10-11): of 49 real tiles only 3 sat in a zone of a
+    /// registered document. Harmony's tiles were stamped with a zone only an
+    /// unregistered orphan document held; selectus's with a zone no document
+    /// held; the mount deferred them all as "another workspace's" and showed an
+    /// empty zone. Shapes copied from that report, never its files.
+    ///
+    /// The rule (`.plans/67` §4): preserve, classify, offer. The mount must not
+    /// move or restamp them; it must say how many are hidden and offer Recover;
+    /// Recover must bring every one back into a zone of its own project with its
+    /// relative layout exact, overlapping no zone, and it must survive a remount.
+    static func runStrandedTileRecovery() throws -> URL {
+        let fixture = try Fixture(label: "stranded")
+        defer { fixture.dispose() }
+        let orphanWorkspace = UUID(uuidString: "00000000-0000-0000-0000-0000000067E0")!
+        let orphanZone = UUID(uuidString: "00000000-0000-0000-0000-0000000067E1")!
+        let deadZone = UUID(uuidString: "00000000-0000-0000-0000-0000000067E2")!
+        // Harmony-shaped: stamped with an orphan document's zone, laid out right
+        // on top of zone A1, so recovery must translate them as a group.
+        let harmonyShaped: [(UUID, TileFrame)] = [
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E101")!, TileFrame(x: 700, y: 300, width: 300, height: 200)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E102")!, TileFrame(x: 1020, y: 300, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E103")!, TileFrame(x: 700, y: 520, width: 560, height: 260)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E104")!, TileFrame(x: 1280, y: 640, width: 240, height: 160)),
+        ]
+        // Selectus-shaped: stamped with a zone no document holds, far from the
+        // project's live zone and overlapping nothing, so they stay put.
+        let selectusShaped: [(UUID, TileFrame)] = [
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E201")!, TileFrame(x: 3600, y: 2200, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E202")!, TileFrame(x: 3860, y: 2200, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E203")!, TileFrame(x: 3600, y: 2380, width: 500, height: 200)),
+        ]
+        // Negative control: a stamp naming ANOTHER REGISTERED workspace's zone is
+        // that workspace's business, never offered and never moved.
+        let otherWorkspaceTile = UUID(uuidString: "00000000-0000-0000-0000-00000067E301")!
+
+        func append(_ project: UUID, _ rows: [(UUID, TileFrame)], zone: UUID) throws {
+            let store = ProjectStore(projectRoot: fixture.projectRoots[project]!)
+            var canvas = try store.loadCanvas()
+            for (index, row) in rows.enumerated() {
+                var tile = Tile(id: row.0, kind: .note, title: "stranded \(index)", frame: row.1,
+                                zPosition: .fromLegacyRank(40 + index), runtimeRef: nil,
+                                metadata: TileMetadata(noteId: row.0))
+                tile.zoneId = zone
+                canvas.tiles.append(tile)
+                try store.saveNoteBody(id: row.0, text: "stranded \(index)")
+            }
+            try store.saveCanvas(canvas)
+        }
+        try append(Fixture.projectA1, harmonyShaped, zone: orphanZone)
+        try append(Fixture.projectA2, selectusShaped, zone: deadZone)
+        try append(Fixture.projectA1, [(otherWorkspaceTile, TileFrame(x: 500, y: 2600, width: 240, height: 160))],
+                   zone: Fixture.zoneB1)
+        try WorkspaceStore(workspaceId: orphanWorkspace, applicationSupportDirectory: fixture.appSupport).save(
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [ZonePlacement(zoneId: orphanZone, projectId: Fixture.projectB1,
+                                      origin: ZonePoint(x: 600, y: 200), size: ZoneSize(width: 1000, height: 700),
+                                      color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "peronsal")],
+                zoneZOrder: [orphanZone], lastActiveZoneId: orphanZone))
+        let strandedIds = (harmonyShaped + selectusShaped).map(\.0)
+        let owner = Dictionary(uniqueKeysWithValues:
+            harmonyShaped.map { ($0.0, Fixture.projectA1) } + selectusShaped.map { ($0.0, Fixture.projectA2) })
+
+        try fixture.mount()
+        var m = try fixture.requireMounted("stranded")
+        let offer = m.delegate.qaWorkspaceManagementMessage ?? ""
+        try expect(offer.contains("7 tiles are hidden"),
+                   "classify: THE reported state. 7 tiles sit in zones no registered document holds and the user "
+                   + "is not told; the notification reads \(offer.isEmpty ? "nothing" : offer)")
+        for id in strandedIds + [otherWorkspaceTile] {
+            try expect(m.canvas.tileRecord(for: id) == nil, "classify: tile \(id) must not be placed before the user accepts")
+        }
+        // Preserve: the mount moved and restamped nothing.
+        func disk(_ project: UUID) -> [UUID: Tile] {
+            Dictionary(uniqueKeysWithValues: (fixture.readProjectFile(project).canvas?.tiles ?? []).map { ($0.id, $0) })
+        }
+        for (id, frame) in harmonyShaped {
+            try expect(disk(Fixture.projectA1)[id]?.zoneId == orphanZone && disk(Fixture.projectA1)[id]?.frame == frame,
+                       "preserve: the mount must not repair stranded tile \(id) silently")
+        }
+
+        guard m.delegate.qaPerformWorkspaceNotificationAction() == "Recover" else {
+            throw Failure(message: "offer: the notification must offer Recover")
+        }
+        m.canvas.layoutSubtreeIfNeeded()
+
+        func placedFrames(_ m: Fixture.Mounted) throws -> [UUID: (zone: ZonePlacement, frame: TileFrame)] {
+            var out: [UUID: (zone: ZonePlacement, frame: TileFrame)] = [:]
+            for id in strandedIds {
+                let zones = m.canvas.installedZoneIds(containing: id)
+                guard zones.count == 1, let zone = m.runtime.document.zones.first(where: { $0.zoneId == zones[0] }),
+                      let frame = m.canvas.tilesInWorldFrames(forZoneId: zone.zoneId)?.first(where: { $0.id == id })?.frame
+                else {
+                    throw Failure(message: "recover: tile \(id) is not in exactly one zone of the document; zones "
+                                  + "\(zones); the notification reads \(m.delegate.qaWorkspaceManagementMessage ?? "nothing")")
+                }
+                out[id] = (zone, frame)
+            }
+            return out
+        }
+        let placed = try placedFrames(m)
+        for (id, home) in placed {
+            try expect(home.zone.projectId == owner[id], "recover: tile \(id) must live in a zone of its own project")
+            try expect(contains(home.zone, home.frame), "recover: tile \(id) must sit inside its new zone")
+        }
+        // Relative layout exact, per project group.
+        for group in [harmonyShaped, selectusShaped] {
+            let dx = placed[group[0].0]!.frame.x - group[0].1.x
+            let dy = placed[group[0].0]!.frame.y - group[0].1.y
+            for (id, original) in group {
+                let got = placed[id]!.frame
+                try expect(got.x - original.x == dx && got.y - original.y == dy
+                           && got.width == original.width && got.height == original.height,
+                           "recover: tile \(id) lost its place in its group: \(got) vs \(original) shifted by (\(dx), \(dy))")
+            }
+        }
+        try expect(placed[selectusShaped[0].0]!.frame == selectusShaped[0].1,
+                   "recover: a group that overlaps nothing is recovered where it already is")
+        // No recovered zone overlaps another zone.
+        let zones = m.runtime.document.zones
+        for zone in Set(placed.values.map(\.zone.zoneId)) {
+            guard let a = zones.first(where: { $0.zoneId == zone }) else { continue }
+            let ra = CanvasEngine.zoneWorldFrame(a)
+            for b in zones where b.zoneId != zone {
+                let rb = CanvasEngine.zoneWorldFrame(b)
+                let overlap = ra.x < rb.x + rb.width && rb.x < ra.x + ra.width && ra.y < rb.y + rb.height && rb.y < ra.y + ra.height
+                try expect(!overlap, "recover: recovered zone \(zone) overlaps zone \(b.zoneId)")
+            }
+        }
+        try expect(m.canvas.tileRecord(for: otherWorkspaceTile) == nil
+                   && disk(Fixture.projectA1)[otherWorkspaceTile]?.zoneId == Fixture.zoneB1,
+                   "recover: a tile of another registered workspace's zone must be left alone")
+
+        try fixture.remount(crash: false)
+        m = try fixture.requireMounted("stranded remount")
+        // Durable: the stamps and WORLD frames on disk, and the zones in the
+        // document. A recovered zone off-screen is below the live tier after a
+        // remount and has no layer until reached, so it is reached here.
+        for (id, home) in placed {
+            let persisted = disk(owner[id]!)[id]
+            try expect(persisted?.zoneId == home.zone.zoneId && persisted?.frame == home.frame,
+                       "remount: canvas.json must hold recovered tile \(id) in its new zone at its WORLD frame")
+            try expect(m.runtime.document.zones.contains(where: { $0.zoneId == home.zone.zoneId }),
+                       "remount: the recovered zone must be in the workspace document")
+        }
+        for zone in Set(placed.values.map(\.zone.zoneId)) { m.runtime.ensureZoneLayer(forZone: zone) }
+        let after = try placedFrames(m)
+        for (id, home) in placed {
+            try expect(after[id]?.zone.zoneId == home.zone.zoneId && after[id]?.frame == home.frame,
+                       "remount: recovered tile \(id) must come back in the same zone at the same WORLD frame")
+        }
+        let again = m.delegate.qaWorkspaceManagementMessage ?? ""
+        try expect(!again.contains("hidden"), "remount: nothing is hidden any more; the notification reads \(again)")
+        return try writeArtifact("stranded-tile-recovery", [
+            "recovered": strandedIds.count,
+            "harmonyShift": placed[harmonyShaped[0].0]!.frame.x - harmonyShaped[0].1.x,
+        ])
+    }
 }

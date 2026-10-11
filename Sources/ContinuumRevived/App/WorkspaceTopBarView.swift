@@ -271,6 +271,19 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         setManagementMessage(message)
     }
 
+    /// A message that offers one action (a repair the user accepts).
+    func setManagementMessage(
+        _ message: String?, kind: WorkspaceNotificationView.Kind, action: (title: String, handler: () -> Void)?
+    ) {
+        guard let action else { return setManagementMessage(message, kind: kind) }
+        messageKind = kind
+        let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        managementMessageLabel.stringValue = text
+        managementMessageLabel.isHidden = true
+        lastMessage = text
+        notificationView.show(text, kind: kind, action: action)
+    }
+
     func setManagementMessage(_ message: String?) {
         let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         managementMessageLabel.stringValue = text

@@ -148,6 +148,7 @@ check --single-zone-compat-check
 check --spawn-focus-policy-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
+check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --strict-agent-harness-check
 check --terminal-fills-tile-check
@@ -382,6 +383,7 @@ leg run_app_check .build/debug/Array --single-zone-compat-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
+leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --terminal-fills-tile-check

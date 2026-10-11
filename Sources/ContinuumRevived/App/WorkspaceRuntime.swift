@@ -941,6 +941,7 @@ final class WorkspaceRuntime {
 
         // Restore focus: active zone's last-active tile, or fall back to canvas.
         restoreFocus(from: canvasView)
+        classifyStrandedTiles()
     }
 
     /// Schedule every mounted project's debounced canvas save; each controller
@@ -1101,6 +1102,9 @@ final class WorkspaceRuntime {
         let saveController = WorkspaceDocumentSaveController(store: workspaceStore)
         saveController.scheduleZoneLayoutSave(document)
         try saveController.flushPendingSave()
+        // A project added back (after its workspace was deleted, say) brings its
+        // old tiles stamped with zones nothing holds any more: offer them.
+        classifyStrandedTiles()
 
         return placement.zoneId
     }
@@ -1127,6 +1131,122 @@ final class WorkspaceRuntime {
         let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
         layer.tileViews = tileViews
         return layer
+    }
+
+    // MARK: - Stranded tiles (preserve, classify, offer)
+
+    /// Tiles of a mounted project whose `zoneId` names a zone that NO registered
+    /// workspace document holds: a zone closed before close re-homed its members,
+    /// a deleted workspace's zones, an orphan document's. The mount sets them
+    /// aside (`resolveZoneMembership` defers any stamp outside the document) and
+    /// nothing ever shows them again. They are never repaired silently: they are
+    /// preserved on disk untouched, classified here at every mount, and offered
+    /// to the user through `onStrandedTilesFound`. A stamp naming another
+    /// registered workspace's zone is that workspace's business and is not
+    /// counted. Keyed by project.
+    private(set) var strandedTiles: [UUID: [Tile]] = [:]
+    var onStrandedTilesFound: (([UUID: [Tile]]) -> Void)?
+
+    func classifyStrandedTiles() {
+        let found = findStrandedTiles()
+        strandedTiles = found
+        if !found.isEmpty { onStrandedTilesFound?(found) }
+    }
+
+    private func findStrandedTiles() -> [UUID: [Tile]] {
+        guard let appRegistry = try? registryStore.loadOrEmpty() else { return [:] }
+        var registeredZoneIds = Set(document.zones.map(\.zoneId))
+        for entry in appRegistry.workspaces where entry.id != workspaceId {
+            if let other = try? loadWorkspaceDocument(workspaceId: entry.id) {
+                registeredZoneIds.formUnion(other.zones.map(\.zoneId))
+            }
+        }
+        var found: [UUID: [Tile]] = [:]
+        for projectId in Set(document.zones.compactMap(\.projectId)) where
+            !document.zones.filter({ $0.projectId == projectId }).allSatisfy({ foreignZoneIds.contains($0.zoneId) }) {
+            guard let entry = appRegistry.projects.first(where: { $0.id == projectId && !$0.missing }),
+                  let canvas = try? ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true)).tryLoadCanvas()
+            else { continue }
+            let stranded = canvas.tiles.filter { tile in
+                guard let zoneId = tile.zoneId else { return false }
+                return !registeredZoneIds.contains(zoneId)
+            }
+            if !stranded.isEmpty { found[projectId] = stranded }
+        }
+        return found
+    }
+
+    /// The user accepted the offer. Each project's stranded tiles move, as one
+    /// group (relative layout exact), into a new zone of that project: where
+    /// they already are when that overlaps nothing, otherwise translated right
+    /// of every zone in the workspace. Written to the project's own canvas
+    /// first, then the zone to the document, so a crash between the two leaves
+    /// them stranded and offered again rather than lost; the replaced
+    /// `canvas.json` stays in `.array/backups`. Returns how many tiles came back.
+    @discardableResult
+    func recoverStrandedTiles() throws -> Int {
+        guard let canvasView else { return 0 }
+        // Classified now, not at the offer: the scene may have changed since.
+        strandedTiles = findStrandedTiles()
+        var recovered = 0
+        for projectId in strandedTiles.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let tiles = strandedTiles[projectId], !tiles.isEmpty,
+                  let anchorZone = document.zones.first(where: { $0.projectId == projectId && !foreignZoneIds.contains($0.zoneId) })
+            else { continue }
+            try prepareZoneForWholeZoneMutation(anchorZone.zoneId)
+            guard let controller = registry.controller(for: projectId) else {
+                throw WorkspaceMutationError.zoneUnavailable(anchorZone.zoneId)
+            }
+            // Nothing queued for this file may land after the rewrite below.
+            try controller.flushCanvasSave()
+
+            let frames = tiles.map(\.frame)
+            let pad = ZoneBoundsConfig.padding()
+            func enclosing(_ frames: [TileFrame]) -> TileFrame {
+                CanvasEngine.zoneBounds(memberFrames: frames, padding: pad,
+                                        minSize: ZoneBoundsConfig.emptyMinSize(),
+                                        headerHeight: ZoneChromeNSView.headerHeight)
+            }
+            let obstacles = document.zones.map(CanvasEngine.zoneWorldFrame) + canvasView.allTilesInWorldFrames().map(\.frame)
+            func overlaps(_ a: TileFrame, _ b: TileFrame) -> Bool {
+                a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+            }
+            var rect = enclosing(frames)
+            var dx = 0.0
+            if obstacles.contains(where: { overlaps(rect, $0) }) {
+                let right = obstacles.map { $0.x + $0.width }.max() ?? rect.x
+                dx = (right + 120) - rect.x
+                rect.x += dx
+            }
+            let newZoneId = UUID()
+            let moved = Dictionary(uniqueKeysWithValues: tiles.map { tile -> (UUID, Tile) in
+                var copy = tile
+                copy.frame.x += dx
+                copy.zoneId = newZoneId
+                return (tile.id, copy)
+            })
+            guard var canvas = try controller.projectStore.tryLoadCanvas() else { continue }
+            canvas.tiles = canvas.tiles.map { moved[$0.id] ?? $0 }
+            try controller.projectStore.saveCanvas(canvas)
+
+            var placement = ZonePlacement(
+                zoneId: newZoneId,
+                projectId: projectId,
+                origin: ZonePoint(x: rect.x, y: rect.y),
+                size: ZoneSize(width: rect.width, height: rect.height),
+                color: ZoneColorAllocator.nextColor(existingColors: document.zones.map(\.color)),
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "Recovered")
+            placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
+            document.zones.append(placement)
+            document.bringZoneToFront(newZoneId)
+            try persistWorkspaceDocument()
+            installZoneLayerIfMissing(placement)
+            recovered += tiles.count
+        }
+        strandedTiles = findStrandedTiles()
+        return recovered
     }
 
     // MARK: - Spawner ownership
@@ -1900,6 +2020,7 @@ final class WorkspaceRuntime {
         } else {
             _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         }
+        classifyStrandedTiles()
         lifecycleObserver?(.switchCompleted(targetWorkspaceId))
         // CX-01: a switch is newer intent for every pending presentation, and a
         // structural change for every issued context.
