@@ -1123,7 +1123,7 @@ run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 # visual gate — run the full matrix on a GUI host to cover them). Not fake-green:
 # they are deferred to where they can actually run, and the skip is printed loudly.
 if [[ "${CONTINUUM_SKIP_SURFACE_CHECKS:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check, --terminal-clipboard-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
+  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check, --terminal-clipboard-check, --terminal-focus-grab-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
 else
   run_app_check .build/debug/Array --terminal-tmux-live-integration-check
   run_app_check .build/debug/Array --terminal-theme-fidelity-check
@@ -1131,6 +1131,7 @@ else
   run_app_check .build/debug/Array --terminal-fills-tile-check
   run_app_check .build/debug/Array --session-resume-check
   run_app_check .build/debug/Array --terminal-clipboard-check
+  run_app_check .build/debug/Array --terminal-focus-grab-check
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then

@@ -88,7 +88,9 @@ final class GhosttyTerminalView: NSView {
             createSurface(app: ghosttyApp)
         }
         updateSurfaceSize()
-        window?.makeFirstResponder(self)
+        // No makeFirstResponder here: entering a window is hydration, a zone
+        // install or a workspace switch, not the user choosing this terminal.
+        // Focus is FocusBroker's (acquireFocus -> runtime.focus) or a click's.
     }
 
     override func setFrameSize(_ newSize: NSSize) {

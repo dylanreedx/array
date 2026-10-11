@@ -85,7 +85,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
         terminalView = view
         view.updateSurfaceSize()
-        focus()
     }
 
     func detach() {
