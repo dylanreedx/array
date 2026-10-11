@@ -537,4 +537,45 @@ enum ZoneTruthChecks {
             "harmonyShift": placed[harmonyShaped[0].0]!.frame.x - harmonyShaped[0].1.x,
         ])
     }
+
+    // MARK: - --layout-commit-truth-check
+
+    /// F1 10.2 / `.plans/67` §2 row 5: the layout commit skipped every tile it
+    /// could not place in a file (an unregistered project, a missing canvas) and
+    /// still reported success, so a move looked saved and came back undone on
+    /// the next launch. It must now fail, roll the move back and say so.
+    static func runLayoutCommitTruth() throws -> URL {
+        let fixture = try Fixture(label: "layout-truth")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("layout-truth")
+        _ = pinPreferences(m.canvas, autoLayout: false)
+        let tile = Fixture.noteA2a
+        let seeded = Fixture.seed.tiles[tile]!
+        let moved = TileFrame(x: seeded.x + 40, y: seeded.y + 30, width: seeded.width, height: seeded.height)
+
+        // Positive control: with its store present the same move commits.
+        let control = m.canvas.applyProgrammaticTileGeometry(
+            tileId: tile, in: Fixture.zoneA2, worldFrame: moved, action: .moveTile)
+        try expect(control == .committed(undoRecorded: true) || control == .committed(undoRecorded: false),
+                   "control: a move with its store present must commit; got \(control)")
+        try expect(fixture.readProjectFile(Fixture.projectA2).canvas?.tiles.first(where: { $0.id == tile })?.frame == moved,
+                   "control: the committed move must be on disk")
+
+        // The project's canvas goes missing while it is mounted, backups and all
+        // (a backup alone would be read in its place and written back).
+        let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
+        try FileManager.default.removeItem(at: layout.canvasFile)
+        try? FileManager.default.removeItem(at: layout.backupsDirectory)
+        let outcome = m.canvas.applyProgrammaticTileGeometry(
+            tileId: tile, in: Fixture.zoneA2, worldFrame: seeded, action: .moveTile)
+        try expect(outcome == .persistenceFailed,
+                   "THE reported bug. A move whose tile is in no saved canvas reported \(outcome); it was never "
+                   + "written anywhere")
+        let shown = m.canvas.tilesInWorldFrames(forZoneId: Fixture.zoneA2)?.first(where: { $0.id == tile })?.frame
+        try expect(shown == moved, "the failed move must be rolled back on screen; tile is at \(String(describing: shown))")
+        let message = m.delegate.qaWorkspaceManagementMessage ?? ""
+        try expect(message.contains("couldn't be saved"), "the failure must be shown; the notification reads \(message)")
+        return try writeArtifact("layout-commit-truth", ["outcome": "\(outcome)"])
+    }
 }

@@ -1133,6 +1133,7 @@ enum ContinuumApp {
             ("--canvas-unreadable-check", ZoneTruthChecks.runCanvasUnreadable),
             ("--zone-close-strand-check", ZoneTruthChecks.runZoneCloseStrand),
             ("--stranded-tile-recovery-check", ZoneTruthChecks.runStrandedTileRecovery),
+            ("--layout-commit-truth-check", ZoneTruthChecks.runLayoutCommitTruth),
         ]
         for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
             do {
@@ -15354,6 +15355,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the workspace document are saved synchronously from one snapshot. If any
     /// write fails, already-written project canvases are restored before the
     /// caller rolls the preview back in memory.
+    enum LayoutCommitError: Error, CustomStringConvertible {
+        case tilesWithoutStore(Int)
+        var description: String { "\(count) moved tile(s) belong to no saved canvas" }
+        private var count: Int { switch self { case let .tilesWithoutStore(count): return count } }
+    }
+
     private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) -> Bool {
         guard let registryStore else { return false }
         do {
@@ -15387,9 +15394,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // well subtracted the zone origin twice, so an ambient tile drifted by
             // −zoneOrigin on every commit/remount cycle and the error accumulated.
             // Witness: `--ambient-tile-frame-space-check`.
+            // Every committed tile must land in exactly the file that owns it. A
+            // tile found in none (its project unregistered, its canvas missing)
+            // used to be skipped while the commit still reported success, so the
+            // gesture looked saved and came back moved on the next launch.
+            var unplacedTileIds = Set(transaction.tileFrames.keys)
             for (tileId, worldFrame) in transaction.tileFrames {
                 guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
                 document.ambientTiles[index].frame = worldFrame
+                unplacedTileIds.remove(tileId)
             }
 
             let registry = try registryStore.loadOrEmpty()
@@ -15402,6 +15415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
                 guard let original = try projectStore.tryLoadCanvas() else { continue }
+                unplacedTileIds.subtract(original.tiles.map(\.id))
                 var updated = original
                 var changed = false
                 // WS2 F2, same defect as the ambient register above: `canvas.json`
@@ -15424,6 +15438,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     changed = true
                 }
                 if changed { projectWrites.append((projectStore, original, updated)) }
+            }
+
+            guard unplacedTileIds.isEmpty else {
+                throw LayoutCommitError.tilesWithoutStore(unplacedTileIds.count)
             }
 
             var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []
@@ -15451,6 +15469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "That layout change couldn't be saved, so it was undone: \(error).", kind: .error)
             return false
         }
     }

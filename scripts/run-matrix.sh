@@ -629,6 +629,9 @@ run_app_check .build/debug/Array --zone-close-strand-check
 # and classifies them and offers Recover, which brings each project's group back
 # into a new zone of its own, layout exact, overlapping nothing.
 run_app_check .build/debug/Array --stranded-tile-recovery-check
+# Confidence pass S2: the layout commit skipped tiles it could place in no file
+# and still reported success. It now fails, the move rolls back, and it says so.
+run_app_check .build/debug/Array --layout-commit-truth-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate
