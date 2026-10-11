@@ -557,16 +557,27 @@ final class WorkspaceRuntime {
     /// Considers every zone this project owns in the document, not just the live
     /// ones, so a tile belonging to a zone below the live tier stays where it is
     /// instead of being rescued onto the screen.
+    ///
+    /// Throws when the project's canvas exists and cannot be read. That project is
+    /// unavailable, never empty: it gets no layers (an empty layer is what a pan
+    /// then saved over the file), its controller refuses to write, and the user
+    /// is told once per mount.
     private func membership(
         forProject projectId: UUID,
         controller: ZoneRuntimeController,
         in document: WorkspaceDocument,
         cache: inout [UUID: [UUID: [Tile]]]
-    ) -> [UUID: [Tile]] {
+    ) throws -> [UUID: [Tile]] {
         if let cached = cache[projectId] { return cached }
-        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)
-            ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                           tiles: [], groups: [], lastActiveTileId: nil)
+        let persisted: CanvasState
+        do {
+            persisted = try controller.projectStore.tryLoadCanvas()
+                ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                               tiles: [], groups: [], lastActiveTileId: nil)
+        } catch {
+            reportCanvasUnavailable(projectId: projectId, controller: controller, error: error)
+            throw error
+        }
         let projectZones = document.zones.filter { $0.projectId == projectId }
         guard !projectZones.isEmpty else {
             cache[projectId] = [:]
@@ -636,8 +647,8 @@ final class WorkspaceRuntime {
     /// it.
     func repairBootMembership(controller: ZoneRuntimeController, canvasView: CanvasNSView) {
         var cache: [UUID: [UUID: [Tile]]] = [:]
-        let byZone = membership(
-            forProject: controller.project.id, controller: controller, in: document, cache: &cache)
+        guard let byZone = try? membership(
+            forProject: controller.project.id, controller: controller, in: document, cache: &cache) else { return }
         for (zoneId, tiles) in byZone {
             for tile in tiles { canvasView.setTileZone(tile.id, zoneId: zoneId) }
         }
@@ -651,7 +662,11 @@ final class WorkspaceRuntime {
     @discardableResult
     private func ensureZone(forProject projectId: UUID, controller: ZoneRuntimeController) -> ZonePlacement? {
         if let existing = document.zones.first(where: { $0.projectId == projectId }) { return existing }
-        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)?.tiles ?? []
+        let persisted: [Tile]
+        do { persisted = try controller.projectStore.tryLoadCanvas()?.tiles ?? [] } catch {
+            reportCanvasUnavailable(projectId: projectId, controller: controller, error: error)
+            return nil
+        }
         let bounds = CanvasEngine.zoneBounds(
             memberFrames: persisted.map(\.frame),
             padding: ZoneBoundsConfig.padding(),
@@ -713,6 +728,7 @@ final class WorkspaceRuntime {
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
         mountEpoch &+= 1
+        reportedUnreadableProjectIds = []
         // Cold launch and an in-process switch must mount the same semantic scene.
         // Preserve legacy foreign placements in the document, but never draw them
         // in a workspace that does not own their project.
@@ -764,9 +780,11 @@ final class WorkspaceRuntime {
             // does not own -- which ordinary dragging produces -- rendering it
             // nowhere. `membership(forProject:…)` rescues those and persists the
             // repair once. See `CanvasEngine.resolveZoneMembership`.
-            layers.append(makeProjectZoneLayer(
+            if let layer = makeProjectZoneLayer(
                 zone: zone, projectId: projectId, controller: controller,
-                document: document, registry: appRegistry, membershipCache: &membershipCache))
+                document: document, registry: appRegistry, membershipCache: &membershipCache) {
+                layers.append(layer)
+            }
         }
 
         for projectId in previouslyAcquired.subtracting(Set(newlyAcquired)) {
@@ -997,6 +1015,16 @@ final class WorkspaceRuntime {
     /// rather than silently using a different project.
     var onZoneProjectUnavailable: ((UUID, Error) -> Void)?
 
+    /// Projects already reported unreadable in this mount, so a pan or a spawn
+    /// that rediscovers it does not repeat the message.
+    private var reportedUnreadableProjectIds: Set<UUID> = []
+
+    private func reportCanvasUnavailable(projectId: UUID, controller: ZoneRuntimeController, error: Error) {
+        controller.markCanvasUnavailable(error)
+        guard reportedUnreadableProjectIds.insert(projectId).inserted else { return }
+        onZoneProjectUnavailable?(projectId, error)
+    }
+
     /// The three construction inputs `attachActiveControllerUI` used to omit, now
     /// injectable. M1.3b (`.plans/46`).
     ///
@@ -1091,9 +1119,10 @@ final class WorkspaceRuntime {
         document: WorkspaceDocument,
         registry appRegistry: Registry,
         membershipCache: inout [UUID: [UUID: [Tile]]]
-    ) -> CanvasNSView.ZoneLayer {
-        let memberTiles = (membership(forProject: projectId, controller: controller,
-                                      in: document, cache: &membershipCache)[zone.zoneId] ?? [])
+    ) -> CanvasNSView.ZoneLayer? {
+        guard let byZone = try? membership(forProject: projectId, controller: controller,
+                                           in: document, cache: &membershipCache) else { return nil }
+        let memberTiles = (byZone[zone.zoneId] ?? [])
         .map { tile -> Tile in
             var adopted = tile
             // M1.10 (`.plans/46`): the frame spaces differ, and the file is
@@ -1165,9 +1194,9 @@ final class WorkspaceRuntime {
         // document, and the layer must not shrink it back.
         let placement = canvasView.zonePlacement(for: zone.zoneId) ?? zone
         var membershipCache: [UUID: [UUID: [Tile]]] = [:]
-        let layer = makeProjectZoneLayer(
+        guard let layer = makeProjectZoneLayer(
             zone: placement, projectId: projectId, controller: controller,
-            document: document, registry: appRegistry, membershipCache: &membershipCache)
+            document: document, registry: appRegistry, membershipCache: &membershipCache) else { return }
         hydrateZoneLayerTiles?(canvasView, [layer], .beforeInstall)
         canvasView.upsertZoneLayer(layer)
         installedLayers.append(layer)
@@ -1600,6 +1629,7 @@ final class WorkspaceRuntime {
     var _relaunchSpy: (() -> Void)?
 
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
+        reportedUnreadableProjectIds = []
         // M1.10: the defect this milestone exists to fix was that EVERY canvas call
         // below optional-chained through a nil `canvasView` and did nothing, for
         // months, in silence. Refusing loudly means any future path that reaches a
@@ -1686,9 +1716,11 @@ final class WorkspaceRuntime {
             // M1.0/M1.10: see `install`. One repaired membership answer per
             // project; the per-zone filter it replaces rendered a foreign-stamped
             // tile nowhere.
-            layers.append(makeProjectZoneLayer(
+            if let layer = makeProjectZoneLayer(
                 zone: zone, projectId: projectId, controller: controller,
-                document: targetDocument, registry: appRegistry, membershipCache: &membershipCache))
+                document: targetDocument, registry: appRegistry, membershipCache: &membershipCache) {
+                layers.append(layer)
+            }
         }
 
         // Commit the selected workspace only after every throwing preparation step
@@ -2005,6 +2037,7 @@ final class WorkspaceRuntime {
            let zoneId = focus.zoneId,
            let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
            let controller = registry.controller(for: projectId),
+           controller.canvasUnavailable == nil,
            var canvas = try controller.projectStore.tryLoadCanvas(),
            canvas.tiles.contains(where: { $0.id == tileId }) {
             canvas.lastActiveTileId = tileId

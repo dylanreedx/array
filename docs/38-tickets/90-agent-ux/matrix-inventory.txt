@@ -53,6 +53,7 @@ check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
 check --canvas-persistence-model-check
 check --canvas-save-receipt-check
+check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
@@ -181,6 +182,7 @@ check --ui-probe-check
 check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
+check --unreadable-canvas-store-check
 check --viewport-sanitize-check
 check --window-chrome-check
 check --workspace-api-agents-check
@@ -289,6 +291,7 @@ leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-save-receipt-check
+leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
@@ -476,6 +479,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor

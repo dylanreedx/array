@@ -2464,7 +2464,9 @@ final class TileSpawner {
             throw SpawnError.canvasUnavailable
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
-            let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+            // An unreadable file is not an empty one: merging against "nothing"
+            // and writing would replace it. `saveCanvas` refuses as well.
+            let persisted = try projectStore.tryLoadCanvas() ?? CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [],
                 groups: [],

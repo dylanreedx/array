@@ -1130,6 +1130,7 @@ enum ContinuumApp {
         // Confidence pass S2: tiles never vanish, and every visible zone can hold tiles.
         let zoneTruthLegs: [(String, () throws -> URL)] = [
             ("--zone-layer-move-check", ZoneTruthChecks.runLayerMove),
+            ("--canvas-unreadable-check", ZoneTruthChecks.runCanvasUnreadable),
         ]
         for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
             do {
@@ -4757,7 +4758,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 : []
 
             var canvasState: CanvasState
-            let existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            // An unreadable (or newer-format) boot canvas is not fatal: the flat
+            // boot state is only a snapshot, the store refuses to write over the
+            // file, and a persisted workspace's mount reports the project
+            // unavailable. `WorkspaceInvariantsFixture.mount` mirrors this.
+            let existingCanvasResult: CanvasEngine.CanvasSanitizationResult?
+            do {
+                existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            } catch ProjectStoreError.canvasUnreadable, ProjectStoreError.unknownFutureSchema {
+                existingCanvasResult = nil
+            }
             let selectedProjectHadCanvasState = existingCanvasResult != nil
             if let existing = existingCanvasResult {
                 canvasState = existing.canvas
@@ -17057,6 +17067,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
             self?.configureCreationAndRuntimeRoutes(on: arriving)
         }
+        // A project whose zone cannot be mounted (its canvas is unreadable, or
+        // its `.array/` is held elsewhere) used to go stderr-only.
+        workspaceRuntime?.onZoneProjectUnavailable = { [weak self] projectId, error in
+            self?.reportZoneProjectUnavailable(projectId: projectId, error: error)
+        }
         workspaceRuntime?.hydrateZoneLayerTiles = { [weak self] canvas, layers, phase in
             self?.hydrateZoneLayerTiles(canvas, layers, phase: phase)
         }
@@ -17066,6 +17081,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 record.tileId.map { (record.id, $0) }
             })
         }
+    }
+
+    private func reportZoneProjectUnavailable(projectId: UUID, error: Error) {
+        let name = (try? registryStore?.loadOrEmpty())?.projects.first(where: { $0.id == projectId })?.name ?? "A project"
+        let reason: String
+        switch error {
+        case ProjectStoreError.canvasUnreadable:
+            reason = "its canvas file can't be read. Array is leaving the file untouched and showing none of its tiles"
+        case let ProjectStoreError.unknownFutureSchema(_, version, supported):
+            reason = "its canvas was saved by a newer Array (format \(version), this build reads \(supported)). "
+                + "Array is leaving the file untouched and showing none of its tiles"
+        default:
+            reason = error.localizedDescription
+        }
+        setWorkspaceManagementMessage("\u{201C}\(name)\u{201D} is unavailable: \(reason).", kind: .error)
     }
 
     // MARK: - Zone tile hydration (M1.2, `.plans/46`)

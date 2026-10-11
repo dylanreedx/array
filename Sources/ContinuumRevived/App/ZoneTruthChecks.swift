@@ -155,4 +155,74 @@ enum ZoneTruthChecks {
         }
         return try writeArtifact("zone-layer-move", manifest)
     }
+
+    // MARK: - --canvas-unreadable-check
+
+    /// F1 #3: a `canvas.json` that exists and does not decode (an unknown tile
+    /// kind from a newer build, a newer schema, corruption) read as EMPTY. The
+    /// mount built empty layers over it, and the first pan's camera save merged
+    /// against "nothing" and wrote that over the file; three more saves rotated
+    /// the original out of the backups for good.
+    static func runCanvasUnreadable() throws -> URL {
+        var manifest: [String: Any] = [:]
+        let variants: [(String, (inout [String: Any]) -> Void)] = [
+            ("unknown tile kind", { json in
+                var tiles = json["tiles"] as! [[String: Any]]
+                tiles[0]["kind"] = "futureKind"
+                json["tiles"] = tiles
+            }),
+            ("newer schema", { json in json["schemaVersion"] = 99 }),
+        ]
+        for (label, corrupt) in variants {
+            let fixture = try Fixture(label: "unreadable")
+            defer { fixture.dispose() }
+            // Birch (A2) is not the boot project, so the mount itself must cope.
+            let victim = Fixture.projectA2
+            let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[victim]!)
+            var json = try JSONSerialization.jsonObject(with: Data(contentsOf: layout.canvasFile)) as! [String: Any]
+            corrupt(&json)
+            try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: layout.canvasFile)
+            try? FileManager.default.removeItem(at: layout.backupsDirectory)
+            let original = try Data(contentsOf: layout.canvasFile)
+
+            try fixture.mount()
+            var m = try fixture.requireMounted("unreadable")
+            try expect(m.canvas.installedZonePlacement(for: Fixture.zoneA2) == nil,
+                       "\(label): an unreadable project must not mount as an EMPTY zone; that empty layer is what "
+                       + "the next save wrote over the file")
+            try expect(m.canvas.qaZoneChromeIds.contains(Fixture.zoneA2),
+                       "\(label): the zone itself must still draw")
+            let message = m.delegate.qaWorkspaceManagementMessage ?? ""
+            try expect(message.contains("Birch") && message.contains("unavailable"),
+                       "\(label): the user must be told the project is unavailable; message: \(message)")
+
+            // Pan, arm, spawn, flush: every writer a user can reach.
+            m.canvas.setViewport(CanvasViewport(x: 1200, y: -50, zoom: 1))
+            m.delegate.canvasDidChange(m.canvas)
+            try fixture.armByClick(Fixture.zoneA2)
+            m.delegate.canvasDidChange(m.canvas)
+            fixture.drain()
+            _ = m.delegate.qaPerformPaletteAction(.newNote)
+            try expect(m.canvas.installedZonePlacement(for: Fixture.zoneA2) == nil,
+                       "\(label): a spawn must not build an empty layer over the unreadable project")
+            try m.runtime.flushMountedWorkspaceState()
+            fixture.drain()
+            let afterSession = try Data(contentsOf: layout.canvasFile)
+            try expect(afterSession == original,
+                       "\(label): THE reported bug. The unreadable canvas.json was written over")
+
+            try fixture.remount(crash: false)
+            m = try fixture.requireMounted("unreadable remount")
+            let afterRemount = try Data(contentsOf: layout.canvasFile)
+            try expect(afterRemount == original,
+                       "\(label): quit and remount must leave the file byte-identical")
+            try expect(m.canvas.installedZonePlacement(for: Fixture.zoneA2) == nil,
+                       "\(label): still unavailable after a remount")
+            // The readable projects are untouched by the refusal.
+            try expect(m.canvas.installedZoneIds(containing: Fixture.noteA1a) == [Fixture.zoneA1],
+                       "\(label): a readable neighbour must still mount its tiles")
+            manifest[label] = ["bytes": original.count]
+        }
+        return try writeArtifact("canvas-unreadable", manifest)
+    }
 }
