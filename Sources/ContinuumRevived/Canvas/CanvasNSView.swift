@@ -4860,9 +4860,14 @@ final class CanvasNSView: NSView, TokenThemed {
     func isZoneProvisional(_ zoneId: UUID) -> Bool { provisionalZoneIds.contains(zoneId) }
 
     private func teardownZoneRenameField() {
-        zoneRenameField?.removeFromSuperview()
+        // Clear the rename state BEFORE removing the field: removing an editing
+        // field ends its editing session, and `controlTextDidEndEditing` treats
+        // the still-registered field's end as a focus-loss commit — which turned
+        // Esc (cancel) into a commit of whatever had been typed.
+        let field = zoneRenameField
         zoneRenameField = nil
         renamingZoneId = nil
+        field?.removeFromSuperview()
     }
 
     /// QA: the zone whose inline rename is active, or nil.
@@ -11972,6 +11977,31 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.qaRenameZone(zoneId, to: "   ")
         try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "empty rename must keep the previous name")
         try expect(renamed.count == 1, "empty rename must not fire onZoneRenamed again; got \(renamed.count)")
+
+        // Esc CANCELS. Open the inline field again, type a new name into its
+        // field editor, and press a real Esc through the window: the name must
+        // stay "Work" and nothing may be reported renamed. Tearing the field down
+        // used to end editing while it was still the registered rename field, so
+        // `controlTextDidEndEditing` committed the typed text on the way out.
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: headerPoint, clicks: 2, window: window))
+        try expect(canvas.qaZoneRenameActiveZoneId == zoneId, "second double-click must reopen the rename")
+        guard let fieldEditor = window.firstResponder as? NSTextView else {
+            throw CheckError.failed("the rename field editor is not first responder: \(String(describing: window.firstResponder))")
+        }
+        fieldEditor.selectAll(nil)
+        fieldEditor.insertText("Scratch", replacementRange: fieldEditor.selectedRange())
+        try expect(canvas.qaZoneRenameFieldText == "Scratch", "typed text must be in the field; got \(canvas.qaZoneRenameFieldText ?? "nil")")
+        guard let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                            timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: window.windowNumber, context: nil,
+                                            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                            isARepeat: false, keyCode: 53)
+        else { throw CheckError.failed("could not synthesize Esc") }
+        window.sendEvent(escape)
+        try expect(canvas.qaZoneRenameActiveZoneId == nil, "Esc must close the rename field")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work",
+                   "Esc must CANCEL the rename; the zone became '\(canvas.qaLiveZonePlacement(zoneId)?.name ?? "nil")'")
+        try expect(renamed.count == 1, "Esc must not report a rename; onZoneRenamed fired \(renamed.count) times: \(renamed)")
 
         // Double-click the zone BODY (below header, no tile) still zoom-fits.
         let before = canvas.canvasState.viewport
