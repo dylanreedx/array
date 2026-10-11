@@ -106,7 +106,8 @@ final class TileSpawner {
     var browserRuntimeSpawnedHandler: ((WKWebViewBrowserRuntime) -> Void)?
 
     /// Called after every note text change so the AppDelegate can schedule a
-    /// debounced note body + index save.
+    /// debounced note body + index save. A view captures it when wired: it
+    /// outlives this spawner, which the next project-changing arm replaces.
     var notePersistenceHandler: (() -> Void)?
 
     /// Called after file-tree expansion, selection, or search changes so the
@@ -586,7 +587,11 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
-        let projectRoot = terminalProjectRoot()
+        // A restart rebuilds a tile that already sits in a zone. When that zone is
+        // THIS spawner's project's, its root and tmux session are this project's —
+        // not the armed zone's, which is what the creation providers answer.
+        let ownsTile = canvasView.zoneId(containing: tileId).flatMap { canvasView.projectId(forZone: $0) } == project.id
+        let projectRoot = ownsTile ? project.rootPath : terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
@@ -619,7 +624,7 @@ final class TileSpawner {
             wrappedProfile = try tmuxWrappedProfileIfAvailable(
                 profileWithCwd,
                 tileId: existing.id,
-                target: terminalSessionTargetProvider?(),
+                target: ownsTile ? .project(projectId: project.id) : terminalSessionTargetProvider?(),
                 existingWindowTarget: persistedWindowTarget
             )
         } catch {
@@ -1998,7 +2003,7 @@ final class TileSpawner {
             return .failure(error)
         }
         let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
-        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: tileId, destination: url))
         }
@@ -2135,7 +2140,7 @@ final class TileSpawner {
         }
         let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
         let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
-        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: activeTile.id, destination: url))
         }
@@ -2215,7 +2220,7 @@ final class TileSpawner {
         _ tile: Tile, noteId: UUID, body: String, canvasView: CanvasNSView
     ) {
         let restored = NoteTileNSView(tile: tile, noteId: noteId, initialBody: body)
-        restored.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        restored.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         restored.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(
                 noteId: noteId, tileId: tile.id, destination: url
@@ -6278,8 +6283,11 @@ final class TileSpawner {
     ) -> (FileTreeViewModel, CanvasNSView.ProjectTileTarget) {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
-        view.onPersist = { [weak self] _ in
-            self?.fileTreePersistenceHandler?()
+        // Captured, not reached through `self`: every project-changing arm mints
+        // new spawners, and a view outlives the spawner that built it. Through a
+        // weak `self` its edits stopped being saved at the first such click.
+        view.onPersist = { [fileTreePersistenceHandler] _ in
+            fileTreePersistenceHandler?()
         }
         view.onSpawnFile = { [weak self] path in
             guard let self else { return }
