@@ -3856,9 +3856,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private func updateVisibleElapsedClock(now: Date) {
         for tableRow in visibleTimedTableRows() {
-            (tableView.view(
-                atColumn: 0, row: tableRow, makeIfNecessary: false
-            ) as? AgentInbox96CellView)?.updateElapsedClock(now: now)
+            let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+            (cell as? AgentInbox96CellView)?.updateElapsedClock(now: now)
+            // A Finishing row is slim and still timed (counted from the close).
+            (cell as? AgentInboxSlimCellView)?.updateElapsedClock(now: now)
         }
     }
 
@@ -4265,6 +4266,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    /// The block an agent is DRAWN in, read off the table's own items and the
+    /// headings between them — `live`, `settled`, `snoozed`, `history` — or nil
+    /// when the table draws no row for it (scoped out, folded, or behind a shut
+    /// heading). Confidence-pass sidebar witnesses assert on this, never on the
+    /// row builder.
+    func drawnBlockForQA(id: UUID) -> String? {
+        var block = "live"
+        for item in items {
+            switch item {
+            case .shelfHeader: block = "snoozed"
+            case .historyHeader: block = "history"
+            case .agent(let row) where row.id == id:
+                if block != "history", case .settled = row.lifecycle { return "settled" }
+                return block
+            default: continue
+            }
+        }
+        return nil
+    }
+    /// The drawn row's own value (variant, Finishing fact), for the same witnesses.
+    func drawnRowForQA(id: UUID) -> AgentInboxRow? { rows.first { $0.id == id } }
     /// Every row the last push handed this view, before scope/search/fold shaping.
     /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
     /// produced, then render those exact values in a deterministic probe host.
@@ -8112,6 +8134,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // injected-clock string. A caller that only has the row still gets a
         // conservative lifecycle-based presence answer for deterministic math.
         let resolvedTime = timeText ?? {
+            if row.closingSince != nil { return "present" }
             switch row.lifecycle {
             case .settled, .snoozed: return "present"
             case .active, .archived: return ""
@@ -8121,7 +8144,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             glyph: measuredTextWidth(glyph(for: row.state), .label),
             title: AgentInboxCellView.measuredTextWidth(row.displayTitle, .title),
             branch: AgentInboxCellView.measuredTextWidth(branchText(branch: row.branch), .label),
-            time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth(unconfirmed: row.isUnconfirmed),
+            time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth(
+                unconfirmed: row.isUnconfirmed, closing: row.closingSince != nil),
             disclosure: disclosure == .none
                 ? 0
                 : disclosureWidth ?? measuredDisclosureWidth(disclosure))
@@ -8195,7 +8219,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         }
         let time = row.isUnconfirmed
             ? AgentInboxCellView.elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
-            : Self.relativeText(for: row.lifecycle, now: shown?.now ?? Date())
+            : Self.relativeText(for: row, now: shown?.now ?? Date())
         if !time.isEmpty { parts.append(time) }
         return parts.joined(separator: ", ")
     }
@@ -8247,8 +8271,9 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         titleLabel.stringValue = row.displayTitle
         branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
-        let relativeText = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
-        timeColumnWidth?.constant = AgentInboxSlimCellView.relativeTimeColumnWidth(unconfirmed: row.isUnconfirmed)
+        let relativeText = AgentInboxSlimCellView.relativeText(for: row, now: now)
+        timeColumnWidth?.constant = AgentInboxSlimCellView.relativeTimeColumnWidth(
+            unconfirmed: row.isUnconfirmed, closing: row.closingSince != nil)
         timeLabel.stringValue = row.isUnconfirmed
             ? AgentInboxCellView.elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
             : relativeText
@@ -8282,6 +8307,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     }
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
+
+    /// The shared inbox clock, for a Finishing row: only its time label moves.
+    func updateElapsedClock(now: Date) {
+        guard let row = shown?.row, row.closingSince != nil, !row.isUnconfirmed else { return }
+        timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row, now: now)
+    }
 
     func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
 
@@ -8346,10 +8377,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     /// Per row, mirroring the card's rule: the "last seen " qualifier is paid
     /// for only by the unconfirmed row that renders it.
-    static func relativeTimeColumnWidth(unconfirmed: Bool) -> Double {
+    static func relativeTimeColumnWidth(unconfirmed: Bool, closing: Bool = false) -> Double {
         let font = NSFont.token(.captionMono)
         let labels = AgentElapsedFormatter.columnLabels.flatMap {
-            unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
+            closing ? [finishingText($0)]
+                : unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
         }
         return labels.map { label in
             Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
@@ -8364,6 +8396,18 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// it collapses into. Empty for a lifecycle with no time to show and for a
     /// distance that has gone negative — an overdue snooze is P4.6's raised hand,
     /// not a row for this view to label "in -3m".
+    /// A closed tile whose agent is still working: "Finishing · 2m", counted from
+    /// the close. The word says the row will leave by itself; the time says how
+    /// long it has been at it since you let it go.
+    static func finishingText(_ elapsed: String) -> String {
+        "\(AgentStatusVocabulary.finishing) · \(elapsed)"
+    }
+
+    static func relativeText(for row: AgentInboxRow, now: Date) -> String {
+        guard let since = row.closingSince else { return relativeText(for: row.lifecycle, now: now) }
+        return finishingText(AgentInboxCellView.elapsedText(max(0, now.timeIntervalSince(since))) ?? "")
+    }
+
     static func relativeText(for lifecycle: InboxLifecycle, now: Date) -> String {
         switch lifecycle {
         case .settled(let at):

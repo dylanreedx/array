@@ -140,8 +140,10 @@ check --run-artifacts-tile-check
 check --session-observer-check
 check --session-resume-check
 check --settings-panel-check
+check --sidebar-lifecycle-check
 check --sidebar-production-corpus-check
 check --sidebar-screenshot-check
+check --sidebar-truth-check
 check --sidebar-ux-check
 check --single-zone-compat-check
 check --spawn-focus-policy-check
@@ -372,6 +374,7 @@ leg run_app_check .build/debug/Array --session-resume-check
 leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
+leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check
 leg run_app_check .build/debug/Array --single-zone-compat-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
@@ -474,6 +477,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
@@ -502,7 +506,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 149
+count ContinuumRevivedCoreChecks 153
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

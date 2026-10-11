@@ -339,8 +339,11 @@ private func runAgentContextTiledAndHeadlessCheck() {
     }
     expect(headless.projectName == "Continuum",
            "headless agent resolves its project from AgentRecord.projectId, got \(headless.projectName ?? "nil")")
-    expect(headless.workspaceName == nil && headless.zoneName == nil && headless.tileTitle == nil,
-           "headless agent has NO workspace/zone/title — nil, never \"\" — got \(headless)")
+    // Confidence pass (sidebar stream): a tile-less agent still belongs to its
+    // project's ONE workspace — otherwise a workspace-scoped list could never
+    // show it, not even in History. It has no zone and no tile title.
+    expect(headless.workspaceName == "Alpha" && headless.zoneName == nil && headless.tileTitle == nil,
+           "headless agent takes its PROJECT's workspace and has no zone/title — nil, never \"\" — got \(headless)")
     expect(headless.model == "anthropic/claude-opus-5" && headless.role == "builder",
            "headless agent still carries model and role, got \(headless.model ?? "nil")/\(headless.role ?? "nil")")
 
@@ -423,7 +426,9 @@ private func runAgentContextGeometricMembershipCheck() {
         fputs("FAIL: AgentContextIndex dropped the out-of-zone agent entirely\n", stderr)
         Foundation.exit(1)
     }
-    expect(stray.workspaceName == nil && stray.zoneName == nil && stray.tileTitle == nil,
+    // No PLACEMENT (zone, tile title) — but its workspace is its project's
+    // (confidence pass, sidebar stream), exactly as for a headless agent.
+    expect(stray.workspaceName == "Alpha" && stray.zoneName == nil && stray.tileTitle == nil,
            "a tile whose centre is outside every zone resolves no placement, got \(stray)")
     expect(stray.projectName == "Continuum",
            "an out-of-zone agent still resolves its project from its record, got \(stray.projectName ?? "nil")")
