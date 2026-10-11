@@ -1131,6 +1131,7 @@ enum ContinuumApp {
         let zoneTruthLegs: [(String, () throws -> URL)] = [
             ("--zone-layer-move-check", ZoneTruthChecks.runLayerMove),
             ("--canvas-unreadable-check", ZoneTruthChecks.runCanvasUnreadable),
+            ("--zone-close-strand-check", ZoneTruthChecks.runZoneCloseStrand),
         ]
         for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
             do {
@@ -6516,7 +6517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let policy = DeleteConfirmPolicy.current
-        if policy.requiresConfirmation(for: tile.kind) {
+        if !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
             alert.messageText = configuration.message
@@ -15120,45 +15121,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Appends the placement as-is (origin/size come from the drag rect) to the stored
     /// Present the keep-or-delete confirm for closing a zone (zone-unify P5),
     /// then drive `closeZone`. Keep is the default (non-destructive) button.
+    /// QA: answers the zone-close confirm instead of running it modally.
+    var qaZoneCloseResponse: ((UUID) -> NSApplication.ModalResponse)?
+
     private func presentZoneCloseConfirm(_ zoneId: UUID) {
-        let alert = NSAlert()
-        alert.messageText = "Close this zone?"
-        alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
-        alert.addButton(withTitle: "Keep Tiles")
-        alert.addButton(withTitle: "Delete Tiles")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: true)
+        let response: NSApplication.ModalResponse
+        if let answer = qaZoneCloseResponse?(zoneId) {
+            response = answer
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Close this zone?"
+            alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
+            alert.addButton(withTitle: "Keep Tiles")
+            alert.addButton(withTitle: "Delete Tiles")
+            alert.addButton(withTitle: "Cancel")
+            response = alert.runModal()
+        }
+        switch response {
+        case .alertFirstButtonReturn: closeZoneKeepingTiles(zoneId)
         case .alertSecondButtonReturn: deleteZoneWithTiles(zoneId)
         default: break
         }
+    }
+
+    /// "Keep Tiles". A project zone's members move, unmoved on screen, into
+    /// another zone of their project (or a fresh one) before the zone goes:
+    /// spilled to "bare canvas" they kept the closed zone's id, and the next
+    /// mount hid them forever. A group zone keeps its old spill.
+    private func closeZoneKeepingTiles(_ zoneId: UUID) {
+        guard let canvasView else { return }
+        if let workspaceRuntime, !canvasView.isGroupZone(zoneId) {
+            do {
+                try workspaceRuntime.rehomeMembersOfClosingZone(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+        }
+        canvasView.closeZone(zoneId: zoneId, keepTiles: true)
     }
 
     /// Tiles deleted by the in-flight "Delete Tiles" zone close, read by
     /// `persistClosedZone` so they leave the WorkspaceDocument rather than being
     /// demoted to ambient tiles that rehydrate on the next mount.
     private var zoneCloseDeletedTileIds: Set<UUID> = []
+    /// The user confirmed "Delete Tiles" for a whole zone; its members do not
+    /// each ask again.
+    private var zoneDeleteConfirmed = false
 
     /// "Delete Tiles" on the zone-close alert.
     ///
     /// Every member goes through `deleteTile(id:)` — the same path the tile's own
     /// close button uses — so the PTY, browser, note store, managed session and
-    /// agent record are torn down exactly once each. `CanvasNSView.closeZone`
-    /// used to do the deletion itself over `canvasState.tiles`, which is empty
-    /// for a hydrated zone, so the loop body never ran and nothing was deleted.
+    /// agent record are torn down exactly once each. That now holds for a
+    /// PROJECT zone too: it used to silently do "Keep", and the tiles it said it
+    /// deleted came back hidden. A member that survives its delete (a dirty
+    /// file the user kept) keeps the zone open rather than being dropped with
+    /// it, so nothing is removed without its teardown.
     private func deleteZoneWithTiles(_ zoneId: UUID) {
         guard let canvasView else { return }
-        // A project zone's tiles are the PROJECT's: shared, persisted in its own
-        // store, and not this zone's to delete. Closing one keeps them.
-        guard canvasView.isGroupZone(zoneId) else {
-            canvasView.closeZone(zoneId: zoneId, keepTiles: true)
-            return
+        let isGroupZone = canvasView.isGroupZone(zoneId)
+        var projectId: UUID?
+        if let workspaceRuntime, !isGroupZone {
+            do {
+                try workspaceRuntime.prepareZoneForWholeZoneMutation(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+            // Per-tile teardown resolves stores through the armed project.
+            workspaceRuntime.setActiveZone(zoneId, reason: .click)
+            projectId = canvasView.zonePlacement(for: zoneId)?.projectId
         }
         let memberIds = canvasView.tileIds(inZone: zoneId)
+        zoneDeleteConfirmed = true
         for id in memberIds { deleteTile(id: id) }
+        zoneDeleteConfirmed = false
+        let survivors = canvasView.tileIds(inZone: zoneId)
+        if let projectId, let controller = workspaceRuntime?.controller(for: projectId) {
+            // While the zone's layer is still installed: only an installed zone
+            // may report its tiles deleted (`mergeProjectTilesForPersistence`).
+            controller.scheduleCanvasSave()
+            do { try controller.flushCanvasSave() } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: its tiles couldn't be saved (\(error.localizedDescription)).", kind: .error)
+                return
+            }
+        }
+        guard survivors.isEmpty else {
+            setWorkspaceManagementMessage(
+                "\(survivors.count) tile(s) were kept, so the zone stays open.", kind: .warning)
+            return
+        }
         zoneCloseDeletedTileIds = Set(memberIds)
         defer { zoneCloseDeletedTileIds = [] }
-        canvasView.closeZone(zoneId: zoneId, keepTiles: false)
+        canvasView.closeZone(zoneId: zoneId, keepTiles: !isGroupZone)
     }
 
     /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
@@ -15170,6 +15229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 reloadWorkspaceSidebar()
             } catch {
                 fputs("persistClosedZone failed: \(error)\n", stderr)
+                setWorkspaceManagementMessage(
+                    "The zone was closed but couldn't be saved; it will reappear next launch "
+                    + "(\(error.localizedDescription)).", kind: .error)
             }
             return
         }

@@ -225,4 +225,155 @@ enum ZoneTruthChecks {
         }
         return try writeArtifact("canvas-unreadable", manifest)
     }
+
+    // MARK: - --zone-close-strand-check
+
+    /// F1 #4, B Z1-Z5, A-history W5: closing a project zone stranded its tiles.
+    /// Both alert buttons ended in "keep"; the members' layer records kept the
+    /// closed zone's id and were saved that way, the zone left the document, and
+    /// the next mount set them aside forever as "another workspace's". "Delete
+    /// Tiles" deleted nothing. The canvas stayed armed on the closed zone, and a
+    /// project's last zone closing left it owned by the workspace.
+    ///
+    /// Drives the ✕ the way a click does: arm the zone, then
+    /// `onZoneCloseRequested` into the production confirm, answered through its
+    /// QA seam.
+    static func runZoneCloseStrand() throws -> URL {
+        var manifest: [String: Any] = [:]
+        func closeZone(_ fixture: Fixture, _ zoneId: UUID, choice: NSApplication.ModalResponse) throws {
+            let m = try fixture.requireMounted("close")
+            try fixture.armByClick(zoneId)
+            m.delegate.qaZoneCloseResponse = { _ in choice }
+            m.canvas.onZoneCloseRequested?(zoneId)
+            m.canvas.layoutSubtreeIfNeeded()
+            fixture.drain()
+        }
+        func worldFrames(_ m: Fixture.Mounted, _ ids: [UUID]) -> [UUID: (zone: UUID, frame: TileFrame)] {
+            var out: [UUID: (zone: UUID, frame: TileFrame)] = [:]
+            for zone in m.runtime.document.zones {
+                for tile in m.canvas.tilesInWorldFrames(forZoneId: zone.zoneId) ?? [] where ids.contains(tile.id) {
+                    out[tile.id] = (zone.zoneId, tile.frame)
+                }
+            }
+            return out
+        }
+        let a1Members = [Fixture.noteA1a, Fixture.noteA1b, Fixture.fileA1]
+
+        // 1. Keep, with another zone of the same project left: the members move
+        //    to it at their WORLD frames, and stay there across a remount.
+        do {
+            let fixture = try Fixture(label: "close-keep")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            // The spawn below may re-settle its zone when auto-layout is on (a
+            // spawn authorizes that); pin it off so frames are the close's alone.
+            _ = pinPreferences(try fixture.requireMounted("keep").canvas, autoLayout: false)
+            try closeZone(fixture, Fixture.zoneA1, choice: .alertFirstButtonReturn)
+            var m = try fixture.requireMounted("keep")
+            try expect(!m.runtime.document.zones.contains(where: { $0.zoneId == Fixture.zoneA1 }),
+                       "keep: the closed zone must leave the document")
+            try expect(!m.canvas.qaInstalledLayerZoneIds.contains(Fixture.zoneA1),
+                       "keep: the closed zone's layer must go with it; an orphan layer is what creation "
+                       + "stayed armed on")
+            var placed = worldFrames(m, a1Members)
+            for id in a1Members {
+                try expect(placed[id]?.zone == Fixture.zoneA3,
+                           "keep: THE reported bug. Kept tile \(id) must belong to the project's remaining zone A3; "
+                           + "it is in \(String(describing: placed[id]?.zone))")
+                try expect(placed[id]?.frame == Fixture.seed.tiles[id],
+                           "keep: kept tile \(id) must not move; \(String(describing: placed[id]?.frame)) vs \(Fixture.seed.tiles[id]!)")
+            }
+            // Z2: nothing may be created in the closed zone.
+            try expect(m.canvas.armedZoneId != Fixture.zoneA1 && m.runtime.qaArmedZoneId != Fixture.zoneA1,
+                       "keep: Z2. Creation stays armed on the closed zone (canvas \(String(describing: m.canvas.armedZoneId)), "
+                       + "document \(String(describing: m.runtime.qaArmedZoneId)))")
+            let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+            _ = m.delegate.qaPerformPaletteAction(.newNote)
+            let spawned = Set(m.canvas.allWorkspaceTiles().map(\.id)).subtracting(before)
+            guard spawned.count == 1, let note = spawned.first else {
+                throw Failure(message: "keep: ⌘K New Note after the close must create one tile; got \(spawned.count)")
+            }
+            let noteZones = m.canvas.installedZoneIds(containing: note)
+            try expect(noteZones.count == 1 && noteZones.allSatisfy { id in
+                m.runtime.document.zones.contains(where: { $0.zoneId == id }) },
+                       "keep: a tile created after the close must land in a zone that exists; got \(noteZones)")
+            try fixture.remount(crash: false)
+            m = try fixture.requireMounted("keep remount")
+            placed = worldFrames(m, a1Members)
+            for id in a1Members {
+                try expect(placed[id]?.zone == Fixture.zoneA3 && placed[id]?.frame == Fixture.seed.tiles[id],
+                           "keep: after a remount kept tile \(id) must still be in A3 at its frame; got \(String(describing: placed[id]))")
+            }
+            let disk = fixture.readProjectFile(Fixture.projectA1).canvas?.tiles ?? []
+            try expect(!disk.contains(where: { $0.zoneId == Fixture.zoneA1 }),
+                       "keep: no tile in canvas.json may still name the closed zone")
+            manifest["keep"] = "moved to sibling zone"
+        }
+
+        // 2. Keep on a project's ONLY zone: a fresh zone for that project takes
+        //    the members, unmoved.
+        do {
+            let fixture = try Fixture(label: "close-keep-last")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            try closeZone(fixture, Fixture.zoneA2, choice: .alertFirstButtonReturn)
+            try fixture.remount(crash: false)
+            let m = try fixture.requireMounted("keep-last remount")
+            let placed = worldFrames(m, [Fixture.noteA2a])
+            guard let home = placed[Fixture.noteA2a] else {
+                throw Failure(message: "keep-last: the kept tile is hidden after a remount")
+            }
+            try expect(home.zone != Fixture.zoneA2
+                       && m.runtime.document.zones.first(where: { $0.zoneId == home.zone })?.projectId == Fixture.projectA2,
+                       "keep-last: the kept tile must live in a zone of its own project")
+            try expect(home.frame == Fixture.seed.tiles[Fixture.noteA2a], "keep-last: the kept tile must not move")
+            manifest["keepLast"] = "fresh zone"
+        }
+
+        // 3. Delete Tiles on a project zone deletes them: gone from the scene,
+        //    from canvas.json and from the notes store, for good.
+        do {
+            let fixture = try Fixture(label: "close-delete")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            try closeZone(fixture, Fixture.zoneA1, choice: .alertSecondButtonReturn)
+            var m = try fixture.requireMounted("delete")
+            for id in a1Members {
+                try expect(m.canvas.tileRecord(for: id) == nil,
+                           "delete: W5. \"Delete Tiles\" on a project zone must delete tile \(id)")
+            }
+            try fixture.remount(crash: false)
+            m = try fixture.requireMounted("delete remount")
+            let disk = fixture.readProjectFile(Fixture.projectA1).canvas?.tiles.map(\.id) ?? []
+            for id in a1Members {
+                try expect(!disk.contains(id), "delete: deleted tile \(id) is still in canvas.json")
+            }
+            try expect(disk.contains(Fixture.noteA3a) && m.canvas.tileRecord(for: Fixture.noteA3a) != nil,
+                       "delete: the project's other zone keeps its tile")
+            let store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+            try expect(((try? store.tryLoadNoteState()) ?? nil)?.tiles.contains(where: { $0.tileId == Fixture.noteA1a }) != true,
+                       "delete: the deleted note's index row must go")
+            manifest["delete"] = "deleted"
+        }
+
+        // 4. Z5: Delete Tiles on a project's LAST zone lets the project go: no
+        //    controller held, and no workspace claiming it, so it can be added
+        //    anywhere again.
+        do {
+            let fixture = try Fixture(label: "close-last")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            try closeZone(fixture, Fixture.zoneA2, choice: .alertSecondButtonReturn)
+            let m = try fixture.requireMounted("close-last")
+            try expect(m.runtime.controller(for: Fixture.projectA2) == nil,
+                       "close-last: Z5. The project's controller (and its .array/lock) is still held")
+            let registry = try fixture.registryStore.loadOrEmpty()
+            let owner = try registry.exclusiveWorkspaceOwner(of: Fixture.projectA2)
+            try expect(owner == nil,
+                       "close-last: Z5. The project is still owned by the workspace it has no zone in, so adding "
+                       + "it elsewhere asks to switch to a workspace that cannot show it")
+            manifest["closeLast"] = "released"
+        }
+        return try writeArtifact("zone-close-strand", manifest)
+    }
 }

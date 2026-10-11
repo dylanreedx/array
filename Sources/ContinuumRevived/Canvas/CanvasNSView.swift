@@ -104,7 +104,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Active single-zone placement for stage-2 integration. Tile frames remain
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
-    let activeZone: ZonePlacement?
+    /// The boot zone. Cleared when that zone closes: it is the creation scope's
+    /// last fallback, and a closed zone must never be one.
+    private(set) var activeZone: ZonePlacement?
     /// Every live, non-provisional zone with the header it derives, in live
     /// order. Computed on read: there is no second copy to go stale.
     var zoneRenderModels: [ZoneRenderModel] {
@@ -2036,6 +2038,23 @@ final class CanvasNSView: NSView, TokenThemed {
         return true
     }
 
+    /// Move records into `zoneId`'s layer from other layers of the same project,
+    /// each at its exact WORLD frame, and grow the destination to contain them
+    /// (persisted through `onZoneMoved`). Returns the ids that moved.
+    @discardableResult
+    func moveLayerTiles(_ tileIds: [UUID], toZone zoneId: UUID) -> [UUID] {
+        let moved = tileIds.filter { transferLayerTile($0, toZone: zoneId) }
+        if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            for id in moved {
+                guard let tile = layer.tiles.first(where: { $0.id == id }) else { continue }
+                growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: tile, in: layer.placement))
+            }
+        }
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+        return moved
+    }
+
     /// Move one record from the layer holding it to `zoneId`'s layer, keeping its
     /// WORLD frame exactly and its view. Same project only: both layers persist
     /// into the same `canvas.json`, so this changes the stamp and nothing else.
@@ -2111,6 +2130,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// persisted) — closing it just removes the zone view and keeps the tiles.
     func closeZone(zoneId: UUID, keepTiles: Bool) {
         guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
+        if activeZone?.zoneId == zoneId { activeZone = nil }
         let isGroupZone = liveZones[idx].projectId == nil
         let memberIds = tileIds(inZone: zoneId)
         if !keepTiles && isGroupZone {

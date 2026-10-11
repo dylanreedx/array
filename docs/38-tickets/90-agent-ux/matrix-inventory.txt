@@ -217,6 +217,7 @@ check --zone-autoname-check
 check --zone-breakout-check
 check --zone-chrome-zorder-check
 check --zone-close-keep-delete-check
+check --zone-close-strand-check
 check --zone-create-encloses-check
 check --zone-create-gesture-check
 check --zone-hydration-lifecycle-check
@@ -448,6 +449,7 @@ leg run_app_check .build/debug/Array --zone-autoname-check
 leg run_app_check .build/debug/Array --zone-breakout-check
 leg run_app_check .build/debug/Array --zone-chrome-zorder-check
 leg run_app_check .build/debug/Array --zone-close-keep-delete-check
+leg run_app_check .build/debug/Array --zone-close-strand-check
 leg run_app_check .build/debug/Array --zone-create-encloses-check
 leg run_app_check .build/debug/Array --zone-create-gesture-check
 leg run_app_check .build/debug/Array --zone-hydration-lifecycle-check

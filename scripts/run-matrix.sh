@@ -619,6 +619,11 @@ run_app_check .build/debug/Array --zone-layer-move-check
 # EMPTY; the mount built empty layers over it and the first pan saved that over
 # the file. The project is now unavailable: no layer, no write, a message.
 run_app_check .build/debug/Array --canvas-unreadable-check
+# Confidence pass S2: closing a project zone stranded its tiles. Keep now moves
+# them into the project's remaining (or a fresh) zone unmoved, Delete Tiles
+# deletes them, the canvas re-arms off the closed zone, and a project's last
+# zone closing releases it from the workspace.
+run_app_check .build/debug/Array --zone-close-strand-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate

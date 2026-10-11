@@ -177,25 +177,151 @@ final class WorkspaceRuntime {
     /// clears `zoneId`, so without this they come back as ambient tiles on the
     /// next mount. The membership write still runs afterwards for the members
     /// that were KEPT, which spill onto the bare canvas.
+    ///
+    /// The closed zone's (now empty) layer leaves the canvas with it, and the
+    /// arming moves through `setActiveZone` to a remaining project zone. Writing
+    /// `lastActiveZoneId` alone left the canvas armed on the orphan layer, so the
+    /// next ⌘T landed, chrome-less, in a zone that no longer existed. A project
+    /// whose last zone this was is released: no controller (and no `.array/lock`)
+    /// held, and no workspace claiming it.
     func commitClosedZone(_ zoneId: UUID, deletingTileIds: Set<UUID> = []) throws {
-        guard document.zones.contains(where: { $0.zoneId == zoneId }) else {
+        guard let closing = document.zones.first(where: { $0.zoneId == zoneId }) else {
             throw WorkspaceMutationError.zoneNotFound(zoneId)
         }
         document.zones.removeAll { $0.zoneId == zoneId }
         document.removeTiles(ids: deletingTileIds)
         document.setTiles([], forZone: zoneId)
+        if canvasView?.tiles(inZone: zoneId)?.isEmpty == true {
+            canvasView?.removeZoneLayer(zoneId: zoneId)
+            installedLayers.removeAll { $0.placement.zoneId == zoneId }
+        }
         if document.lastActiveZoneId == zoneId {
-            document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId
+            document.lastActiveZoneId = nil
+            if let next = document.zonesInZOrder.last(where: { $0.projectId != nil }) {
+                setActiveZone(next.zoneId, reason: .explicit)
+            } else {
+                canvasView?.setActiveProjectZone(nil)
+            }
         }
         try persistWorkspaceDocument()
+        if let projectId = closing.projectId, !document.zones.contains(where: { $0.projectId == projectId }) {
+            releaseProjectWithoutZones(projectId)
+        }
+    }
+
+    private func releaseProjectWithoutZones(_ projectId: UUID) {
+        if acquiredProjectIds.contains(projectId) {
+            acquiredProjectIds.removeAll { $0 == projectId }
+            registry.release(projectId: projectId)
+        }
+        do {
+            var ownership = try registryStore.loadOrEmpty()
+            ownership.releaseProject(projectId, from: workspaceId, now: Date())
+            try registryStore.save(ownership)
+        } catch {
+            fputs("WorkspaceRuntime: could not release project \(projectId.uuidString) from its workspace: \(error)\n", stderr)
+        }
+    }
+
+    /// Give a zone about to be closed (or otherwise mutated as a whole) its
+    /// layer, so its members are acted on rather than forgotten: a zone below
+    /// the live tier holds its tiles only on disk, and closing it used to leave
+    /// every one of them naming a zone that no longer existed. Throws when the
+    /// project cannot be mounted (its `.array/` is held, its canvas unreadable).
+    func prepareZoneForWholeZoneMutation(_ zoneId: UUID) throws {
+        guard let zone = document.zones.first(where: { $0.zoneId == zoneId }),
+              let projectId = zone.projectId else { return }
+        if registry.controller(for: projectId) == nil {
+            _ = try registry.acquire(projectId: projectId)
+            if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
+        }
+        installZoneLayerIfMissing(zone)
+        guard canvasView?.installedZonePlacement(for: zoneId) != nil else {
+            throw WorkspaceMutationError.zoneUnavailable(zoneId)
+        }
+    }
+
+    /// "Keep Tiles" on a project zone. Every member moves, at its unchanged
+    /// WORLD frame, into the nearest other zone of the same project or, when
+    /// this is the project's only zone, into a fresh zone for the project that
+    /// encloses them. The project's canvas is saved before the zone goes, so no
+    /// tile is left naming a zone that no longer exists. Throws, moving nothing
+    /// further, when the members cannot be placed.
+    func rehomeMembersOfClosingZone(_ zoneId: UUID) throws {
+        guard let canvasView,
+              let zone = document.zones.first(where: { $0.zoneId == zoneId }),
+              let projectId = zone.projectId else { return }
+        try prepareZoneForWholeZoneMutation(zoneId)
+        let members = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
+        guard !members.isEmpty else { return }
+        let centre = CanvasEngine.zoneWorldFrame(zone)
+        func distance(_ other: ZonePlacement) -> Double {
+            let rect = CanvasEngine.zoneWorldFrame(other)
+            return hypot((rect.x + rect.width / 2) - (centre.x + centre.width / 2),
+                         (rect.y + rect.height / 2) - (centre.y + centre.height / 2))
+        }
+        let target: UUID
+        if let sibling = document.zones
+            .filter({ $0.projectId == projectId && $0.zoneId != zoneId && !foreignZoneIds.contains($0.zoneId) })
+            .min(by: { distance($0) < distance($1) }) {
+            try prepareZoneForWholeZoneMutation(sibling.zoneId)
+            target = sibling.zoneId
+        } else {
+            target = try addProjectZone(
+                projectId: projectId, enclosing: members.map(\.frame), name: zone.name, color: zone.color)
+        }
+        let moved = canvasView.moveLayerTiles(members.map(\.id), toZone: target)
+        guard moved.count == members.count else {
+            throw WorkspaceMutationError.tilesNotMoved(members.count - moved.count)
+        }
+        guard let controller = registry.controller(for: projectId) else {
+            throw WorkspaceMutationError.zoneUnavailable(zoneId)
+        }
+        controller.scheduleCanvasSave()
+        try controller.flushCanvasSave()
+    }
+
+    /// A new zone for `projectId` enclosing `worldFrames`, in the document and
+    /// on the canvas as an empty layer, ready for records to be moved into it.
+    @discardableResult
+    func addProjectZone(projectId: UUID, enclosing worldFrames: [TileFrame], name: String, color: String?) throws -> UUID {
+        guard let canvasView else { throw WorkspaceMutationError.zoneUnavailable(projectId) }
+        let bounds = CanvasEngine.zoneBounds(
+            memberFrames: worldFrames,
+            padding: ZoneBoundsConfig.padding(),
+            minSize: ZoneBoundsConfig.emptyMinSize(),
+            headerHeight: ZoneChromeNSView.headerHeight)
+        var placement = ZonePlacement(
+            zoneId: UUID(),
+            projectId: projectId,
+            origin: ZonePoint(x: bounds.x, y: bounds.y),
+            size: ZoneSize(width: bounds.width, height: bounds.height),
+            color: color ?? ZoneColorAllocator.nextColor(existingColors: document.zones.map(\.color)),
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: name)
+        placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
+        document.zones.append(placement)
+        document.bringZoneToFront(placement.zoneId)
+        try persistWorkspaceDocument()
+        let appRegistry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
+        let layer = CanvasNSView.ZoneLayer(
+            placement: placement, renderModel: Self.renderModel(for: placement, registry: appRegistry), tiles: [])
+        canvasView.upsertZoneLayer(layer)
+        installedLayers.append(layer)
+        return placement.zoneId
     }
 
     enum WorkspaceMutationError: Error, LocalizedError {
         case zoneNotFound(UUID)
+        case zoneUnavailable(UUID)
+        case tilesNotMoved(Int)
 
         var errorDescription: String? {
             switch self {
             case let .zoneNotFound(zoneId): return "Zone \(zoneId) is not part of the mounted workspace."
+            case .zoneUnavailable: return "The zone's project isn't available, so its tiles can't be moved."
+            case let .tilesNotMoved(count): return "\(count) tile(s) could not be moved out of the zone."
             }
         }
     }
