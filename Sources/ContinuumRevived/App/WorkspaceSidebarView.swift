@@ -639,6 +639,14 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
     var workspaceRowsRenderedForQA: Int { visibleItems().filter { if case .workspace = $0.kind { return true }; return false }.count }
     var zoneRowsRenderedForQA: Int { visibleItems().filter { if case .zone = $0.kind { return true }; return false }.count }
+    /// Every tile id the last tree placed, whether or not its row is expanded.
+    var treeTileIdsForQA: Set<UUID> {
+        Set(tree.workspaces.flatMap(\.zones).flatMap(\.tiles).map(\.tileId))
+    }
+    func treeTileIdsForQA(workspaceId: UUID) -> Set<UUID> {
+        Set(tree.workspaces.filter { $0.workspaceId == workspaceId }
+            .flatMap(\.zones).flatMap(\.tiles).map(\.tileId))
+    }
     var tileRowsRenderedForQA: Int { visibleItems().filter { if case .tile = $0.kind { return true }; return false }.count }
     var visibleDisplayNamesForQA: [String] { visibleItems().map(displayTitle(for:)) }
     var visibleStatusTextsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.text } }

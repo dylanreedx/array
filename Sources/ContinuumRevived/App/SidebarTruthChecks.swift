@@ -328,9 +328,17 @@ enum SidebarTruthChecks {
         try expect(block(world, lostAgent) != "live",
                    "W5: an agent bound to a tile no workspace holds is drawn as a LIVE row — the sidebar keeps a row for a tile that is gone")
 
+        // The sidebar's tiles come from the LIVE zone layers, not from the flat
+        // boot snapshot (A-history #4): the mounted tiles are placed, and a
+        // closed one leaves the tree on the same reload.
+        try expect(world.sidebar.treeTileIdsForQA.isSuperset(of: [idleTile, busyTile, parentTile]),
+                   "setup: the sidebar tree must place the mounted tiles — got \(world.sidebar.treeTileIdsForQA.count)")
+
         // W1 · the control: an idle agent's tile, closed through the canvas.
         let historyBefore = inbox.historyHeaderTitleForQA
         world.canvas.onTileCloseRequested?(idleTile)
+        try expect(!world.sidebar.treeTileIdsForQA.contains(idleTile),
+                   "a closed tile must leave the sidebar's tree — the active project's tiles came from a snapshot frozen at boot")
         try expect(block(world, idleAgent) == nil || block(world, idleAgent) == "history",
                    "W1: closing an idle agent's tile must take its row out of the live list — drawn in \(String(describing: block(world, idleAgent)))")
         try expect(inbox.historyHeaderTitleForQA != historyBefore,
@@ -456,6 +464,12 @@ enum SidebarTruthChecks {
         try expect(world.app.revealAgentFromInbox(otherAgent.rawValue),
                    "setup: revealing the other workspace's agent must switch to it")
         try expect(world.runtime.workspaceId == world.workspaceB, "setup: now in workspace Beta")
+        // A-history #4: the active project's tiles came from the flat BOOT model,
+        // which after a switch still holds the departed project's tiles — so the
+        // arriving workspace listed Alpha's tiles as its own.
+        let betaTiles = world.sidebar.treeTileIdsForQA(workspaceId: world.workspaceB)
+        try expect(betaTiles.contains(otherTile) && betaTiles.isDisjoint(with: [idleTile, busyTile, parentTile]),
+                   "after switching to Beta its tree must list Beta's tiles only — it lists \(betaTiles.count) tile(s), Alpha's among them: \(!betaTiles.isDisjoint(with: [idleTile, busyTile, parentTile]))")
         try expect(block(world, otherAgent) == "live" && block(world, busyAgent) == nil,
                    "W7: after a switch the list shows the NEW workspace's agents only — other \(String(describing: block(world, otherAgent))), busy \(String(describing: block(world, busyAgent)))")
         // …and back, for the sections below.

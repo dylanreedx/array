@@ -155,3 +155,56 @@ func runManagedSessionRootIsolationChecks() {
     }
     print("ManagedSessionRootIsolation: an unreadable root keeps its last good listing, is named, and every other root still lists")
 }
+
+/// Step 3 (A-history #4): the sidebar tree places a project's tiles by zone
+/// MEMBERSHIP — the rule the canvas mounts layers with — never by centre geometry.
+func runSidebarTreeMembershipChecks() {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let workspaceId = UUID(), projectId = UUID()
+    let zoneOne = UUID(), zoneTwo = UUID()
+    func zone(_ id: UUID, x: Double) -> ZonePlacement {
+        ZonePlacement(
+            zoneId: id, projectId: projectId, origin: ZonePoint(x: x, y: 0),
+            size: ZoneSize(width: 100, height: 100), color: "blue", collapsed: false,
+            hydrationPolicy: .automatic)
+    }
+    var registry = Registry.empty()
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "W", projectIds: [projectId], createdAt: now, updatedAt: now)]
+    registry.projects = [ProjectEntry(id: projectId, name: "P", rootPath: "/tmp/membership", workspaceId: workspaceId,
+                                      lastOpenedAt: now, pinned: false, missing: false)]
+    let document = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [zone(zoneOne, x: 0), zone(zoneTwo, x: 200)],
+        zoneZOrder: [zoneOne, zoneTwo], lastActiveZoneId: zoneTwo)
+    func tile(_ id: UUID, x: Double, stamp: UUID?) -> Tile {
+        var tile = Tile(
+            id: id, kind: .note, title: "t", frame: TileFrame(x: x, y: 10, width: 40, height: 40),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        tile.zoneId = stamp
+        return tile
+    }
+    // Stamped to zone TWO, lying over zone ONE: membership says two.
+    let stampedTile = UUID()
+    // No stamp, inside no zone: the canvas rescues it into the HOME zone (two).
+    let strayTile = UUID()
+    // No stamp, inside zone one: rescued by geometry into one.
+    let looseTile = UUID()
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [tile(stampedTile, x: 10, stamp: zoneTwo), tile(strayTile, x: 900, stamp: nil),
+                tile(looseTile, x: 30, stamp: nil)],
+        groups: [], lastActiveTileId: nil)
+    let tree = SidebarTreeBuilder.build(
+        registry: registry, documents: [workspaceId: document], projectCanvases: [projectId: canvas])
+    let zones = tree.workspaces.first?.zones ?? []
+    func ids(_ zoneId: UUID) -> Set<UUID> {
+        Set(zones.first { $0.zoneId == zoneId }?.tiles.map(\.tileId) ?? [])
+    }
+    expect(ids(zoneTwo).contains(stampedTile) && !ids(zoneOne).contains(stampedTile),
+           "a tile STAMPED to a zone is listed in that zone, wherever its centre lies — zone one \(ids(zoneOne)), zone two \(ids(zoneTwo))")
+    expect(ids(zoneTwo).contains(strayTile),
+           "a tile inside no zone is listed where the canvas draws it (the home zone), not nowhere")
+    expect(ids(zoneOne) == [looseTile],
+           "an unstamped tile inside zone one is listed there and only there — got \(ids(zoneOne))")
+    print("SidebarTreeMembership: stamped, stray and loose tiles listed by membership, exactly where the canvas mounts them")
+}

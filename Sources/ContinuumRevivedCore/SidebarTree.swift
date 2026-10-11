@@ -223,6 +223,7 @@ public enum SidebarTreeBuilder {
                 // Zone order derives from each placement's zPosition register
                 // (ticket 04) — the same (zPosition, zoneId) sort the canvas uses.
                 let sorted = document.zonesInZOrder
+                var membershipByProject: [UUID: [UUID: [Tile]]] = [:]
                 zones = sorted.map { placement -> SidebarZoneRow in
                     let name: String
                     if let projectId = placement.projectId {
@@ -230,7 +231,9 @@ public enum SidebarTreeBuilder {
                     } else {
                         name = placement.name
                     }
-                    let zoneTiles = tiles(for: placement, document: document, projectCanvases: projectCanvases)
+                    let zoneTiles = tiles(
+                        for: placement, document: document, projectCanvases: projectCanvases,
+                        membership: &membershipByProject)
                     let tiles = zoneTiles.map { tile in
                         SidebarTileRow(tileId: tile.id, title: tile.title, kind: tile.kind, agentStatus: agentStatusesByTileId[tile.id])
                     }
@@ -283,24 +286,47 @@ public enum SidebarTreeBuilder {
         return tree
     }
 
-    private static func tiles(for placement: ZonePlacement, document: WorkspaceDocument, projectCanvases: [UUID: CanvasState]) -> [Tile] {
+    /// A zone's tiles: the document's own (ambient) tiles stamped to it, plus the
+    /// project's tiles that BELONG to it — by MEMBERSHIP, the same
+    /// `CanvasEngine.resolveZoneMembership` the canvas mounts layers with
+    /// (`WorkspaceRuntime.membership`). It used to be the tile CENTRE in the zone's
+    /// rect, so a tile stamped to one zone but lying over another was listed in
+    /// the wrong one, and a tile outside every rect was listed nowhere while the
+    /// canvas drew it in its home zone (confidence pass, sidebar stream).
+    private static func tiles(
+        for placement: ZonePlacement,
+        document: WorkspaceDocument,
+        projectCanvases: [UUID: CanvasState],
+        membership: inout [UUID: [UUID: [Tile]]]
+    ) -> [Tile] {
         var tiles = document.tiles(forZone: placement.zoneId)
         if let projectId = placement.projectId, let canvas = projectCanvases[projectId] {
+            if membership[projectId] == nil {
+                membership[projectId] = projectMembership(
+                    projectId: projectId, canvas: canvas, document: document)
+            }
             let existing = Set(tiles.map(\.id))
-            let projectTiles = canvas.tiles.filter { tileCenter($0).isInside(zone: placement) }
+            let projectTiles = membership[projectId]?[placement.zoneId] ?? []
             tiles.append(contentsOf: projectTiles.filter { !existing.contains($0.id) })
         }
         return tiles
     }
 
-    private static func tileCenter(_ tile: Tile) -> ZonePoint {
-        ZonePoint(x: tile.frame.x + tile.frame.width / 2, y: tile.frame.y + tile.frame.height / 2)
-    }
-}
-
-private extension ZonePoint {
-    func isInside(zone: ZonePlacement) -> Bool {
-        let frame = CanvasEngine.zoneWorldFrame(zone)
-        return x >= frame.x && x <= frame.x + frame.width && y >= frame.y && y <= frame.y + frame.height
+    /// Exactly the runtime's rule: this document's zones for the project, home is
+    /// the document's last active zone when the project owns it, else the first.
+    private static func projectMembership(
+        projectId: UUID, canvas: CanvasState, document: WorkspaceDocument
+    ) -> [UUID: [Tile]] {
+        let projectZones = document.zones.filter { $0.projectId == projectId }
+        guard let first = projectZones.first else { return [:] }
+        let home = document.lastActiveZoneId.flatMap { candidate in
+            projectZones.contains(where: { $0.zoneId == candidate }) ? candidate : nil
+        } ?? first.zoneId
+        return CanvasEngine.resolveZoneMembership(
+            tiles: canvas.tiles,
+            projectZones: projectZones,
+            documentZoneIds: Set(document.zones.map(\.zoneId)),
+            homeZoneId: home
+        ).byZone
     }
 }

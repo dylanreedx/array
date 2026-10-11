@@ -10,11 +10,14 @@ import Foundation
 //   2. HEADLESS — an agent with no tile resolves its project from
 //      `AgentRecord.projectId` and leaves workspace/zone/title nil. nil, not ""
 //      — an empty string renders as a stray "·" in "project · title · model".
-//   3. GEOMETRIC MEMBERSHIP — the tiled agent above is in the PROJECT canvas,
-//      not in the workspace document, so it is only reachable through the same
-//      centre-in-zone fold `SidebarTreeBuilder` owns. Dropping `projectCanvases`
-//      from the call loses it, and a tile whose centre is outside the zone is
-//      not claimed by it. That is what makes property 4 a real assertion.
+//   3. MEMBERSHIP — the tiled agent above is in the PROJECT canvas, not in the
+//      workspace document, so it is only reachable through the zone-membership
+//      fold `SidebarTreeBuilder` owns (`CanvasEngine.resolveZoneMembership`, the
+//      rule the canvas mounts layers with — confidence pass, sidebar stream; it
+//      was centre-in-zone geometry). Dropping `projectCanvases` from the call
+//      loses it, and an unstamped tile outside every zone is placed where the
+//      canvas draws it: the project's home zone. That is what makes property 4 a
+//      real assertion.
 //   4. AGREEMENT — for every tiled agent, the index's (workspace, zone, title)
 //      equals what `SidebarTreeBuilder.build` says on the same fixture. Stated
 //      honestly: the index CALLS the builder, so this is a REGRESSION NET
@@ -418,18 +421,16 @@ private func runAgentContextTiledAndHeadlessCheck() {
 private func runAgentContextGeometricMembershipCheck() {
     let index = contextIndex()
 
-    // The stray agent's tile is in the project canvas but its centre is in no
-    // zone, so the sidebar does not claim it and neither does the index. Its
-    // project still resolves — from the RECORD, which is the only source a
-    // placement-less agent has.
+    // The stray agent's tile is in the project canvas, unstamped, with its centre
+    // in no zone. The canvas mounts it in the project's HOME zone (its only zone
+    // here), so the sidebar lists it there and the index places it there — the
+    // list and the canvas cannot disagree about where a tile is.
     guard let stray = index[contextStrayAgentId.rawValue] else {
         fputs("FAIL: AgentContextIndex dropped the out-of-zone agent entirely\n", stderr)
         Foundation.exit(1)
     }
-    // No PLACEMENT (zone, tile title) — but its workspace is its project's
-    // (confidence pass, sidebar stream), exactly as for a headless agent.
-    expect(stray.workspaceName == "Alpha" && stray.zoneName == nil && stray.tileTitle == nil,
-           "a tile whose centre is outside every zone resolves no placement, got \(stray)")
+    expect(stray.workspaceName == "Alpha" && stray.zoneName == "Continuum" && stray.tileTitle == "Stray Tile",
+           "an unstamped tile outside every zone is placed in its project's home zone, got \(stray)")
     expect(stray.projectName == "Continuum",
            "an out-of-zone agent still resolves its project from its record, got \(stray.projectName ?? "nil")")
 
@@ -468,8 +469,8 @@ private func runAgentContextSidebarAgreementCheck() {
             }
         }
     }
-    expect(treePlacements.count == 4,
-           "fixture check: the sidebar places exactly 4 tiles (2 ambient + 2 by geometry), got \(treePlacements.count)")
+    expect(treePlacements.count == 5,
+           "fixture check: the sidebar places exactly 5 tiles (2 ambient + 3 by membership), got \(treePlacements.count)")
 
     // agentId -> tileId, for the agents that have one.
     let tiledAgents: [(UUID, UUID)] = [
@@ -477,6 +478,7 @@ private func runAgentContextSidebarAgreementCheck() {
         (contextGuestAgentId.rawValue, contextGuestAgentTile),
         (contextTerminalTile, contextTerminalTile),
         (contextGhostTile, contextGhostTile),
+        (contextStrayAgentId.rawValue, contextStrayAgentTile),
     ]
     var compared = 0
     for (agentId, tileId) in tiledAgents {
@@ -494,7 +496,7 @@ private func runAgentContextSidebarAgreementCheck() {
                "index title must equal the sidebar's for \(tileId): \(context.tileTitle ?? "nil") vs \(placement.title)")
         compared += 1
     }
-    expect(compared == 4, "the agreement check compared every placed agent, got \(compared)")
+    expect(compared == 5, "the agreement check compared every placed agent, got \(compared)")
     print("AgentContextIndex sidebar agreement measured placed=\(treePlacements.count) compared=\(compared)")
 }
 

@@ -37,6 +37,7 @@ if CommandLine.arguments.contains("--sidebar-lifecycle-check") {
     runAgentInventoryChecks()
     runSidebarLifecycleChecks()
     runManagedSessionRootIsolationChecks()
+    runSidebarTreeMembershipChecks()
     print("SidebarLifecycleChecks passed")
     Foundation.exit(0)
 }
