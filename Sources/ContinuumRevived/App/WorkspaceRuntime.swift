@@ -764,43 +764,9 @@ final class WorkspaceRuntime {
             // does not own -- which ordinary dragging produces -- rendering it
             // nowhere. `membership(forProject:…)` rescues those and persists the
             // repair once. See `CanvasEngine.resolveZoneMembership`.
-            let memberTiles = (membership(forProject: projectId, controller: controller,
-                                          in: document, cache: &membershipCache)[zone.zoneId] ?? [])
-            .map { tile -> Tile in
-                var adopted = tile
-                // M1.10 (`.plans/46`): the frame spaces differ, and the file is
-                // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
-                // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
-                // `canvas.json` in the field holds WORLD frames -- because layers
-                // have never been reachable from production, `canvasStateForPersistence`
-                // has always taken its flat branch and written the flat state
-                // verbatim. Handing a layer those frames unconverted moves every
-                // tile by the zone origin: for a zone at x=4000, the whole project
-                // jumps 4000pt right the first time you switch workspaces.
-                //
-                // Convert on the way in, convert back on the way out
-                // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
-                // on-disk convention never changes -- which is what keeps the boot
-                // flat path, and every installed copy of the app, reading the same
-                // file correctly.
-                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
-                return adopted
-            }
-            // Build tile views (descriptor views — headless safe; real hydration is T08).
-            var tileViews: [UUID: TileNSView] = [:]
-            for tile in memberTiles {
-                let view = DescriptorTileNSView(tile: tile)
-                tileViews[tile.id] = view
-            }
-
-            let renderModel = Self.renderModel(for: zone, registry: appRegistry)
-            let layer = CanvasNSView.ZoneLayer(
-                placement: zone,
-                renderModel: renderModel,
-                tiles: memberTiles
-            )
-            layer.tileViews = tileViews
-            layers.append(layer)
+            layers.append(makeProjectZoneLayer(
+                zone: zone, projectId: projectId, controller: controller,
+                document: document, registry: appRegistry, membershipCache: &membershipCache))
         }
 
         for projectId in previouslyAcquired.subtracting(Set(newlyAcquired)) {
@@ -1113,6 +1079,106 @@ final class WorkspaceRuntime {
                 controller.attachSpawner(spawner, canvasView: canvasView)
             }
         }
+    }
+
+    /// One project zone's `ZoneLayer`, built from its controller's repaired
+    /// membership answer. The mount, the switch and `installZoneLayerIfMissing`
+    /// all build a layer this way.
+    private func makeProjectZoneLayer(
+        zone: ZonePlacement,
+        projectId: UUID,
+        controller: ZoneRuntimeController,
+        document: WorkspaceDocument,
+        registry appRegistry: Registry,
+        membershipCache: inout [UUID: [UUID: [Tile]]]
+    ) -> CanvasNSView.ZoneLayer {
+        let memberTiles = (membership(forProject: projectId, controller: controller,
+                                      in: document, cache: &membershipCache)[zone.zoneId] ?? [])
+        .map { tile -> Tile in
+            var adopted = tile
+            // M1.10 (`.plans/46`): the frame spaces differ, and the file is
+            // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
+            // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
+            // `canvas.json` in the field holds WORLD frames -- because layers
+            // have never been reachable from production, `canvasStateForPersistence`
+            // has always taken its flat branch and written the flat state
+            // verbatim. Handing a layer those frames unconverted moves every
+            // tile by the zone origin: for a zone at x=4000, the whole project
+            // jumps 4000pt right the first time you switch workspaces.
+            //
+            // Convert on the way in, convert back on the way out
+            // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
+            // on-disk convention never changes -- which is what keeps the boot
+            // flat path, and every installed copy of the app, reading the same
+            // file correctly.
+            adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
+            return adopted
+        }
+        // Descriptor views — headless safe; `hydrateZoneLayerTiles` builds the real ones.
+        var tileViews: [UUID: TileNSView] = [:]
+        for tile in memberTiles {
+            tileViews[tile.id] = DescriptorTileNSView(tile: tile)
+        }
+        let layer = CanvasNSView.ZoneLayer(
+            placement: zone,
+            renderModel: Self.renderModel(for: zone, registry: appRegistry),
+            tiles: memberTiles)
+        layer.tileViews = tileViews
+        return layer
+    }
+
+    /// A layer for a mounted project zone that has none: one the camera brings
+    /// into the live tier after the mount, or the zone a spawn is about to land in.
+    ///
+    /// The mount and the switch build layers only for zones in the live tier at
+    /// that moment. `setActiveZone` and `reconcileHydration` later acquired a
+    /// controller for a zone the camera or a click reached, and stopped there. That
+    /// zone was armed, so creation scoped to it, but `installProjectTile` found no
+    /// layer and fell through to the flat model, whose save refuses once the boot
+    /// scene is retired. The spawn failed with its tile view already on screen and
+    /// no agent was ever minted: a blank Home, a Home menu that did nothing and a
+    /// composer that said "Unavailable", for a tile nothing had persisted.
+    ///
+    /// Arming alone does not build one. A click arms a zone the camera may not be
+    /// on, and a layer built there outlives the arming (focus moving back to
+    /// another zone re-arms it), so the mounted scene would depend on click
+    /// history a relaunch cannot reproduce (`--workspace-restart-fault-check`
+    /// compares the two). The creation scope still names the armed zone from
+    /// the document, and the spawn's scope lookup builds the layer.
+    func ensureZoneLayer(forZone zoneId: UUID) {
+        guard let zone = document.zones.first(where: { $0.zoneId == zoneId }) else { return }
+        installZoneLayerIfMissing(zone)
+    }
+
+    private func installZoneLayerIfMissing(_ zone: ZonePlacement) {
+        guard let canvasView,
+              // The boot-only flat scene owns its project's tiles itself; a layer
+              // over it would draw every one of them twice.
+              !canvasView.isFlatCompatibilitySceneActive,
+              let projectId = zone.projectId,
+              !foreignZoneIds.contains(zone.zoneId),
+              canvasView.installedZonePlacement(for: zone.zoneId) == nil,
+              let controller = registry.controller(for: projectId),
+              let appRegistry = try? registryStore.loadOrEmpty()
+        else { return }
+        // The zone as DRAWN: auto-layout grows a zone on the canvas ahead of the
+        // document, and the layer must not shrink it back.
+        let placement = canvasView.zonePlacement(for: zone.zoneId) ?? zone
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
+        let layer = makeProjectZoneLayer(
+            zone: placement, projectId: projectId, controller: controller,
+            document: document, registry: appRegistry, membershipCache: &membershipCache)
+        hydrateZoneLayerTiles?(canvasView, [layer], .beforeInstall)
+        canvasView.upsertZoneLayer(layer)
+        installedLayers.append(layer)
+        // Phase B needs this controller's spawner. Build one only if it has none:
+        // `attachActiveControllerUI` replaces EVERY spawner, and this runs inside a
+        // spawn's scope lookup, so the spawn's own managed-agent memo would land on
+        // a spawner already discarded and the agent would lose its Home.
+        if controller.tileSpawner == nil {
+            controller.attachSpawner(makeSpawner(for: controller, canvasView: canvasView), canvasView: canvasView)
+        }
+        hydrateZoneLayerTiles?(canvasView, [layer], .afterInstall)
     }
 
     private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
@@ -1620,37 +1686,9 @@ final class WorkspaceRuntime {
             // M1.0/M1.10: see `install`. One repaired membership answer per
             // project; the per-zone filter it replaces rendered a foreign-stamped
             // tile nowhere.
-            let memberTiles = (membership(forProject: projectId, controller: controller,
-                                          in: targetDocument, cache: &membershipCache)[zone.zoneId] ?? [])
-            .map { tile -> Tile in
-                var adopted = tile
-                // M1.10 (`.plans/46`): the frame spaces differ, and the file is
-                // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
-                // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
-                // `canvas.json` in the field holds WORLD frames -- because layers
-                // have never been reachable from production, `canvasStateForPersistence`
-                // has always taken its flat branch and written the flat state
-                // verbatim. Handing a layer those frames unconverted moves every
-                // tile by the zone origin: for a zone at x=4000, the whole project
-                // jumps 4000pt right the first time you switch workspaces.
-                //
-                // Convert on the way in, convert back on the way out
-                // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
-                // on-disk convention never changes -- which is what keeps the boot
-                // flat path, and every installed copy of the app, reading the same
-                // file correctly.
-                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
-                return adopted
-            }
-            var tileViews: [UUID: TileNSView] = [:]
-            for tile in memberTiles {
-                let view = DescriptorTileNSView(tile: tile)
-                tileViews[tile.id] = view
-            }
-            let renderModel = Self.renderModel(for: zone, registry: appRegistry)
-            let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
-            layer.tileViews = tileViews
-            layers.append(layer)
+            layers.append(makeProjectZoneLayer(
+                zone: zone, projectId: projectId, controller: controller,
+                document: targetDocument, registry: appRegistry, membershipCache: &membershipCache))
         }
 
         // Commit the selected workspace only after every throwing preparation step
@@ -1887,6 +1925,7 @@ final class WorkspaceRuntime {
                     let acquired = try registry.acquire(projectId: projectId)
                     if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
                     try? acquired.setTier(plannedTier, allowDehydratingFocusedZone: false)
+                    if plannedTier == .live { installZoneLayerIfMissing(zone) }
                 } catch {
                     // Its `.array/` is held by another install (hazard 10), or the
                     // root is gone. Leave it unacquired: creation refuses and asks
@@ -1896,6 +1935,9 @@ final class WorkspaceRuntime {
                 }
                 continue
             }
+            // A second zone of a project another zone already acquired has a
+            // controller and still no layer.
+            if plannedTier == .live { installZoneLayerIfMissing(zone) }
             guard plannedTier != controller.hydrationTier else { continue }
             try? controller.setTier(plannedTier, allowDehydratingFocusedZone: false)
         }

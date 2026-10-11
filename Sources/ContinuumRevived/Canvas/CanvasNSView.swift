@@ -6793,6 +6793,9 @@ final class CanvasNSView: NSView, TokenThemed {
     enum ProjectTileTarget: Equatable {
         case flatCanvasState
         case zoneLayer(UUID)
+        /// Refused: the flat scene is retired and the target zone has no layer.
+        /// Nothing was installed, so there is nothing on screen to persist.
+        case unplaced
     }
 
     /// The active project zone's placement, when a layer owns it. New tiles must be
@@ -6817,6 +6820,11 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let zoneId = targetZoneId ?? activeProjectZoneId,
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
+            // Once the boot scene is retired the flat model is a stale snapshot
+            // whose save refuses, so a tile installed there is drawn, unreachable
+            // by `tileView(for:)`, and never persisted: the blank "—" agent tile.
+            // Refuse instead; the zone owner builds layers on arm and on spawn.
+            guard flatCompatibilitySceneActive else { return .unplaced }
             install(tileView: tileView, for: tile)
             // T7 (`.plans/47`): the flat model never grew its zone on a spawn — only
             // `installProjectTile`'s LAYER branch did, and only through

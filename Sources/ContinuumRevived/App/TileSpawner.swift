@@ -339,6 +339,8 @@ final class TileSpawner {
             agentDescriptor: agentDescriptor
         )
         do {
+            // Nothing was installed: leave no session descriptor behind either.
+            if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
             try persistProjectCanvas(after: target, in: canvasView)
@@ -2458,6 +2460,8 @@ final class TileSpawner {
         switch target {
         case .flatCanvasState:
             try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+        case .unplaced:
+            throw SpawnError.canvasUnavailable
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
             let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(

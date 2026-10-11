@@ -17284,7 +17284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
-        spawner.creationScopeProvider = { [weak self] in self?.resolvedCreationScope() }
+        // Every spawn reads its scope here, before framing and installing its tile,
+        // so this is where an armed zone below the live tier gets the layer the
+        // tile must install into. Without one it fell to the retired flat model.
+        spawner.creationScopeProvider = { [weak self] in
+            let scope = self?.resolvedCreationScope()
+            if let zoneId = scope?.zoneId { self?.workspaceRuntime?.ensureZoneLayer(forZone: zoneId) }
+            return scope
+        }
         spawner.terminalProjectContextProvider = { [weak self] in self?.activeZoneProjectEntry() }
         spawner.terminalSessionTargetProvider = { [weak self] in
             guard let self else { return nil }
