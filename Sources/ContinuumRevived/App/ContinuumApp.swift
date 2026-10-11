@@ -6735,8 +6735,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             in: (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
         )
         let discovered = try reconciledManagedSessionSource.records(roots: roots, now: Date())
+        // Per root (confidence pass, R4): the active project's own store failing to
+        // list is that project's problem, not the whole list's — the walk above
+        // already carries its last good listing.
         if let activeStore = workspaceRuntime?.activeController?.managedSessionStore {
-            for record in try activeStore.reconciledRecords(reconciledManagedSessionSource.proof())
+            let proof = try reconciledManagedSessionSource.proof()
+            let activeRecords: [ManagedAgentSessionRecord]
+            do {
+                activeRecords = try activeStore.reconciledRecords(proof)
+            } catch {
+                fputs("agent activity: the active project's managed sessions are unreadable, using its last listing — \(error)\n", stderr)
+                activeRecords = []
+            }
+            for record in activeRecords
             where seenTiles.insert(record.tileId).inserted {
                 records.append(record)
             }

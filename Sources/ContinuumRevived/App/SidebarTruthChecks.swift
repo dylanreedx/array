@@ -72,10 +72,14 @@ enum SidebarTruthChecks {
         let world = try makeWorld()
         defer { tearDown(world) }
         try await closeLifecycle(world)
+        try eventPushOpensNoFile(world)
+        try unreadableRootIsolation(world)
         print("sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
               + "agent's closed tile drew slim as Finishing, kept running, and left for History "
               + "by itself when its turn ended; a closed parent took its subagents with it; a "
-              + "record naming a tile no canvas holds was never drawn live")
+              + "record naming a tile no canvas holds was never drawn live; with another "
+              + "project's agent listing unreadable, a close still reached the list; an agent-"
+              + "event push opened no file")
     }
 
     // MARK: - World
@@ -367,5 +371,50 @@ enum SidebarTruthChecks {
                        "W4: …nested under its parent there, not promoted to a root")
         }
         try expect(block(world, parentAgent) == "history", "W4: the parent itself is in History")
+    }
+
+    // MARK: - W6: one unreadable root must not freeze the list
+
+    static func unreadableRootIsolation(_ world: World) throws {
+        // Project B's managed-session listing becomes unreadable: a TCC-denied
+        // folder, a lock held by the other install, a permissions slip.
+        let dir = ProjectStoreLayout(projectRoot: world.rootB).managedSessionsDirectory
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try ManagedAgentSessionStore(projectRoot: world.rootB).upsert(ManagedAgentSessionRecord(
+            tileId: UUID(), agentKind: .claude, status: .stopped, lastSeenAt: Date()))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
+        try expect((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) == nil,
+                   "setup: project B's managed-session directory must actually be unreadable")
+        try expect(block(world, secondIdleAgent) == "live",
+                   "setup: the second idle agent is drawn live before its tile closes")
+
+        // Close an idle agent's tile in project A. Project B has nothing to do
+        // with it, and the row must still move.
+        world.canvas.onTileCloseRequested?(secondIdleTile)
+        try expect(world.supervisor.records[secondIdleAgent]?.archivedAt != nil,
+                   "setup: the idle close must have parked the agent")
+        try expect(block(world, secondIdleAgent) != "live",
+                   "W6: with ANOTHER project's agent listing unreadable, closing a tile left its row live — one bad root froze the whole list")
+        try expect(block(world, otherAgent) == "live" || world.inbox.drawnBlockForQA(id: otherAgent.rawValue) == nil,
+                   "W6: the unreadable project's own agent keeps its last good row")
+    }
+
+    // MARK: - W11: an agent event's push opens no file
+
+    static func eventPushOpensNoFile(_ world: World) throws {
+        // Positive control first: a STRUCTURAL refresh does read the disk, so a
+        // zero below is the push's cost and not a probe that counts nothing.
+        let structuralBefore = StoreReadProbe.shared.count
+        world.app.qaRefreshAgentSurfaces()
+        try expect(StoreReadProbe.shared.count > structuralBefore,
+                   "control: a structural refresh must read the registry and canvases — the probe counted nothing")
+        let before = StoreReadProbe.shared.count
+        world.app.qaPushAgentSurfacesForEvent()
+        let reads = StoreReadProbe.shared.count - before
+        try expect(reads == 0,
+                   "W11: one agent-event push opened \(reads) registry/workspace/canvas/session file(s) on the main thread — it must derive from memory")
+        try expect(block(world, otherAgent) != nil || world.inbox.rowIdsForQA.contains(otherAgent.rawValue) == false,
+                   "control: the push still drew the list")
     }
 }

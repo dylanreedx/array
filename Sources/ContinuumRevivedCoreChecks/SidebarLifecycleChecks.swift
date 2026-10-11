@@ -111,3 +111,47 @@ func runSidebarLifecycleChecks() {
     print("SidebarLifecycle: closeRequestedAt round-trips and decodes absent; idle close → History, busy close → Finishing; "
           + "an unreachable binding derives closed (never a headless one); children follow their root's section, Finishing and workspace")
 }
+
+/// R4: one unreadable project root must not fail every project's listing.
+func runManagedSessionRootIsolationChecks() {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("root-isolation-\(UUID().uuidString)", isDirectory: true)
+    let goodRoot = base.appendingPathComponent("good", isDirectory: true)
+    let badRoot = base.appendingPathComponent("bad", isDirectory: true)
+    let badDir = ProjectStoreLayout(projectRoot: badRoot).managedSessionsDirectory
+    defer {
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: badDir.path)
+        try? fm.removeItem(at: base)
+    }
+    let goodTile = UUID(), badTile = UUID()
+    do {
+        try fm.createDirectory(at: goodRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: badRoot, withIntermediateDirectories: true)
+        try ManagedAgentSessionStore(projectRoot: goodRoot).upsert(ManagedAgentSessionRecord(
+            tileId: goodTile, agentKind: .claude, status: .stopped, lastSeenAt: Date()))
+        try ManagedAgentSessionStore(projectRoot: badRoot).upsert(ManagedAgentSessionRecord(
+            tileId: badTile, agentKind: .claude, status: .stopped, lastSeenAt: Date()))
+    } catch {
+        expect(false, "root isolation fixture: \(error)")
+    }
+    let roots = [
+        ReconciledManagedSessionSource.Root(projectId: UUID(), projectRoot: goodRoot),
+        ReconciledManagedSessionSource.Root(projectId: UUID(), projectRoot: badRoot),
+    ]
+    let source = ReconciledManagedSessionSource(ttl: 0)
+    do {
+        try source.reconcile(roots: roots, reason: .continuumRestarted, now: Date())
+        let first = try source.records(roots: roots, now: Date())
+        expect(Set(first.map(\.record.tileId)) == [goodTile, badTile], "control: both roots list while readable")
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: badDir.path)
+        source.invalidateCache()
+        let second = try source.records(roots: roots, now: Date().addingTimeInterval(1))
+        expect(Set(second.map(\.record.tileId)) == [goodTile, badTile],
+               "an unreadable root keeps its LAST GOOD listing and the readable root still lists — got \(second.map(\.record.tileId))")
+        expect(source.unreadableRoots == [roots[1]],
+               "the unreadable root is named — got \(source.unreadableRoots)")
+    } catch {
+        expect(false, "one unreadable project root failed the whole managed-session listing: \(error)")
+    }
+    print("ManagedSessionRootIsolation: an unreadable root keeps its last good listing, is named, and every other root still lists")
+}
