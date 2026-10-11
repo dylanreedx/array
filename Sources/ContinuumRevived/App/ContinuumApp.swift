@@ -6319,7 +6319,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onRestart = nil
         }
         let view = TerminalRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
-        canvasView.install(tileView: view, for: tile)
+        // Replacing the view of a tile that exists, in whichever model holds it —
+        // never the flat install, which drew a layer tile's placeholder at the
+        // zone's negative origin and left the dead view underneath.
+        canvasView.materializeProjectTile(tileView: view, for: tile)
     }
 
     private func wireRuntimeExitHandler(_ runtime: GhosttyTerminalRuntime) {
@@ -7400,7 +7403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onRestart = nil
         }
         let view = BrowserRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
-        canvasView.install(tileView: view, for: tile)
+        canvasView.materializeProjectTile(tileView: view, for: tile)
     }
 
     private func restartBrowserTile(tileId: UUID) {
@@ -17311,6 +17314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // written for. Retire it first; see `retireOrphanedRuntimes`.
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
                 if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
+                    // Wired like a boot or a spawned terminal: without it a shell's
+                    // `exit` left a dead tile with no Restart and no `lastExit`.
+                    wireRuntimeExitHandler(runtime)
                     controller.runtimes.append(runtime)
                 }
             case .browser:

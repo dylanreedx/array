@@ -17,6 +17,9 @@ import Foundation
 ///  - closing A2's terminal, browser and note removes them from A2's
 ///    `canvas.json` and stores and frees the terminal's surface, and a remount
 ///    does not bring them back;
+///  - a shell exiting in A2 leaves a Restart placeholder exactly where the
+///    terminal was, stamps `lastExit` in A2's store, and Restart rebuilds it
+///    through A2's controller; a restored terminal opens in A2's own root;
 ///  - switching away frees the departed projects' Ghostty surfaces, and no
 ///    surface of any mounted project is alive when the quit teardown reaches
 ///    `ghostty_app_free`;
@@ -158,6 +161,7 @@ enum TileProjectScopeChecks {
         let scenarios: [(String, (Fixture) throws -> [String: Any])] = [
             ("notes-and-trees-save-to-owner", notesAndTreesSaveToOwner),
             ("close-in-unarmed-zone", closeInUnarmedZone),
+            ("exit-and-restart-in-unarmed-zone", exitAndRestartInUnarmedZone),
             ("switch-away-frees-departed-surfaces", switchAwayFreesDepartedSurfaces),
             ("quit-frees-every-surface", quitFreesEverySurface),
             ("status-and-link-in-unarmed-zone", statusAndLinkInUnarmedZone)
@@ -308,6 +312,65 @@ enum TileProjectScopeChecks {
         let back = (closed + [terminalA1]).filter { remounted.canvas.tileRecord(for: $0) != nil }
         try expect(back.isEmpty, "a remount brought closed tile(s) back: \(back.map { $0.uuidString.suffix(4) })")
         return ["closed": closed.map(\.uuidString)]
+    }
+
+    /// The shell in A2's terminal exits; then the placeholder's Restart.
+    private static func exitAndRestartInUnarmedZone(_ fixture: Fixture) throws -> [String: Any] {
+        let window = try attachWindow(fixture)
+        defer { window.close() }
+        let m = try fixture.requireMounted("exit")
+        let a1 = try controller(fixture, Fixture.projectA1, "exit")
+        let a2 = try controller(fixture, Fixture.projectA2, "exit")
+        let rootA2 = fixture.projectRoots[Fixture.projectA2]!.path
+
+        // A restored terminal opens in its OWN project, not the armed one's.
+        guard let restored = try store(fixture, Fixture.projectA2).listSessions().first(where: { $0.tileId == terminalA2 }) else {
+            throw Failure(message: "precondition: project A2 has no session for its restored terminal")
+        }
+        try expect(sameFile(restored.cwd, rootA2), "terminal A2 was restored in \(restored.cwd), not project A2's root \(rootA2)")
+
+        guard let live = m.canvas.tileView(for: terminalA2) as? TerminalTileNSView,
+              pump(until: 5, { live.runtime.qaTerminalView?.surface != nil }) else {
+            throw Failure(message: "precondition: terminal A2 has no live surface")
+        }
+        let liveFrame = live.frame
+        let exitedRuntime = live.runtime
+        let a1SessionsBefore = Set(try store(fixture, Fixture.projectA1).listSessions().map(\.id))
+        exitedRuntime.sendInput(Data("exit\n".utf8))
+        let placeholderAppeared = pump(until: 15) { m.canvas.tileView(for: terminalA2) is TerminalRestartTileNSView }
+        try expect(placeholderAppeared,
+                   "the shell exited but terminal A2 shows \(String(describing: m.canvas.tileView(for: terminalA2).map { type(of: $0) })), not a Restart placeholder")
+        let planeViews = m.canvas.qaWorldPlaneTileViews(for: terminalA2)
+        try expect(planeViews.count == 1, "the world plane holds \(planeViews.count) views for terminal A2 after the exit")
+        try expect(planeViews.first?.frame == liveFrame, "the placeholder sits at \(String(describing: planeViews.first?.frame)), not where the terminal was (\(liveFrame))")
+        let exitedDescriptor = try? store(fixture, Fixture.projectA2).loadSession(id: exitedRuntime.id)
+        try expect(exitedDescriptor?.lastExit != nil, "project A2's session for the exited terminal has no lastExit")
+        try expect(!a2.runtimes.contains { $0 === exitedRuntime }, "project A2's controller still holds the exited runtime")
+
+        // Restart, as the placeholder's button does.
+        m.delegate.qaRestartTerminalTile(terminalA2)
+        guard let restarted = m.canvas.tileView(for: terminalA2) as? TerminalTileNSView else {
+            throw Failure(message: "Restart left terminal A2 as \(String(describing: m.canvas.tileView(for: terminalA2).map { type(of: $0) }))")
+        }
+        let restartViews = m.canvas.qaWorldPlaneTileViews(for: terminalA2)
+        try expect(restartViews.count == 1 && restartViews.first === restarted,
+                   "the world plane holds \(restartViews.count) views for terminal A2 after Restart")
+        try expect(restarted.frame == liveFrame, "the restarted terminal sits at \(restarted.frame), not \(liveFrame)")
+        try expect(a2.runtimes.contains { $0 === restarted.runtime }, "the restarted runtime is not held by project A2's controller")
+        try expect(!a1.runtimes.contains { $0 === restarted.runtime }, "the restarted runtime is held by project A1's controller")
+        try expect((try? store(fixture, Fixture.projectA2).loadSession(id: restarted.runtime.id)) != nil,
+                   "project A2's store has no session for the restarted terminal")
+        let a1SessionsAfter = Set(try store(fixture, Fixture.projectA1).listSessions().map(\.id))
+        try expect(a1SessionsAfter == a1SessionsBefore, "the restart wrote a session into project A1's store")
+
+        // The restarted terminal's exit is handled too.
+        guard pump(until: 5, { restarted.runtime.qaTerminalView?.surface != nil }) else {
+            throw Failure(message: "the restarted terminal has no live surface")
+        }
+        restarted.runtime.sendInput(Data("exit\n".utf8))
+        try expect(pump(until: 15) { m.canvas.tileView(for: terminalA2) is TerminalRestartTileNSView },
+                   "the restarted terminal's exit left no Restart placeholder")
+        return ["placeholderFrame": "\(liveFrame)"]
     }
 
     /// The live terminals of both projects, each with a surface.

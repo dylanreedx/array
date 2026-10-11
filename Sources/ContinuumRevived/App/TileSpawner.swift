@@ -587,7 +587,11 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
-        let projectRoot = terminalProjectRoot()
+        // A restart rebuilds a tile that already sits in a zone. When that zone is
+        // THIS spawner's project's, its root and tmux session are this project's —
+        // not the armed zone's, which is what the creation providers answer.
+        let ownsTile = canvasView.zoneId(containing: tileId).flatMap { canvasView.projectId(forZone: $0) } == project.id
+        let projectRoot = ownsTile ? project.rootPath : terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
@@ -620,7 +624,7 @@ final class TileSpawner {
             wrappedProfile = try tmuxWrappedProfileIfAvailable(
                 profileWithCwd,
                 tileId: existing.id,
-                target: terminalSessionTargetProvider?(),
+                target: ownsTile ? .project(projectId: project.id) : terminalSessionTargetProvider?(),
                 existingWindowTarget: persistedWindowTarget
             )
         } catch {
