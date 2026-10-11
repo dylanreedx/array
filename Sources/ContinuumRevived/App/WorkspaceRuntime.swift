@@ -104,6 +104,10 @@ final class WorkspaceRuntime {
         registry.controller(for: projectId)
     }
 
+    /// Every project controller this workspace holds live. Teardown that must
+    /// reach every runtime iterates this, never `activeController`.
+    var liveControllers: [ZoneRuntimeController] { registry.liveControllers }
+
     /// Keep the runtime's in-memory document aligned with app-level canvas zone
     /// callbacks that mutate the WorkspaceDocument directly. Without this, a later
     /// runtime save (for example addZone(projectId:)) can rewrite stale zone state

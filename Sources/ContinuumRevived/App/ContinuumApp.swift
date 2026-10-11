@@ -3649,6 +3649,21 @@ enum ContinuumApp {
             }
         }
 
+        // A tile's own project, never the armed zone's, owns its saves, close,
+        // exit, restart and teardown. Real shells in an off-display window, so it
+        // sits below `ghostty_init()` like the leg above.
+        if CommandLine.arguments.contains("--tile-project-scope-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileProjectScopeChecks.run()
+                print("ContinuumRevivedTileProjectScopeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-runtime-duplication-check") {
             do {
                 _ = NSApplication.shared
@@ -4391,6 +4406,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceRuntime: WorkspaceRuntime?
     private let editorLanguageServices = EditorLanguageServiceManager()
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
+
+    /// Every project controller the mounted workspace holds live.
+    private var liveControllers: [ZoneRuntimeController] { workspaceRuntime?.liveControllers ?? [] }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     /// Internal, not private: the WS9 zone/project witness and the WS7 asset-sweep
     /// witness both drive production entry points that need a scratch registry.
@@ -16599,6 +16617,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
     /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
     func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
+    /// QA: Ghostty surfaces still alive when `windowWillClose` reached the
+    /// `ghostty_app_free` step. Anything above zero traps there (ADR-0010).
+    private(set) var qaLiveTerminalSurfacesAtGhosttyShutdown: Int?
     /// QA: host the mounted canvas in `window` and install the keyDown monitor
     /// launch installs, so a check's key events take the production route
     /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown
@@ -17271,16 +17292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// that `TileSpawner.restartBrowserTile` owns, so it belongs in the spawner
     /// rather than duplicated here.
     private func retireOrphanedRuntimes(forTile tileId: UUID, controller: ZoneRuntimeController) {
-        for runtime in controller.runtimes where runtime.tileId == tileId {
-            runtime.detach()
-            runtime.terminate(policy: .force)
-        }
-        controller.runtimes.removeAll { $0.tileId == tileId }
-        for runtime in controller.browserRuntimes where runtime.tileId == tileId {
-            runtime.detach()
-            runtime.terminate(policy: .force)
-        }
-        controller.browserRuntimes.removeAll { $0.tileId == tileId }
+        // Terminate before detach, inside `releaseRuntimes`: detaching first let
+        // go of the view `terminate` reaches the surface through, so the old
+        // surface was never freed.
+        controller.releaseRuntimes(tileId: tileId)
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
@@ -17533,30 +17548,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         localPairingListener?.stop()
         localPairingListener = nil
 
-        // Browsers tear down first: WKWebView's process pool teardown is
-        // independent of GhosttyKit's. Inverting the order risks WebKit KVO
-        // callbacks firing into a half-torn-down app.
-        for runtime in browserRuntimes {
-            runtime.terminate(policy: .force)
-        }
-        browserRuntimes.removeAll()
-
-        // Free every Ghostty surface before ghostty_app_free, per ADR-0010.
+        // Free every Ghostty surface before ghostty_app_free, per ADR-0010 —
+        // EVERY mounted project's, not only the armed zone's.
         // ghostty_app_free walks the surface registry and dereferences
         // PAC-protected pointers; if a surface is still alive at that point,
-        // deinit traps with EXC_BAD_ACCESS.
-        for runtime in runtimes {
-            runtime.terminate(policy: .force)
-        }
-        // Release zone layers and controllers after terminating runtimes so that
-        // the runtimes/browserRuntimes computed properties (which proxy through
-        // workspaceRuntime?.activeController) are still readable during the loops above.
+        // deinit traps with EXC_BAD_ACCESS. Releasing a controller frees its
+        // runtimes (browsers first, see `releaseRuntimes`); the sweep after
+        // catches any controller the registry did not close (still referenced,
+        // or kept warm).
+        let controllers = liveControllers
         workspaceRuntime?.closeAll()
+        for controller in controllers { controller.releaseRuntimes() }
         canvasView = nil
-        runtimes.removeAll()
-        noteViews.removeAll()
-        fileTreeViews.removeAll()
         bootTileSpawner = nil
+        qaLiveTerminalSurfacesAtGhosttyShutdown = GhosttyTerminalView.liveSurfaceCount
         ghostty?.shutdown()
         ghostty = nil
         browserEngine?.shutdown()

@@ -31,6 +31,10 @@ final class GhosttyTerminalView: NSView {
     private let displayDefaults: UserDefaults
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
+    /// Surfaces `ghostty_surface_new` returned that `ghostty_surface_free` has not
+    /// freed yet, process-wide. `ghostty_app_free` traps on a live one (ADR-0010),
+    /// so the app's teardown reads this before freeing the app.
+    private(set) static var liveSurfaceCount = 0
     private var processExitPoller: Timer?
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
@@ -526,6 +530,7 @@ final class GhosttyTerminalView: NSView {
             statusChanged(.error(message: "ghostty_surface_new returned nil"))
             return
         }
+        Self.liveSurfaceCount += 1
 
         statusChanged(.running)
         applyRequestedOcclusion()
@@ -565,6 +570,7 @@ final class GhosttyTerminalView: NSView {
         guard let surface else { return }
         self.surface = nil
         ghostty_surface_free(surface)
+        Self.liveSurfaceCount -= 1
     }
 
     private func reportSurfaceSize() {

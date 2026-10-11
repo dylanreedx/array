@@ -212,8 +212,39 @@ final class ZoneRuntimeController {
                 try? managedSessionStore.upsert(record)
             }
         }
+        releaseRuntimes()
 
         projectLock?.release()
+    }
+
+    /// Free the Ghostty surface and web view of every runtime this controller
+    /// holds — or only `tileId`'s — and forget them.
+    ///
+    /// Not an exit: each exit handler is dropped first, so no placeholder or
+    /// `lastExit` follows. Terminate BEFORE detach: `terminate` reaches the surface
+    /// through the view that `detach` lets go of, so the other order frees nothing
+    /// and leaves a live surface holding a dangling pointer to its view. With tmux,
+    /// freeing the surface only ends the attached client; the session survives
+    /// (D16). Called by `close()`, by the quit teardown for every live controller,
+    /// and before Phase B restarts a tile.
+    func releaseRuntimes(tileId: UUID? = nil) {
+        // Browsers first: WKWebView's process-pool teardown is independent of
+        // GhosttyKit's, and the other order risks WebKit KVO callbacks firing
+        // into a half-torn-down app.
+        let browsers = browserRuntimes.filter { tileId == nil || $0.tileId == tileId }
+        browserRuntimes.removeAll { tileId == nil || $0.tileId == tileId }
+        for runtime in browsers {
+            runtime.onContentProcessTerminated = nil
+            runtime.terminate(policy: .force)
+            runtime.detach()
+        }
+        let terminals = runtimes.filter { tileId == nil || $0.tileId == tileId }
+        runtimes.removeAll { tileId == nil || $0.tileId == tileId }
+        for runtime in terminals {
+            runtime.onRuntimeExited = nil
+            runtime.terminate(policy: .force)
+            runtime.detach()
+        }
     }
 
     /// A spawner for a live but NON-active controller. M1.3b (`.plans/46`).
