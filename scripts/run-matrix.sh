@@ -854,6 +854,12 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # asset contract) is exhaustive and fast, and a long process-heavy binary is a
 # bad place to bisect it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
+# .plans/70 S5: project ownership is recorded once. Both field registry shapes
+# (2026-10-05 consistent, 2026-09-27 four-of-seven disagreeing) decode through
+# RegistryStore without an ownership throw and migrate losslessly and
+# idempotently; deleting a workspace never un-owns another workspace's project
+# and falls back to the most recently mounted survivor.
+run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 # The RENDERER, in pixels, in an offscreen fixture window: it sits below
 # worldPlane and hit-transparent, base+image are screen-fixed while the grid is
 # world-aligned (sampled before and after a pan into negative world space), a

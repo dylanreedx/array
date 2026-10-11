@@ -134,6 +134,13 @@ if CommandLine.arguments.contains("--role-registry-check") {
     try runRoleRegistryChecks()
     Foundation.exit(0)
 }
+// .plans/70 S5: project ownership recorded once, migrated on decode against
+// the two field registry shapes; delete keeps another workspace's project and
+// falls back by recency. Its own arm: the bare run is KNOWN-RED.
+if CommandLine.arguments.contains("--registry-ownership-check") {
+    runRegistryOwnershipChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--canvas-background-model-check") {
     runCanvasBackgroundChecks()
     print("CanvasBackgroundModelChecks passed")
