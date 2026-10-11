@@ -934,7 +934,13 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 installMainMenu()
-                try runMenuContractSelfCheck()
+                try runMenuContractSelfCheck(expectDeveloperMenus: showsDeveloperMenusOnLiveChannel)
+                // The other channel's developer surfaces too, so a dev run still
+                // witnesses what the prod build hides and vice versa. (Only that
+                // subset: AppKit keeps the first Services menu it was given.)
+                installMainMenu(showsDeveloperMenus: !showsDeveloperMenusOnLiveChannel)
+                guard let otherChannelMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
+                try expectDeveloperSurfaces(in: otherChannelMenu, expected: !showsDeveloperMenusOnLiveChannel)
                 if let sentinel = launchProbeSentinelPath() {
                     try "menu-contract-check passed\n".write(toFile: sentinel, atomically: true, encoding: .utf8)
                 }
@@ -3410,6 +3416,30 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--language-server-release-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try LanguageServerReleaseCheck.run()
+                print("ContinuumRevivedLanguageServerReleaseChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-click-recency-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserClickRecencySelfCheck()
+                print("ContinuumRevivedBrowserClickRecencyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
@@ -3495,6 +3525,31 @@ enum ContinuumApp {
             do {
                 let artifact = try AppDelegate.runAgentInputSelfCheck()
                 print("ContinuumRevivedAgentInputChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--attention-notification-check") {
+            _ = NSApplication.shared
+            do {
+                let artifact = try NeedsAttentionNotification.runSelfCheck()
+                print("ContinuumRevivedAttentionNotificationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--diff-review-off-main-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try DiffReviewOffMainCheck.run()
+                print("ContinuumRevivedDiffReviewOffMainChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -3827,6 +3882,45 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-clipboard-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runClipboardCheck()
+                print("ContinuumRevivedTerminalClipboardChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-focus-grab-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runFocusGrabCheck()
+                print("ContinuumRevivedTerminalFocusGrabChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-cmd-w-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runCmdWCheck()
+                print("ContinuumRevivedTerminalCmdWChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-default-readability-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -4001,8 +4095,15 @@ enum ContinuumApp {
         return true
     }
 
+    /// Debug > Companion Sync and View > Component Lab are developer surfaces:
+    /// sync is gated off for the alpha and the lab spins up real Ghostty/WebKit
+    /// surfaces. The prod channel (the /Applications bundle) never shows them.
+    private static var showsDeveloperMenusOnLiveChannel: Bool {
+        Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier
+    }
+
     @MainActor
-    private static func installMainMenu() {
+    private static func installMainMenu(showsDeveloperMenus: Bool = showsDeveloperMenusOnLiveChannel) {
         let appName = "Array"
         let mainMenu = NSMenu(title: "Main Menu")
 
@@ -4066,20 +4167,24 @@ enum ContinuumApp {
         let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
         sidebarItem.tag = registeredSidebarMenuTag
         viewMenu.addItem(sidebarItem)
-        viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        if showsDeveloperMenus {
+            viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        }
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
-        let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
-        let debugMenu = NSMenu(title: "Debug")
-        let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
-        let companionMenu = NSMenu(title: "Companion Sync")
-        companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionItem.submenu = companionMenu
-        debugMenu.addItem(companionItem)
-        debugMenuItem.submenu = debugMenu
-        mainMenu.addItem(debugMenuItem)
+        if showsDeveloperMenus {
+            let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+            let debugMenu = NSMenu(title: "Debug")
+            let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
+            let companionMenu = NSMenu(title: "Companion Sync")
+            companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionItem.submenu = companionMenu
+            debugMenu.addItem(companionItem)
+            debugMenuItem.submenu = debugMenu
+            mainMenu.addItem(debugMenuItem)
+        }
 
         let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         let helpMenu = NSMenu(title: "Help")
@@ -4138,7 +4243,7 @@ enum ContinuumApp {
     }
 
     @MainActor
-    private static func runMenuContractSelfCheck() throws {
+    private static func runMenuContractSelfCheck(expectDeveloperMenus: Bool) throws {
         guard let mainMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
         guard mainMenu.items.first?.title == "Array",
               let appMenu = mainMenu.items.first?.submenu,
@@ -4182,7 +4287,6 @@ enum ContinuumApp {
               sidebarItem.title.hasPrefix("Show Workspace Sidebar") else {
             throw SelfCheckError("registered Activity Dock menu item is missing or retained a hardcoded key equivalent")
         }
-        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
         guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
@@ -4190,6 +4294,19 @@ enum ContinuumApp {
         try expectMenuItem(helpMenu, title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
+        try expectDeveloperSurfaces(in: mainMenu, expected: expectDeveloperMenus)
+    }
+
+    /// Developer surfaces exist on the dev channel and are absent on prod.
+    @MainActor
+    private static func expectDeveloperSurfaces(in mainMenu: NSMenu, expected: Bool) throws {
+        guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
+        guard expected else {
+            if viewMenu.item(withTitle: "Component Lab") != nil { throw SelfCheckError("prod channel must not show View > Component Lab") }
+            if mainMenu.item(withTitle: "Debug") != nil { throw SelfCheckError("prod channel must not show the Debug menu") }
+            return
+        }
+        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
         try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
@@ -5968,6 +6085,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
+            if deliberate { self.noteBrowserUse(tileId) }
         }
     }
 
@@ -7818,13 +7936,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             // CX-01: a click is the user's newer intent for focus and selection.
             self.workspaceRuntime?.noteUserInteraction()
-            if let clickedTileId,
-               canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
-                self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
-            }
+            if let clickedTileId { self.noteBrowserUse(clickedTileId) }
             return event
         }
         self.tileFocusMonitor = monitor
+    }
+
+    /// A click on (or deliberate focus of) a browser tile is use: refresh its
+    /// slot in the WKWebView budget so the browser in use is never the one
+    /// evicted when another opens.
+    func noteBrowserUse(_ tileId: UUID) {
+        // `tileRecord(for:)`, not `canvasState.tiles`: once zones are installed
+        // the flat list holds the departed project's tiles (hazard 9), so a
+        // browser in a zone layer never registered its use.
+        guard canvasView?.tileRecord(for: tileId)?.kind == .browser else { return }
+        workspaceRuntime?.registerLiveBrowser(tileId: tileId)
+    }
+
+    /// QA (`--browser-click-recency-check`): adopt a fixture workspace runtime.
+    func qaAdoptWorkspaceRuntime(_ runtime: WorkspaceRuntime) {
+        workspaceRuntime = runtime
     }
 
     /// Trackpad gestures (two-finger scroll, pinch) get consumed by tile
@@ -8560,10 +8691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func deliverNeedsAttentionNotification(count: Int) {
-        let notification = NSUserNotification()
-        notification.title = "Continuum agent needs attention"
-        notification.informativeText = count == 1 ? "1 agent needs input." : "\(count) agents need input."
-        NSUserNotificationCenter.default.deliver(notification)
+        NeedsAttentionNotification.deliver(count: count)
     }
 
     private func moveNavSelection(direction: TileArrangement.Direction) {
@@ -25469,11 +25597,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         branchView.onSourceChanged = { updated in
             if let idx = materialized.tiles.firstIndex(where: { $0.id == updated.id }) { materialized.tiles[idx] = updated }
         }
-        guard branchView.selectSourcePickerItemForQA(title: "Branch feature vs main") else {
-            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
-        }
+        // Git runs off the main thread: the branch list loads once the tile is
+        // in a window, and each diff lands asynchronously.
         branchView.frame = window.contentView?.bounds ?? .zero
         window.contentView = branchView
+        guard branchView.waitForPendingLoadsForQA(timeout: 15),
+              branchView.selectSourcePickerItemForQA(title: "Branch feature vs main"),
+              branchView.waitForPendingLoadsForQA(timeout: 15) else {
+            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
+        }
         window.layoutIfNeeded()
         let branchEvidence = branchView.visibilityEvidence(containing: "+feature branch")
         guard branchEvidence.ok,

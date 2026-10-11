@@ -28,7 +28,13 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public static let agentGuidance =
         "You are running in a tile on the user's Array canvas. Use the array_* tools of the array_workspace MCP server (in Claude Code, mcp__array_workspace__*; load them with tool search if they are deferred) to see and manage the canvas. To run work in a visible tile, use array_delegate: your built-in subagent tool runs inside this tile and never creates one. You can message only agents you created (array_message_agent); collect their results with wait_agents."
 
-    public init(serverExecutable: String, endpoint: String, agentID: String, token: String) {
+    public init(
+        serverExecutable: String,
+        endpoint: String,
+        agentID: String,
+        token: String,
+        directory: URL = FileManager.default.temporaryDirectory
+    ) {
         self.serverExecutable = serverExecutable
         self.endpoint = endpoint
         self.agentID = agentID
@@ -36,13 +42,35 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         let filenameID = agentID.map { character in
             character.isLetter || character.isNumber ? String(character) : "_"
         }.joined()
-        let directory = FileManager.default.temporaryDirectory
         self.tokenFilePath = directory.appendingPathComponent("array-workspace-mcp-\(filenameID).token").path
-        FileManager.default.createFile(atPath: tokenFilePath, contents: Data(token.utf8),
-                                       attributes: [.posixPermissions: 0o600])
-        let path = directory.appendingPathComponent("array-workspace-mcp-\(filenameID).json")
-        self.claudeMCPConfigPath = path.path
-        try? Data(claudeMCPConfigJSON.utf8).write(to: path, options: [.atomic])
+        self.claudeMCPConfigPath = directory.appendingPathComponent("array-workspace-mcp-\(filenameID).json").path
+        // Best effort here; a launch calls `materialize()` again and fails
+        // loudly if the files cannot be written.
+        try? materialize()
+    }
+
+    public struct MaterializeError: Error, CustomStringConvertible, Sendable {
+        public let path: String
+        public let reason: String
+        public var description: String {
+            "Array could not write its workspace tools config (\(reason)) at \(path)"
+        }
+    }
+
+    /// Write the private token file and Claude's `--mcp-config` file. A provider
+    /// launched against a missing file starts without Array's tools (or refuses
+    /// its strict config) and says nothing about why, so the launch path calls
+    /// this and surfaces the error instead.
+    public func materialize() throws {
+        guard FileManager.default.createFile(atPath: tokenFilePath, contents: Data(token.utf8),
+                                             attributes: [.posixPermissions: 0o600]) else {
+            throw MaterializeError(path: tokenFilePath, reason: String(cString: strerror(errno)))
+        }
+        do {
+            try Data(claudeMCPConfigJSON.utf8).write(to: URL(fileURLWithPath: claudeMCPConfigPath), options: [.atomic])
+        } catch {
+            throw MaterializeError(path: claudeMCPConfigPath, reason: error.localizedDescription)
+        }
     }
 
     /// The MCP SERVER's environment, delivered only through each provider's

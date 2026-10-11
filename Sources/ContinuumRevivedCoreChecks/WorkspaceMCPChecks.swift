@@ -150,5 +150,58 @@ func runWorkspaceMCPChecks() {
         expect(!environment.values.contains { $0.contains("secret") } && !environment.keys.contains { $0.hasPrefix("ARRAY_WORKSPACE_") },
                "\(name)'s process environment carries the MCP capability: \(environment.keys.filter { $0.hasPrefix("ARRAY_WORKSPACE_") })")
     }
+    runMCPConfigMaterializeFailureCheck()
     print("Workspace MCP checks passed: \(tools.count) shared tools + \(WorkspaceMCPToolCatalog.waitAgentsName) match pi minus \(piOnlyToolNames.keys.sorted()), Claude/Codex guidance, allowances and timeouts, and the token out of argv, config and agent env")
+}
+
+/// A config file Array cannot write must stop the launch with the real reason.
+/// Before, the write was `try?`: claude was started with `--strict-mcp-config
+/// --mcp-config <missing file>` and the user saw a failure (or an agent with no
+/// Array tools) with nothing saying why.
+private func runMCPConfigMaterializeFailureCheck() {
+    #if os(macOS)
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("array-mcp-materialize-\(UUID().uuidString)", isDirectory: true)
+    let fakeBin = root.appendingPathComponent("bin", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    do {
+        try AgentSteeringQAFakes.install(.claude, in: fakeBin)
+    } catch {
+        expect(false, "mcp materialize: could not install the fake claude: \(error)")
+        return
+    }
+    // A regular file where the config directory should be: nothing can be
+    // created beneath it.
+    let blocker = root.appendingPathComponent("not-a-directory")
+    fm.createFile(atPath: blocker.path, contents: Data("x".utf8))
+    let config = WorkspaceMCPConfiguration(
+        serverExecutable: "/tmp/array-workspace-mcp",
+        endpoint: "http://127.0.0.1:43123/workspace-mcp",
+        agentID: "00000000-0000-4000-8000-0000000000aa",
+        token: "secret",
+        directory: blocker.appendingPathComponent("mcp", isDirectory: true))
+    expect(!fm.fileExists(atPath: config.claudeMCPConfigPath), "mcp materialize: fixture must leave the config unwritable")
+
+    let previousPath = ProcessInfo.processInfo.environment["PATH"]
+    setenv("PATH", "\(fakeBin.path):\(previousPath ?? "/usr/bin:/bin")", 1)
+    defer {
+        if let previousPath { setenv("PATH", previousPath, 1) } else { unsetenv("PATH") }
+    }
+    let runner = ClaudeAgentRunner(config: .init(
+        model: "fake-model", cwd: root, sessionId: "00000000-0000-4000-8000-0000000000ab",
+        conversationMayExist: false, workspaceMCP: config))
+    var thrown: Error?
+    do {
+        try runner.run(prompt: AgentPrompt("hello")) { _ in }
+    } catch {
+        thrown = error
+    }
+    runner.stop()
+    // What the supervisor shows: the error text after local-path redaction.
+    let message = thrown.map { SecretRedactor.redactLocalDiagnostics(String(describing: $0)) } ?? ""
+    expect(AgentSteeringQAFakes.spawnCount(in: fakeBin) == 0,
+           "mcp materialize: claude was launched against a config file Array failed to write")
+    expect(message.contains("workspace tools config") && message.contains(String(cString: strerror(ENOTDIR))),
+           "mcp materialize: the launch must fail with the real write error, got \(message.isEmpty ? "no error" : message)")
+    #endif
 }

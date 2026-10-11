@@ -777,6 +777,16 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
 
     private func ensureStarted(mode: SessionMode) throws {
         if queue.sync(execute: { child != nil }) { return }
+        // `--strict-mcp-config --mcp-config <path>` names a file Array writes;
+        // (re)write it now and refuse the launch with the real reason if that
+        // fails, rather than start claude against a file that is not there.
+        if let workspaceMCP = config.workspaceMCP {
+            do {
+                try workspaceMCP.materialize()
+            } catch {
+                throw RunError.launchFailed(String(describing: error))
+            }
+        }
         let command = Self.liveResolvedCommand()
         let arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
