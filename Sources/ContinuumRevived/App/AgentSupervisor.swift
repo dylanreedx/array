@@ -1341,27 +1341,37 @@ final class AgentSupervisor {
     }
 
     private struct TurnFacts {
-        var execution: AgentTurnExecutionState = .ready
-        var failureMessage: String?
-        var didFail = false
+        /// The one owner of turn presence (`AgentTurnPresence`). The execution,
+        /// failure and anchor facts below are READ from it, never written beside
+        /// it — four independently written copies of "is it working" is what let
+        /// a provider's session-ready signal paint Idle over an accepted prompt.
+        var presence = AgentTurnPresence()
         var pendingRequests: [String: AgentPendingRequest] = [:]
         var requestOrder: [String] = []
+
+        var execution: AgentTurnExecutionState { presence.isWorking ? .working : .ready }
+        var didFail: Bool {
+            if case .failed = presence.phase { return true }
+            return false
+        }
+        var failureMessage: String? {
+            if case let .failed(message) = presence.phase { return message }
+            return nil
+        }
         /// P3.3: when the turn now in flight started. THE anchor for every elapsed
         /// reading, and the fact the supervisor was not keeping — without it the
         /// sidebar measured from the event ring, whose oldest working event for a
         /// restored agent is a synthetic draft stamped at the SPAWN instant (the
         /// 158-hour reading). Non-nil exactly while `execution == .working`.
-        var turnStartedAt: Date?
-        /// When the prompt was accepted here, before any provider event.
-        ///
-        /// The spawn window (`submittedAt` set, `turnStartedAt` still nil) is the
-        /// dead-air interval nothing in this app used to record: `turnStartedAt` is
-        /// stamped from the provider's `.turnStarted`, so the process spawn, session
-        /// resume and CLI cold start fell in a gap. Cleared by the same transitions
-        /// that clear `turnStartedAt`.
-        var submittedAt: Date?
+        var turnStartedAt: Date? { presence.isWorking ? presence.turnStartedAt : nil }
+        /// When the prompt was accepted (Return), before any provider event, for
+        /// as long as the submission is live. The spawn window (`submittedAt`
+        /// set, `turnStartedAt` still nil) is the dead-air interval.
+        var submittedAt: Date? { presence.isLive ? presence.submittedAt : nil }
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
+    /// Return, as the composer saw it, for a prompt not yet accepted.
+    private var pendingReturnStamps: [AgentID: Date] = [:]
     /// Latest provider-reported context-window telemetry per agent. The replay
     /// buffer cannot be trusted to still contain the (rare) telemetry event
     /// after a streaming turn floods it, so a tile that attaches later seeds
@@ -2728,7 +2738,11 @@ final class AgentSupervisor {
         // Stamp the spawn-window anchor BEFORE the runner is built, so the
         // interval covers makeRunner (which for pi walks `.pi/agents`) and the
         // dispatch, not just the provider's silence.
-        turnFacts[id, default: TurnFacts()].submittedAt = now
+        // The submission's clock starts at Return when the composer reported it
+        // (`noteSubmissionReturn`), so the attachment await and this main-actor
+        // hop are inside the "Starting" clock rather than before it.
+        let returnedAt = pendingReturnStamps.removeValue(forKey: id).flatMap { now.timeIntervalSince($0) < 60 ? $0 : nil }
+        turnFacts[id, default: TurnFacts()].presence.arm(at: returnedAt ?? now)
 
         // M1.7: a new prompt is a new turn, so the previous turn's stop no longer
         // speaks for it. Cleared here rather than in `stop` because the throw it
@@ -3167,6 +3181,7 @@ final class AgentSupervisor {
            !interruptingAgents.contains(id),
            let steering = runners[id] as? AgentSteeringRunning {
             stopRequestedAgents.insert(id)
+            turnFacts[id]?.presence.noteStopRequested()
             interruptTurn(steering, for: id)
             return
         }
@@ -3180,6 +3195,7 @@ final class AgentSupervisor {
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
+        turnFacts[id]?.presence.noteStopRequested()
         if activeCompactionOperations.contains(id),
            let runner = runners[id],
            let runnerGeneration = runnerGenerationTokens[id] {
@@ -5252,7 +5268,7 @@ final class AgentSupervisor {
             state = .working
         } else if facts.execution == .working {
             state = .working
-        } else if runners[id] != nil, facts.submittedAt != nil {
+        } else if runners[id] != nil, facts.presence.phase == .starting {
             // A runner is bound, a prompt was accepted, and the provider has not
             // reported a turn yet. This used to fall through to `.ready`, which is
             // why the tile said "idle" with a disabled composer while `canStop` was
@@ -5313,8 +5329,36 @@ final class AgentSupervisor {
             // sidebar and the tile header measured different durations for one turn.
             turnStartedAt: facts.turnStartedAt,
             submittedAt: facts.submittedAt,
-            isMirrored: mirrored
+            isMirrored: mirrored,
+            presence: facts.presence
         )
+    }
+
+    /// The one turn-presence owner for `id` (`AgentTurnPresence`): what every
+    /// surface — tile header, transcript tail, compact status row, canvas badge,
+    /// sidebar row — reads to say whether a message is being worked on.
+    func turnPresence(for id: AgentID) -> AgentTurnPresence? {
+        guard records[id] != nil else { return nil }
+        return turnFacts[id]?.presence ?? AgentTurnPresence()
+    }
+
+    /// The composer saw Return for `id` at `date`. The next accepted prompt's
+    /// clock starts here rather than when the main actor got round to it.
+    func noteSubmissionReturn(for id: AgentID, at date: Date = Date()) {
+        guard records[id] != nil else { return }
+        pendingReturnStamps[id] = date
+    }
+
+    /// The working status a sidebar row or canvas badge shows for an agent with
+    /// no tile of its own, from the same owner the tile reads. nil when the
+    /// presence has nothing live to say (the row falls back to its record).
+    func presenceRowStatus(for id: AgentID) -> AgentStatus? {
+        guard let snapshot = turnSnapshot(for: id) else { return nil }
+        switch snapshot.state {
+        case .starting, .working, .compacting, .queued: return .working
+        case .needsAction: return .needsAttention
+        case .ready, .failed, .restored: return nil
+        }
     }
 
     /// TR-06 — carries a user's decision back to a request the provider OPENED.
@@ -6789,6 +6833,7 @@ final class AgentSupervisor {
         guard !activeCompactionOperations.contains(id) else { return false }
         pendingForceSends[id] = (prepared, echo)
         stopRequestedAgents.insert(id)
+        turnFacts[id]?.presence.noteStopRequested()
         if interruptingAgents.contains(id) { return true }
         if let steering = runner as? AgentSteeringRunning {
             interruptTurn(steering, for: id)
@@ -6962,7 +7007,11 @@ final class AgentSupervisor {
         idleSessionRunners[id] = nil
         idleReapTokens[id] = nil
         deferredQueueOutcomes[id] = nil
-        turnFacts[id, default: TurnFacts()].submittedAt = Date()
+        turnFacts[id, default: TurnFacts()].presence.arm(at: Date())
+        // N1 — an earlier turn's Stop does not speak for this one. Left set, it
+        // disarmed the no-result safety net below, so an unsolicited turn whose
+        // runner returned without a result read Working forever.
+        stopRequestedAgents.remove(id)
         startTurn(on: runner, for: id) { onEvent in try runner.continueUnsolicitedTurn(onEvent: onEvent) }
     }
 
@@ -7414,35 +7463,21 @@ final class AgentSupervisor {
 
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
         var facts = turnFacts[id] ?? TurnFacts()
+        // The presence owner reduces EVERY event first; the record stamps below
+        // are side effects of the same transitions, never a second state.
+        facts.presence.reduce(event, at: now)
         switch event {
         case .turnStarted:
-            facts.execution = .working
-            facts.didFail = false
-            facts.failureMessage = nil
-            // P3.3: THE elapsed anchor, stamped by the one owner of turn state at
-            // the one event that means "work started now". Every other candidate is
-            // a proxy: `record.lastSeenAt` is the spawn instant, and the event ring's
-            // trailing working run starts at whatever synthetic draft a restore left
-            // behind — which is the 158-hour reading the sidebar was showing.
-            // Provider adapters may repeat a start boundary while one user turn
-            // is still active (for example around nested/subagent protocol
-            // cycles). A repeated boundary is activity, but it is not a new
-            // elapsed-time origin. Preserve the oldest authoritative stamp until
-            // a terminal event clears it; this keeps every provider and every
-            // surface on one honest clock.
-            facts.turnStartedAt = facts.turnStartedAt.map { min($0, now) } ?? now
+            // P3.3: THE elapsed anchor is stamped by the presence owner at the one
+            // event that means "work started now"; a repeated start boundary
+            // inside a live turn keeps the oldest stamp (`AgentTurnPresence`).
             if var record = records[id] {
                 // P6.2: a turn start is real activity; the surrounding event
                 // delivery may still update metadata for non-activity events.
                 record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, now)
                 records[id] = record
             }
-        case let .turnCompleted(_, turnID, outcome, errorMessage):
-            facts.execution = .ready
-            facts.didFail = outcome == .failed
-            facts.failureMessage = outcome == .failed ? errorMessage : nil
-            facts.turnStartedAt = nil
-            facts.submittedAt = nil
+        case let .turnCompleted(_, turnID, outcome, _):
             if var record = records[id] {
                 // P6.3/P6.4: completion is both a possible raised hand and the
                 // durable source for the unread axis. It is stamped at the actual
@@ -7466,23 +7501,11 @@ final class AgentSupervisor {
                 records[id] = record
             }
         case let .sessionStateChanged(state):
-            // `.running` is session/process state, not proof of an active turn.
-            // Only turnStarted/turnCompleted move the execution fact.
-            if state == .error {
-                facts.execution = .ready
-                facts.didFail = true
-                facts.turnStartedAt = nil
-                facts.submittedAt = nil
-            facts.submittedAt = nil
-                if var record = records[id] {
-                    record.failedAt = max(record.failedAt ?? .distantPast, now)
-                    records[id] = record
-                }
-            } else if state == .stopped || state == .ready {
-                facts.execution = .ready
-                facts.turnStartedAt = nil
-                facts.submittedAt = nil
-            facts.submittedAt = nil
+            // `.running`/`.ready` are session/process state, not proof of an
+            // active or finished turn; the presence owner decides what they mean.
+            if state == .error, var record = records[id] {
+                record.failedAt = max(record.failedAt ?? .distantPast, now)
+                records[id] = record
             }
         case let .requestOpened(_, requestID, kind):
             let request = AgentPendingRequest(
@@ -7514,12 +7537,7 @@ final class AgentSupervisor {
         case let .requestResolved(_, requestID, _), let .userInputResolved(_, requestID):
             facts.pendingRequests.removeValue(forKey: requestID)
             facts.requestOrder.removeAll { $0 == requestID }
-        case let .runtimeError(threadID, message):
-            facts.execution = .ready
-            facts.didFail = true
-            facts.failureMessage = message
-            facts.turnStartedAt = nil
-            facts.submittedAt = nil
+        case let .runtimeError(threadID, _):
             if var record = records[id] {
                 record.failedAt = max(record.failedAt ?? .distantPast, now)
                 record.runCompletedAt = max(record.runCompletedAt ?? .distantPast, now)
@@ -12723,11 +12741,23 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     let id = supervisor.spawn(
         role: nil, prompt: "work", cwd: cwd, model: config.model, thinking: config.thinking
     )
+    // Confidence pass S3 (`AgentTurnPresence`): a provider's session-READY
+    // signal is process state. Inside a live submission it cannot end the
+    // user's turn — only the turn's own terminal event does. (This leg used to
+    // pin the opposite, which is the rule that painted codex Idle in its spawn
+    // window.)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        runner.runCount == 1 && supervisor.turnSnapshot(for: id)?.state == .ready
+        runner.runCount == 1 && supervisor.turnSnapshot(for: id)?.turnStartedAt != nil
     }) else {
-        throw fail("turn-state: scripted ready event did not arrive")
+        throw fail("turn-state: scripted turnStarted did not arrive")
     }
+    guard supervisor.turnSnapshot(for: id)?.state == .working else {
+        throw fail("turn-state: a session-ready signal inside a live turn ended it: \(String(describing: supervisor.turnSnapshot(for: id)?.state))")
+    }
+    supervisor.qaDeliver(.turnCompleted(
+        threadId: AgentSupervisor.threadId(for: id), turnId: "turn-1",
+        outcome: .completed, errorMessage: nil
+    ), to: id)
     guard supervisor.isRunning(id), supervisor.turnSnapshot(for: id)?.state == .ready else {
         throw fail("turn-state: process alive but explicitly idle did not present Ready")
     }

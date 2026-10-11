@@ -28,6 +28,11 @@ import Foundation
 //   LONG        up to 10 s of text generation with no tool boundary, for an
 //               interrupt — a steer sent meanwhile stays held by Array
 //   CRASH       exits 3 mid-turn without a result
+//   DELAYSTART  (combines with any shape) holds ~1.2 s before the provider's
+//               own turn-start signal, after its session-ready signal, so a
+//               check can sample the spawn window production really crosses
+//               (codex: thread/started before turn/started; pi: the session
+//               header before agent_start; claude: before system/init)
 //   anything else: a short text reply
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
 // CLI does for a conversation that does not exist yet.
@@ -115,6 +120,10 @@ def record(line):
     with open(os.path.join(HERE, "stdin.jsonl"), "a") as f:
         f.write(line.rstrip("\n") + "\n")
 
+def delay_start(text):
+    if "DELAYSTART" in text:
+        time.sleep(1.2)
+
 def shape(text):
     for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
         if word in text:
@@ -192,6 +201,7 @@ def say(text):
 
 def run_turn(msg):
     text = text_of(msg)
+    delay_start(text)
     out({"type": "system", "subtype": "init", "session_id": SID, "cwd": os.getcwd(), "model": "fake-claude", "slash_commands": ["compact"]})
     replay(msg)
     kind = shape(text)
@@ -274,6 +284,7 @@ def reply(obj, result=None, error=None):
         out({"id": obj["id"], "result": result or {}})
 
 def run_turn(turn_id, text):
+    delay_start(text)
     out({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": turn_id}}})
     kind = shape(text)
     if kind == "CRASH":
@@ -356,7 +367,7 @@ time.sleep(0.2)
 """#
 
     private static let piSource = #"""
-state = {"active": False, "steering": []}
+state = {"active": False, "steering": [], "announced": False}
 lock = threading.Lock()
 steer_arrived = threading.Event()
 aborted = threading.Event()
@@ -385,6 +396,7 @@ def finish(reason):
     idle.set()
 
 def run_turn(text):
+    delay_start(text)
     out({"type": "agent_start"})
     out({"type": "turn_start"})
     kind = shape(text)
@@ -426,7 +438,13 @@ for line in sys.stdin:
     kind = obj.get("type")
     if kind == "prompt":
         with lock:
+            announce = not state["announced"]
+            state["announced"] = True
             state["active"] = True
+        if announce:
+            # pi's session header: the session-ready signal production reads
+            # before the first agent_start.
+            out({"type": "session", "id": "pi-fake-session", "cwd": os.getcwd()})
         idle.clear()
         aborted.clear()
         steer_arrived.clear()

@@ -14,6 +14,7 @@ check --agent-inventory-wiring-check
 check --agent-local-file-link-check
 check --agent-message-bus-check
 check --agent-observer-independence-check
+check --agent-presence-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-steering-runner-check
@@ -252,6 +253,7 @@ leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-observer-independence-check
+leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-restore-check
 leg run_app_check .build/debug/Array --agent-status-check
 leg run_app_check .build/debug/Array --agent-stop-outcome-check

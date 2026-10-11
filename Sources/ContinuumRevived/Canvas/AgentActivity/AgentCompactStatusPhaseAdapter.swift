@@ -223,6 +223,14 @@ struct AgentCompactStatusPhaseAdapter {
             }
         }
 
+        // A submission that has not started its turn yet is Starting, whatever
+        // generic lifecycle observation (a session-ready "waiting", a process
+        // "thinking") the provider's boot produced. Those described the
+        // process, not the user's prompt, and painted it idle-ish.
+        if let session = facts.session, session.state == .starting {
+            return result(.starting, startedAt: session.startedAt, evidence: "A submission is starting; the provider has not started its turn.")
+        }
+
         if let activity = currentActivity {
             return activityResult(activity)
         }

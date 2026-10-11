@@ -168,8 +168,12 @@ final class ManagedAgentTileNSView: TileNSView {
     // stream. In particular, no receipt-time Date is promoted to a phase anchor;
     // the supervisor's stamped turn start is the only turn anchor available here.
     private var compactStatusPhaseAdapter = AgentCompactStatusPhaseAdapter()
-    private var compactStatusSession: AgentCompactStatusPhaseFacts.Session?
-    private var compactStatusTurn: AgentCompactStatusPhaseFacts.Turn?
+    /// The session fact a running context compaction contributes. Every other
+    /// session/turn fact the row shows comes from `currentPresence`.
+    private var compactionSessionFact: AgentCompactStatusPhaseFacts.Session?
+    /// Facts a geometry/appearance probe injected (`qaApplyCompactStatusFacts`);
+    /// held so the elapsed tick repaints what the probe asked for.
+    private var injectedCompactFacts: (session: AgentCompactStatusPhaseFacts.Session?, turn: AgentCompactStatusPhaseFacts.Turn?)?
     private var compactStatusInteraction: AgentCompactStatusPhaseFacts.Interaction?
     private var compactContextWindow: AgentContextWindowSnapshot?
     private var compactStatusResolution = AgentCompactStatusPhaseResolution.unknown
@@ -247,12 +251,38 @@ final class ManagedAgentTileNSView: TileNSView {
     /// from the latest `.toolDetail` observation. Store-sourced, never the
     /// document. Cleared when that item ends or the turn moves on.
     private var liveToolVerb: (itemID: String, text: String)?
-    /// The last settled turn's "Worked for Ns", measured submit -> completion
-    /// (the user-message anchor; entry timestamps alone undercount).
-    private var settledTurnStatusText: String?
-    /// See `TurnLiveness`. Written only from the event switch, so it moves with
-    /// the same stream that produces the transcript's rows.
-    private(set) var turnLiveness: TurnLiveness = .unknown
+    /// This tile's own reduction of what it ingests, with the same reducer the
+    /// supervisor owns. It is what the tile paints from only when no supervisor
+    /// is attached (ComponentLab, a detached view) and between Return and the
+    /// supervisor accepting the prompt; otherwise `currentPresence` reads the
+    /// supervisor's, so the tile, row, badge and sidebar can never disagree.
+    private var localPresence = AgentTurnPresence()
+    /// Whether this tile has any session fact at all (an attach or an event).
+    /// A brand-new tile has none, and says nothing rather than "Ready".
+    private var hasPresenceFacts = false
+    /// True from `attach` until `detach` begins: only a tile following an agent
+    /// may speak with the supervisor's presence.
+    private var followsSupervisorPresence = false
+
+    /// THE presence this tile paints from (`AgentTurnPresence`).
+    var currentPresence: AgentTurnPresence {
+        if pendingOptimisticSubmissionID == nil,
+           followsSupervisorPresence,
+           let agentID = attachedAgentID,
+           let supervised = agentSource?.turnPresence(for: agentID) {
+            return supervised
+        }
+        return localPresence
+    }
+
+    /// See `TurnLiveness`. A projection of `currentPresence`, never a fact of
+    /// its own.
+    var turnLiveness: TurnLiveness {
+        let presence = currentPresence
+        if presence.isLive { return .inFlight }
+        if presence.phase.isTerminal { return .completed }
+        return .unknown
+    }
     /// Explicit provider response transport for v2 request blocks.
     ///
     /// Returns whether the app ACCEPTED the response for dispatch — not whether
@@ -535,6 +565,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        followsSupervisorPresence = true
         v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
         headerAgentName = supervisor.records[agentID]?.humanDisplayName
         displayNameObserverToken = supervisor.addDisplayNameObserver(for: agentID) { [weak self] name in
@@ -942,7 +973,11 @@ final class ManagedAgentTileNSView: TileNSView {
         transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
         // Clear lifecycle facts before the detached-location demotion so the
         // final compact projection keeps recent What without retaining a live
-        // phase claim.
+        // phase claim. A detached view follows no agent, so it holds no
+        // presence of its own either: it has nothing authoritative to say.
+        followsSupervisorPresence = false
+        localPresence = AgentTurnPresence()
+        hasPresenceFacts = false
         resetCompactStatusProjection()
         settleLocationForDetach()
         locationStaleTimer?.invalidate()
@@ -1419,20 +1454,39 @@ final class ManagedAgentTileNSView: TileNSView {
         guard pendingOptimisticSubmissionID == nil,
               let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
         pendingOptimisticSubmissionID = id
+        // Return arms the submission and starts its one clock. The supervisor
+        // is told the same instant so its own arm, a main-actor hop and any
+        // attachment await later, measures from here too.
+        let returnedAt = Date()
+        presenceBeforeOptimisticSubmission = localPresence
+        localPresence.arm(at: returnedAt)
+        hasPresenceFacts = true
+        if let agentID = attachedAgentID {
+            agentSource?.noteSubmissionReturn(for: agentID, at: returnedAt)
+        }
         cancelStreamingMarkupParseTimer()
         model.appendUserPrompt(id: id, prompt: prompt)
         // final: true — the user's own words must not wait on the 30Hz streaming gate.
         synchronizeV2Transcript(final: true)
         transcriptCollectionFixture?.setTurnInFlight(true)
+        refreshCompactStatus()
         transcriptCollectionFixture?.setThinkingStatusText("Sending")
         transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
     }
 
+    /// The local presence before Return armed it, restored if the prompt is
+    /// refused: a refused prompt never became a submission.
+    private var presenceBeforeOptimisticSubmission: AgentTurnPresence?
+
     private func finishOptimisticSubmission(accepted: Bool) {
         guard pendingOptimisticSubmissionID != nil else { return }
         pendingOptimisticSubmissionID = nil
+        let armedLocally = presenceBeforeOptimisticSubmission
+        presenceBeforeOptimisticSubmission = nil
         guard accepted else {
+            if let armedLocally { localPresence = armedLocally }
             transcriptCollectionFixture?.setTurnInFlight(false)
+            refreshCompactStatus()
             transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
             showSendRefusedNotice("Message was not sent. Your draft was restored; retry when ready.")
             return
@@ -1444,13 +1498,16 @@ final class ManagedAgentTileNSView: TileNSView {
         // that really does start one, so process ownership is the truthful split.
         guard let agentID = attachedAgentID,
               agentSource?.isRunning(agentID) == true else {
+            if let armedLocally { localPresence = armedLocally }
             transcriptCollectionFixture?.setTurnInFlight(false)
+            refreshCompactStatus()
             transcriptCollectionFixture?.setThinkingIndicatorVisible(false)
             return
         }
-        // One word with the header and the sidebar, not a third vocabulary.
-        transcriptCollectionFixture?.setThinkingStatusText(AgentStatusVocabulary.starting)
-        transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+        // The supervisor has armed its own presence by now; the row and tail
+        // read it from here on ("Starting · Ns" on the one clock).
+        refreshCompactStatus()
+        refreshTranscriptThinkingIndicator()
     }
 
     /// Shows the prompt the user just submitted as its own "you" entry.
@@ -1510,6 +1567,8 @@ final class ManagedAgentTileNSView: TileNSView {
         default:
             break
         }
+        localPresence.reduce(event, at: Date())
+        hasPresenceFacts = true
         let captureEvent = originalEvent ?? event
         let priorEntryIDs = Set(model.document.entries.map(\.id))
         let capturedIdentity = transcriptCollectionFixture?.captureRuntimeEvent(captureEvent)
@@ -1555,31 +1614,19 @@ final class ManagedAgentTileNSView: TileNSView {
     /// to `.stale` because a seeded read is not a live provider report — the
     /// next `.contextWindowUpdated` restores a live reading.
     private func seedCompactStatus(from supervisor: AgentSupervisor, agentID: AgentID) {
+        // The turn's phase and clock are read live from the supervisor's
+        // presence (`currentPresence`); only the facts presence does not own are
+        // seeded here.
+        hasPresenceFacts = true
         if let snapshot = supervisor.turnSnapshot(for: agentID) {
             switch snapshot.state {
-            case .working:
-                compactStatusSession = .init(state: .running)
-                compactStatusTurn = .active(
-                    startedAt: snapshot.turnStartedAt, stream: nil, streamStartedAt: nil)
             case .compacting:
-                compactStatusSession = .init(state: .running)
+                compactionSessionFact = .init(state: .running)
                 liveToolVerb = (itemID: "context-compaction", text: "Compacting context…")
-            case .starting:
-                // The compact row already had a word for this window; the tile just
-                // had no state that could reach it.
-                compactStatusSession = .init(state: .starting)
-                compactStatusTurn = .active(
-                    startedAt: snapshot.submittedAt, stream: nil, streamStartedAt: nil)
-            case .queued:
-                compactStatusSession = .init(state: .starting)
             case .needsAction:
-                compactStatusSession = .init(state: .running)
                 compactStatusInteraction = .pending(startedAt: nil)
-            case .failed:
-                compactStatusSession = .init(state: .error)
-                compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
-            case .ready, .restored:
-                compactStatusSession = .init(state: .ready)
+            case .ready, .restored, .starting, .working, .queued, .failed:
+                break
             }
         }
         if compactContextWindow == nil,
@@ -1607,88 +1654,36 @@ final class ManagedAgentTileNSView: TileNSView {
     /// supervisor's stamped turn start is used as an elapsed anchor; interaction
     /// and session receipt times remain nil rather than becoming fake precision.
     private func updateCompactStatusFacts(for event: AgentRuntimeEvent) {
+        // Session and turn phase are NOT written here: they are projections of
+        // `currentPresence`, which a provider's session event cannot regress.
         switch event {
         case let .sessionStateChanged(state):
-            compactStatusSession = AgentCompactStatusPhaseFacts.Session(state: state)
-            // A session lifecycle event does not carry a turn/stream fact;
-            // never retain a completed or prior-turn phase across it.
-            compactStatusTurn = nil
             if state == .ready || state == .stopped || state == .error {
                 compactStatusInteraction = nil
             }
-            // A session that stopped or errored ended whatever it was doing. This
-            // is the second way out of `.inFlight`, and it exists because a runner
-            // that dies mid-turn never sends `.turnCompleted`.
-            if state == .stopped || state == .error {
-                turnLiveness = .completed
-            }
         case .turnStarted:
-            turnLiveness = .inFlight
-            settledTurnStatusText = nil
             transcriptCollectionFixture?.setTurnInFlight(true)
-            compactStatusSession = .init(state: .running, startedAt: nil)
-            let start = v2TurnSnapshot?.turnStartedAt
-            compactStatusTurn = .active(startedAt: start, stream: nil, streamStartedAt: nil)
-        case let .contentDelta(_, _, streamKind, _):
-            let start: Date?
-            if case let .active(turnStart, _, _) = compactStatusTurn {
-                start = turnStart
-            } else {
-                start = v2TurnSnapshot?.turnStartedAt
-            }
-            compactStatusSession = .init(state: .running, startedAt: nil)
-            compactStatusTurn = .active(startedAt: start, stream: streamKind, streamStartedAt: start)
-        case let .turnCompleted(_, _, outcome, _):
-            // `.plans/45` S6 — "Worked for Ns" / "You stopped after Ns" (t3's
-            // wording for interruptions). Anchored at submit when known —
-            // provider events alone undercount the duration.
-            turnLiveness = .completed
+        case .contentDelta:
+            break
+        case .turnCompleted:
             liveToolVerb = nil
             transcriptCollectionFixture?.setTurnInFlight(false)
-            let anchor = v2TurnSnapshot?.submittedAt ?? v2TurnSnapshot?.turnStartedAt
-            if let anchor {
-                let duration = Self.settledDurationText(Date().timeIntervalSince(anchor))
-                switch outcome {
-                case .completed:
-                    settledTurnStatusText = "Worked for \(duration)"
-                case .interrupted, .cancelled:
-                    settledTurnStatusText = "You stopped after \(duration)"
-                case .failed:
-                    settledTurnStatusText = nil
-                }
-            } else {
-                settledTurnStatusText = nil
-            }
-            compactStatusTurn = .completed(outcome: outcome, phaseStartedAt: nil)
-            compactStatusSession = .init(state: .ready, startedAt: nil)
             compactStatusInteraction = .clear
         case .requestOpened, .userInputRequested:
             compactStatusInteraction = .pending(startedAt: nil)
         case .requestResolved, .userInputResolved:
             compactStatusInteraction = .clear
         case .runtimeError:
-            // The third way out of `.inFlight`: a runner that throws mid-turn
-            // delivers this, and without it the gyro spins forever over the
-            // error row (D2, 2026-08-26).
-            turnLiveness = .completed
             transcriptCollectionFixture?.setTurnInFlight(false)
-            compactStatusTurn = .completed(outcome: .failed, phaseStartedAt: nil)
-            compactStatusSession = .init(state: .error, startedAt: nil)
             compactStatusInteraction = .clear
         case .compactionChanged(_, let lifecycle):
             switch lifecycle.phase {
             case .requested, .running:
                 liveToolVerb = (itemID: "context-compaction", text: "Compacting context…")
-                compactStatusSession = .init(state: .running, startedAt: lifecycle.observedAt)
-            case .succeeded:
+                compactionSessionFact = .init(state: .running, startedAt: lifecycle.observedAt)
+            case .succeeded, .failed, .cancelled, .indeterminate:
                 liveToolVerb = nil
-                compactStatusSession = .init(state: .ready, startedAt: nil)
-            case .failed:
-                liveToolVerb = nil
-                compactStatusSession = .init(state: .error, startedAt: nil)
-            case .cancelled, .indeterminate:
-                liveToolVerb = nil
-                compactStatusSession = .init(state: .stopped, startedAt: nil)
+                compactionSessionFact = nil
             }
         case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned, .semanticSignal:
             break
@@ -1707,9 +1702,10 @@ final class ManagedAgentTileNSView: TileNSView {
             applyUnknownCompactStatus()
             return
         }
+        let phaseFacts = compactPhaseFacts()
         let facts = AgentCompactStatusPhaseFacts(
-            session: compactStatusSession,
-            turn: compactStatusTurn,
+            session: phaseFacts.session,
+            turn: phaseFacts.turn,
             location: snapshot,
             interaction: compactStatusInteraction)
         let locationPresentation = AgentLocationStatusPresenter.present(
@@ -1778,12 +1774,46 @@ final class ManagedAgentTileNSView: TileNSView {
         compactStatusTickTimer = nil
     }
 
+    /// The compact row's session/turn facts, projected from `currentPresence`
+    /// on the one clock (Return). A running compaction adds its own session
+    /// fact; a probe's injected facts win while it holds them.
+    private func compactPhaseFacts() -> (session: AgentCompactStatusPhaseFacts.Session?, turn: AgentCompactStatusPhaseFacts.Turn?) {
+        if let injectedCompactFacts { return injectedCompactFacts }
+        let presence = currentPresence
+        let anchor = presence.startedAt
+        var session: AgentCompactStatusPhaseFacts.Session?
+        var turn: AgentCompactStatusPhaseFacts.Turn?
+        switch presence.phase {
+        case .idle:
+            session = hasPresenceFacts ? .init(state: .ready) : nil
+        case .starting:
+            session = .init(state: .starting, startedAt: anchor)
+        case .thinking, .tool:
+            session = .init(state: .running)
+            turn = .active(startedAt: anchor, stream: nil, streamStartedAt: nil)
+        case .writing:
+            session = .init(state: .running)
+            turn = .active(startedAt: anchor, stream: .assistant, streamStartedAt: anchor)
+        case let .settled(cause):
+            session = .init(state: .ready)
+            turn = .completed(outcome: cause == .completed ? .completed : .interrupted, phaseStartedAt: nil)
+        case .failed:
+            session = .init(state: .error)
+            turn = .completed(outcome: .failed, phaseStartedAt: nil)
+        }
+        if let compactionSessionFact {
+            session = compactionSessionFact
+            if !presence.isLive { turn = nil }
+        }
+        return (session, turn)
+    }
+
     private func resetCompactStatusProjection(at now: Date = Date()) {
         cancelCompactStatusTick()
         compactStatusPhaseAdapter.reset()
         compactStatusResolution = .unknown
-        compactStatusSession = nil
-        compactStatusTurn = nil
+        compactionSessionFact = nil
+        injectedCompactFacts = nil
         compactStatusInteraction = nil
         compactContextWindow = nil
         let snapshot = projectedAgentID.flatMap { agentSource?.locationSnapshot(for: $0, at: now) }
@@ -1951,8 +1981,7 @@ final class ManagedAgentTileNSView: TileNSView {
         enabledElements: [AgentStatusElement]? = nil,
         now: Date
     ) {
-        compactStatusSession = facts.session
-        compactStatusTurn = facts.turn
+        injectedCompactFacts = (facts.session, facts.turn)
         compactStatusInteraction = facts.interaction
         compactContextWindow = contextWindow
         let resolution = compactStatusPhaseAdapter.update(facts, now: now)
@@ -2328,23 +2357,35 @@ final class ManagedAgentTileNSView: TileNSView {
             transcriptCollectionFixture.setThinkingIndicatorVisible(true)
             return
         }
-        let statusIsActive: Bool
-        if let agentID = attachedAgentID,
-           let agentSource,
-           eventSubscription != nil,
-           descriptor.status == .working {
-            statusIsActive = agentSource.isRunning(agentID)
-        } else {
-            statusIsActive = false
-        }
+        // One owner: the tail is up exactly while the submission is live and
+        // the agent is not waiting on the user (the request block says that).
+        let presence = currentPresence
+        let awaitingUser: Bool
+        if case .needsAction = v2TurnSnapshot?.state { awaitingUser = true } else { awaitingUser = false }
+        let statusIsActive = presence.isLive && !awaitingUser
         let showsWorkingTail = Self.showsWorkingTail(
             statusIsActive: statusIsActive, document: model.document,
             turnLiveness: turnLiveness)
-        if !statusIsActive, let settledTurnStatusText {
-            transcriptCollectionFixture.setSettledTailStatus(settledTurnStatusText)
+        if !statusIsActive, let settled = Self.settledTailText(for: presence) {
+            transcriptCollectionFixture.setSettledTailStatus(settled)
             return
         }
         transcriptCollectionFixture.setThinkingIndicatorVisible(showsWorkingTail)
+    }
+
+    /// The tail's words for a settled submission, measured Return → settle,
+    /// naming who ended it: the user's Stop is never confused with a crash or
+    /// a provider-side interrupt.
+    static func settledTailText(for presence: AgentTurnPresence) -> String? {
+        guard let interval = presence.settledDuration else { return nil }
+        let duration = settledDurationText(interval)
+        switch presence.phase {
+        case .settled(.completed): return "Worked for \(duration)"
+        case .settled(.stoppedByUser): return "You stopped after \(duration)"
+        case .settled(.interrupted): return "Interrupted after \(duration)"
+        case .settled(.processLost): return "Ended after \(duration) — the agent process exited without finishing"
+        case .idle, .starting, .thinking, .tool, .writing, .failed: return nil
+        }
     }
 
     /// `.plans/45` S6 — the live tool verb, derived from whitelisted detail
