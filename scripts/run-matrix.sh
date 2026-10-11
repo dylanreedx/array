@@ -398,6 +398,9 @@ run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
 run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
+# An unreadable canvas.json throws instead of loading as empty, and the store
+# refuses to write over it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 # Worst-case cost of the exact zone-origin correction on the resize input path
 # (it runs per zone per mouseDragged). Registered so the bound is gated, not
 # merely measurable: the leg existed with a failing exit path no gate ran.
@@ -607,6 +610,28 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# Confidence pass S2: a tile dropped into another zone of its own project moves
+# to that zone's layer at its WORLD frame, persists the new stamp, and undoes.
+# Membership used to be re-read from the retired flat snapshot, so after the
+# mount no tile could ever change zone.
+run_app_check .build/debug/Array --zone-layer-move-check
+# Confidence pass S2: a canvas.json that exists and decodes nowhere read as
+# EMPTY; the mount built empty layers over it and the first pan saved that over
+# the file. The project is now unavailable: no layer, no write, a message.
+run_app_check .build/debug/Array --canvas-unreadable-check
+# Confidence pass S2: closing a project zone stranded its tiles. Keep now moves
+# them into the project's remaining (or a fresh) zone unmoved, Delete Tiles
+# deletes them, the canvas re-arms off the closed zone, and a project's last
+# zone closing releases it from the workspace.
+run_app_check .build/debug/Array --zone-close-strand-check
+# Confidence pass S2: tiles stamped with a zone no registered workspace holds
+# (Dylan's harmony/selectus shapes) were hidden forever. The mount now preserves
+# and classifies them and offers Recover, which brings each project's group back
+# into a new zone of its own, layout exact, overlapping nothing.
+run_app_check .build/debug/Array --stranded-tile-recovery-check
+# Confidence pass S2: the layout commit skipped tiles it could place in no file
+# and still reported success. It now fails, the move rolls back, and it says so.
+run_app_check .build/debug/Array --layout-commit-truth-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate

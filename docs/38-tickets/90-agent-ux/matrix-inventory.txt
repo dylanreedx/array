@@ -53,6 +53,7 @@ check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
 check --canvas-persistence-model-check
 check --canvas-save-receipt-check
+check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
@@ -89,6 +90,7 @@ check --input-gate-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
 check --language-service-check
+check --layout-commit-truth-check
 check --layout-pressure-check
 check --leader-activation-check
 check --leader-jump-check
@@ -147,6 +149,7 @@ check --single-zone-compat-check
 check --spawn-focus-policy-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
+check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --strict-agent-harness-check
 check --terminal-fills-tile-check
@@ -181,6 +184,7 @@ check --ui-probe-check
 check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
+check --unreadable-canvas-store-check
 check --viewport-sanitize-check
 check --window-chrome-check
 check --workspace-api-agents-check
@@ -215,9 +219,11 @@ check --zone-autoname-check
 check --zone-breakout-check
 check --zone-chrome-zorder-check
 check --zone-close-keep-delete-check
+check --zone-close-strand-check
 check --zone-create-encloses-check
 check --zone-create-gesture-check
 check --zone-hydration-lifecycle-check
+check --zone-layer-move-check
 check --zone-lazy-resume-check
 check --zone-move-unified-check
 check --zone-presentation-check
@@ -288,6 +294,7 @@ leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-save-receipt-check
+leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
@@ -320,6 +327,7 @@ leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check
 leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check
+leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-snap-check
@@ -377,6 +385,7 @@ leg run_app_check .build/debug/Array --single-zone-compat-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
+leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --terminal-fills-tile-check
@@ -444,9 +453,11 @@ leg run_app_check .build/debug/Array --zone-autoname-check
 leg run_app_check .build/debug/Array --zone-breakout-check
 leg run_app_check .build/debug/Array --zone-chrome-zorder-check
 leg run_app_check .build/debug/Array --zone-close-keep-delete-check
+leg run_app_check .build/debug/Array --zone-close-strand-check
 leg run_app_check .build/debug/Array --zone-create-encloses-check
 leg run_app_check .build/debug/Array --zone-create-gesture-check
 leg run_app_check .build/debug/Array --zone-hydration-lifecycle-check
+leg run_app_check .build/debug/Array --zone-layer-move-check
 leg run_app_check .build/debug/Array --zone-lazy-resume-check
 leg run_app_check .build/debug/Array --zone-move-unified-check
 leg run_app_check .build/debug/Array --zone-presentation-check
@@ -474,6 +485,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor

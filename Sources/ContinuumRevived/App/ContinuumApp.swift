@@ -1127,6 +1127,25 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Confidence pass S2: tiles never vanish, and every visible zone can hold tiles.
+        let zoneTruthLegs: [(String, () throws -> URL)] = [
+            ("--zone-layer-move-check", ZoneTruthChecks.runLayerMove),
+            ("--canvas-unreadable-check", ZoneTruthChecks.runCanvasUnreadable),
+            ("--zone-close-strand-check", ZoneTruthChecks.runZoneCloseStrand),
+            ("--stranded-tile-recovery-check", ZoneTruthChecks.runStrandedTileRecovery),
+            ("--layout-commit-truth-check", ZoneTruthChecks.runLayoutCommitTruth),
+        ]
+        for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
+            do {
+                _ = NSApplication.shared
+                let artifact = try leg()
+                print("ContinuumRevivedZoneTruthChecks \(flag) passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL \(flag): \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--zone-arming-check") {
             do {
                 _ = NSApplication.shared
@@ -4789,7 +4808,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 : []
 
             var canvasState: CanvasState
-            let existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            // An unreadable (or newer-format) boot canvas is not fatal: the flat
+            // boot state is only a snapshot, the store refuses to write over the
+            // file, and a persisted workspace's mount reports the project
+            // unavailable. `WorkspaceInvariantsFixture.mount` mirrors this.
+            let existingCanvasResult: CanvasEngine.CanvasSanitizationResult?
+            do {
+                existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            } catch ProjectStoreError.canvasUnreadable, ProjectStoreError.unknownFutureSchema {
+                existingCanvasResult = nil
+            }
             let selectedProjectHadCanvasState = existingCanvasResult != nil
             if let existing = existingCanvasResult {
                 canvasState = existing.canvas
@@ -6560,7 +6588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let policy = DeleteConfirmPolicy.current
-        if policy.requiresConfirmation(for: tile.kind) {
+        if !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
             alert.messageText = configuration.message
@@ -10581,6 +10609,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             if let model = try buildWorkspaceTopBarModel() {
                 topBar.reload(model)
+                // A message raised before the bar existed (the mount's offers) keeps its action.
+                if let action = workspaceManagementAction, topBar.notificationView.actionTitle == nil {
+                    topBar.setManagementMessage(workspaceManagementMessage, kind: workspaceManagementKind, action: action)
+                }
             } else {
                 // 0721: no registry store, or no current workspace at all. The chrome
                 // stays unloaded either way — say which, rather than leaving a live
@@ -15178,45 +15210,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Appends the placement as-is (origin/size come from the drag rect) to the stored
     /// Present the keep-or-delete confirm for closing a zone (zone-unify P5),
     /// then drive `closeZone`. Keep is the default (non-destructive) button.
+    /// QA: answers the zone-close confirm instead of running it modally.
+    var qaZoneCloseResponse: ((UUID) -> NSApplication.ModalResponse)?
+
     private func presentZoneCloseConfirm(_ zoneId: UUID) {
-        let alert = NSAlert()
-        alert.messageText = "Close this zone?"
-        alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
-        alert.addButton(withTitle: "Keep Tiles")
-        alert.addButton(withTitle: "Delete Tiles")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: true)
+        let response: NSApplication.ModalResponse
+        if let answer = qaZoneCloseResponse?(zoneId) {
+            response = answer
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Close this zone?"
+            alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
+            alert.addButton(withTitle: "Keep Tiles")
+            alert.addButton(withTitle: "Delete Tiles")
+            alert.addButton(withTitle: "Cancel")
+            response = alert.runModal()
+        }
+        switch response {
+        case .alertFirstButtonReturn: closeZoneKeepingTiles(zoneId)
         case .alertSecondButtonReturn: deleteZoneWithTiles(zoneId)
         default: break
         }
+    }
+
+    /// "Keep Tiles". A project zone's members move, unmoved on screen, into
+    /// another zone of their project (or a fresh one) before the zone goes:
+    /// spilled to "bare canvas" they kept the closed zone's id, and the next
+    /// mount hid them forever. A group zone keeps its old spill.
+    private func closeZoneKeepingTiles(_ zoneId: UUID) {
+        guard let canvasView else { return }
+        if let workspaceRuntime, !canvasView.isGroupZone(zoneId) {
+            do {
+                try workspaceRuntime.rehomeMembersOfClosingZone(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+        }
+        canvasView.closeZone(zoneId: zoneId, keepTiles: true)
     }
 
     /// Tiles deleted by the in-flight "Delete Tiles" zone close, read by
     /// `persistClosedZone` so they leave the WorkspaceDocument rather than being
     /// demoted to ambient tiles that rehydrate on the next mount.
     private var zoneCloseDeletedTileIds: Set<UUID> = []
+    /// The user confirmed "Delete Tiles" for a whole zone; its members do not
+    /// each ask again.
+    private var zoneDeleteConfirmed = false
 
     /// "Delete Tiles" on the zone-close alert.
     ///
     /// Every member goes through `deleteTile(id:)` — the same path the tile's own
     /// close button uses — so the PTY, browser, note store, managed session and
-    /// agent record are torn down exactly once each. `CanvasNSView.closeZone`
-    /// used to do the deletion itself over `canvasState.tiles`, which is empty
-    /// for a hydrated zone, so the loop body never ran and nothing was deleted.
+    /// agent record are torn down exactly once each. That now holds for a
+    /// PROJECT zone too: it used to silently do "Keep", and the tiles it said it
+    /// deleted came back hidden. A member that survives its delete (a dirty
+    /// file the user kept) keeps the zone open rather than being dropped with
+    /// it, so nothing is removed without its teardown.
     private func deleteZoneWithTiles(_ zoneId: UUID) {
         guard let canvasView else { return }
-        // A project zone's tiles are the PROJECT's: shared, persisted in its own
-        // store, and not this zone's to delete. Closing one keeps them.
-        guard canvasView.isGroupZone(zoneId) else {
-            canvasView.closeZone(zoneId: zoneId, keepTiles: true)
-            return
+        let isGroupZone = canvasView.isGroupZone(zoneId)
+        var projectId: UUID?
+        if let workspaceRuntime, !isGroupZone {
+            do {
+                try workspaceRuntime.prepareZoneForWholeZoneMutation(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+            // Per-tile teardown resolves stores through the armed project.
+            workspaceRuntime.setActiveZone(zoneId, reason: .click)
+            projectId = canvasView.zonePlacement(for: zoneId)?.projectId
         }
         let memberIds = canvasView.tileIds(inZone: zoneId)
+        zoneDeleteConfirmed = true
         for id in memberIds { deleteTile(id: id) }
+        zoneDeleteConfirmed = false
+        let survivors = canvasView.tileIds(inZone: zoneId)
+        if let projectId, let controller = workspaceRuntime?.controller(for: projectId) {
+            // While the zone's layer is still installed: only an installed zone
+            // may report its tiles deleted (`mergeProjectTilesForPersistence`).
+            controller.scheduleCanvasSave()
+            do { try controller.flushCanvasSave() } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: its tiles couldn't be saved (\(error.localizedDescription)).", kind: .error)
+                return
+            }
+        }
+        guard survivors.isEmpty else {
+            setWorkspaceManagementMessage(
+                "\(survivors.count) tile(s) were kept, so the zone stays open.", kind: .warning)
+            return
+        }
         zoneCloseDeletedTileIds = Set(memberIds)
         defer { zoneCloseDeletedTileIds = [] }
-        canvasView.closeZone(zoneId: zoneId, keepTiles: false)
+        canvasView.closeZone(zoneId: zoneId, keepTiles: !isGroupZone)
     }
 
     /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
@@ -15228,6 +15318,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 reloadWorkspaceSidebar()
             } catch {
                 fputs("persistClosedZone failed: \(error)\n", stderr)
+                setWorkspaceManagementMessage(
+                    "The zone was closed but couldn't be saved; it will reappear next launch "
+                    + "(\(error.localizedDescription)).", kind: .error)
             }
             return
         }
@@ -15345,6 +15438,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the workspace document are saved synchronously from one snapshot. If any
     /// write fails, already-written project canvases are restored before the
     /// caller rolls the preview back in memory.
+    enum LayoutCommitError: Error, CustomStringConvertible {
+        case tilesWithoutStore(Int)
+        var description: String { "\(count) moved tile(s) belong to no saved canvas" }
+        private var count: Int { switch self { case let .tilesWithoutStore(count): return count } }
+    }
+
     private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) -> Bool {
         guard let registryStore else { return false }
         do {
@@ -15378,9 +15477,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // well subtracted the zone origin twice, so an ambient tile drifted by
             // −zoneOrigin on every commit/remount cycle and the error accumulated.
             // Witness: `--ambient-tile-frame-space-check`.
+            // Every committed tile must land in exactly the file that owns it. A
+            // tile found in none (its project unregistered, its canvas missing)
+            // used to be skipped while the commit still reported success, so the
+            // gesture looked saved and came back moved on the next launch.
+            var unplacedTileIds = Set(transaction.tileFrames.keys)
             for (tileId, worldFrame) in transaction.tileFrames {
                 guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
                 document.ambientTiles[index].frame = worldFrame
+                unplacedTileIds.remove(tileId)
             }
 
             let registry = try registryStore.loadOrEmpty()
@@ -15393,6 +15498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
                 guard let original = try projectStore.tryLoadCanvas() else { continue }
+                unplacedTileIds.subtract(original.tiles.map(\.id))
                 var updated = original
                 var changed = false
                 // WS2 F2, same defect as the ambient register above: `canvas.json`
@@ -15406,9 +15512,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 for index in updated.tiles.indices {
                     guard let worldFrame = transaction.tileFrames[updated.tiles[index].id] else { continue }
                     updated.tiles[index].frame = worldFrame
+                    // Membership commits with geometry: a cross-zone drop must not
+                    // leave the old stamp behind the new frame.
+                    if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
+                       document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
+                        updated.tiles[index].zoneId = zoneId
+                    }
                     changed = true
                 }
                 if changed { projectWrites.append((projectStore, original, updated)) }
+            }
+
+            guard unplacedTileIds.isEmpty else {
+                throw LayoutCommitError.tilesWithoutStore(unplacedTileIds.count)
             }
 
             var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []
@@ -15436,6 +15552,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "That layout change couldn't be saved, so it was undone: \(error).", kind: .error)
             return false
         }
     }
@@ -15772,13 +15890,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func setWorkspaceManagementMessage(_ message: String?, kind: WorkspaceNotificationView.Kind = .warning) {
+    private func setWorkspaceManagementMessage(
+        _ message: String?,
+        kind: WorkspaceNotificationView.Kind = .warning,
+        action: (title: String, handler: () -> Void)? = nil
+    ) {
         workspaceManagementMessage = message
-        workspaceTopBarView?.setManagementMessage(message, kind: kind)
+        workspaceManagementAction = action
+        workspaceManagementKind = kind
+        workspaceTopBarView?.setManagementMessage(message, kind: kind, action: action)
         workspaceTopBarView?.notificationView.onDismiss = { [weak self] in
             self?.workspaceManagementMessage = nil
+            self?.workspaceManagementAction = nil
         }
         workspaceSidebarView?.setManagementMessage(message)
+    }
+
+    /// The action the current notification offers, if any.
+    private var workspaceManagementAction: (title: String, handler: () -> Void)?
+    private var workspaceManagementKind: WorkspaceNotificationView.Kind = .warning
+
+    /// QA: press the current notification's action, the way its button does.
+    /// Returns its title, or nil when the notification offers none.
+    @discardableResult
+    func qaPerformWorkspaceNotificationAction() -> String? {
+        guard let action = workspaceManagementAction else { return nil }
+        workspaceManagementMessage = nil
+        workspaceManagementAction = nil
+        action.handler()
+        return action.title
     }
 
     private func createWorkspaceFromChrome() {
@@ -17128,6 +17268,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
             self?.configureCreationAndRuntimeRoutes(on: arriving)
         }
+        // A project whose zone cannot be mounted (its canvas is unreadable, or
+        // its `.array/` is held elsewhere) used to go stderr-only.
+        workspaceRuntime?.onZoneProjectUnavailable = { [weak self] projectId, error in
+            self?.reportZoneProjectUnavailable(projectId: projectId, error: error)
+        }
+        workspaceRuntime?.onStrandedTilesFound = { [weak self] found in
+            self?.offerStrandedTileRecovery(found)
+        }
         workspaceRuntime?.hydrateZoneLayerTiles = { [weak self] canvas, layers, phase in
             self?.hydrateZoneLayerTiles(canvas, layers, phase: phase)
         }
@@ -17137,6 +17285,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 record.tileId.map { (record.id, $0) }
             })
         }
+    }
+
+    /// Tiles whose zone no registered workspace holds are never repaired
+    /// silently (`.plans/67` §4): the mount preserves and classifies them, and
+    /// this offers the repair. Nothing moves until the user presses Recover.
+    private func offerStrandedTileRecovery(_ found: [UUID: [Tile]]) {
+        let count = found.values.reduce(0) { $0 + $1.count }
+        guard count > 0 else { return }
+        let registry = (try? registryStore?.loadOrEmpty()) ?? nil
+        let names = found.keys
+            .compactMap { id in registry?.projects.first(where: { $0.id == id })?.name }
+            .sorted()
+            .map { "\u{201C}\($0)\u{201D}" }
+        let where_ = names.isEmpty ? "" : " in " + ListFormatter.localizedString(byJoining: names)
+        let noun = count == 1 ? "tile is" : "tiles are"
+        setWorkspaceManagementMessage(
+            "\(count) \(noun) hidden\(where_): they belong to a zone that no longer exists. "
+            + "Recover puts them in a new zone, keeping their layout.",
+            kind: .warning,
+            action: (title: "Recover", handler: { [weak self] in self?.recoverStrandedTiles() }))
+    }
+
+    private func recoverStrandedTiles() {
+        guard let workspaceRuntime else { return }
+        do {
+            let recovered = try workspaceRuntime.recoverStrandedTiles()
+            reloadWorkspaceSidebar()
+            setWorkspaceManagementMessage(
+                "Recovered \(recovered) tile\(recovered == 1 ? "" : "s") into a new zone.", kind: .success)
+        } catch {
+            setWorkspaceManagementMessage(
+                "The hidden tiles couldn't be recovered: \(error.localizedDescription). Nothing was changed.",
+                kind: .error)
+        }
+    }
+
+    private func reportZoneProjectUnavailable(projectId: UUID, error: Error) {
+        let name = (try? registryStore?.loadOrEmpty())?.projects.first(where: { $0.id == projectId })?.name ?? "A project"
+        let reason: String
+        switch error {
+        case ProjectStoreError.canvasUnreadable:
+            reason = "its canvas file can't be read. Array is leaving the file untouched and showing none of its tiles"
+        case let ProjectStoreError.unknownFutureSchema(_, version, supported):
+            reason = "its canvas was saved by a newer Array (format \(version), this build reads \(supported)). "
+                + "Array is leaving the file untouched and showing none of its tiles"
+        default:
+            reason = error.localizedDescription
+        }
+        setWorkspaceManagementMessage("\u{201C}\(name)\u{201D} is unavailable: \(reason).", kind: .error)
     }
 
     // MARK: - Zone tile hydration (M1.2, `.plans/46`)
@@ -17375,7 +17572,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
-        spawner.creationScopeProvider = { [weak self] in self?.resolvedCreationScope() }
+        // Every spawn reads its scope here, before framing and installing its tile,
+        // so this is where an armed zone below the live tier gets the layer the
+        // tile must install into. Without one it fell to the retired flat model.
+        spawner.creationScopeProvider = { [weak self] in
+            let scope = self?.resolvedCreationScope()
+            if let zoneId = scope?.zoneId { self?.workspaceRuntime?.ensureZoneLayer(forZone: zoneId) }
+            return scope
+        }
         spawner.terminalProjectContextProvider = { [weak self] in self?.activeZoneProjectEntry() }
         spawner.terminalSessionTargetProvider = { [weak self] in
             guard let self else { return nil }
