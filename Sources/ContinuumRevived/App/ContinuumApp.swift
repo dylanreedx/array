@@ -3397,6 +3397,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--language-server-release-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try LanguageServerReleaseCheck.run()
+                print("ContinuumRevivedLanguageServerReleaseChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-click-recency-check") {
             do {
                 _ = NSApplication.shared
