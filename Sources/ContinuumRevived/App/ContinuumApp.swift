@@ -3793,6 +3793,45 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-clipboard-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runClipboardCheck()
+                print("ContinuumRevivedTerminalClipboardChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-focus-grab-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runFocusGrabCheck()
+                print("ContinuumRevivedTerminalFocusGrabChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-cmd-w-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runCmdWCheck()
+                print("ContinuumRevivedTerminalCmdWChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-default-readability-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
