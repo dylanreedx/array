@@ -3483,6 +3483,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--diff-review-off-main-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try DiffReviewOffMainCheck.run()
+                print("ContinuumRevivedDiffReviewOffMainChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--diff-tile-check") {
             do {
                 let artifact = try AppDelegate.runDiffTileSelfCheck()
@@ -25213,11 +25226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         branchView.onSourceChanged = { updated in
             if let idx = materialized.tiles.firstIndex(where: { $0.id == updated.id }) { materialized.tiles[idx] = updated }
         }
-        guard branchView.selectSourcePickerItemForQA(title: "Branch feature vs main") else {
-            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
-        }
+        // Git runs off the main thread: the branch list loads once the tile is
+        // in a window, and each diff lands asynchronously.
         branchView.frame = window.contentView?.bounds ?? .zero
         window.contentView = branchView
+        guard branchView.waitForPendingLoadsForQA(timeout: 15),
+              branchView.selectSourcePickerItemForQA(title: "Branch feature vs main"),
+              branchView.waitForPendingLoadsForQA(timeout: 15) else {
+            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
+        }
         window.layoutIfNeeded()
         let branchEvidence = branchView.visibilityEvidence(containing: "+feature branch")
         guard branchEvidence.ok,

@@ -1100,6 +1100,7 @@ run_app_check .build/debug/Array --ticket-queue-tile-check
 run_app_check .build/debug/Array --conductor-queue-tile-check
 run_app_check .build/debug/Array --agent-input-check
 run_app_check .build/debug/Array --diff-tile-check
+run_app_check .build/debug/Array --diff-review-off-main-check
 run_app_check .build/debug/Array --file-tree-hardening-check
 run_app_check .build/debug/Array --viewport-sanitize-check
 run_app_check .build/debug/Array --project-lock-check
