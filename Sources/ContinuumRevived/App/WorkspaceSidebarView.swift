@@ -544,6 +544,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.scopeCatalog = catalog
     }
 
+    /// The workspace on screen, which the default scope resolves to.
+    func setInboxCurrentWorkspace(_ name: String?) {
+        inboxView.currentWorkspaceName = name
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
     /// How many agents are running in terminal tiles, which this list does not show.
     /// Only its empty state reads this — see `AgentInboxView.terminalHostedEmptyMessage`.

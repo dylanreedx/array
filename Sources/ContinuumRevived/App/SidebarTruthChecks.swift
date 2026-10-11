@@ -71,6 +71,7 @@ enum SidebarTruthChecks {
     static func run() async throws {
         let world = try makeWorld()
         defer { tearDown(world) }
+        try defaultScopeIsTheWorkspace(world)
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
         try unreadableRootIsolation(world)
@@ -79,7 +80,8 @@ enum SidebarTruthChecks {
               + "by itself when its turn ended; a closed parent took its subagents with it; a "
               + "record naming a tile no canvas holds was never drawn live; with another "
               + "project's agent listing unreadable, a close still reached the list; an agent-"
-              + "event push opened no file")
+              + "event push opened no file; the default scope was the workspace on screen, "
+              + "across a switch")
     }
 
     // MARK: - World
@@ -247,10 +249,11 @@ enum SidebarTruthChecks {
         canvas.layoutSubtreeIfNeeded()
 
         // The stored scope is the user's; put it back afterwards, as the inbox and
-        // corpus checks do.
+        // corpus checks do. REMOVED for the run, not set: what is under test is
+        // the scope a person gets without ever touching the popup.
         let defaults = UserDefaults.standard
         let storedScope = defaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
-        WorkspaceSidebarConfig.setScope(.all, defaults: defaults)
+        defaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 1_000),
@@ -416,5 +419,34 @@ enum SidebarTruthChecks {
                    "W11: one agent-event push opened \(reads) registry/workspace/canvas/session file(s) on the main thread — it must derive from memory")
         try expect(block(world, otherAgent) != nil || world.inbox.rowIdsForQA.contains(otherAgent.rawValue) == false,
                    "control: the push still drew the list")
+    }
+
+    // MARK: - W7: the default scope is the workspace on screen
+
+    static func defaultScopeIsTheWorkspace(_ world: World) throws {
+        let inbox = world.inbox
+        try expect(block(world, busyAgent) == "live",
+                   "setup: this workspace's agent is drawn")
+        try expect(block(world, otherAgent) == nil,
+                   "W7: out of the box the list must show THIS workspace's agents — the other workspace's agent is drawn (\(String(describing: block(world, otherAgent)))), whose tile is not on this canvas")
+        // "All" is one click away and shows both.
+        try expect(inbox.pickScopeForQA(.all), "All agents must be pickable")
+        try expect(block(world, otherAgent) == "live" && block(world, busyAgent) == "live",
+                   "W7: 'All agents' shows every workspace's agents")
+        try expect(inbox.pickScopeForQA(.currentWorkspace), "This workspace must be pickable")
+        // Switch workspaces through the production reveal path: the scope follows.
+        try expect(world.app.revealAgentFromInbox(otherAgent.rawValue),
+                   "setup: revealing the other workspace's agent must switch to it")
+        try expect(world.runtime.workspaceId == world.workspaceB, "setup: now in workspace Beta")
+        try expect(block(world, otherAgent) == "live" && block(world, busyAgent) == nil,
+                   "W7: after a switch the list shows the NEW workspace's agents only — other \(String(describing: block(world, otherAgent))), busy \(String(describing: block(world, busyAgent)))")
+        // …and back, for the sections below.
+        try expect(inbox.pickScopeForQA(.all), "All agents must be pickable")
+        try expect(world.app.revealAgentFromInbox(busyAgent.rawValue),
+                   "setup: revealing this workspace's agent must switch back")
+        try expect(world.runtime.workspaceId == world.workspaceA, "setup: back in workspace Alpha")
+        try expect(inbox.pickScopeForQA(.currentWorkspace), "This workspace must be pickable")
+        try expect(block(world, busyAgent) == "live" && block(world, otherAgent) == nil,
+                   "W7: back home, the home workspace's agents again")
     }
 }

@@ -10727,6 +10727,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
         sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
+        // R6: the default scope is the workspace on screen.
+        let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
+        sidebar.setInboxCurrentWorkspace(registry.workspaces.first { $0.id == onScreen }?.name)
         sidebar.agentInbox.setProjectIconSources(Dictionary(
             uniqueKeysWithValues: registry.projects.filter { !$0.missing }.map {
                 ($0.id, URL(fileURLWithPath: $0.rootPath, isDirectory: true))
@@ -31226,14 +31229,18 @@ extension AppDelegate {
     let scopeSuite = "continuum.inbox.scope.\(UUID().uuidString)"
     let scopeDefaults = UserDefaults(suiteName: scopeSuite)!
     defer { scopeDefaults.removePersistentDomain(forName: scopeSuite) }
+    // Confidence pass (sidebar stream): the default is the workspace on screen.
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .currentWorkspace,
+               "with no stored scope the inbox shows the workspace on screen")
+    WorkspaceSidebarConfig.setScope(.all, defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "with no stored scope the inbox shows every agent")
+               "an explicitly picked 'All agents' is honoured over the default")
     WorkspaceSidebarConfig.setScope(.workspace("Overnight"), defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .workspace("Overnight"),
                "the picked scope comes back after a relaunch — got \(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults))")
     scopeDefaults.set("zone:main", forKey: WorkspaceSidebarConfig.scopeKey)
-    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "an unreadable stored scope opens the list up rather than emptying it")
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == WorkspaceSidebarConfig.defaultScope,
+               "an unreadable stored scope falls back to the default rather than emptying the list")
     // …and the restore path is the one the app uses, with no write-back.
     let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
     var restoreWrites = 0
@@ -32475,7 +32482,7 @@ extension AppDelegate {
                "a scope must filter: 'Quiet' has no agent — got \(sidebar.inboxForQA.titlesForQA)")
     // The menu comes from the REGISTRY, not only from the rows: this run's project and
     // workspace are both offered while the list is showing one row.
-    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["All agents", "Continuum", "Quiet", "Default"],
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "Continuum", "Quiet", "Default"],
                "the popup offers the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.

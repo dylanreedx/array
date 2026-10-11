@@ -1108,6 +1108,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             updateScopeMenu()
         }
     }
+    /// The workspace on screen, from the host — what `.currentWorkspace` (the
+    /// default scope) resolves to. A change re-filters: a workspace switch moves
+    /// the list with it.
+    var currentWorkspaceName: String? {
+        didSet {
+            guard currentWorkspaceName != oldValue else { return }
+            reload(rows: allRows)
+        }
+    }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
     /// Agents the host's row-source policy left out because they are running inside
@@ -1877,7 +1886,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
-        let scoped = InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId)
+        let scoped = InboxScope.filter(
+            rows: newRows, scope: scope, openAgentId: openAgentId,
+            currentWorkspace: currentWorkspaceName)
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch]
@@ -2319,7 +2330,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the wrong scope. The tag carries the index instead of the position, so the
     /// separator between the two blocks costs nothing.
     private func updateScopeMenu() {
-        let entries = InboxScope.entries(for: allRows, catalog: scopeCatalog, including: scope)
+        let entries = InboxScope.entries(
+            for: allRows, catalog: scopeCatalog, including: scope,
+            currentWorkspace: currentWorkspaceName)
         scopeEntries = entries
         var items = entries.map { ChoiceItem(id: $0.storageValue, title: $0.title) }
         managementItems.removeAll()
