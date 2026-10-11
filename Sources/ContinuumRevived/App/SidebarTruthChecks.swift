@@ -72,6 +72,7 @@ enum SidebarTruthChecks {
         let world = try makeWorld()
         defer { tearDown(world) }
         try defaultScopeIsTheWorkspace(world)
+        try await switchCostsOneReload(world)
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
         try unreadableRootIsolation(world)
@@ -81,7 +82,8 @@ enum SidebarTruthChecks {
               + "record naming a tile no canvas holds was never drawn live; with another "
               + "project's agent listing unreadable, a close still reached the list; an agent-"
               + "event push opened no file; the default scope was the workspace on screen, "
-              + "across a switch")
+              + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
+              + "reloaded the sidebar once")
     }
 
     // MARK: - World
@@ -142,7 +144,7 @@ enum SidebarTruthChecks {
             groups: [], lastActiveTileId: nil))
         try storeB.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [agentTile(otherTile, "other", x: 40, zone: zoneB)],
+            tiles: [agentTile(otherTile, "other", x: 40, zone: zoneB)] + switchLoadTiles(root: rootB, zone: zoneB),
             groups: [], lastActiveTileId: nil))
 
         func zone(_ id: UUID, _ projectId: UUID, _ name: String) -> ZonePlacement {
@@ -276,6 +278,22 @@ enum SidebarTruthChecks {
                     defaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
                 }
             })
+    }
+
+    /// Runtime-backed tiles for the switch-cost witness: each one restored on a
+    /// switch used to trigger its own full sidebar reload.
+    static let switchLoadTileCount = 6
+    static func switchLoadTiles(root: URL, zone: UUID) -> [Tile] {
+        (0..<switchLoadTileCount).map { index in
+            var tile = Tile(
+                id: UUID(), kind: .fileTree, title: "tree \(index)",
+                frame: TileFrame(x: 400 + Double(index % 3) * 300, y: 300 + Double(index / 3) * 260,
+                                 width: 260, height: 220),
+                zPosition: .fromLegacyRank(10 + index), runtimeRef: nil,
+                metadata: TileMetadata(filePath: root.path))
+            tile.zoneId = zone
+            return tile
+        }
     }
 
     static func tearDown(_ world: World) {
@@ -448,5 +466,38 @@ enum SidebarTruthChecks {
         try expect(inbox.pickScopeForQA(.currentWorkspace), "This workspace must be pickable")
         try expect(block(world, busyAgent) == "live" && block(world, otherAgent) == nil,
                    "W7: back home, the home workspace's agents again")
+    }
+
+    // MARK: - Switch cost: one sidebar reload, however many tiles restore
+
+    static func switchCostsOneReload(_ world: World) async throws {
+        // What ONE structural reload reads, as the yardstick.
+        let yardstickBefore = StoreReadProbe.shared.count
+        world.app.qaRefreshAgentSurfaces()
+        let oneReload = StoreReadProbe.shared.count - yardstickBefore
+
+        func switchViaSidebar(to workspace: UUID) async -> (reloads: Int, reads: Int) {
+            let reloadsBefore = world.app.qaStructuralSidebarReloadCount
+            let readsBefore = StoreReadProbe.shared.count
+            // The sidebar's own workspace row: the production switch entry.
+            world.sidebar.onSelection?(.workspace(workspace))
+            // Coalesced reloads land on the NEXT run-loop turn; count them too.
+            _ = await waitUntil(timeout: 0.3, pollInterval: 0.05, { false })
+            return (world.app.qaStructuralSidebarReloadCount - reloadsBefore,
+                    StoreReadProbe.shared.count - readsBefore)
+        }
+        let there = await switchViaSidebar(to: world.workspaceB)
+        try expect(world.runtime.workspaceId == world.workspaceB, "setup: the sidebar switched to Beta")
+        try expect(there.reloads == 1,
+                   "switch: restoring \(switchLoadTileCount) runtime-backed tiles ran \(there.reloads) structural sidebar reloads — one per restored tile; it must be one")
+        // The switch reads its own target (document, registry, canvases) once; the
+        // sidebar may add ONE reload's worth on top. Per-tile reloads put this at
+        // N+1 reloads' worth (79 reads for 6 tiles on this fixture before).
+        try expect(there.reads <= oneReload * 3,
+                   "switch: \(there.reads) registry/workspace/canvas/session reads for one switch, against \(oneReload) for one structural reload — the sidebar's share must not grow with the tiles it restores")
+        let back = await switchViaSidebar(to: world.workspaceA)
+        try expect(world.runtime.workspaceId == world.workspaceA, "setup: the sidebar switched back to Alpha")
+        try expect(back.reloads == 1, "switch back: \(back.reloads) structural sidebar reloads, wanted 1")
+        print("sidebar-truth: switch cost reloads=\(there.reloads)/\(back.reloads) reads=\(there.reads)/\(back.reads) (one structural reload reads \(oneReload))")
     }
 }

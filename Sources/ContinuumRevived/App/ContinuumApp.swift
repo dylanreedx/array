@@ -4537,6 +4537,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
     private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
     private var sidebarTurnObserverToken: UUID?
+    /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
+    /// switch witness reads the delta across one switch.
+    private(set) var qaStructuralSidebarReloadCount = 0
+    /// A canvas model change is waiting for the next run-loop turn's reload.
+    private var sidebarReloadPending = false
     /// What the last structural rebuild read from disk (`SidebarModelInputs`).
     private var sidebarModelInputsFromDisk: SidebarModelInputs?
     private var sidebarTerminalDescriptors: [TerminalSessionDescriptor] = []
@@ -10714,7 +10719,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
-        if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
+        if rebuildAgentActivity {
+            qaStructuralSidebarReloadCount += 1
+            sidebarReloadPending = false
+            rebuildAgentActivitySnapshot()
+        }
         defer { if reloadsTopBar ?? rebuildAgentActivity { reloadWorkspaceTopBar() } }
         guard let sidebar = workspaceSidebarView else { return }
         let registry = currentSidebarModelInputs().registry
@@ -12510,11 +12519,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 needs you") == true, "zone row should include needs-attention rollup text")
 
         canvas.install(tileView: TileNSView(tile: createdTile), for: createdTile)
+        // Canvas model changes reload the sidebar on the NEXT run-loop turn,
+        // coalesced (confidence pass): drain that turn, as the app's own loop does.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileCreateUpdatedSidebar = sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileCreateUpdatedSidebar, "tile install should update the existing sidebar view")
 
         canvas.removeTile(id: createdTileId)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileDeleteUpdatedSidebar = !sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileDeleteUpdatedSidebar, "tile removal should update the existing sidebar view")
@@ -17638,8 +17651,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// COALESCED (confidence pass): at most one sidebar reload per run-loop turn.
+    /// Every restored terminal, browser and file-tree tile reports a model change,
+    /// and each used to cost a full structural reload — a workspace switch paid one
+    /// per restored tile, hundreds of file reads on the main thread. Any full
+    /// reload that runs before the deferred one (the switch's own) satisfies it.
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {
-        reloadWorkspaceSidebar()
+        guard !sidebarReloadPending else { return }
+        sidebarReloadPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sidebarReloadPending else { return }
+            self.reloadWorkspaceSidebar()
+        }
     }
 
     private var lastReconciledViewport: CanvasViewport?
