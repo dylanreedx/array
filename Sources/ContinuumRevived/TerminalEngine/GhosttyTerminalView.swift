@@ -439,9 +439,17 @@ final class GhosttyTerminalView: NSView {
             closeSurface()
             statusChanged(.exited(exitCode: nil))
         } else {
+            closeRequestedByArray = true
             ghostty_surface_request_close(surface)
         }
     }
+
+    /// Set when Array itself asks Ghostty to close this surface. Ghostty's own
+    /// `close_surface` binding (⌘W in its default keymap) raises the same
+    /// callback; that one must not free a surface whose shell is still running,
+    /// because only the tile's close path (with its confirm policy, session
+    /// record and canvas entry) may end a terminal.
+    private var closeRequestedByArray = false
 
     // MARK: - Clipboard (Edit > Copy / Paste and Ghostty's callbacks)
 
@@ -556,6 +564,7 @@ final class GhosttyTerminalView: NSView {
         guard let userdata else { return }
         let view = Unmanaged<GhosttyTerminalView>.fromOpaque(userdata).takeUnretainedValue()
         DispatchQueue.main.async {
+            if processAlive, !view.closeRequestedByArray { return }
             view.statusChanged(.exited(exitCode: nil))
             view.closeSurface()
         }
