@@ -3397,6 +3397,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-click-recency-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserClickRecencySelfCheck()
+                print("ContinuumRevivedBrowserClickRecencyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
@@ -5986,6 +5998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
+            if deliberate { self.noteBrowserUse(tileId) }
         }
     }
 
@@ -7803,13 +7816,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             // CX-01: a click is the user's newer intent for focus and selection.
             self.workspaceRuntime?.noteUserInteraction()
-            if let clickedTileId,
-               canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
-                self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
-            }
+            if let clickedTileId { self.noteBrowserUse(clickedTileId) }
             return event
         }
         self.tileFocusMonitor = monitor
+    }
+
+    /// A click on (or deliberate focus of) a browser tile is use: refresh its
+    /// slot in the WKWebView budget so the browser in use is never the one
+    /// evicted when another opens.
+    func noteBrowserUse(_ tileId: UUID) {
+        // `tileRecord(for:)`, not `canvasState.tiles`: once zones are installed
+        // the flat list holds the departed project's tiles (hazard 9), so a
+        // browser in a zone layer never registered its use.
+        guard canvasView?.tileRecord(for: tileId)?.kind == .browser else { return }
+        workspaceRuntime?.registerLiveBrowser(tileId: tileId)
+    }
+
+    /// QA (`--browser-click-recency-check`): adopt a fixture workspace runtime.
+    func qaAdoptWorkspaceRuntime(_ runtime: WorkspaceRuntime) {
+        workspaceRuntime = runtime
     }
 
     /// Trackpad gestures (two-finger scroll, pinch) get consumed by tile

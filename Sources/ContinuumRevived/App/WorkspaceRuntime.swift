@@ -1779,6 +1779,13 @@ final class WorkspaceRuntime {
         browserRuntimeBudget.registerLive(tileId: tileId)
     }
 
+    /// QA: who the budget would evict from `liveTileIds` right now, without
+    /// evicting anything.
+    func qaBrowserEvictionCandidates(liveTileIds: [UUID], protectedTileIds: Set<UUID> = []) -> [UUID] {
+        var copy = browserRuntimeBudget
+        return copy.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protectedTileIds)
+    }
+
     /// Gather protected tile ids from each live controller's canvas lastActiveTileId.
     private func currentProtectedBrowserTileIds() -> Set<UUID> {
         var protected = Set<UUID>()
