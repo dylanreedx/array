@@ -3483,6 +3483,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--attention-notification-check") {
+            _ = NSApplication.shared
+            do {
+                let artifact = try NeedsAttentionNotification.runSelfCheck()
+                print("ContinuumRevivedAttentionNotificationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--diff-review-off-main-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -8501,10 +8513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func deliverNeedsAttentionNotification(count: Int) {
-        let notification = NSUserNotification()
-        notification.title = "Continuum agent needs attention"
-        notification.informativeText = count == 1 ? "1 agent needs input." : "\(count) agents need input."
-        NSUserNotificationCenter.default.deliver(notification)
+        NeedsAttentionNotification.deliver(count: count)
     }
 
     private func moveNavSelection(direction: TileArrangement.Direction) {
