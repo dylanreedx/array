@@ -934,7 +934,13 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 installMainMenu()
-                try runMenuContractSelfCheck()
+                try runMenuContractSelfCheck(expectDeveloperMenus: showsDeveloperMenusOnLiveChannel)
+                // The other channel's developer surfaces too, so a dev run still
+                // witnesses what the prod build hides and vice versa. (Only that
+                // subset: AppKit keeps the first Services menu it was given.)
+                installMainMenu(showsDeveloperMenus: !showsDeveloperMenusOnLiveChannel)
+                guard let otherChannelMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
+                try expectDeveloperSurfaces(in: otherChannelMenu, expected: !showsDeveloperMenusOnLiveChannel)
                 if let sentinel = launchProbeSentinelPath() {
                     try "menu-contract-check passed\n".write(toFile: sentinel, atomically: true, encoding: .utf8)
                 }
@@ -4031,8 +4037,15 @@ enum ContinuumApp {
         return true
     }
 
+    /// Debug > Companion Sync and View > Component Lab are developer surfaces:
+    /// sync is gated off for the alpha and the lab spins up real Ghostty/WebKit
+    /// surfaces. The prod channel (the /Applications bundle) never shows them.
+    private static var showsDeveloperMenusOnLiveChannel: Bool {
+        Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier
+    }
+
     @MainActor
-    private static func installMainMenu() {
+    private static func installMainMenu(showsDeveloperMenus: Bool = showsDeveloperMenusOnLiveChannel) {
         let appName = "Array"
         let mainMenu = NSMenu(title: "Main Menu")
 
@@ -4096,20 +4109,24 @@ enum ContinuumApp {
         let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
         sidebarItem.tag = registeredSidebarMenuTag
         viewMenu.addItem(sidebarItem)
-        viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        if showsDeveloperMenus {
+            viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        }
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
-        let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
-        let debugMenu = NSMenu(title: "Debug")
-        let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
-        let companionMenu = NSMenu(title: "Companion Sync")
-        companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionItem.submenu = companionMenu
-        debugMenu.addItem(companionItem)
-        debugMenuItem.submenu = debugMenu
-        mainMenu.addItem(debugMenuItem)
+        if showsDeveloperMenus {
+            let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+            let debugMenu = NSMenu(title: "Debug")
+            let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
+            let companionMenu = NSMenu(title: "Companion Sync")
+            companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionItem.submenu = companionMenu
+            debugMenu.addItem(companionItem)
+            debugMenuItem.submenu = debugMenu
+            mainMenu.addItem(debugMenuItem)
+        }
 
         let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         let helpMenu = NSMenu(title: "Help")
@@ -4168,7 +4185,7 @@ enum ContinuumApp {
     }
 
     @MainActor
-    private static func runMenuContractSelfCheck() throws {
+    private static func runMenuContractSelfCheck(expectDeveloperMenus: Bool) throws {
         guard let mainMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
         guard mainMenu.items.first?.title == "Array",
               let appMenu = mainMenu.items.first?.submenu,
@@ -4212,7 +4229,6 @@ enum ContinuumApp {
               sidebarItem.title.hasPrefix("Show Workspace Sidebar") else {
             throw SelfCheckError("registered Activity Dock menu item is missing or retained a hardcoded key equivalent")
         }
-        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
         guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
@@ -4220,6 +4236,19 @@ enum ContinuumApp {
         try expectMenuItem(helpMenu, title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
+        try expectDeveloperSurfaces(in: mainMenu, expected: expectDeveloperMenus)
+    }
+
+    /// Developer surfaces exist on the dev channel and are absent on prod.
+    @MainActor
+    private static func expectDeveloperSurfaces(in mainMenu: NSMenu, expected: Bool) throws {
+        guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
+        guard expected else {
+            if viewMenu.item(withTitle: "Component Lab") != nil { throw SelfCheckError("prod channel must not show View > Component Lab") }
+            if mainMenu.item(withTitle: "Debug") != nil { throw SelfCheckError("prod channel must not show the Debug menu") }
+            return
+        }
+        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
         try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
