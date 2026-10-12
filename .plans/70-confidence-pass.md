@@ -98,3 +98,37 @@ project's `.array/`, or the default tmux socket; commits as Dylan, subject
   ui-geometry (failed tool vs failed turn), agent-supervisor (branch chip).
   Sent back to S5/S3. Inventory regeneration pending a clean run.
 - In progress: S4b (sidebar layout), S6 (composer), S8 (transcript C).
+
+## Handoff (2026-10-12, session wrapped for usage)
+
+Resume here. Staging: `array/confidence-pass` (bench `.worktrees/confidence-pass`).
+Nothing is on `array/integration`; nothing is pushed; `/Applications/Array.app`
+and Dylan's real state were never touched (read-only copy audit only).
+
+Stream branches still holding unmerged work (merge each into staging, rebuild,
+run its legs, then the full matrix):
+- `array/cp-sidebar` — S4b layout (header row, 82/36pt rows, hover actions,
+  row animation, shelf persistence).
+- `array/cp-workspace` — S5b: zone header on warm re-attach, one global browser
+  budget incl. warm scenes, warm detach-sweep contract.
+- `array/cp-agent-presence` — S3b: ui-geometry failed-tool vs failed-turn,
+  agent-supervisor branch chip.
+- `array/cp-composer` — S6 (⌥ leader, force-send, stranded steers, /compact MCP,
+  quit flush).
+- `array/cp-transcript` — S8 direction C (turn cards + live work strip from
+  `AgentTurnPresence`); behind one switch.
+
+Gate before Dylan reviews: full `scripts/run-matrix.sh` with
+`CONTINUUM_SKIP_UI_BASELINES=1`, `env -u TMUX -u TMUX_PANE`, and `caffeinate -u`
+(a locked screen makes terminal legs fail with "terminal surface missing").
+Then regenerate the inventory once on a clean run
+(`CONTINUUM_UPDATE_MATRIX_INVENTORY=1`). Then dogfood in the preview app
+(`scripts/dev-app.sh`) — switch A→B→A, delete a workspace, close a busy agent
+tile and watch its sidebar row, send to claude/codex/pi and watch the strip.
+
+Open decisions for Dylan: transcript A/B/C (previews link above; C assumed);
+busy-tile close = "Finishing" vs stop; subagents nested vs hidden.
+Known open items: P2 persistent codex process; Recover has no undo (backups
+only); deleting a workspace leaves its tmux sessions running; boot sweep of
+orphan workspace dirs; retry wire formats verified against fakes only.
+Benches to return when merged: every `.worktrees/cp-*`.
