@@ -10407,6 +10407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
         installSidebarTurnObserver()
+        // Confidence pass: Settled folds behind a counted heading and the shelves
+        // sink to the bottom of the list (T3 nightly's layout).
+        sidebar.agentInbox.foldsSettledIntoShelf = true
         sidebar.onSelection = { [weak self] selection in
             self?.handleWorkspaceSidebarSelection(selection)
         }
@@ -30830,6 +30833,9 @@ extension AppDelegate {
         let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
         app.configureWorkspaceSidebar(sidebar)
+        // The corpus reads every flow's rendered row, the settled one included,
+        // so the folded Settled shelf is opened (confidence pass).
+        sidebar.inboxForQA.expandSettledShelfForQA()
 
         // A real window, so the offscreen table has a viewport in which to
         // materialize cells — without one, every rendered-cell read is vacuous.
@@ -34527,6 +34533,9 @@ extension AppDelegate {
     try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
                "setup: adopting a settled agent clears nothing")
     revealApp.refreshAgentSurfaces(notify: false)
+    // The app folds Settled behind a heading (confidence pass); this section reads
+    // and clicks settled rows, so it opens the shelf first.
+    revealSidebar.inboxForQA.expandSettledShelfForQA()
     revealSidebar.inboxForQA.layoutForQA()
 
     // The shipped list is the source of truth for section placement. `refreshAgentSurfaces`

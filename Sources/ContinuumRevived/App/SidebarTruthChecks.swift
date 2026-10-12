@@ -57,6 +57,7 @@ enum SidebarTruthChecks {
     static let childTwo = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A5")!)
     static let lostAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A6")!)
     static let secondIdleAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A7")!)
+    static let settledAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A8")!)
     static let otherAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000B1")!)
 
     static let idleTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E1")!
@@ -72,6 +73,7 @@ enum SidebarTruthChecks {
         let world = try makeWorld()
         defer { tearDown(world) }
         try defaultScopeIsTheWorkspace(world)
+        try shelvesFoldAndSinkToTheBottom(world)
         try await switchCostsOneReload(world)
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
@@ -83,7 +85,8 @@ enum SidebarTruthChecks {
               + "project's agent listing unreadable, a close still reached the list; an agent-"
               + "event push opened no file; the default scope was the workspace on screen, "
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
-              + "reloaded the sidebar once")
+              + "reloaded the sidebar once; Settled folded behind a counted heading and the "
+              + "headings sat at the bottom of the list")
     }
 
     // MARK: - World
@@ -200,6 +203,11 @@ enum SidebarTruthChecks {
         ] {
             try agentStore.upsert(value)
         }
+        // Finished work the human already said "done" to: the Settled shelf's row.
+        var settled = record(settledAgent, "settled agent", project: projectA, root: rootA, tile: nil, age: 900)
+        settled.settledOverride = .settled
+        settled.settledAt = now.addingTimeInterval(-120)
+        try agentStore.upsert(settled)
 
         let app = AppDelegate()
         app.registryStore = registryStore
@@ -513,5 +521,29 @@ enum SidebarTruthChecks {
         try expect(world.runtime.workspaceId == world.workspaceA, "setup: the sidebar switched back to Alpha")
         try expect(back.reloads == 1, "switch back: \(back.reloads) structural sidebar reloads, wanted 1")
         print("sidebar-truth: switch cost reloads=\(there.reloads)/\(back.reloads) reads=\(there.reads)/\(back.reads) (one structural reload reads \(oneReload))")
+    }
+
+    // MARK: - Shelves: Settled is folded, and the headings sink to the bottom
+
+    static func shelvesFoldAndSinkToTheBottom(_ world: World) throws {
+        let inbox = world.inbox
+        try expect(world.supervisor.records[settledAgent]?.settledOverride == .settled,
+                   "setup: the settled agent was adopted settled")
+        try expect(inbox.settledHeaderTitleForQA == "Settled (1)",
+                   "finished work is counted behind a 'Settled' heading — got \(String(describing: inbox.settledHeaderTitleForQA))")
+        try expect(block(world, settledAgent) == nil,
+                   "the Settled shelf opens COLLAPSED: its row must not be drawn until asked for — drawn \(String(describing: block(world, settledAgent)))")
+        // The live list owns the top; the headings meet the bottom of the viewport.
+        let viewport = inbox.tableViewportHeightForQA
+        guard let heading = inbox.tableRowFrameOfShelfHeadingForQA(),
+              let bottom = inbox.lastTableRowMaxYForQA else {
+            throw Failure(message: "the list draws a shelf heading")
+        }
+        try expect(heading.minY > viewport / 2 && abs(bottom - viewport) <= 2,
+                   "the shelf headings must sit at the BOTTOM of the sidebar — first heading at y \(heading.minY), last row ends at \(bottom), viewport \(viewport)")
+        try expect(inbox.clickSettledDisclosureForQA(), "the Settled heading's triangle must be wired")
+        try expect(block(world, settledAgent) == "settled",
+                   "…and opening it draws the settled agent — drawn \(String(describing: block(world, settledAgent)))")
+        try expect(inbox.clickSettledDisclosureForQA(), "and closes again")
     }
 }
