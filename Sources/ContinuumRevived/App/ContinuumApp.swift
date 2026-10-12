@@ -17273,8 +17273,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.onZoneProjectUnavailable = { [weak self] projectId, error in
             self?.reportZoneProjectUnavailable(projectId: projectId, error: error)
         }
-        workspaceRuntime?.onStrandedTilesFound = { [weak self] found in
-            self?.offerStrandedTileRecovery(found)
+        workspaceRuntime?.onStrandedTilesFound = { [weak self] found, leftAlone in
+            self?.offerStrandedTileRecovery(found, leftAlone: leftAlone)
+        }
+        workspaceRuntime?.agentProjectForTile = { [weak self] tileId in
+            guard let self, let agentId = agentSupervisor.agent(forTile: tileId) else { return nil }
+            return agentSupervisor.records[agentId]?.projectId
         }
         workspaceRuntime?.hydrateZoneLayerTiles = { [weak self] canvas, layers, phase in
             self?.hydrateZoneLayerTiles(canvas, layers, phase: phase)
@@ -17290,21 +17294,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Tiles whose zone no registered workspace holds are never repaired
     /// silently (`.plans/67` §4): the mount preserves and classifies them, and
     /// this offers the repair. Nothing moves until the user presses Recover.
-    private func offerStrandedTileRecovery(_ found: [UUID: [Tile]]) {
+    private func offerStrandedTileRecovery(
+        _ found: [UUID: [Tile]], leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]
+    ) {
         let count = found.values.reduce(0) { $0 + $1.count }
-        guard count > 0 else { return }
+        let copies = leftAlone.values.reduce(0) { $0 + $1.count }
+        guard count + copies > 0 else { return }
         let registry = (try? registryStore?.loadOrEmpty()) ?? nil
-        let names = found.keys
-            .compactMap { id in registry?.projects.first(where: { $0.id == id })?.name }
-            .sorted()
-            .map { "\u{201C}\($0)\u{201D}" }
-        let where_ = names.isEmpty ? "" : " in " + ListFormatter.localizedString(byJoining: names)
-        let noun = count == 1 ? "tile is" : "tiles are"
-        setWorkspaceManagementMessage(
-            "\(count) \(noun) hidden\(where_): they belong to a zone that no longer exists. "
-            + "Recover puts them in a new zone, keeping their layout.",
-            kind: .warning,
-            action: (title: "Recover", handler: { [weak self] in self?.recoverStrandedTiles() }))
+        func names(_ ids: [UUID]) -> String {
+            let quoted = Set(ids).compactMap { id in registry?.projects.first(where: { $0.id == id })?.name }
+                .sorted()
+                .map { "\u{201C}\($0)\u{201D}" }
+            return ListFormatter.localizedString(byJoining: quoted)
+        }
+        var sentences: [String] = []
+        if count > 0 {
+            let place = names(Array(found.keys))
+            sentences.append("\(count) \(count == 1 ? "tile is" : "tiles are") hidden\(place.isEmpty ? "" : " in " + place): "
+                + "they belong to a zone that no longer exists. Recover puts them in a new zone, keeping their layout.")
+        }
+        if copies > 0 {
+            let owners = names(leftAlone.values.flatMap(\.elsewhere))
+            sentences.append("\(copies) \(copies == 1 ? "copy" : "copies") of tiles\(owners.isEmpty ? "" : " in " + owners) "
+                + "\(copies == 1 ? "is" : "are") left alone, so no tile or agent is shown twice.")
+        }
+        var action: (title: String, handler: () -> Void)?
+        if count > 0 {
+            action = (title: "Recover", handler: { [weak self] in self?.recoverStrandedTiles() })
+        }
+        setWorkspaceManagementMessage(sentences.joined(separator: " "), kind: .warning, action: action)
     }
 
     private func recoverStrandedTiles() {

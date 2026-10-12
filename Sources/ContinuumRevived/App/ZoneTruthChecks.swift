@@ -438,6 +438,38 @@ enum ZoneTruthChecks {
                                       origin: ZonePoint(x: 600, y: 200), size: ZoneSize(width: 1000, height: 700),
                                       color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "peronsal")],
                 zoneZOrder: [orphanZone], lastActiveZoneId: orphanZone))
+        // Copies (G: harmony's file holds 18 of personal's tiles, same ids and
+        // frames). Cedar (B1) owns three notes, bodies and all; Alder (A1) holds
+        // copies of them. And an agent tile in Alder whose session lives in
+        // Cedar's `.array/`. Recovering any of these into Alder would show one
+        // tile, or one agent, twice: they must be left alone and said so.
+        let personalShaped: [(UUID, TileFrame)] = [
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E401")!, TileFrame(x: 5200, y: 300, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E402")!, TileFrame(x: 5460, y: 300, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E403")!, TileFrame(x: 5200, y: 480, width: 500, height: 200)),
+        ]
+        try append(Fixture.projectB1, personalShaped, zone: orphanZone)   // owner, with note bodies
+        do {
+            let store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+            var canvas = try store.loadCanvas()
+            for (index, row) in personalShaped.enumerated() {
+                var copy = Tile(id: row.0, kind: .note, title: "stranded \(index)", frame: row.1,
+                                zPosition: .fromLegacyRank(60 + index), runtimeRef: nil,
+                                metadata: TileMetadata(noteId: row.0))
+                copy.zoneId = orphanZone
+                canvas.tiles.append(copy)
+            }
+            let agentTile = UUID(uuidString: "00000000-0000-0000-0000-00000067E501")!
+            var agent = Tile(id: agentTile, kind: .managedAgent, title: "agent", frame: TileFrame(x: 5200, y: 800, width: 480, height: 360),
+                             zPosition: .fromLegacyRank(70), runtimeRef: nil, metadata: TileMetadata())
+            agent.zoneId = deadZone
+            canvas.tiles.append(agent)
+            try store.saveCanvas(canvas)
+            try ManagedAgentSessionStore(projectRoot: fixture.projectRoots[Fixture.projectB1]!).upsert(
+                ManagedAgentSessionRecord(tileId: agentTile, agentKind: .shell, status: .running,
+                                          lastSeenAt: Date(timeIntervalSince1970: 1_900_000_000)))
+        }
+        let leftAloneIds = personalShaped.map(\.0) + [UUID(uuidString: "00000000-0000-0000-0000-00000067E501")!]
         let strandedIds = (harmonyShaped + selectusShaped).map(\.0)
         let owner = Dictionary(uniqueKeysWithValues:
             harmonyShaped.map { ($0.0, Fixture.projectA1) } + selectusShaped.map { ($0.0, Fixture.projectA2) })
@@ -448,6 +480,9 @@ enum ZoneTruthChecks {
         try expect(offer.contains("7 tiles are hidden"),
                    "classify: THE reported state. 7 tiles sit in zones no registered document holds and the user "
                    + "is not told; the notification reads \(offer.isEmpty ? "nothing" : offer)")
+        try expect(offer.contains("4 copies of tiles in \u{201C}Cedar\u{201D} are left alone"),
+                   "classify: copies of another project's tiles, and an agent tile whose session is another "
+                   + "project's, must be left alone and said so; the notification reads \(offer)")
         for id in strandedIds + [otherWorkspaceTile] {
             try expect(m.canvas.tileRecord(for: id) == nil, "classify: tile \(id) must not be placed before the user accepts")
         }
@@ -511,6 +546,13 @@ enum ZoneTruthChecks {
         try expect(m.canvas.tileRecord(for: otherWorkspaceTile) == nil
                    && disk(Fixture.projectA1)[otherWorkspaceTile]?.zoneId == Fixture.zoneB1,
                    "recover: a tile of another registered workspace's zone must be left alone")
+        for id in leftAloneIds {
+            try expect(m.canvas.tileRecord(for: id) == nil,
+                       "recover: THE duplicate hazard. Copy \(id) was recovered, so one tile (or agent) now shows twice")
+            try expect(disk(Fixture.projectA1)[id]?.zoneId != nil
+                       && m.runtime.document.zones.allSatisfy { $0.zoneId != disk(Fixture.projectA1)[id]?.zoneId },
+                       "recover: copy \(id) must stay untouched on disk")
+        }
 
         try fixture.remount(crash: false)
         m = try fixture.requireMounted("stranded remount")
