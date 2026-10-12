@@ -369,6 +369,9 @@ enum TileMaterializeChecks {
         }
         restored.onSaveAsMarkdownRequested?(fixture.projectRoots[Fixture.projectA2]!.appendingPathComponent("control.md"))
         try expect(m.canvas.tileView(for: Fixture.noteA2a) is FileTileNSView, "control: the second conversion did not land")
+        // A left workspace is kept warm, its views alive; the control needs the
+        // release path, which retires them.
+        m.runtime.warmSceneCapacity = 0
         try fixture.switchTo(Fixture.workspaceB)
         try expect(closes == 2, "control: switching away retired the converted file view, but the counter reads \(closes), "
                    + "not 2, so it does not observe a retirement")

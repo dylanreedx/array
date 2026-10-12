@@ -209,6 +209,13 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection.appendNotice(id: id, title: title, text: text)
     }
 
+    /// Removes an optimistic prompt the supervisor refused; see
+    /// `AgentTranscriptProjection.withdrawLocalPrompt`.
+    public mutating func withdrawLocalPrompt(id: AgentNodeID) {
+        do { _ = try semanticProjection.withdrawLocalPrompt(id: id) }
+        catch { /* fail closed: an unsent bubble is still followed by its notice */ }
+    }
+
     /// TR-06 — forwards the LOCAL delivery state of a response to an open
     /// request. The projection owns the document; this is a pass-through for the
     /// same reason `appendNotice` is one, and it returns the projection's own

@@ -47,6 +47,10 @@ public enum IntentRefusal: String, Equatable, Sendable {
     /// agent and remains transportable. Keep this deliberately opaque: storage
     /// paths and provider diagnostics never cross the UI-facing refusal seam.
     case invalidAttachment
+    /// The agent's CLI cannot take a prompt right now (signed out, not
+    /// installed, a model it cannot run). The words are the supervisor's
+    /// `sendRefusal(for:)`, the one copy of that rule.
+    case harnessNotReady
 }
 
 /// Provider response shape compiled at the provider-neutral seam. The current
@@ -178,18 +182,26 @@ public struct AgentTileTurnSnapshot: Equatable, Sendable {
     /// all, because `turnStartedAt` is stamped from the provider's first event.
     public var submittedAt: Date?
 
+    /// The supervisor's one turn-presence owner for this agent (phase, clock,
+    /// steps, last tool, error, silence). Every surface that says whether a
+    /// message is being worked on reads this; nil only for a snapshot built
+    /// without a supervisor.
+    public var presence: AgentTurnPresence?
+
     public init(
         state: AgentTileOperationalState,
         capabilities: AgentTurnCapabilities,
         turnStartedAt: Date?,
         submittedAt: Date? = nil,
-        isMirrored: Bool = false
+        isMirrored: Bool = false,
+        presence: AgentTurnPresence? = nil
     ) {
         self.state = state
         self.capabilities = capabilities
         self.turnStartedAt = turnStartedAt
         self.submittedAt = submittedAt
         self.isMirrored = isMirrored
+        self.presence = presence
     }
 
     public var executionState: AgentTurnExecutionState {

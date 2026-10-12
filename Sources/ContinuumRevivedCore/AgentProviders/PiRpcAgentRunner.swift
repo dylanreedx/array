@@ -26,9 +26,11 @@ import Foundation
 public final class PiRpcAgentRunner: @unchecked Sendable {
     public typealias Config = PiAgentRunner.Config
 
-    public enum RunError: Error, CustomStringConvertible {
+    public enum RunError: Error, CustomStringConvertible, AgentRunFailureDescribing {
         case launchFailed(String)
         case commandFailed(command: String, message: String)
+        /// The rpc process exited with a turn or compaction in flight.
+        case exitedMidTurn(operation: String, stderr: String)
 
         public var description: String {
             switch self {
@@ -36,7 +38,26 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
                 return "launchFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
             case .commandFailed(let command, let message):
                 return "commandFailed(\(command): \(SecretRedactor.redactLocalDiagnostics(message)))"
+            case .exitedMidTurn(let operation, let stderr):
+                return "exitedMidTurn(\(operation), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
             }
+        }
+
+        public var userFacingDescription: String {
+            switch self {
+            case .launchFailed(let message):
+                return "Pi could not start: \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .commandFailed(let command, let message):
+                return "Pi refused \(command): \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .exitedMidTurn(let operation, let stderr):
+                let head = "Pi exited without finishing the \(operation)"
+                return AgentFailureText.stderrTail(stderr).map { "\(head): \($0)" } ?? "\(head)."
+            }
+        }
+
+        public var isProcessLoss: Bool {
+            if case .exitedMidTurn = self { return true }
+            return false
         }
     }
 
@@ -58,6 +79,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     private var translator: PiEventTranslator
     private var started = false
     private var stopRequested = false
+    private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
     /// Signalled by the event stream when the in-flight turn reaches
     /// `.turnCompleted`. One at a time -- `run` is documented (like the other
     /// two runners) as blocking until its own turn finishes; the supervisor
@@ -122,16 +144,24 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         translator.onToolExecutionEnded = { [weak self] toolCallId in
             self?.hostToolReturnedOnQueue(toolCallId: toolCallId)
         }
-        transport.onExit = { [weak self] _ in
+        transport.onExit = { [weak self] code in
             self?.queue.sync {
                 guard let self else { return }
+                // S3 (N3): the session process left between turns, unasked.
+                if self.turnSemaphore == nil, self.compactionSemaphore == nil, !self.stopRequested,
+                   let handler = self.idleExitHandler {
+                    let tail = self.transport.stderrTail.summary
+                    DispatchQueue.global(qos: .utility).async { handler(code, tail, false) }
+                }
                 if let semaphore = self.turnSemaphore {
-                    self.turnOutcomeError = RunError.launchFailed("pi rpc process exited mid-turn")
+                    // Let the pipe's last bytes land before reading the tail.
+                    Thread.sleep(forTimeInterval: 0.05)
+                    self.turnOutcomeError = RunError.exitedMidTurn(operation: "turn", stderr: self.transport.stderrTail.text)
                     self.turnSemaphore = nil
                     semaphore.signal()
                 }
                 if let semaphore = self.compactionSemaphore {
-                    self.compactionOutcomeError = RunError.launchFailed("pi rpc process exited during compaction")
+                    self.compactionOutcomeError = RunError.exitedMidTurn(operation: "compaction", stderr: self.transport.stderrTail.text)
                     self.compactionSemaphore = nil
                     semaphore.signal()
                 }
@@ -662,3 +692,11 @@ extension PiRpcAgentRunner: ObservedRunReporting {
 extension PiRpcAgentRunner: HostToolBridging {}
 
 #endif  // os(macOS)
+
+#if os(macOS)
+extension PiRpcAgentRunner: AgentIdleExitReporting {
+    public func observeIdleExit(_ handler: @escaping @Sendable (Int32, String?, Bool) -> Void) {
+        queue.sync { idleExitHandler = handler }
+    }
+}
+#endif

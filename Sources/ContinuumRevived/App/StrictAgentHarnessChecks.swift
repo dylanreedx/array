@@ -172,7 +172,9 @@ func runStrictAgentHarnessChecks() throws {
                "an unresolved harness refused without saying so: \(refusal(unresolved))")
     try expect(refusal(record(.codex, model: "openai-codex/gpt-5.6-sol")).contains("still starting up"),
                "a still-probing harness refused without saying so: \(refusal(record(.codex, model: "openai-codex/gpt-5.6-sol")))")
-    try expect(refusal(record(.pi, model: "google/gemini")).contains("logged out"),
+    // S3: signed out says so AND names the CLI's own login (non-negotiable 3).
+    try expect(refusal(record(.pi, model: "google/gemini")).contains("signed out")
+               && refusal(record(.pi, model: "google/gemini")).contains("/login <provider>"),
                "a logged-out harness refused without saying so: \(refusal(record(.pi, model: "google/gemini")))")
     try expect(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")).contains("cannot run"),
                "a model the harness does not own refused without saying so: \(refusal(record(.claudeCode, model: "openai-codex/gpt-5.6-sol")))")

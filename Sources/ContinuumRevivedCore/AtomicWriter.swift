@@ -166,7 +166,17 @@ public struct AtomicWriter: Sendable {
         try read(at: url, decoder: JSONCodec.makeDecoder())
     }
 
+    /// Every store read through any writer, process-wide. Instrumentation only:
+    /// the workspace-switch witness gates on how many reads a switch makes.
+    public static var readCount: Int {
+        readCountLock.lock(); defer { readCountLock.unlock() }
+        return readCountValue
+    }
+    private static let readCountLock = NSLock()
+    nonisolated(unsafe) private static var readCountValue = 0
+
     public func read<T: Codable>(at url: URL, decoder: JSONDecoder) throws -> T {
+        Self.readCountLock.lock(); Self.readCountValue += 1; Self.readCountLock.unlock()
         if let data = try? Data(contentsOf: url),
            let value = try? decoder.decode(T.self, from: data) {
             return value

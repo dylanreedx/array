@@ -709,7 +709,7 @@ func runWorkspaceAPIDelegationChecks() async throws {
         dispatch("agent.message", ["agentId": childIdString, "text": "MSG-NOTREADY-91: while the catalogue is out",
                                    "idempotencyKey": "m5"]),
         .unsupported, "message while the catalogue is not ready")
-    try expect(notReady.message.lowercased().contains("logged out"),
+    try expect(notReady.message.lowercased().contains("signed out"),
                "the unsupported answer carries the send path's own reason: \(notReady.message)")
     try expect(occurrences("MSG-NOTREADY-91", in: childPromptLog()) == 0,
                "a catalogue refusal delivers nothing")

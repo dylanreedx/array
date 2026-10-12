@@ -131,6 +131,17 @@ public struct ClaudeEventTranslator {
                     observedAt: now()
                 ))]
             }
+            if subtype == "api_retry" {
+                // S3: a request claude is retrying is the turn's status, not
+                // silence ("Retrying (2/10) in 3s").
+                let attempt = Self.intValue(object["attempt"]) ?? 1
+                let maximum = Self.intValue(object["max_retries"]) ?? Self.intValue(object["maxRetries"])
+                let delayMs = Self.doubleValue(object["retry_delay_ms"]) ?? Self.doubleValue(object["retryDelayMs"])
+                onRuntimeObservation?(.providerRetry(AgentTurnPresence.Retry(
+                    attempt: attempt, maxAttempts: maximum,
+                    delay: delayMs.map { $0 / 1000 }, observedAt: now())))
+                return []
+            }
             guard subtype == "init" else { return [] }
             if let id = object["session_id"] as? String {
                 threadId = id
@@ -650,15 +661,25 @@ public struct ClaudeEventTranslator {
             }
         }
 
-        // errorMessage is the SUBTYPE ("error_max_turns"), never the result
-        // body — the body can quote tool output (I5). Launch/auth failures
-        // don't reach here at all: the runner surfaces those from exit+stderr.
+        // errorMessage is the SUBTYPE ("error_max_turns") unless the result
+        // body is the API's own account/transport failure ("API Error: 401
+        // …", "Please run /login"): a body that could quote tool output never
+        // crosses (I5, `AgentFailureText.providerMessage`). A persistent
+        // process reports an expired login exactly here — as an `is_error`
+        // result whose subtype is "success", which used to render as the word
+        // "success" in a red row.
         let subtype = object["subtype"] as? String
+        var errorMessage: String?
+        if isError {
+            errorMessage = AgentFailureText.providerMessage(object["result"] as? String)
+                ?? (subtype == "success" || subtype == nil
+                    ? "Claude Code reported an error without details." : subtype)
+        }
         events.append(.turnCompleted(
             threadId: threadId,
             turnId: currentTurnId,
             outcome: isError ? .failed : .completed,
-            errorMessage: isError ? subtype : nil
+            errorMessage: errorMessage
         ))
         events.append(.sessionStateChanged(.ready))
         return events

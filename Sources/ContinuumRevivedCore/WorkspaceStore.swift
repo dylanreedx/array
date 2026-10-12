@@ -81,6 +81,38 @@ public struct WorkspaceStore: Sendable {
         }
     }
 
+    /// Where a deleted workspace's directory goes: `workspaces/.trash/`, which
+    /// no workspace id can name. Recoverable by moving it back.
+    public var trashDirectory: URL {
+        layout.workspacesDirectory.appendingPathComponent(".trash", isDirectory: true)
+    }
+
+    /// Delete the workspace's document recoverably: its whole directory —
+    /// document AND the AtomicWriter backups inside it — moves into
+    /// `trashDirectory` as `<id>-<UTC timestamp>`. Removing it outright, as
+    /// `deleteDocument` does, destroyed the only copies of its zones' names,
+    /// colours and geometry. Returns the trashed directory.
+    @discardableResult
+    public func moveDocumentToTrash(now: Date = Date()) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        var destination = trashDirectory.appendingPathComponent(
+            "\(layout.workspaceId.uuidString)-\(formatter.string(from: now))", isDirectory: true)
+        var suffix = 1
+        while FileManager.default.fileExists(atPath: destination.path) {
+            suffix += 1
+            destination = trashDirectory.appendingPathComponent(
+                "\(layout.workspaceId.uuidString)-\(formatter.string(from: now))-\(suffix)", isDirectory: true)
+        }
+        try StoreFileWriter.perform(.remove, at: layout.workspaceDirectory) {
+            try FileManager.default.createDirectory(at: trashDirectory, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: layout.workspaceDirectory, to: destination)
+        }
+        return destination
+    }
+
     public func deleteDocument() throws {
         try StoreFileWriter.perform(.remove, at: layout.workspaceDirectory) {
             try FileManager.default.removeItem(at: layout.workspaceDirectory)

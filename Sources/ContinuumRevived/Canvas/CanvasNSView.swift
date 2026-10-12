@@ -2190,7 +2190,9 @@ final class CanvasNSView: NSView, TokenThemed {
     // MARK: - Tile management
 
     func agentStatus(for tileId: UUID) -> AgentStatus? {
-        tileViews[tileId]?.agentStatus
+        // The installed scene, not the flat boot map: a layer tile's live status
+        // was invisible here, so review flyback and focus pairing read it as stale.
+        tileView(for: tileId)?.agentStatus
     }
 
     func refreshRunArtifactsTiles() {
@@ -2890,7 +2892,7 @@ final class CanvasNSView: NSView, TokenThemed {
         if previousTile.title != tile.title || previousTile.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
         }
-        if notifyChange { delegate?.canvasDidChange(self) }
+        if notifyChange { delegate?.canvasDidChange(self, tileId: tile.id) }
     }
 
     /// UserDefaults the drag-snap toggle resolves from (`DragMagnetizeConfig`).
@@ -3129,7 +3131,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)
         updateDocumentRelationshipOverlay()
-        delegate?.canvasDidChange(self)
+        delegate?.canvasDidChange(self, tileId: tileId)
     }
 
     /// Tile currently wearing the marching-ants focus border. Exactly one tile
@@ -3650,7 +3652,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvasState.lastActiveTileId = tileId
         if alreadyFrontmost {
             if previousActiveTileId != tileId {
-                delegate?.canvasDidChange(self)
+                delegate?.canvasDidChange(self, tileId: tileId)
             }
             return
         }
@@ -3660,7 +3662,7 @@ final class CanvasNSView: NSView, TokenThemed {
             tileViews[tile.id]?.tile = tile
         }
         reorderTileSubviewsByZIndex()
-        delegate?.canvasDidChange(self)
+        delegate?.canvasDidChange(self, tileId: tileId)
     }
 
     /// QA: every camera apply, whoever asked. With the driver in place, N input
@@ -5557,6 +5559,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func layoutAllTiles(invalidateTileDisplay: Bool = true, onlyChangedTiles: Bool = false) {
+        WorkspaceSwitchCounters.layoutPasses += 1
         layoutZoneChromeViews()
         // Gesture transactions restore a complete baseline-relative scene, but
         // only changed occurrences need AppKit layout or surface invalidation.
@@ -6393,6 +6396,28 @@ final class CanvasNSView: NSView, TokenThemed {
         // back into this canvas. Pruning here is what stops a workspace switch from
         // accumulating megabytes of pixels for tiles nobody can reach.
         tileSurfaceStore.prune(keeping: Set(tileViewsInVisualOrder.map { $0.tile.id }))
+    }
+
+    /// Take every installed layer off the canvas WITHOUT retiring its views, and
+    /// hand the layers back. A warm workspace (`WorkspaceRuntime`) keeps them: the
+    /// views leave the tree and the focus broker and give up their surface
+    /// residency, but are not told they left the scene, so a terminal keeps its
+    /// surface, a web view its page and an agent tile its subscription. `setZones`
+    /// re-adopts them; the runtime retires them if it evicts the workspace.
+    func parkZoneLayers() -> [ZoneLayer] {
+        let parked = zoneLayers
+        for layer in parked {
+            for view in layer.tileViews.values {
+                focusBroker?.unregister(view.focusSurfaceID)
+                releaseSurfaceResidency(of: view)
+                view.removeFromSuperview()
+            }
+        }
+        zoneLayers = []
+        zoneLayerOrder = []
+        activeProjectZoneId = nil
+        clearFocusBorder()
+        return parked
     }
 
     enum FlatSceneError: Error, CustomStringConvertible {
@@ -12697,10 +12722,14 @@ final class CanvasNSView: NSView, TokenThemed {
 @MainActor
 protocol CanvasNSViewDelegate: AnyObject {
     func canvasDidChange(_ canvas: CanvasNSView)
+    /// A change to ONE tile's record. The tile's own project holds it, which is
+    /// not necessarily the armed zone's.
+    func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID)
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView)
 }
 
 extension CanvasNSViewDelegate {
+    func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID) { canvasDidChange(canvas) }
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {}
 }
 

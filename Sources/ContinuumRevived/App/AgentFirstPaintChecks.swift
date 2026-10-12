@@ -553,29 +553,55 @@ enum AgentFirstPaintChecks {
 
     /// The spawn window is a real state, with the word and the clock to match.
     ///
-    /// Pure over the presenter, because the interesting failure is not "the
-    /// process was slow" but "the app had nothing to say about it".
+    /// Driven through production: a supervisor, `send` (the same `sendPrepared`
+    /// path `accept(.send)` takes once its capability gate passes), and a runner
+    /// that emits the REAL codex resume prefix — the synthetic
+    /// `thread/started` line fed through `CodexAppServerEventTranslator`, i.e.
+    /// session READY before any turn — and then holds. This used to hand-build
+    /// an `AgentTileTurnSnapshot(state: .starting, …)`, so it stayed green
+    /// while that very prefix painted Idle with Send disabled (`.plans/70` S3).
     @MainActor
     static func checkSpawnWindowIsPresentable() throws {
-        let now = Date(timeIntervalSince1970: 1_900_000_000)
-        let spawning = AgentTileTurnSnapshot(
-            state: .starting,
-            capabilities: .sendStop(canSend: false, canStop: true),
-            turnStartedAt: nil,
-            submittedAt: now.addingTimeInterval(-4)
-        )
+        var translator = CodexAppServerEventTranslator()
+        let prefix = translator.translate(
+            line: #"{"method":"thread/started","params":{"thread":{"id":"first-paint-thread"}}}"#)
+        guard prefix.contains(.sessionStateChanged(.ready)) else {
+            throw fail("first-paint: the codex resume prefix no longer reports session ready (\(prefix)) — this witness would not cross the window it guards")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("first-paint-spawn-window-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = ScriptedAgentRunner(script: prefix, holdUntilStopped: true)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root), makeRunner: { _ in runner })
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        defer { supervisor.stopAll() }
+        guard supervisor.send("spawn window", to: id) else {
+            throw fail("first-paint: the spawn-window prompt was refused")
+        }
+        // Wait until the prefix has been delivered: the runner ran it and the
+        // main queue has drained past its deliveries.
+        let deadline = Date().addingTimeInterval(5)
+        while runner.runCount == 0 && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        for _ in 0..<20 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        guard let spawning = supervisor.turnSnapshot(for: id), let submittedAt = spawning.submittedAt else {
+            throw fail("first-paint: after the provider's session-ready signal the snapshot carries no submission (\(String(describing: supervisor.turnSnapshot(for: id)))) — the window has no clock")
+        }
         let presented = AgentTileStatePresenter.present(
             name: "Spawning", snapshot: spawning, branchContext: nil,
-            startedAt: nil, now: now
+            startedAt: nil, now: submittedAt.addingTimeInterval(4)
         )
-        guard presented.stateLabel == AgentStatusVocabulary.starting else {
-            throw fail("first-paint: the spawn window reads \(presented.stateLabel), not \(AgentStatusVocabulary.starting) — this is the window that used to say idle")
+        guard spawning.state == .starting, presented.stateLabel == AgentStatusVocabulary.starting else {
+            throw fail("first-paint: after the provider's session-ready signal the spawn window reads \(spawning.state) / '\(presented.stateLabel)', not \(AgentStatusVocabulary.starting) — this is the window that used to say Idle")
         }
         guard presented.elapsedSeconds == 4 else {
             throw fail("first-paint: the spawn window measures \(String(describing: presented.elapsedSeconds))s, expected 4 from the submission — an unclocked spawn is indistinguishable from a hung one")
         }
-        guard presented.status == .working else {
-            throw fail("first-paint: the spawn window presents status \(presented.status), which paints no motion while a process is starting")
+        guard presented.status == .working, spawning.capabilities.canStop, !spawning.capabilities.canSend else {
+            throw fail("first-paint: the spawn window presents status \(presented.status) (stop \(spawning.capabilities.canStop), send \(spawning.capabilities.canSend)) — it must read as work in progress, stoppable, not idle")
         }
     }
 }

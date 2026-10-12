@@ -27,7 +27,24 @@ import Foundation
 //   PLAIN       0.6 s of text generation with no tool boundary
 //   LONG        up to 10 s of text generation with no tool boundary, for an
 //               interrupt — a steer sent meanwhile stays held by Array
-//   CRASH       exits 3 mid-turn without a result
+//   CRASH       writes a diagnostic line to stderr, then exits 3 mid-turn
+//               without a result
+//   VANISH      exits 0 mid-turn without a result and without a word
+//   RETRY       announces a provider retry (attempt 2 of 5), holds 1.5 s,
+//               then replies (pi also announces the retry's end)
+//   TOOLFAIL    a tool call that fails at once, then 1.5 s more of the turn
+//               before a normal reply (the agent works past a failed step)
+//   EXITIDLE    (claude, pi) a normal reply, then the session process exits
+//               on its own 0.3 s after the turn, writing to stderr
+//   APIERROR    the provider's own in-band failure for an expired login
+//               (claude: an `is_error` result whose subtype says "success";
+//               codex: turn/completed failed with an error message; pi: a
+//               turn_end whose stopReason is "error" with an errorMessage)
+//   DELAYSTART  (combines with any shape) holds ~1.2 s before the provider's
+//               own turn-start signal, after its session-ready signal, so a
+//               check can sample the spawn window production really crosses
+//               (codex: thread/started before turn/started; pi: the session
+//               header before agent_start; claude: before system/init)
 //   anything else: a short text reply
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
 // CLI does for a conversation that does not exist yet.
@@ -115,8 +132,26 @@ def record(line):
     with open(os.path.join(HERE, "stdin.jsonl"), "a") as f:
         f.write(line.rstrip("\n") + "\n")
 
+def crash():
+    sys.stderr.write("fatal: lost connection to the model provider (ECONNRESET)\n")
+    sys.stderr.flush()
+    time.sleep(0.05)
+    os._exit(3)
+
+def exit_soon():
+    def leave():
+        time.sleep(0.3)
+        sys.stderr.write("fatal: session store is unreadable\n")
+        sys.stderr.flush()
+        os._exit(2)
+    threading.Thread(target=leave, daemon=True).start()
+
+def delay_start(text):
+    if "DELAYSTART" in text:
+        time.sleep(1.2)
+
 def shape(text):
-    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG"):
+    for word in ("TOOLFAIL", "TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE"):
         if word in text:
             return word
     return "TEXT"
@@ -192,11 +227,32 @@ def say(text):
 
 def run_turn(msg):
     text = text_of(msg)
+    delay_start(text)
     out({"type": "system", "subtype": "init", "session_id": SID, "cwd": os.getcwd(), "model": "fake-claude", "slash_commands": ["compact"]})
     replay(msg)
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fail", "name": "Bash", "input": {"command": "false"}}]}, "parent_tool_use_id": None, "session_id": SID})
+        out({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fail", "is_error": True, "content": "exit 1"}]}, "parent_tool_use_id": None, "session_id": SID})
+        time.sleep(1.5)
+    if kind == "RETRY":
+        out({"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 5, "retry_delay_ms": 3000,
+             "error_status": 529, "error": "overloaded_error", "session_id": SID})
+        time.sleep(1.5)
+    if kind == "EXITIDLE":
+        say("ok")
+        result()
+        exit_soon()
+        return
+    if kind == "APIERROR":
+        out({"type": "result", "subtype": "success", "is_error": True, "session_id": SID,
+             "result": "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+             "usage": {"input_tokens": 0, "output_tokens": 0}})
+        return
     if text.startswith("/compact"):
         out({"type": "system", "subtype": "compact_boundary", "session_id": SID, "compact_metadata": {"trigger": "manual", "pre_tokens": 1000, "post_tokens": 100}})
         result()
@@ -274,10 +330,27 @@ def reply(obj, result=None, error=None):
         out({"id": obj["id"], "result": result or {}})
 
 def run_turn(turn_id, text):
+    delay_start(text)
     out({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": turn_id}}})
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fail", "type": "commandExecution", "command": "false"}}})
+        out({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fail", "type": "commandExecution", "status": "failed", "exitCode": 1}}})
+        time.sleep(1.5)
+    if kind == "RETRY":
+        out({"method": "error", "params": {"threadId": THREAD, "turnId": turn_id,
+             "error": {"message": "Reconnecting... 2/5"}, "willRetry": True}})
+        time.sleep(1.5)
+    if kind == "APIERROR":
+        with lock:
+            state["turn"] = None
+        out({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": turn_id, "status": "failed",
+             "error": {"message": "unexpected status 401 Unauthorized: your access token has expired", "codexErrorInfo": "unauthorized"}}}})
+        return
     status = "completed"
     if kind in ("TOOL", "SLOW"):
         interrupted.clear()
@@ -356,7 +429,7 @@ time.sleep(0.2)
 """#
 
     private static let piSource = #"""
-state = {"active": False, "steering": []}
+state = {"active": False, "steering": [], "announced": False}
 lock = threading.Lock()
 steer_arrived = threading.Event()
 aborted = threading.Event()
@@ -385,11 +458,35 @@ def finish(reason):
     idle.set()
 
 def run_turn(text):
+    delay_start(text)
     out({"type": "agent_start"})
     out({"type": "turn_start"})
     kind = shape(text)
     if kind == "CRASH":
-        os._exit(3)
+        crash()
+    if kind == "VANISH":
+        os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"type": "tool_execution_start", "toolCallId": "tc-fail", "toolName": "bash", "args": {"command": "false"}})
+        out({"type": "tool_execution_end", "toolCallId": "tc-fail", "toolName": "bash", "isError": True})
+        time.sleep(1.5)
+    if kind == "RETRY":
+        out({"type": "auto_retry_start", "attempt": 2, "maxAttempts": 5, "delayMs": 3000, "errorMessage": "overloaded"})
+        time.sleep(1.5)
+        out({"type": "auto_retry_end", "success": True, "attempt": 2})
+    if kind == "EXITIDLE":
+        finish("stop")
+        exit_soon()
+        return
+    if kind == "APIERROR":
+        out({"type": "turn_end", "message": {"role": "assistant", "stopReason": "error",
+             "errorMessage": "401 Unauthorized: OAuth token expired for provider openai-codex"}})
+        out({"type": "agent_end", "willRetry": False})
+        with lock:
+            state["active"] = False
+        out({"type": "agent_settled"})
+        idle.set()
+        return
     if kind in ("TOOL", "SLOW"):
         out({"type": "tool_execution_start", "toolCallId": "tc-fake", "toolName": "bash", "args": {"command": "true"}})
         deadline = time.time() + (10 if kind == "SLOW" else 1.5)
@@ -426,7 +523,13 @@ for line in sys.stdin:
     kind = obj.get("type")
     if kind == "prompt":
         with lock:
+            announce = not state["announced"]
+            state["announced"] = True
             state["active"] = True
+        if announce:
+            # pi's session header: the session-ready signal production reads
+            # before the first agent_start.
+            out({"type": "session", "id": "pi-fake-session", "cwd": os.getcwd()})
         idle.clear()
         aborted.clear()
         steer_arrived.clear()

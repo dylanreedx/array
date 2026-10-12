@@ -443,6 +443,7 @@ class TileNSView: NSView, TokenThemed {
         self.tile = tile
         self.agentStatus = nil
         super.init(frame: .zero)
+        WorkspaceSwitchCounters.tileViewsBuilt += 1
         wantsLayer = true
         applyTokens()
         layer?.borderWidth = 1

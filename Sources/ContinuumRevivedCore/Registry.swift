@@ -93,8 +93,11 @@ public struct Registry: Codable, Equatable, Sendable {
         return true
     }
 
+    /// `selectForLaunch: false` leaves `lastActiveWorkspaceId` alone, for a caller
+    /// that selects the workspace only once it has actually been mounted —
+    /// otherwise a failed switch into the new workspace still relaunches into it.
     @discardableResult
-    public mutating func createWorkspace(id: UUID = UUID(), name: String, now: Date) -> WorkspaceEntry {
+    public mutating func createWorkspace(id: UUID = UUID(), name: String, now: Date, selectForLaunch: Bool = true) -> WorkspaceEntry {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let entry = WorkspaceEntry(
             id: id,
@@ -104,7 +107,7 @@ public struct Registry: Codable, Equatable, Sendable {
             updatedAt: now
         )
         workspaces.append(entry)
-        lastActiveWorkspaceId = id
+        if selectForLaunch { lastActiveWorkspaceId = id }
         return entry
     }
 
@@ -142,33 +145,91 @@ public struct Registry: Codable, Equatable, Sendable {
         }
     }
 
+    /// The project's owning workspace. Ownership is recorded ONCE: the project's
+    /// `workspaceId` is the record, and `WorkspaceEntry.projectIds` is its
+    /// derived index (`normalizeOwnership()`). A disagreement between the two
+    /// is never an error here — the declaration wins — because a throw at this
+    /// point aborted every workspace switch and delete that touched the project
+    /// (four of seven projects in the 2026-09-27 field registry). Only an
+    /// unregistered project throws.
     public func exclusiveWorkspaceOwner(of projectId: UUID) throws -> UUID? {
         guard let project = projects.first(where: { $0.id == projectId }) else {
             throw ProjectWorkspaceOwnershipError.unknownProject(projectId)
         }
-        let memberships = workspaces
-            .filter { Set($0.projectIds).contains(projectId) }
-            .map(\.id)
+        return Self.resolvedOwner(of: project, in: workspaces, lastActiveWorkspaceId: lastActiveWorkspaceId)
+    }
 
-        // `workspaceId` is the durable ownership declaration. Older Array
-        // versions could leave a second workspace membership behind; that stale
-        // reference must remain visible for explicit repair, but it must not make
-        // the declared owner's workspace impossible to mount at launch.
-        if let declared = project.workspaceId {
-            if let membership = memberships.first, !memberships.contains(declared) {
-                throw ProjectWorkspaceOwnershipError.ownerMismatch(
-                    projectId: projectId,
-                    declaredWorkspaceId: declared,
-                    membershipWorkspaceId: membership)
-            }
-            return declared
-        }
-        if memberships.count > 1 {
-            throw ProjectWorkspaceOwnershipError.duplicateMembership(
-                projectId: projectId,
-                workspaceIds: memberships.sorted { $0.uuidString < $1.uuidString })
-        }
+    /// One rule for "who owns this project", shared by the read above and the
+    /// migration below so they can never disagree:
+    ///  1. a declaration naming a registered workspace wins, whatever lists it;
+    ///  2. otherwise a legacy membership is adopted — the last-active workspace
+    ///     if it is one of them, else the first in registry order;
+    ///  3. otherwise the project is unowned.
+    private static func resolvedOwner(
+        of project: ProjectEntry,
+        in workspaces: [WorkspaceEntry],
+        lastActiveWorkspaceId: UUID?
+    ) -> UUID? {
+        if let declared = project.workspaceId { return declared }
+        let memberships = workspaces.filter { $0.projectIds.contains(project.id) }.map(\.id)
+        if let lastActiveWorkspaceId, memberships.contains(lastActiveWorkspaceId) { return lastActiveWorkspaceId }
         return memberships.first
+    }
+
+    /// Make `workspaceId` the single ownership record and rebuild every
+    /// workspace's `projectIds` from it. Run on every decode, so a registry from
+    /// any earlier version mounts without an ownership throw.
+    ///
+    /// Lossless for ownership: every project that was owned through either field
+    /// is still owned afterwards — an undeclared project adopts its membership,
+    /// and a declared one keeps its declaration. What goes is only a membership
+    /// that CONTRADICTS a declaration (or a second membership of one project);
+    /// those were the stale references the ownership throw existed to report.
+    /// Their zones stay in the workspace documents, unmounted, exactly as before.
+    /// `projectIds` keeps its existing order; newly listed projects append in
+    /// registry order. Idempotent.
+    public mutating func normalizeOwnership() {
+        let snapshot = workspaces
+        for index in projects.indices {
+            projects[index].workspaceId = Self.resolvedOwner(
+                of: projects[index], in: snapshot, lastActiveWorkspaceId: lastActiveWorkspaceId)
+        }
+        for index in workspaces.indices {
+            let workspaceId = workspaces[index].id
+            let owned = Set(projects.filter { $0.workspaceId == workspaceId }.map(\.id))
+            var seen = Set<UUID>()
+            var listed = workspaces[index].projectIds.filter { owned.contains($0) && seen.insert($0).inserted }
+            for project in projects where project.workspaceId == workspaceId && !seen.contains(project.id) {
+                listed.append(project.id)
+                seen.insert(project.id)
+            }
+            workspaces[index].projectIds = listed
+        }
+    }
+
+    /// Workspaces in the order a replacement should be tried: most recently
+    /// mounted first (`lastActiveAt`), never-mounted ones after in registry order.
+    public func workspacesByRecency(excluding excluded: UUID? = nil) -> [WorkspaceEntry] {
+        workspaces.enumerated()
+            .filter { $0.element.id != excluded }
+            .sorted { lhs, rhs in
+                switch (lhs.element.lastActiveAt, rhs.element.lastActiveAt) {
+                case let (l?, r?) where l != r: return l > r
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return lhs.offset < rhs.offset
+                }
+            }
+            .map(\.element)
+    }
+
+    /// Stamp `workspaceId` as the one just mounted: the launch target and the
+    /// head of the recency order a delete falls back through.
+    public mutating func markWorkspaceMounted(_ workspaceId: UUID, now: Date) {
+        lastActiveWorkspaceId = workspaceId
+        if let index = workspaces.firstIndex(where: { $0.id == workspaceId }) {
+            workspaces[index].lastActiveAt = now
+        }
     }
 
     /// Add an unowned project to a workspace. A project already owned elsewhere
@@ -235,15 +296,21 @@ public struct Registry: Codable, Equatable, Sendable {
     public mutating func deleteWorkspace(id: UUID, replacementId: UUID? = nil, now: Date) -> Bool {
         guard let idx = workspaces.firstIndex(where: { $0.id == id }) else { return false }
         guard workspaces.count > 1 else { return false }
+        // The most recently used survivor, not the first in registry order: the
+        // one the user would have gone back to.
         let replacement = replacementId.flatMap { wanted in workspaces.contains(where: { $0.id == wanted && $0.id != id }) ? wanted : nil }
-            ?? workspaces.first(where: { $0.id != id })?.id
+            ?? workspacesByRecency(excluding: id).first?.id
         guard let replacement else { return false }
 
-        let removedProjectIds = Set(workspaces[idx].projectIds)
         workspaces.remove(at: idx)
-        for projectIndex in projects.indices
-        where projects[projectIndex].workspaceId == id || removedProjectIds.contains(projects[projectIndex].id) {
+        // Only the projects this workspace OWNS lose their owner. A project that
+        // merely carried a stale membership here belongs to another workspace,
+        // and clearing it made that workspace's zones for it foreign — they
+        // vanished from a workspace the user never touched.
+        var removedProjectIds = Set<UUID>()
+        for projectIndex in projects.indices where projects[projectIndex].workspaceId == id {
             projects[projectIndex].workspaceId = nil
+            removedProjectIds.insert(projects[projectIndex].id)
         }
         let replacementProjectIds = workspaces.first(where: { $0.id == replacement })?.projectIds ?? []
         for workspaceIdx in workspaces.indices where workspaces[workspaceIdx].id == replacement {
@@ -271,6 +338,7 @@ public struct Registry: Codable, Equatable, Sendable {
         projects = try container.decode([ProjectEntry].self, forKey: .projects)
         settings = try container.decode(RegistrySettings.self, forKey: .settings)
         pairedDevices = try container.decodeIfPresent([PairedDeviceEntry].self, forKey: .pairedDevices) ?? []
+        normalizeOwnership()
     }
 }
 
@@ -322,19 +390,25 @@ public struct WorkspaceEntry: Codable, Equatable, Sendable {
     public var projectIds: [UUID]
     public let createdAt: Date
     public var updatedAt: Date
+    /// When this workspace was last mounted. Orders the fallback when the
+    /// current workspace is deleted; nil for one never mounted since this field
+    /// existed.
+    public var lastActiveAt: Date?
 
     public init(
         id: UUID,
         name: String,
         projectIds: [UUID],
         createdAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        lastActiveAt: Date? = nil
     ) {
         self.id = id
         self.name = name
         self.projectIds = projectIds
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.lastActiveAt = lastActiveAt
     }
 }
 

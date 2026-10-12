@@ -89,4 +89,12 @@ project's `.array/`, or the default tmux socket; commits as Dylan, subject
   recency, language-server release.
 - Merged head verified: S1/S2/S7 legs green. Terminal legs need the display awake
   (`caffeinate -u`); a locked screen reads as "terminal surface missing".
-- S3, S4, S5 in progress; S6 (composer) and S8 (transcript) wait on S3.
+- S3 (presence), S4 (sidebar truth), S5 (warm switch, delete/create/rename,
+  registry ownership once), S1b, S2b merged; agent-status check fixed (it never
+  seeded the registry the sidebar inputs now read).
+- Full matrix on a5cfba13: 268 legs, 10 KNOWN-RED as before, 6 regressed:
+  agent-status (fixed), zone-presentation (warm re-attach header), browser-lru
+  (budget ignores warm scenes), zone-tile-detach-sweep (warm contract),
+  ui-geometry (failed tool vs failed turn), agent-supervisor (branch chip).
+  Sent back to S5/S3. Inventory regeneration pending a clean run.
+- In progress: S4b (sidebar layout), S6 (composer), S8 (transcript C).

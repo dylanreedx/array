@@ -40,6 +40,10 @@ public struct AgentTranscriptProjection: Sendable {
     private var referencedAgentIDs = Set<UUID>()
     private var localSequence = 0
     private var runtimeErrorSequence = 0
+    /// The runtime error this turn already rendered. A runner that throws
+    /// delivers `.runtimeError` and then a closing `.turnCompleted(.failed)`
+    /// carrying the same words; that is one failure and gets one row.
+    private var renderedRuntimeErrorMessage: String?
     private let markupParser = MarkdownAgentMarkupParser()
     private let monotonicNow: @Sendable () -> TimeInterval
 
@@ -130,6 +134,7 @@ public struct AgentTranscriptProjection: Sendable {
             return closeStreamingRun()
 
         case .turnStarted(let tid, _) where tid == threadId:
+            renderedRuntimeErrorMessage = nil
             return closeStreamingRun()
 
         case .contentDelta(let tid, let turnID, let kind, let delta) where tid == threadId:
@@ -231,14 +236,16 @@ public struct AgentTranscriptProjection: Sendable {
                 result.append(.finishEntry(id: entryID))
             }
             activeItemIDs.removeAll()
-            if let errorMessage, !errorMessage.isEmpty {
+            if let errorMessage, !errorMessage.isEmpty, errorMessage != renderedRuntimeErrorMessage {
                 result += errorMutations(message: errorMessage, provenanceID: turnID, suffix: "turn-error")
             }
+            renderedRuntimeErrorMessage = nil
             return result
 
         case .runtimeError(let tid, let message) where tid == nil || tid == threadId:
             var result = closeStreamingRun()
             runtimeErrorSequence += 1
+            renderedRuntimeErrorMessage = message
             result += errorMutations(message: message, provenanceID: tid, suffix: "runtime-error:\(runtimeErrorSequence)")
             return result
 
@@ -482,6 +489,17 @@ public struct AgentTranscriptProjection: Sendable {
         text: String
     ) throws -> [AgentDocumentPatch] {
         try appendUserPrompt(id: id, prompt: AgentPrompt(text))
+    }
+
+    /// Takes back a locally echoed prompt that was never sent (the supervisor
+    /// refused it). Only a `.localPrompt` entry can be withdrawn; provider
+    /// history is never edited here.
+    @discardableResult
+    public mutating func withdrawLocalPrompt(id: AgentNodeID) throws -> [AgentDocumentPatch] {
+        guard let entry = document.entries.first(where: { $0.id == id }),
+              case .localPrompt = entry.provenance else { return [] }
+        compatibilityIDs[id] = nil
+        return try applyReturningPatches([.removeEntry(id: id)])
     }
 
     /// Adds an idempotent Continuum-authored notice. The heading child keeps

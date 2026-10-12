@@ -698,6 +698,12 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# Confidence pass S3: one owner for turn presence (`AgentTurnPresence`). Drives
+# the production claude, codex and pi runners against their reactive fakes with
+# a real tile attached, and asserts every surface reads Starting from Return to
+# the provider's own turn start — through codex's resume prefix and pi's session
+# header, which used to paint Idle with Send disabled.
+run_app_check .build/debug/Array --agent-presence-check
 # TR-06: responding to a request the provider is HOLDING. Drives the real
 # `wireManagedAgentTile` and asserts the response transport is bound by
 # production — the seam sat declared-and-unbound through every release of the
@@ -838,10 +844,31 @@ run_app_check .build/debug/Array --tile-materialize-check
 # project A1 armed, A2's note and file-tree saves, its tile closes (canvas.json,
 # stores, surface), a shell exit's placeholder and Restart, a status write and a
 # link opened beside its tile all land in A2; switching away and quitting leave
-# no Ghostty surface alive at ghostty_app_free.
+# no Ghostty surface alive at ghostty_app_free. Spawner callbacks survive arming
+# another project; a tile record change, a browser profile deletion, the quit
+# sweep, a ticket dispatch, focus pairing and review flyback all act in A2; a
+# surface a teardown missed is freed by Ghostty shutdown instead of trapping.
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
+# .plans/70 S5: a workspace switch is instant, certain and cheap to undo, through
+# mountWorkspaceSceneAtBoot and launch's own project factory. Counted across each
+# switch: A→B→A re-attaches a warm scene (no tile view built, the same terminal
+# runtimes and web view, descriptors untouched), no synchronous tmux round trip
+# on the main thread, one sidebar reload, the camera where it was left, nothing
+# re-planned after the switch returns. A released workspace keeps its terminal
+# descriptors; a nested switch is refused; a held project lock fails with the
+# project's name and no modal; a failed registry commit releases every
+# acquisition and lock; an editor that never answers costs a bounded wait; the
+# titlebar names the target before the work and reverts on failure.
+run_app_check .build/debug/Array --workspace-switch-confidence-check
+# .plans/70 S5: delete, create and rename. ⌘K "Rename X…" asks for the name;
+# deleting the current workspace lands on the most recently used one that
+# mounts (a fresh empty one if none does) and moves its directory to the
+# workspace trash byte for byte; a deleted warm workspace's controllers and
+# locks are released; a created workspace becomes the launch workspace only
+# once mounted; a create whose registry write fails leaves no orphan document.
+run_app_check .build/debug/Array --workspace-lifecycle-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
 # production dispatch entry. Same-named file in two checkouts, dirty draft
 # preserved, world frames at a non-zero zone origin, partial relationship
@@ -888,6 +915,12 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # asset contract) is exhaustive and fast, and a long process-heavy binary is a
 # bad place to bisect it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
+# .plans/70 S5: project ownership is recorded once. Both field registry shapes
+# (2026-10-05 consistent, 2026-09-27 four-of-seven disagreeing) decode through
+# RegistryStore without an ownership throw and migrate losslessly and
+# idempotently; deleting a workspace never un-owns another workspace's project
+# and falls back to the most recently mounted survivor.
+run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 # The RENDERER, in pixels, in an offscreen fixture window: it sits below
 # worldPlane and hit-transparent, base+image are screen-fixed while the grid is
 # world-aligned (sampled before and after a pan into negative world space), a

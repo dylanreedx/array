@@ -125,6 +125,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// attachment awaits so the transcript can respond in the submit frame.
     var onSubmissionStarted: ((AgentPrompt) -> Void)?
     var onSubmissionFinished: ((Bool) -> Void)?
+    /// Why the sink refused the submission, delivered just before
+    /// `onSubmissionFinished(false)`. Absent when the submission never reached
+    /// the sink at all (a lease or binding failure).
+    var onSubmissionRefused: ((IntentRefusal) -> Void)?
+    /// A steer the sink accepted for the turn in flight. The tile shows it in
+    /// the transcript at once rather than when the provider gets to it.
+    var onSteerAccepted: ((AgentPrompt) -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
     // Keep an unbound composer useful as a real surface too. Managed tiles bind
@@ -1354,6 +1361,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             let acceptance = await sink.accept(intent, for: agentID)
             if previewPrompt != nil {
                 reportedResolution = true
+                if case let .refused(reason) = acceptance { self.onSubmissionRefused?(reason) }
                 self.onSubmissionFinished?(acceptance == .accepted)
             }
             guard acceptance == .accepted else {
@@ -1371,6 +1379,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 }
                 return
             }
+            if case let .steer(prompt) = intent { self.onSteerAccepted?(prompt) }
             if let submittedTaskContext {
                 self.onAcceptedBoardTask?(submittedTaskContext)
             }

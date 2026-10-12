@@ -66,6 +66,8 @@ public struct CodexAppServerEventTranslator {
     /// here needs synthesizing or salting. Kept per-thread so a child thread's
     /// turn id is never confused with the parent's.
     private var sawSessionStart = false
+    /// Retries codex announced since the current turn started.
+    private var retryAttempts = 0
     /// Item ids that have actually streamed at least one `item/agentMessage/delta`.
     ///
     /// TR-07 — `item/completed` used to drop every `agentMessage`'s whole text
@@ -125,7 +127,24 @@ public struct CodexAppServerEventTranslator {
         case "thread/started":
             return translateThreadStarted(params)
         case "turn/started":
+            retryAttempts = 0
             return translateTurnStarted(params)
+        // S3: a stream error codex is retrying ("Reconnecting... 2/5") is the
+        // turn's status, not silence. A final one (willRetry false) is followed
+        // by the failed turn/completed that carries it.
+        case "error":
+            guard (params["willRetry"] as? Bool) == true else { return [] }
+            retryAttempts += 1
+            let message = ((params["error"] as? [String: Any])?["message"] as? String) ?? ""
+            var attempt = retryAttempts
+            var maximum: Int?
+            if let match = message.range(of: #"(\d+)\s*/\s*(\d+)"#, options: .regularExpression) {
+                let parts = message[match].split(separator: "/").map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2, let a = Int(parts[0]), let m = Int(parts[1]) { attempt = a; maximum = m }
+            }
+            onRuntimeObservation?(.providerRetry(AgentTurnPresence.Retry(
+                attempt: attempt, maxAttempts: maximum, delay: nil, observedAt: now())))
+            return []
         case "item/started":
             return translateItemStarted(params)
         case "item/agentMessage/delta":
@@ -514,7 +533,11 @@ public struct CodexAppServerEventTranslator {
         let failed = (turn["status"] as? String) == "failed"
         var code: String?
         if failed, let error = turn["error"] as? [String: Any] {
-            code = (error["code"] as? String) ?? (error["type"] as? String)
+            // The API's own account/transport failure in its own words
+            // ("unexpected status 401 Unauthorized"); otherwise the short code.
+            code = AgentFailureText.providerMessage(error["message"] as? String)
+                ?? (error["code"] as? String) ?? (error["type"] as? String)
+                ?? (error["codexErrorInfo"] as? String)
         }
         // T5 — `turn/interrupt` ends the turn `interrupted`; reporting that as
         // completed drained the queue into a turn the user had just stopped.
