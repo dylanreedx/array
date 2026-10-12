@@ -78,6 +78,7 @@ enum SidebarTruthChecks {
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
         try unreadableRootIsolation(world)
+        try oneRowHeaderMakesAnAgent(world)
         print("sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
               + "agent's closed tile drew slim as Finishing, kept running, and left for History "
               + "by itself when its turn ended; a closed parent took its subagents with it; a "
@@ -86,7 +87,9 @@ enum SidebarTruthChecks {
               + "event push opened no file; the default scope was the workspace on screen, "
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
               + "reloaded the sidebar once; Settled folded behind a counted heading and the "
-              + "headings sat at the bottom of the list")
+              + "headings sat at the bottom of the list; the header is one row whose New "
+              + "agent button made an agent; hovering it offered Snooze and Settle, and "
+              + "Settle settled it")
     }
 
     // MARK: - World
@@ -264,6 +267,12 @@ enum SidebarTruthChecks {
         let defaults = UserDefaults.standard
         let storedScope = defaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         defaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
+        let storedShelves = WorkspaceSidebarConfig.Shelf.allCases.map {
+            ($0, defaults.object(forKey: WorkspaceSidebarConfig.shelfKey($0)))
+        }
+        for shelf in WorkspaceSidebarConfig.Shelf.allCases {
+            defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+        }
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 1_000),
@@ -280,6 +289,13 @@ enum SidebarTruthChecks {
             supervisor: supervisor, runners: runners, runtime: runtime,
             browserEngine: browserEngine,
             restoreDefaults: {
+                for (shelf, value) in storedShelves {
+                    if let value {
+                        defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+                    } else {
+                        defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+                    }
+                }
                 if let storedScope {
                     defaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
                 } else {
@@ -322,6 +338,8 @@ enum SidebarTruthChecks {
 
     static func closeLifecycle(_ world: World) async throws {
         let inbox = world.inbox
+        // Motion is under test below; the host's own setting must not decide it.
+        inbox.prefersReducedMotion = { false }
         try expect(!DeleteConfirmPolicy.current.requiresConfirmation(for: .managedAgent),
                    "setup: this machine's delete-confirm policy would put a modal in front of deleteTile")
         try expect(world.canvas.tileView(for: idleTile) is ManagedAgentTileNSView,
@@ -345,6 +363,11 @@ enum SidebarTruthChecks {
         // W1 · the control: an idle agent's tile, closed through the canvas.
         let historyBefore = inbox.historyHeaderTitleForQA
         world.canvas.onTileCloseRequested?(idleTile)
+        // The row LEAVES visibly: a 150ms fade from where it was.
+        try expect(inbox.qaLastRowMotion.exiting.contains(idleAgent.rawValue) && inbox.qaLiveExitGhostCount > 0,
+                   "W1: the closed tile's row must fade out from its place — motion \(inbox.qaLastRowMotion), ghosts \(inbox.qaLiveExitGhostCount)")
+        let ghostsGone = await waitUntil(timeout: 2, pollInterval: 0.05, { inbox.qaLiveExitGhostCount == 0 })
+        try expect(ghostsGone, "W1: the exit ghost is gone once its 150ms fade ends")
         try expect(!world.sidebar.treeTileIdsForQA.contains(idleTile),
                    "a closed tile must leave the sidebar's tree — the active project's tiles came from a snapshot frozen at boot")
         try expect(block(world, idleAgent) == nil || block(world, idleAgent) == "history",
@@ -399,7 +422,16 @@ enum SidebarTruthChecks {
             try expect(block(world, child) == "live",
                        "setup: a live parent's child is drawn under it — got \(String(describing: block(world, child)))")
         }
+        // Under Reduce Motion the same departure does not animate at all. (Earlier
+        // fades are allowed to finish first, so a count of zero is this close's.)
+        _ = await waitUntil(timeout: 2, pollInterval: 0.05, { inbox.qaLiveExitGhostCount == 0 })
+        inbox.prefersReducedMotion = { true }
+        let motionBefore = inbox.qaLastRowMotion
         world.canvas.onTileCloseRequested?(parentTile)
+        try expect(inbox.qaLiveExitGhostCount == 0
+                   && inbox.qaLastRowMotion.exiting == motionBefore.exiting,
+                   "Reduce Motion: a row leaves without a fade — ghosts \(inbox.qaLiveExitGhostCount)")
+        inbox.prefersReducedMotion = { false }
         for child in [childOne, childTwo] {
             let drawn = block(world, child)
             try expect(drawn == "history",
@@ -544,6 +576,81 @@ enum SidebarTruthChecks {
         try expect(inbox.clickSettledDisclosureForQA(), "the Settled heading's triangle must be wired")
         try expect(block(world, settledAgent) == "settled",
                    "…and opening it draws the settled agent — drawn \(String(describing: block(world, settledAgent)))")
+        // Remembered across a relaunch: a freshly configured sidebar opens it.
+        try expect(WorkspaceSidebarConfig.isShelfExpanded(.settled),
+                   "opening the Settled shelf must be persisted")
+        let relaunched = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
+        world.app.qaInstallWorkspaceSidebar(relaunched)
+        try expect(relaunched.inboxForQA.isSettledExpandedForQA,
+                   "a relaunched sidebar opens the Settled shelf as it was left")
+        world.app.qaInstallWorkspaceSidebar(world.sidebar)
+        world.app.qaRefreshAgentSurfaces()
         try expect(inbox.clickSettledDisclosureForQA(), "and closes again")
+        try expect(!WorkspaceSidebarConfig.isShelfExpanded(.settled), "…which is persisted too")
+    }
+
+    // MARK: - Header: one row — search, scope, New agent (T3 nightly)
+
+    static func oneRowHeaderMakesAnAgent(_ world: World) throws {
+        let inbox = world.inbox
+        inbox.layoutForQA()
+        let header = inbox.headerFramesForQA
+        guard let newAgent = header.newAgent else {
+            throw Failure(message: "the header must carry a New agent button")
+        }
+        try expect(abs(header.search.midY - header.scope.midY) <= 2
+                   && abs(header.search.midY - newAgent.midY) <= 2,
+                   "search, scope and New agent share ONE row — mid-Ys \(header.search.midY), \(header.scope.midY), \(newAgent.midY)")
+        try expect(header.search.minX < header.scope.minX && header.scope.maxX <= newAgent.minX,
+                   "in T3's order: search, then scope, then New agent")
+        try expect(newAgent.width == AgentInboxView.headerIconButtonSide
+                   && newAgent.height == AgentInboxView.headerIconButtonSide,
+                   "New agent is a \(AgentInboxView.headerIconButtonSide)pt square — got \(newAgent.size)")
+        try expect(header.listTop <= header.search.minY,
+                   "the list starts under the header row")
+        let before = Set(world.supervisor.records.keys)
+        try expect(inbox.clickNewAgentForQA(), "the New agent button must be clickable")
+        let made = Set(world.supervisor.records.keys).subtracting(before)
+        try expect(made.count == 1,
+                   "New agent makes exactly one agent — made \(made.count)")
+        guard let id = made.first else { return }
+        world.app.qaRefreshAgentSurfaces()
+        try expect(block(world, id) == "live",
+                   "…and it is drawn live at once — drawn \(String(describing: block(world, id)))")
+        try hoverActionsSettle(world, id)
+    }
+
+    // MARK: - Hover: the status slot becomes [Snooze] [Settle]
+
+    static func hoverActionsSettle(_ world: World, _ agent: AgentID) throws {
+        let inbox = world.inbox
+        inbox.layoutForQA()
+        try expect(inbox.hoverActionsForQA(id: agent.rawValue)?.shown == false,
+                   "control: a row nobody is pointing at shows its status, not its actions")
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the new agent's row must be hoverable")
+        let hovered = inbox.hoverActionsForQA(id: agent.rawValue)
+        try expect(hovered?.shown == true && hovered?.titles == ["Snooze", "Settle"],
+                   "hovering an idle card cross-fades its status slot to [Snooze] [Settle] — got \(String(describing: hovered))")
+        try expect(inbox.clickHoverSettleForQA(id: agent.rawValue), "the hover Settle must be clickable")
+        try expect(world.supervisor.records[agent]?.settledOverride == .settled,
+                   "the hover Settle settles the agent — got \(String(describing: world.supervisor.records[agent]?.settledOverride))")
+        try expect(block(world, agent) != "live",
+                   "…and its row leaves the live list — drawn \(String(describing: block(world, agent)))")
+        _ = inbox.hoverRowForQA(id: nil)
+    }
+}
+
+extension WorkspaceSidebarConfig {
+    /// For a check that configures the app's sidebar: start from collapsed
+    /// shelves (the default), and hand back what restores the person's own.
+    static func qaIsolateShelves(defaults: UserDefaults = .standard) -> () -> Void {
+        let stored = Shelf.allCases.map { ($0, defaults.object(forKey: shelfKey($0))) }
+        for shelf in Shelf.allCases { defaults.removeObject(forKey: shelfKey(shelf)) }
+        return {
+            for (shelf, value) in stored {
+                if let value { defaults.set(value, forKey: shelfKey(shelf)) }
+                else { defaults.removeObject(forKey: shelfKey(shelf)) }
+            }
+        }
     }
 }

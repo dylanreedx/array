@@ -318,7 +318,7 @@ struct AgentInboxCardStyleOverride {
     let cardHeight: (AgentInboxRow) -> Double
 
     static var production: Self {
-        let proposal = SidebarDensityProposal.a
+        let proposal = SidebarDensityProposal.production
         let anatomy = SidebarRowAnatomy(
             id: "production", label: "production",
             border: .none, iconPlacement: .leading, showsModelText: false)
@@ -345,6 +345,10 @@ struct AgentInboxCardStyleOverride {
 /// The stacked, boxless search treatment is now the production default. nil is
 /// retained only for the Component Lab's explicit legacy comparison.
 struct AgentInboxHeaderStyleOverride {
+    /// T3 nightly's ONE header row (confidence pass, sidebar stream): search
+    /// (flexible), then the scope control, then a 28pt New agent button. Wins over
+    /// `stacked` when both are set.
+    var oneRow = true
     /// Search takes a full-width row of its own, above the scope control, rather
     /// than sharing one row with it.
     var stacked = true
@@ -450,7 +454,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// A PARKED row's height: one `.title` line in a row inset — 35pt, which is
     /// the "~36pt" the packet approximates. Derived exactly like `rowHeight`, so
     /// a P1.4 size move moves both instead of clipping one.
-    static var slimRowHeight: Double { Metrics.rowHeight(for: .title, insets: Inset.row) }
+    /// 36 pt — T3 nightly's `h-9` slim row (confidence pass, sidebar stream). It
+    /// was the title's line height plus the row insets (~35 pt).
+    static let slimRowHeight: Double = 36
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The `Snoozed (N)` heading's height: the same one line a parked row gets, so
@@ -608,6 +614,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// production and every existing gate see.
     private var defaultHeaderConstraints: [NSLayoutConstraint] = []
     private var stackedHeaderConstraints: [NSLayoutConstraint] = []
+    private var oneRowHeaderConstraints: [NSLayoutConstraint] = []
+    /// The header's New agent button (one-row header only). The host wires it to
+    /// the same spawn ⌘K's New Agent makes.
+    private let newAgentButton = NSButton(frame: .zero)
+    var onNewAgent: (() -> Void)?
+    /// The square the New agent button occupies: T3's `size-7`.
+    static let headerIconButtonSide: CGFloat = 28
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
@@ -750,6 +763,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// (`AppDelegate.configureWorkspaceSidebar`); a bare view keeps the P4.8 inline
     /// tail, which the older fixture legs are written against. Migrating those
     /// legs and removing this switch is an open follow-up.
+    /// Reports a shelf being opened or closed by the person, so the host can
+    /// remember it across launches. Not called by `restoreShelfExpansion`.
+    var onShelfExpansionChange: ((WorkspaceSidebarConfig.Shelf, Bool) -> Void)?
+
+    /// Put the shelves back the way they were left (the host's persisted state).
+    func restoreShelfExpansion(snoozed: Bool, settled: Bool, history: Bool) {
+        guard (shelfExpanded, settledExpanded, historyExpanded) != (snoozed, settled, history) else { return }
+        shelfExpanded = snoozed
+        settledExpanded = settled
+        historyExpanded = history
+        render(display(from: allRows))
+    }
+
     var foldsSettledIntoShelf = false {
         didSet {
             guard foldsSettledIntoShelf != oldValue else { return }
@@ -1271,6 +1297,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        newAgentButton.translatesAutoresizingMaskIntoConstraints = false
+        newAgentButton.isBordered = false
+        newAgentButton.title = ""
+        newAgentButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New agent")
+        newAgentButton.imagePosition = .imageOnly
+        newAgentButton.imageScaling = .scaleProportionallyDown
+        newAgentButton.target = self
+        newAgentButton.action = #selector(newAgentPressed)
+        newAgentButton.toolTip = "New agent"
+        newAgentButton.setAccessibilityLabel("New agent")
+        newAgentButton.setAccessibilityIdentifier("ContinuumAgentInboxNewAgent")
+        addSubview(newAgentButton)
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
         searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         searchIcon.imageScaling = .scaleProportionallyDown
@@ -1354,6 +1392,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
+        // T3 nightly's one row: [search ………][scope][+]. The scope control yields
+        // width before the search field does not exist at all.
+        let scopeMax = scopeButton.widthAnchor.constraint(lessThanOrEqualToConstant: 104)
+        // …and never more than 30% of the sidebar, so at 220pt the search field
+        // keeps a usable width (T3's scope is an icon; this one names its scope).
+        let scopeShare = scopeButton.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.3)
+        oneRowHeaderConstraints = [
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeButton.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: Space.s),
+            scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeMax,
+            scopeShare,
+            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+        ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
 
         NSLayoutConstraint.activate([
@@ -1424,6 +1484,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        newAgentButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
         applySearchFieldChrome()
     }
@@ -1485,9 +1546,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private static let searchIconSide: CGFloat = 14
 
     private func applyHeaderStyle() {
-        let stacked = headerStyleOverride?.stacked == true
-        NSLayoutConstraint.deactivate(stacked ? defaultHeaderConstraints : stackedHeaderConstraints)
-        NSLayoutConstraint.activate(stacked ? stackedHeaderConstraints : defaultHeaderConstraints)
+        let oneRow = headerStyleOverride?.oneRow == true
+        let stacked = !oneRow && headerStyleOverride?.stacked == true
+        let chosen = oneRow ? oneRowHeaderConstraints
+            : stacked ? stackedHeaderConstraints : defaultHeaderConstraints
+        NSLayoutConstraint.deactivate(
+            defaultHeaderConstraints + stackedHeaderConstraints + oneRowHeaderConstraints)
+        NSLayoutConstraint.activate(chosen)
+        newAgentButton.isHidden = !oneRow
+        // In one row the scope control is the part that yields: its label
+        // truncates before the row can force the sidebar wider than it is.
+        scopeButton.setContentCompressionResistancePriority(
+            oneRow ? .defaultLow : .required, for: .horizontal)
+        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // The glyph steals the field's leading edge, so the text has to start
         // after it — otherwise the placeholder sits underneath the magnifier.
         let chrome = headerStyleOverride?.fieldChrome == true
@@ -1766,6 +1837,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// takes the unfiltered set, and handing it an already-filtered list would make
     /// the scope narrow itself with every call.
     private func render(_ visible: [InboxListItem]) {
+        // Row motion (confidence pass): rows that leave fade out from where they
+        // were, rows that arrive fade in — 150ms, skipped above 40 rows and under
+        // Reduce Motion. A closed tile's row visibly leaving IS the confirmation.
+        let previousIds = Set(rows.map(\.id))
+        let nextIds = Set(visible.compactMap { $0.agentRow?.id })
+        let animatesRows = !previousIds.isEmpty && previousIds != nextIds
+            && visible.count <= Self.rowMotionRowLimit && !prefersReducedMotion()
+        let exitGhosts = animatesRows ? liftExitGhosts(leaving: previousIds.subtracting(nextIds)) : []
+        defer {
+            if animatesRows { startRowMotion(exits: exitGhosts, entering: nextIds.subtracting(previousIds)) }
+        }
         // P3.13: a full reload moves every row, so a field left floating would be over
         // a different agent. Committing is the same answer clicking away gives — the
         // rename is finished, not thrown away, and this is also the path the host's
@@ -2084,6 +2166,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// away and a bulk action must never reach a row you cannot see.
     func toggleShelf() {
         shelfExpanded.toggle()
+        onShelfExpansionChange?(.snoozed, shelfExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
@@ -2100,6 +2183,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// dropped, for the reason `toggleShelf` records.
     func toggleSettled() {
         settledExpanded.toggle()
+        onShelfExpansionChange?(.settled, settledExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
@@ -2133,6 +2217,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// list handed out now names a different agent.
     func toggleHistory() {
         historyExpanded.toggle()
+        onShelfExpansionChange?(.history, historyExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
@@ -2356,6 +2441,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Empty the search the way a person does, through the same notification a
     /// keystroke raises, so the filter, the selection reset and the button's own
     /// visibility all take one path.
+    @objc private func newAgentPressed() { onNewAgent?() }
+
     @objc private func clearSearch() {
         guard !searchField.stringValue.isEmpty else { return }
         searchField.stringValue = ""
@@ -2630,6 +2717,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             isInteracting: interacting,
             now: renderNow
         )
+        configureHoverActions(on: cell, for: model)
         if let redesigned = cell as? AgentInbox96CellView {
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
@@ -2660,6 +2748,51 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow[row] = cell
         updateAccessibilityHierarchy()
         return cell
+    }
+
+    /// T3 nightly's hover actions (confidence pass): a card offers [Snooze] [Settle],
+    /// a snoozed slim row Wake, a settled one Un-settle — each only when the row
+    /// may do it and the host performs it, through the same `performRowAction` the
+    /// context menu uses.
+    private func configureHoverActions(on cell: AgentInboxRowCell, for model: AgentInboxRow) {
+        let id = model.id
+        func action(_ kind: InboxRowAction) -> (() -> Void)? {
+            guard isWired(kind), kind.isAvailable(for: model, rollups: rollupsByParent) else { return nil }
+            return { [weak self] in
+                guard let self else { return }
+                self.rowChoiceTargetIds = [id]
+                self.performRowAction(kind)
+            }
+        }
+        if let card = cell as? AgentInbox96CellView {
+            card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
+        } else if let slim = cell as? AgentInboxSlimCellView {
+            switch model.lifecycle {
+            case .snoozed:
+                slim.configureHoverAction(symbol: "alarm", label: "Wake", perform: action(.wake))
+            case .settled:
+                slim.configureHoverAction(
+                    symbol: "arrow.uturn.backward", label: "Un-settle", perform: action(.unsettle))
+            case .active, .archived:
+                slim.configureHoverAction(symbol: "arrow.uturn.backward", label: "Un-settle", perform: nil)
+            }
+        }
+    }
+
+    /// Whether row `id`'s cell is showing its hover actions, and which.
+    func hoverActionsForQA(id: UUID) -> (shown: Bool, titles: [String])? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+        if let card = cell as? AgentInbox96CellView { return (card.qaHoverActionsShown, card.qaHoverActionTitles) }
+        if let slim = cell as? AgentInboxSlimCellView { return (slim.qaHoverActionShown, []) }
+        return nil
+    }
+
+    func clickHoverSettleForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        return card.clickHoverSettleForQA()
     }
 
     /// At most one nudge is ever offered, and only while the list has no unread or
@@ -3637,6 +3770,64 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
     }
 
+    // MARK: - Row enter / exit motion (confidence pass, sidebar stream)
+
+    static let rowMotionDuration: TimeInterval = 0.15
+    static let rowMotionRowLimit = 40
+    /// What the most recent animated render moved, for the witness.
+    private(set) var qaLastRowMotion: (exiting: Set<UUID>, entering: Set<UUID>) = ([], [])
+    private var exitGhostViews: [NSView] = []
+    var qaLiveExitGhostCount: Int { exitGhostViews.count }
+
+    /// Snapshots of the leaving rows' cells, at the rects they occupied, taken
+    /// BEFORE the table reloads and loses them.
+    private func liftExitGhosts(leaving: Set<UUID>) -> [(id: UUID, view: NSView)] {
+        guard !leaving.isEmpty else { return [] }
+        var ghosts: [(id: UUID, view: NSView)] = []
+        for (index, row) in rows.enumerated() where leaving.contains(row.id) {
+            guard let tableRow = tableRow(forRowIndex: index),
+                  let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false),
+                  cell.bounds.width > 0, cell.bounds.height > 0,
+                  let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) else { continue }
+            cell.cacheDisplay(in: cell.bounds, to: rep)
+            let image = NSImage(size: cell.bounds.size)
+            image.addRepresentation(rep)
+            let ghost = NSImageView(frame: tableView.rect(ofRow: tableRow))
+            ghost.image = image
+            ghost.imageScaling = .scaleNone
+            ghost.setAccessibilityElement(false)
+            ghosts.append((row.id, ghost))
+        }
+        return ghosts
+    }
+
+    private func startRowMotion(exits: [(id: UUID, view: NSView)], entering: Set<UUID>) {
+        qaLastRowMotion = (Set(exits.map(\.id)), entering)
+        for ghost in exits {
+            tableView.addSubview(ghost.view)
+            exitGhostViews.append(ghost.view)
+        }
+        tableView.layoutSubtreeIfNeeded()
+        let arriving = entering.compactMap { id in
+            tableRow(forAgentId: id).flatMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) }
+        }
+        for view in arriving { view.alphaValue = 0 }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.rowMotionDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            for ghost in exits { ghost.view.animator().alphaValue = 0 }
+            for view in arriving { view.animator().alphaValue = 1 }
+        }
+        // Teardown is SCHEDULED, for the reason the lifecycle crossfade records: a
+        // completion handler that never fires would leave a ghost painted forever.
+        let ghostViews = exits.map(\.view)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rowMotionDuration) { [weak self] in
+            for view in arriving { view.alphaValue = 1 }
+            for view in ghostViews { view.removeFromSuperview() }
+            self?.exitGhostViews.removeAll { ghost in ghostViews.contains { $0 === ghost } }
+        }
+    }
+
     // MARK: - Crossfading a lifecycle move (P4.12)
 
     /// The outgoing cell of every row whose variant is about to change, lifted out
@@ -4438,6 +4629,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return tableView.rect(ofRow: row)
     }
     var tableViewportHeightForQA: CGFloat { scrollView.contentView.bounds.height }
+    /// The header's three controls, in this view's coordinates.
+    var headerFramesForQA: (search: NSRect, scope: NSRect, newAgent: NSRect?, listTop: CGFloat) {
+        (searchField.frame, scopeButton.frame,
+         // The ALIGNMENT rect: the constraints place it, and NSButton pads its
+         // frame beyond it.
+         newAgentButton.isHidden ? nil : newAgentButton.alignmentRect(forFrame: newAgentButton.frame),
+         scrollView.frame.maxY)
+    }
+    func clickNewAgentForQA() -> Bool {
+        guard !newAgentButton.isHidden, newAgentButton.isEnabled else { return false }
+        newAgentButton.performClick(nil)
+        return true
+    }
     var lastTableRowMaxYForQA: CGFloat? {
         items.isEmpty ? nil : tableView.rect(ofRow: items.count - 1).maxY
     }
@@ -8069,6 +8273,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
+    /// The slim row's hover action (confidence pass): Wake on a snoozed row,
+    /// Un-settle on a settled one, cross-fading over the time.
+    private let hoverAction = InboxRowHoverActionButton(symbol: "arrow.uturn.backward", label: "Un-settle")
+    private var onHoverAction: (() -> Void)?
+    private var hoverActionShown = false
     private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
     private var branchMinimumWidth: NSLayoutConstraint?
@@ -8190,6 +8399,19 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // P3.10: an overlay here too — a parked row is one line, so a pill in the
         // stack would push the whole line sideways rather than merely displace one
         // label.
+        hoverAction.translatesAutoresizingMaskIntoConstraints = false
+        hoverAction.target = self
+        hoverAction.action = #selector(hoverActionClicked)
+        hoverAction.alphaValue = 0
+        hoverAction.isHidden = true
+        card.addSubview(hoverAction)
+        NSLayoutConstraint.activate([
+            hoverAction.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
+            hoverAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            hoverAction.widthAnchor.constraint(equalToConstant: 20),
+            hoverAction.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
         jumpHint.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(jumpHint)
         NSLayoutConstraint.activate([
@@ -8465,7 +8687,30 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
+        let on = interaction.isHovered && onHoverAction != nil
+        hoverActionShown = on
+        hoverAction.isHidden = !on
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || window == nil
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduce ? 0 : 0.15
+            context.allowsImplicitAnimation = !reduce
+            (reduce ? hoverAction : hoverAction.animator()).alphaValue = on ? 1 : 0
+            (reduce ? timeLabel : timeLabel.animator()).alphaValue = on ? 0 : CGFloat(shown?.emphasis.textOpacity ?? 1)
+        }
     }
+
+    @objc private func hoverActionClicked() { onHoverAction?() }
+
+    /// The one action this slim row offers on hover, or nil for none.
+    func configureHoverAction(symbol: String, label: String, perform: (() -> Void)?) {
+        onHoverAction = perform
+        hoverAction.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        hoverAction.toolTip = label
+        hoverAction.setAccessibilityLabel(label)
+        hoverAction.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    var qaHoverActionShown: Bool { hoverActionShown }
 
     func setIncreasedContrast(_ enabled: Bool) {
         card.usesIncreasedContrast = enabled

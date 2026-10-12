@@ -4345,12 +4345,17 @@ enum UIProbeGeometry {
                 let scopeFrame = probe.inbox.scopeControlFrameForQA
                 let searchDrawing = probe.inbox.searchTextDrawingRectForQA
                 let searchIcon = probe.inbox.searchIconFrameInFieldForQA
-                guard searchFrame.width > scopeFrame.width + 40,
-                      abs(searchFrame.minX - scopeFrame.minX) <= 2,
+                // Confidence pass: T3's ONE header row — search first and widest,
+                // the scope control beside it on the same line, the placeholder still
+                // readable at 220pt.
+                guard searchFrame.width > scopeFrame.width,
+                      abs(searchFrame.midY - scopeFrame.midY) <= 1,
+                      searchFrame.maxX <= scopeFrame.minX,
+                      searchDrawing.width >= 40,
                       !searchFrame.intersects(scopeFrame),
                       probe.inbox.searchLeadingInsetForQA > 0,
                       searchDrawing.minX >= searchIcon.maxX + CGFloat(Space.s) - 0.5 else {
-                    throw fail("\(label): production stacked scope/search geometry or magnifier clearance escaped (search=\(searchFrame), scope=\(scopeFrame), drawing=\(searchDrawing), icon=\(searchIcon))")
+                    throw fail("\(label): production one-row search/scope geometry or magnifier clearance escaped (search=\(searchFrame), scope=\(scopeFrame), drawing=\(searchDrawing), icon=\(searchIcon))")
                 }
                 let acceptedSearchFocus = probe.window.makeFirstResponder(searchField)
                 let searchHasFocus = probe.window.firstResponder === searchField || searchField.currentEditor() != nil

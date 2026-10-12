@@ -98,4 +98,22 @@ public enum WorkspaceSidebarConfig {
     public static func setScope(_ scope: InboxScope, defaults: UserDefaults = .standard) {
         defaults.set(scope.storageValue, forKey: scopeKey)
     }
+
+    // Confidence pass (sidebar stream): whether each counted shelf was left open.
+    // Collapsed is the default (absent key); T3 nightly persists the same fact.
+    public enum Shelf: String, CaseIterable, Sendable {
+        case snoozed, settled, history
+    }
+
+    public static func shelfKey(_ shelf: Shelf) -> String {
+        "continuum.workspaceSidebar.shelfExpanded.\(shelf.rawValue)"
+    }
+
+    public static func isShelfExpanded(_ shelf: Shelf, defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: shelfKey(shelf))
+    }
+
+    public static func setShelfExpanded(_ shelf: Shelf, _ expanded: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(expanded, forKey: shelfKey(shelf))
+    }
 }

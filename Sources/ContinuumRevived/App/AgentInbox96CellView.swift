@@ -284,6 +284,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
     private var onSettleNudge: (() -> Void)?
+    /// T3 nightly's hover actions (confidence pass, sidebar stream): the status
+    /// slot cross-fades to [Snooze] [Settle] while the pointer is over the row.
+    private let hoverSnooze = InboxRowHoverActionButton(symbol: "clock", label: "Snooze")
+    private let hoverSettle = InboxRowHoverActionButton(symbol: "checkmark", label: "Settle")
+    private var onHoverSnooze: (() -> Void)?
+    private var onHoverSettle: (() -> Void)?
+    private var hoverActionsShown = false
 
     private let placementLabel = NSTextField(labelWithString: "")
     private let projectIcon = NSImageView(frame: .zero)
@@ -414,6 +421,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         settleNudge.setAccessibilityLabel("Settle agent")
         settleNudge.setAccessibilityIdentifier("ContinuumAgentInboxSettleNudge")
         card.addSubview(settleNudge)
+        for button in [hoverSnooze, hoverSettle] {
+            button.target = self
+            button.alphaValue = 0
+            button.isHidden = true
+            card.addSubview(button)
+        }
+        hoverSnooze.action = #selector(hoverSnoozeClicked)
+        hoverSettle.action = #selector(hoverSettleClicked)
         // An OVERLAY, never an arranged subview: a pill that joins the row's stack
         // pushes the status label out of the line. That regression has a name in
         // this codebase — holding ⌘ blanked out "Working".
@@ -690,6 +705,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             string: settleNudge.title,
             attributes: [.font: settleNudge.font as Any, .foregroundColor: nudgeForeground])
         settleNudge.layer?.backgroundColor = SidebarSurfaceRole.hover.color.cgColor(in: self)
+        for button in [hoverSnooze, hoverSettle] {
+            button.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
 
         // Recession is the row's words, never its accent: `accentOpacity` paints the
         // state at full strength however far the row recedes, which is queue-94's
@@ -969,6 +987,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             y: (bounds.height - jumpHint.intrinsicContentSize.height) / 2,
             width: jumpHint.intrinsicContentSize.width,
             height: jumpHint.intrinsicContentSize.height)
+        // The hover actions sit in the status slot, right-aligned on the meta line.
+        let actionSide: CGFloat = 20
+        let actionY = proposal.insetV + (proposal.bandTop - actionSide) / 2
+        hoverSettle.frame = inCard(NSRect(
+            x: textRight - actionSide, y: actionY, width: actionSide, height: actionSide))
+        hoverSnooze.frame = inCard(NSRect(
+            x: textRight - actionSide * 2 - 4, y: actionY, width: actionSide, height: actionSide))
         let nudgeSize = NSSize(width: 94, height: 22)
         settleNudge.frame = inCard(NSRect(
             x: max(textLeft, textRight - nudgeSize.width),
@@ -998,6 +1023,45 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
     @objc private func settleNudgeClicked() { onSettleNudge?() }
+    @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
+    @objc private func hoverSettleClicked() { onHoverSettle?() }
+
+    /// Which hover actions this row offers; nil hides one. Set by the list, which
+    /// owns the action predicates, after every `apply`.
+    func configureHoverActions(snooze: (() -> Void)?, settle: (() -> Void)?) {
+        onHoverSnooze = snooze
+        onHoverSettle = settle
+    }
+
+    /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
+    /// Motion). Only the actions the row offers ever appear.
+    private func setHoverActionsShown(_ shown: Bool) {
+        let snoozeOn = shown && onHoverSnooze != nil
+        let settleOn = shown && onHoverSettle != nil
+        let any = snoozeOn || settleOn
+        hoverActionsShown = any
+        let statusAlpha: CGFloat = any ? 0 : CGFloat(self.shown?.emphasis.accentOpacity ?? 1)
+        hoverSnooze.isHidden = !snoozeOn
+        hoverSettle.isHidden = !settleOn
+        let apply = {
+            self.hoverSnooze.alphaValue = snoozeOn ? 1 : 0
+            self.hoverSettle.alphaValue = settleOn ? 1 : 0
+            self.stateLabel.alphaValue = statusAlpha
+            self.statusGlyph.alphaValue = any ? 0 : 1
+        }
+        if prefersReducedMotion() || window == nil {
+            apply()
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                context.allowsImplicitAnimation = true
+                self.hoverSnooze.animator().alphaValue = snoozeOn ? 1 : 0
+                self.hoverSettle.animator().alphaValue = settleOn ? 1 : 0
+                self.stateLabel.animator().alphaValue = statusAlpha
+                self.statusGlyph.animator().alphaValue = any ? 0 : 1
+            }
+        }
+    }
 
     func showSettleNudge(_ shown: Bool, onSettle: (() -> Void)?) {
         onSettleNudge = shown ? onSettle : nil
@@ -1030,6 +1094,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
+        setHoverActionsShown(interaction.isHovered)
+    }
+
+    /// Whether the hover actions are what the status slot shows right now.
+    var qaHoverActionsShown: Bool { hoverActionsShown }
+    var qaHoverActionTitles: [String] {
+        [hoverSnooze, hoverSettle].filter { !$0.isHidden }.compactMap { $0.accessibilityLabel() }
+    }
+    func clickHoverSettleForQA() -> Bool {
+        guard !hoverSettle.isHidden else { return false }
+        hoverSettle.performClick(nil)
+        return true
     }
 
     func setIncreasedContrast(_ enabled: Bool) { card.usesIncreasedContrast = enabled }
@@ -1336,4 +1412,25 @@ private final class Decorations: NSView {
             NSGraphicsContext.restoreGraphicsState()
         }
     }
+}
+
+
+/// One icon-only hover action in a sidebar row's status slot. A plain
+/// borderless `NSButton` tinted by its row's tokens — deliberately not a
+/// `TokenThemed` view (hazard 8): the row that owns it repaints it.
+@MainActor
+final class InboxRowHoverActionButton: NSButton {
+    init(symbol: String, label: String) {
+        super.init(frame: .zero)
+        isBordered = false
+        title = ""
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        toolTip = label
+        setAccessibilityLabel(label)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

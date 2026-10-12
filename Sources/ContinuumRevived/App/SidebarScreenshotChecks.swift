@@ -414,7 +414,7 @@ enum SidebarScreenshotChecks {
                 ("rules", AgentInbox96Fixtures.rows(now: now)),
             ]
             for (rowSetID, liveRows) in liveRowSets {
-                let proposal = SidebarDensityProposal.a
+                let proposal = SidebarDensityProposal.production
                 try drawing(appearance) {
                     let host = try makeHost(
                         width: 280, height: denseViewportHeight, appearance: appearance,
@@ -779,21 +779,23 @@ enum SidebarScreenshotChecks {
         }) {
             let measuredCard = measured.cardHeightPt ?? 0
             let measuredPitch = measured.pitchPt ?? 0
-            let expectedCard = AgentInbox96CellView.rowHeight(for: .a)
+            // The PRODUCTION proposal (T3 since the confidence pass) is the one the
+            // shipped list must measure as.
+            let expectedCard = AgentInbox96CellView.rowHeight(for: .production)
             let expectedPitch = expectedCard + Space.s
             try expect(abs(measuredCard - expectedCard) <= 0.5
                        && abs(measuredPitch - expectedPitch) <= 0.5,
-                       "proposal A's live list geometry claims \(expectedCard)/"
+                       "the production proposal's live list geometry claims \(expectedCard)/"
                        + "\(expectedPitch)pt but the shipped sidebar "
-                       + "measures \(measuredCard)/\(measuredPitch)pt — A is supposed to BE "
-                       + "today's geometry, so fix A rather than the comparison")
-            let stackedHeaderHeight = Space.s + ChoiceButton.controlHeight + Space.s
-                + ChoiceButton.controlHeight + Space.s
-            let rowViewport = denseViewportHeight - stackedHeaderHeight
+                       + "measures \(measuredCard)/\(measuredPitch)pt — the production proposal is supposed to BE "
+                       + "today's geometry, so fix it rather than the comparison")
+            // T3's one header row since the confidence pass.
+            let headerHeight = Space.s + ChoiceButton.controlHeight + Space.s
+            let rowViewport = denseViewportHeight - headerHeight
             let expectedRows = Int(((rowViewport - SidebarDensityProposal.outerGutter)
                                     / CGFloat(expectedPitch)).rounded(.down))
             try expect(measured.completeRowsIn662pt == expectedRows,
-                       "proposal A plus the stacked header computes \(expectedRows) "
+                       "the production proposal plus the one-row header computes \(expectedRows) "
                        + "rows in \(Int(denseViewportHeight))pt but the real sidebar paints "
                        + "\(measured.completeRowsIn662pt ?? -1) at the same geometry — the "
                        + "row-count arithmetic every proposal reports is wrong")
@@ -1058,13 +1060,16 @@ private func assertSearchPlaceholderIsVerticallyCentered(inbox: AgentInboxView) 
           drawing.height < field.bounds.height,
           inbox.searchLeadingInsetForQA > 0,
           drawing.minX >= icon.maxX + CGFloat(Space.s) - 0.5,
-          field.frame.width > scope.width + 40 else {
+          // One header row (confidence pass): search first and widest, scope beside.
+          field.frame.width > scope.width,
+          abs(field.frame.midY - scope.midY) <= 1,
+          field.frame.maxX <= scope.minX else {
         throw SidebarScreenshotChecks.Failure(description:
-            "the production 96 search header is not stacked, centred, or clear of its icon "
+            "the production 96 search header is not one row, centred, or clear of its icon "
             + "(field \(field.frame), scope \(scope), drawing \(drawing), icon \(icon), "
             + "leading inset \(inbox.searchLeadingInsetForQA), measured height \(measuredHeight))")
     }
-    print("SidebarScreenshotChecks: production 96 search is stacked and its centred placeholder clears the magnifier by \(Int(drawing.minX - icon.maxX))pt")
+    print("SidebarScreenshotChecks: production 96 search shares one row with scope and its centred placeholder clears the magnifier by \(Int(drawing.minX - icon.maxX))pt")
 }
 
 /// The 96 status is quiet, fixed-width telemetry; provider silhouettes need the
@@ -1238,6 +1243,20 @@ struct SidebarDensityProposal: Sendable {
         insetV: 12, bandTop: 14, gapTop: 4, bandTitle: 19, gapBottom: 4, bandDetail: 14,
         gapBetweenRows: 4,
         rationale: "Current shipping pitch, with the bands the design wants filled in.")
+
+    /// T3 — the shipping card since the confidence pass (§3.2 of the sidebar
+    /// report): T3 nightly's `h-[4.875rem]` card in a `py-0.5` row, mapped to points.
+    /// `8 + 20 + 4 + 20 + 2 + 16 + 8 = 78`, 82 pt pitch. Taller than A, and the list
+    /// still reads calmer, because it has fewer rows (the report's finding: density
+    /// was never the difference).
+    static let t3 = SidebarDensityProposal(
+        id: "T3", title: "78 pt card / 82 pt pitch — T3 nightly",
+        insetV: 8, bandTop: 20, gapTop: 4, bandTitle: 20, gapBottom: 2, bandDetail: 16,
+        gapBetweenRows: 4,
+        rationale: "T3 nightly's card: a 20 pt meta line, a 20 pt title, a 16 pt detail line.")
+
+    /// What the shipped sidebar draws.
+    static let production = t3
 
     static let all: [SidebarDensityProposal] = [a, b, c]
 }
