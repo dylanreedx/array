@@ -267,6 +267,12 @@ enum SidebarTruthChecks {
         let defaults = UserDefaults.standard
         let storedScope = defaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         defaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
+        let storedShelves = WorkspaceSidebarConfig.Shelf.allCases.map {
+            ($0, defaults.object(forKey: WorkspaceSidebarConfig.shelfKey($0)))
+        }
+        for shelf in WorkspaceSidebarConfig.Shelf.allCases {
+            defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+        }
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 1_000),
@@ -283,6 +289,13 @@ enum SidebarTruthChecks {
             supervisor: supervisor, runners: runners, runtime: runtime,
             browserEngine: browserEngine,
             restoreDefaults: {
+                for (shelf, value) in storedShelves {
+                    if let value {
+                        defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+                    } else {
+                        defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
+                    }
+                }
                 if let storedScope {
                     defaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
                 } else {
@@ -563,7 +576,17 @@ enum SidebarTruthChecks {
         try expect(inbox.clickSettledDisclosureForQA(), "the Settled heading's triangle must be wired")
         try expect(block(world, settledAgent) == "settled",
                    "…and opening it draws the settled agent — drawn \(String(describing: block(world, settledAgent)))")
+        // Remembered across a relaunch: a freshly configured sidebar opens it.
+        try expect(WorkspaceSidebarConfig.isShelfExpanded(.settled),
+                   "opening the Settled shelf must be persisted")
+        let relaunched = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
+        world.app.qaInstallWorkspaceSidebar(relaunched)
+        try expect(relaunched.inboxForQA.isSettledExpandedForQA,
+                   "a relaunched sidebar opens the Settled shelf as it was left")
+        world.app.qaInstallWorkspaceSidebar(world.sidebar)
+        world.app.qaRefreshAgentSurfaces()
         try expect(inbox.clickSettledDisclosureForQA(), "and closes again")
+        try expect(!WorkspaceSidebarConfig.isShelfExpanded(.settled), "…which is persisted too")
     }
 
     // MARK: - Header: one row — search, scope, New agent (T3 nightly)
@@ -614,5 +637,20 @@ enum SidebarTruthChecks {
         try expect(block(world, agent) != "live",
                    "…and its row leaves the live list — drawn \(String(describing: block(world, agent)))")
         _ = inbox.hoverRowForQA(id: nil)
+    }
+}
+
+extension WorkspaceSidebarConfig {
+    /// For a check that configures the app's sidebar: start from collapsed
+    /// shelves (the default), and hand back what restores the person's own.
+    static func qaIsolateShelves(defaults: UserDefaults = .standard) -> () -> Void {
+        let stored = Shelf.allCases.map { ($0, defaults.object(forKey: shelfKey($0))) }
+        for shelf in Shelf.allCases { defaults.removeObject(forKey: shelfKey(shelf)) }
+        return {
+            for (shelf, value) in stored {
+                if let value { defaults.set(value, forKey: shelfKey(shelf)) }
+                else { defaults.removeObject(forKey: shelfKey(shelf)) }
+            }
+        }
     }
 }

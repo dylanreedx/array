@@ -763,6 +763,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// (`AppDelegate.configureWorkspaceSidebar`); a bare view keeps the P4.8 inline
     /// tail, which the older fixture legs are written against. Migrating those
     /// legs and removing this switch is an open follow-up.
+    /// Reports a shelf being opened or closed by the person, so the host can
+    /// remember it across launches. Not called by `restoreShelfExpansion`.
+    var onShelfExpansionChange: ((WorkspaceSidebarConfig.Shelf, Bool) -> Void)?
+
+    /// Put the shelves back the way they were left (the host's persisted state).
+    func restoreShelfExpansion(snoozed: Bool, settled: Bool, history: Bool) {
+        guard (shelfExpanded, settledExpanded, historyExpanded) != (snoozed, settled, history) else { return }
+        shelfExpanded = snoozed
+        settledExpanded = settled
+        historyExpanded = history
+        render(display(from: allRows))
+    }
+
     var foldsSettledIntoShelf = false {
         didSet {
             guard foldsSettledIntoShelf != oldValue else { return }
@@ -2153,6 +2166,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// away and a bulk action must never reach a row you cannot see.
     func toggleShelf() {
         shelfExpanded.toggle()
+        onShelfExpansionChange?(.snoozed, shelfExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
@@ -2169,6 +2183,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// dropped, for the reason `toggleShelf` records.
     func toggleSettled() {
         settledExpanded.toggle()
+        onShelfExpansionChange?(.settled, settledExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil
@@ -2202,6 +2217,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// list handed out now names a different agent.
     func toggleHistory() {
         historyExpanded.toggle()
+        onShelfExpansionChange?(.history, historyExpanded)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredAgentId = nil

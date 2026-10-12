@@ -10650,6 +10650,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Confidence pass: Settled folds behind a counted heading and the shelves
         // sink to the bottom of the list (T3 nightly's layout).
         sidebar.agentInbox.foldsSettledIntoShelf = true
+        // The shelves open as they were left, and remember being opened.
+        sidebar.agentInbox.restoreShelfExpansion(
+            snoozed: WorkspaceSidebarConfig.isShelfExpanded(.snoozed),
+            settled: WorkspaceSidebarConfig.isShelfExpanded(.settled),
+            history: WorkspaceSidebarConfig.isShelfExpanded(.history))
+        sidebar.agentInbox.onShelfExpansionChange = { shelf, expanded in
+            WorkspaceSidebarConfig.setShelfExpanded(shelf, expanded)
+        }
         // The header's New agent button makes the same agent ⌘K's New Agent does.
         sidebar.agentInbox.onNewAgent = { [weak self] in
             _ = self?.spawnManagedAgentFromPalette()
@@ -13080,6 +13088,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.workspaceRuntime = runtime
         app.workspaceSidebarView = sidebar
         app.workspaceTopBarView = topBar
+        let restorePolishShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restorePolishShelves() }
         app.configureWorkspaceSidebar(sidebar)
         app.configureWorkspaceTopBar(topBar)
         app.reloadWorkspaceSidebar()
@@ -31289,6 +31299,7 @@ extension AppDelegate {
         let standardDefaults = UserDefaults.standard
         let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
         app.configureWorkspaceSidebar(sidebar)
         // The corpus reads every flow's rendered row, the settled one included,
         // so the folded Settled shelf is opened (confidence pass).
@@ -31324,6 +31335,7 @@ extension AppDelegate {
                     agentId: agentId, tileId: tileId, event: event, status: status)
             },
             restoreDefaults: {
+                restoreShelves()
                 if let storedScope {
                     standardDefaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
                 } else {
@@ -32955,6 +32967,8 @@ extension AppDelegate {
     // and a workspace scope must not claim it (`InboxScope.matches`). Scoping to the
     // project instead would leave both rows in and prove only that nothing crashed.
     WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: standardDefaults)
+    let restoreScopeSectionShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
+    defer { restoreScopeSectionShelves() }
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
     sidebar.inboxForQA.layoutForQA()
@@ -33230,6 +33244,8 @@ extension AppDelegate {
     // Every agent in the list: this section is about reaching them, and a scope
     // left over from section B would hide the ones it is about to click.
     WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
+    let restoreRevealShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
+    defer { restoreRevealShelves() }
     revealApp.configureWorkspaceSidebar(revealSidebar)
     // Production installs this immediately after the active controller wires the
     // broker. This check needs the same app-level focus→read bridge so a tile click
