@@ -1300,13 +1300,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.isBordered = false
         newAgentButton.title = ""
-        newAgentButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New agent")
+        newAgentButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Agent")
         newAgentButton.imagePosition = .imageOnly
         newAgentButton.imageScaling = .scaleProportionallyDown
         newAgentButton.target = self
         newAgentButton.action = #selector(newAgentPressed)
-        newAgentButton.toolTip = "New agent"
-        newAgentButton.setAccessibilityLabel("New agent")
+        newAgentButton.toolTip = "New Agent"
+        newAgentButton.setAccessibilityLabel("New Agent")
         newAgentButton.setAccessibilityIdentifier("ContinuumAgentInboxNewAgent")
         addSubview(newAgentButton)
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
