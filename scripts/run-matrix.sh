@@ -806,7 +806,8 @@ run_app_check .build/debug/Array --tile-materialize-check
 # link opened beside its tile all land in A2; switching away and quitting leave
 # no Ghostty surface alive at ghostty_app_free. Spawner callbacks survive arming
 # another project; a tile record change, a browser profile deletion, the quit
-# sweep, a ticket dispatch, focus pairing and review flyback all act in A2.
+# sweep, a ticket dispatch, focus pairing and review flyback all act in A2; a
+# surface a teardown missed is freed by Ghostty shutdown instead of trapping.
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check

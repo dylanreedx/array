@@ -35,6 +35,23 @@ final class GhosttyTerminalView: NSView {
     /// freed yet, process-wide. `ghostty_app_free` traps on a live one (ADR-0010),
     /// so the app's teardown reads this before freeing the app.
     private(set) static var liveSurfaceCount = 0
+    /// The views holding those surfaces, so the app's last line of defence can
+    /// free any a teardown missed. Weak: a view that died with a live surface
+    /// cannot be reached, and is why the count stays the authority.
+    private static let liveSurfaceViews = NSHashTable<GhosttyTerminalView>.weakObjects()
+
+    /// Free every surface of `app` still alive, loudly, and report how many live
+    /// surfaces no view can reach any more (their view is gone). Called by
+    /// `GhosttyRuntimeContext.shutdown` before `ghostty_app_free`, which traps on
+    /// a live surface (ADR-0010).
+    static func freeLiveSurfacesForShutdown(app: ghostty_app_t) -> Int {
+        let views = liveSurfaceViews.allObjects.filter { $0.ghosttyApp == app }
+        if !views.isEmpty {
+            fputs("GHOSTTY SHUTDOWN: \(views.count) terminal surface(s) still alive at app free — a teardown missed them; freeing them now\n", stderr)
+        }
+        for view in views { view.closeSurface() }
+        return liveSurfaceCount - liveSurfaceViews.allObjects.count
+    }
     private var processExitPoller: Timer?
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
@@ -531,6 +548,7 @@ final class GhosttyTerminalView: NSView {
             return
         }
         Self.liveSurfaceCount += 1
+        Self.liveSurfaceViews.add(self)
 
         statusChanged(.running)
         applyRequestedOcclusion()
@@ -571,6 +589,7 @@ final class GhosttyTerminalView: NSView {
         self.surface = nil
         ghostty_surface_free(surface)
         Self.liveSurfaceCount -= 1
+        Self.liveSurfaceViews.remove(self)
     }
 
     private func reportSurfaceSize() {

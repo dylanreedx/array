@@ -28,7 +28,9 @@ import Foundation
 ///    survive arming another project, because a project keeps one spawner;
 ///  - a tile record change, a browser profile deletion, the quit's
 ///    managed-session sweep, a ticket dispatch, focus-mode pairing and a review
-///    flyback each act in A2.
+///    flyback each act in A2;
+///  - `GhosttyRuntimeContext.shutdown` frees a surface a teardown missed
+///    instead of trapping in `ghostty_app_free`.
 ///
 /// Terminals run a real shell in a real (off-display) window, with tmux and the
 /// delete confirmation turned off through the volatile argument domain only —
@@ -191,7 +193,9 @@ enum TileProjectScopeChecks {
             ("status-and-link-in-unarmed-zone", statusAndLinkInUnarmedZone),
             ("spawner-callbacks-survive-arming", spawnerCallbacksSurviveArming),
             ("tile-record-profiles-sweep-queue-pairing", tileRecordProfilesSweepQueuePairing),
-            ("review-flyback-in-unarmed-zone", reviewFlybackInUnarmedZone)
+            ("review-flyback-in-unarmed-zone", reviewFlybackInUnarmedZone),
+            // Last: it frees the leg's Ghostty app.
+            ("shutdown-frees-missed-surfaces", shutdownFreesMissedSurfaces)
         ]
         for (label, body) in scenarios {
             let fixture = try Fixture(label: "project-scope-\(label)")
@@ -616,5 +620,32 @@ enum TileProjectScopeChecks {
         }
         try expect(prompt.text.contains(reviewA2.uuidString), "the flyback prompt does not name A2's review")
         return ["sent": true]
+    }
+
+    /// A surface a teardown missed is freed by the shutdown itself, which then
+    /// frees the Ghostty app instead of trapping on the live surface.
+    /// It frees the leg's own Ghostty app — production has exactly one, and a
+    /// second app freed in-process takes shared Ghostty state with it — so it
+    /// must run last.
+    private static func shutdownFreesMissedSurfaces(_ fixture: Fixture) throws -> [String: Any] {
+        guard let context = fixture.ghostty else { throw Failure(message: "precondition: the leg has no Ghostty app") }
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontOffscreenForChecks()
+        defer { window.close() }
+        let runtime = GhosttyTerminalRuntime(
+            title: "missed",
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: fixture.root.path, title: "missed"),
+            ghostty: context)
+        host.attach(runtime: runtime)
+        host.layoutSubtreeIfNeeded()
+        try expect(pump(until: 5) { runtime.qaTerminalView?.surface != nil }, "precondition: the terminal got no surface")
+        let before = GhosttyTerminalView.liveSurfaceCount
+        context.shutdown()
+        try expect(runtime.qaTerminalView?.surface == nil, "shutdown left the missed surface alive")
+        try expect(GhosttyTerminalView.liveSurfaceCount == before - 1, "the live-surface count did not drop by the one freed")
+        return ["freed": 1]
     }
 }
