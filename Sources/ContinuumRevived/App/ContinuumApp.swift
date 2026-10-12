@@ -1134,6 +1134,7 @@ enum ContinuumApp {
             ("--zone-close-strand-check", ZoneTruthChecks.runZoneCloseStrand),
             ("--stranded-tile-recovery-check", ZoneTruthChecks.runStrandedTileRecovery),
             ("--layout-commit-truth-check", ZoneTruthChecks.runLayoutCommitTruth),
+            ("--refused-spawn-teardown-check", ZoneTruthChecks.runRefusedSpawnTeardown),
         ]
         for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
             do {

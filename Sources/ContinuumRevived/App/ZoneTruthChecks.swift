@@ -652,4 +652,65 @@ enum ZoneTruthChecks {
         try expect(message.contains("couldn't be saved"), "the failure must be shown; the notification reads \(message)")
         return try writeArtifact("layout-commit-truth", ["outcome": "\(outcome)"])
     }
+
+    // MARK: - --refused-spawn-teardown-check
+
+    /// A spawn that cannot be placed or persisted must leave nothing behind. A
+    /// refused browser spawn kept its WKWebView process alive with nothing to
+    /// reach it, and a spawn whose canvas write failed left its tile drawn with
+    /// no record on disk: it vanished on the next launch, its runtime with it.
+    static func runRefusedSpawnTeardown() throws -> URL {
+        // A. Refused outright: the armed zone's project is unavailable, so no
+        //    layer exists to install into.
+        do {
+            let fixture = try Fixture(label: "refused-spawn")
+            defer { fixture.dispose() }
+            let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
+            var json = try JSONSerialization.jsonObject(with: Data(contentsOf: layout.canvasFile)) as! [String: Any]
+            var tiles = json["tiles"] as! [[String: Any]]
+            tiles[0]["kind"] = "futureKind"
+            json["tiles"] = tiles
+            try JSONSerialization.data(withJSONObject: json).write(to: layout.canvasFile)
+            try? FileManager.default.removeItem(at: layout.backupsDirectory)
+            try fixture.mount()
+            let m = try fixture.requireMounted("refused-spawn")
+            try fixture.armByClick(Fixture.zoneA2)
+            let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+            let live = WKWebViewBrowserRuntime.qaUnterminatedCount
+            _ = m.delegate.qaPerformPaletteAction(.newBrowser)
+            try expect(Set(m.canvas.allWorkspaceTiles().map(\.id)) == before,
+                       "refused: a refused browser spawn must not add a tile")
+            try expect(WKWebViewBrowserRuntime.qaUnterminatedCount == live,
+                       "refused: a refused browser spawn leaked its web view runtime "
+                       + "(\(WKWebViewBrowserRuntime.qaUnterminatedCount - live) left running)")
+        }
+        // B. Installed, then the canvas write failed.
+        do {
+            let fixture = try Fixture(label: "failed-spawn")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            let m = try fixture.requireMounted("failed-spawn")
+            try fixture.armByClick(Fixture.zoneA1)
+            fixture.drain()
+            let root = fixture.projectRoots[Fixture.projectA1]!
+            let store = ProjectStore(projectRoot: root)
+            let browserRowsBefore = ((try? store.tryLoadBrowserState()) ?? nil)?.tiles.count ?? 0
+            let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+            let live = WKWebViewBrowserRuntime.qaUnterminatedCount
+            // Write 1 is the browser-state row, write 2 the canvas.
+            StoreFileWriter.install(.init(fault: .failWrite(2), scope: root))
+            _ = m.delegate.qaPerformPaletteAction(.newBrowser)
+            StoreFileWriter.uninstall()
+            let added = Set(m.canvas.allWorkspaceTiles().map(\.id)).subtracting(before)
+            try expect(added.isEmpty,
+                       "failed: THE ghost. A spawn whose canvas write failed left tile(s) \(added) on the canvas "
+                       + "with no record on disk")
+            try expect(WKWebViewBrowserRuntime.qaUnterminatedCount == live,
+                       "failed: the failed browser spawn leaked its web view runtime")
+            let browserRowsAfter = ((try? store.tryLoadBrowserState()) ?? nil)?.tiles.count ?? 0
+            try expect(browserRowsAfter == browserRowsBefore,
+                       "failed: the failed spawn left a browser-state row for a tile that does not exist")
+        }
+        return try writeArtifact("refused-spawn-teardown", ["ok": true])
+    }
 }
