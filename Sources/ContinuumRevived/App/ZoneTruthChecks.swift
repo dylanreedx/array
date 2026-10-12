@@ -240,9 +240,12 @@ enum ZoneTruthChecks {
     /// QA seam.
     static func runZoneCloseStrand() throws -> URL {
         var manifest: [String: Any] = [:]
-        func closeZone(_ fixture: Fixture, _ zoneId: UUID, choice: NSApplication.ModalResponse) throws {
+        /// `armFirst: false` is the header menu's "Close Zone…", which arms
+        /// nothing: teardown must still reach the closing zone's own project.
+        func closeZone(_ fixture: Fixture, _ zoneId: UUID, choice: NSApplication.ModalResponse,
+                       armFirst: Bool = true) throws {
             let m = try fixture.requireMounted("close")
-            try fixture.armByClick(zoneId)
+            if armFirst { try fixture.armByClick(zoneId) }
             m.delegate.qaZoneCloseResponse = { _ in choice }
             m.canvas.onZoneCloseRequested?(zoneId)
             m.canvas.layoutSubtreeIfNeeded()
@@ -336,7 +339,9 @@ enum ZoneTruthChecks {
             let fixture = try Fixture(label: "close-delete")
             defer { fixture.dispose() }
             try fixture.mount()
-            try closeZone(fixture, Fixture.zoneA1, choice: .alertSecondButtonReturn)
+            // Another project's zone is armed, as after "Close Zone…" from A1's menu.
+            try fixture.armByClick(Fixture.zoneA2)
+            try closeZone(fixture, Fixture.zoneA1, choice: .alertSecondButtonReturn, armFirst: false)
             var m = try fixture.requireMounted("delete")
             for id in a1Members {
                 try expect(m.canvas.tileRecord(for: id) == nil,
@@ -373,6 +378,33 @@ enum ZoneTruthChecks {
                        "close-last: Z5. The project is still owned by the workspace it has no zone in, so adding "
                        + "it elsewhere asks to switch to a workspace that cannot show it")
             manifest["closeLast"] = "released"
+        }
+        // 5. Z6: Keep on a legacy GROUP zone. Its members used to become
+        //    zone-less ambient tiles, which no mount renders: gone after a
+        //    relaunch. The zone must stay, with its tile, across a remount.
+        do {
+            let fixture = try Fixture(label: "close-group")
+            defer { fixture.dispose() }
+            let group = UUID(uuidString: "00000000-0000-0000-0000-0000000067C1")!
+            let member = UUID(uuidString: "00000000-0000-0000-0000-00000067C101")!
+            let store = WorkspaceStore(workspaceId: Fixture.workspaceA, applicationSupportDirectory: fixture.appSupport)
+            var document = try store.load()
+            document.zones.append(ZonePlacement(
+                zoneId: group, projectId: nil, origin: ZonePoint(x: 600, y: 1400), size: ZoneSize(width: 700, height: 400),
+                color: "gray", collapsed: false, hydrationPolicy: .automatic, name: "Group"))
+            var tile = Tile(id: member, kind: .note, title: "grouped", frame: TileFrame(x: 650, y: 1480, width: 240, height: 160),
+                            zPosition: .fromLegacyRank(80), runtimeRef: nil, metadata: TileMetadata(noteId: member))
+            tile.zoneId = group
+            document.ambientTiles.append(tile)
+            try store.save(document)
+            try fixture.mount()
+            try closeZone(fixture, group, choice: .alertFirstButtonReturn, armFirst: false)
+            try fixture.remount(crash: false)
+            let m = try fixture.requireMounted("close-group remount")
+            let kept = m.canvas.tilesInWorldFrames(forZoneId: group)?.first(where: { $0.id == member })
+            try expect(kept?.frame == tile.frame,
+                       "close-group: Z6. The kept group tile vanished after a remount; it is \(String(describing: kept))")
+            manifest["closeGroup"] = "kept"
         }
         return try writeArtifact("zone-close-strand", manifest)
     }

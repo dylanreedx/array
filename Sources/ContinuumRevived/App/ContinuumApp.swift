@@ -15239,6 +15239,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// mount hid them forever. A group zone keeps its old spill.
     private func closeZoneKeepingTiles(_ zoneId: UUID) {
         guard let canvasView else { return }
+        // Z6: a group zone's kept tiles became zone-less ambient tiles, which no
+        // mount renders, so they vanished on the next launch. A tile must belong
+        // to a zone, and new group zones are not made, so the zone stays.
+        if workspaceRuntime != nil, canvasView.isGroupZone(zoneId), !canvasView.tileIds(inZone: zoneId).isEmpty {
+            setWorkspaceManagementMessage(
+                "The group zone wasn't closed: its tiles have nowhere else to live. "
+                + "Choose Delete Tiles to remove them with it.", kind: .warning)
+            return
+        }
         if let workspaceRuntime, !canvasView.isGroupZone(zoneId) {
             do {
                 try workspaceRuntime.rehomeMembersOfClosingZone(zoneId)
@@ -15280,8 +15289,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
                 return
             }
-            // Per-tile teardown resolves stores through the armed project.
-            workspaceRuntime.setActiveZone(zoneId, reason: .click)
             projectId = canvasView.zonePlacement(for: zoneId)?.projectId
         }
         let memberIds = canvasView.tileIds(inZone: zoneId)
