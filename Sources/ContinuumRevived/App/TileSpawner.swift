@@ -347,6 +347,10 @@ final class TileSpawner {
             try persistProjectCanvas(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
+            // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            try? projectStore.deleteSession(id: runtime.id)
             if let target = wrappedProfile.windowTarget {
                 let reach = project.remoteEnvironment?.reach ?? .localhost
                 if let tmuxPath = tmuxPathResolver(defaults) {
@@ -964,6 +968,14 @@ final class TileSpawner {
             )
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
+            // Leave nothing behind: no web view process, no drawn tile nothing
+            // persisted, no browser-state row for a tile that does not exist.
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            if var state = try? projectStore.tryLoadBrowserState(), state.tiles.contains(where: { $0.tileId == tile.id }) {
+                state.tiles.removeAll { $0.tileId == tile.id }
+                try? projectStore.saveBrowserState(state)
+            }
             return .failure(error)
         }
 
@@ -1592,6 +1604,7 @@ final class TileSpawner {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
+            withdrawFailedSpawn(tileId, target: target, in: canvasView)
             return .failure(error)
         }
         managedAgentLaunchSelections[tileId] = resolvedSelection
@@ -2453,6 +2466,15 @@ final class TileSpawner {
             if !overlaps { return candidate }
         }
         return TileArrangement.dockDestination(seed, direction: .left, against: anchor, gap: anchoredFileGap)
+    }
+
+    /// A spawn that installed its tile and then failed to persist it must take
+    /// the tile back off the canvas: left there it is drawn, has no record on
+    /// disk, and comes back as nothing after a relaunch. A refused install
+    /// (`.unplaced`) put nothing on the canvas.
+    private func withdrawFailedSpawn(_ tileId: UUID, target: CanvasNSView.ProjectTileTarget, in canvasView: CanvasNSView) {
+        guard target != .unplaced else { return }
+        canvasView.removeTile(id: tileId)
     }
 
     /// Persists through the model that actually received the tile. The flat

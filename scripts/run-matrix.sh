@@ -632,6 +632,9 @@ run_app_check .build/debug/Array --stranded-tile-recovery-check
 # Confidence pass S2: the layout commit skipped tiles it could place in no file
 # and still reported success. It now fails, the move rolls back, and it says so.
 run_app_check .build/debug/Array --layout-commit-truth-check
+# Confidence pass S2: a refused or failed spawn left its web view running and
+# its tile drawn with nothing on disk. It now takes back what it made.
+run_app_check .build/debug/Array --refused-spawn-teardown-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate

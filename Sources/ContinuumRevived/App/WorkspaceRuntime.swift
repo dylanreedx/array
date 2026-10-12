@@ -1149,35 +1149,97 @@ final class WorkspaceRuntime {
     /// registered workspace's zone is that workspace's business and is not
     /// counted. Keyed by project.
     private(set) var strandedTiles: [UUID: [Tile]] = [:]
-    var onStrandedTilesFound: (([UUID: [Tile]]) -> Void)?
+    /// Stranded tiles that are NOT offered, keyed by the project whose file holds
+    /// them: copies of another project's tiles (Dylan's harmony file holds 18 of
+    /// personal's, same ids and frames), and agent tiles whose agent belongs to
+    /// another project. Recovering either would put one tile id in two projects
+    /// and could bind a second view to one agent (CLAUDE.md hazard 10). They are
+    /// left untouched on disk; `elsewhere` names the projects they belong to.
+    private(set) var strandedLeftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)] = [:]
+    var onStrandedTilesFound: ((_ recoverable: [UUID: [Tile]], _ leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]) -> Void)?
+    /// The project of the agent record bound to a tile, if any (AppDelegate's
+    /// supervisor). Nil in production only before the supervisor exists.
+    var agentProjectForTile: ((UUID) -> UUID?)?
 
     func classifyStrandedTiles() {
         let found = findStrandedTiles()
-        strandedTiles = found
-        if !found.isEmpty { onStrandedTilesFound?(found) }
+        strandedTiles = found.recoverable
+        strandedLeftAlone = found.leftAlone
+        if !found.recoverable.isEmpty || !found.leftAlone.isEmpty {
+            onStrandedTilesFound?(found.recoverable, found.leftAlone)
+        }
     }
 
-    private func findStrandedTiles() -> [UUID: [Tile]] {
-        guard let appRegistry = try? registryStore.loadOrEmpty() else { return [:] }
+    private func findStrandedTiles() -> (recoverable: [UUID: [Tile]], leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]) {
+        guard let appRegistry = try? registryStore.loadOrEmpty() else { return ([:], [:]) }
         var registeredZoneIds = Set(document.zones.map(\.zoneId))
         for entry in appRegistry.workspaces where entry.id != workspaceId {
             if let other = try? loadWorkspaceDocument(workspaceId: entry.id) {
                 registeredZoneIds.formUnion(other.zones.map(\.zoneId))
             }
         }
-        var found: [UUID: [Tile]] = [:]
+        // Every registered project's tile ids: a stranded id found in another
+        // project's file is a copy unless the evidence says it is ours alone.
+        var roots: [UUID: URL] = [:]
+        var idsByProject: [UUID: Set<UUID>] = [:]
+        for entry in appRegistry.projects where !entry.missing {
+            let root = URL(fileURLWithPath: entry.rootPath, isDirectory: true)
+            roots[entry.id] = root
+            if let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas() {
+                idsByProject[entry.id] = Set(canvas.tiles.map(\.id))
+            }
+        }
+        func evidence(_ tile: Tile, belongsTo projectId: UUID) -> Bool {
+            guard let root = roots[projectId] else { return false }
+            if tile.metadata.filesystemProjectId == projectId { return true }
+            if let agentProject = agentProjectForTile?(tile.id) { return agentProject == projectId }
+            if tile.kind == .managedAgent,
+               (try? ManagedAgentSessionStore(projectRoot: root).load(tileId: tile.id)) != nil { return true }
+            if let noteId = tile.metadata.noteId,
+               FileManager.default.fileExists(atPath: ProjectStoreLayout(projectRoot: root).noteFile(id: noteId).path) {
+                return true
+            }
+            if let path = tile.metadata.filePath, path.hasPrefix(root.standardizedFileURL.path + "/") { return true }
+            return false
+        }
+
+        var recoverable: [UUID: [Tile]] = [:]
+        var leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)] = [:]
         for projectId in Set(document.zones.compactMap(\.projectId)) where
             !document.zones.filter({ $0.projectId == projectId }).allSatisfy({ foreignZoneIds.contains($0.zoneId) }) {
-            guard let entry = appRegistry.projects.first(where: { $0.id == projectId && !$0.missing }),
-                  let canvas = try? ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true)).tryLoadCanvas()
+            guard let root = roots[projectId],
+                  let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas()
             else { continue }
-            let stranded = canvas.tiles.filter { tile in
-                guard let zoneId = tile.zoneId else { return false }
-                return !registeredZoneIds.contains(zoneId)
+            for tile in canvas.tiles {
+                guard let zoneId = tile.zoneId, !registeredZoneIds.contains(zoneId) else { continue }
+                var elsewhere = Set(idsByProject.filter { $0.key != projectId && $0.value.contains(tile.id) }.keys)
+                if let agentProject = agentProjectForTile?(tile.id), agentProject != projectId {
+                    elsewhere.insert(agentProject)
+                }
+                // An agent tile whose session lives in another project's `.array/`
+                // is that project's view of the agent, not a second one of ours.
+                if tile.kind == .managedAgent {
+                    for (other, otherRoot) in roots where other != projectId
+                        && (try? ManagedAgentSessionStore(projectRoot: otherRoot).load(tileId: tile.id)) != nil {
+                        elsewhere.insert(other)
+                    }
+                }
+                // Ours alone: no other project holds the id, or only we have the
+                // evidence (its note body, its file, its agent, its session).
+                let ours = elsewhere.isEmpty
+                    || (evidence(tile, belongsTo: projectId)
+                        && !elsewhere.contains(where: { evidence(tile, belongsTo: $0) }))
+                if ours {
+                    recoverable[projectId, default: []].append(tile)
+                } else {
+                    var entry = leftAlone[projectId] ?? (0, [])
+                    entry.count += 1
+                    entry.elsewhere.formUnion(elsewhere)
+                    leftAlone[projectId] = entry
+                }
             }
-            if !stranded.isEmpty { found[projectId] = stranded }
         }
-        return found
+        return (recoverable, leftAlone)
     }
 
     /// The user accepted the offer. Each project's stranded tiles move, as one
@@ -1191,7 +1253,7 @@ final class WorkspaceRuntime {
     func recoverStrandedTiles() throws -> Int {
         guard let canvasView else { return 0 }
         // Classified now, not at the offer: the scene may have changed since.
-        strandedTiles = findStrandedTiles()
+        strandedTiles = findStrandedTiles().recoverable
         var recovered = 0
         for projectId in strandedTiles.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             guard let tiles = strandedTiles[projectId], !tiles.isEmpty,
@@ -1249,7 +1311,9 @@ final class WorkspaceRuntime {
             installZoneLayerIfMissing(placement)
             recovered += tiles.count
         }
-        strandedTiles = findStrandedTiles()
+        let after = findStrandedTiles()
+        strandedTiles = after.recoverable
+        strandedLeftAlone = after.leftAlone
         return recovered
     }
 
