@@ -122,7 +122,11 @@ Left, by bench (uncommitted work stays in the bench):
   rows, send anchoring, sticky strip, then flip the default; Phase 2 LOD.
 - `cp-sidebar-fold-migration-wip`: remove `foldsSettledIntoShelf` (J3 red).
 - `--nav-mode-check` (KNOWN-RED) now fails on a different assertion.
-- Final matrix log: session scratchpad `matrix-final.log` (head before S8).
+- Final matrix (head before S8): 269 legs, 10 KNOWN-RED, 4 red —
+  ui-geometry (uncommitted fix in cp-agent-presence), browser-lru (open),
+  agent-supervisor (fixed after: sidebar button label collided with the
+  AgentName sentinel), terminal-tmux-live-integration (pane cwd `/private/var`
+  vs `/var`; not yet triaged — check whether it reproduces on the 0.7.26 base).
 
 Gate before Dylan reviews: full `scripts/run-matrix.sh` with
 `CONTINUUM_SKIP_UI_BASELINES=1`, `env -u TMUX -u TMUX_PANE`, and `caffeinate -u`
