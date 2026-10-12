@@ -31,6 +31,27 @@ final class GhosttyTerminalView: NSView {
     private let displayDefaults: UserDefaults
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
+    /// Surfaces `ghostty_surface_new` returned that `ghostty_surface_free` has not
+    /// freed yet, process-wide. `ghostty_app_free` traps on a live one (ADR-0010),
+    /// so the app's teardown reads this before freeing the app.
+    private(set) static var liveSurfaceCount = 0
+    /// The views holding those surfaces, so the app's last line of defence can
+    /// free any a teardown missed. Weak: a view that died with a live surface
+    /// cannot be reached, and is why the count stays the authority.
+    private static let liveSurfaceViews = NSHashTable<GhosttyTerminalView>.weakObjects()
+
+    /// Free every surface of `app` still alive, loudly, and report how many live
+    /// surfaces no view can reach any more (their view is gone). Called by
+    /// `GhosttyRuntimeContext.shutdown` before `ghostty_app_free`, which traps on
+    /// a live surface (ADR-0010).
+    static func freeLiveSurfacesForShutdown(app: ghostty_app_t) -> Int {
+        let views = liveSurfaceViews.allObjects.filter { $0.ghosttyApp == app }
+        if !views.isEmpty {
+            fputs("GHOSTTY SHUTDOWN: \(views.count) terminal surface(s) still alive at app free — a teardown missed them; freeing them now\n", stderr)
+        }
+        for view in views { view.closeSurface() }
+        return liveSurfaceCount - liveSurfaceViews.allObjects.count
+    }
     private var processExitPoller: Timer?
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
@@ -44,6 +65,8 @@ final class GhosttyTerminalView: NSView {
     private(set) var qaConfiguredFontSize: Float?
     private(set) var qaLastAppliedGhosttyVisibility: Bool?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
+    /// Pasteboards + confirmation policy for Ghostty's clipboard callbacks.
+    let clipboard: TerminalClipboard
 
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
     /// first OSC 7 fires. Used by GhosttyTerminalRuntime.capturedCwd.
@@ -61,12 +84,14 @@ final class GhosttyTerminalView: NSView {
         ghosttyApp: ghostty_app_t,
         launchProfile: LaunchProfile,
         displayDefaults: UserDefaults = .standard,
+        clipboard: TerminalClipboard = .system,
         reservedShortcutHandler: ((NSEvent) -> Bool)? = nil,
         statusChanged: @escaping (TerminalStatus) -> Void
     ) {
         self.ghosttyApp = ghosttyApp
         self.launchProfile = launchProfile
         self.displayDefaults = displayDefaults
+        self.clipboard = clipboard
         self.statusChanged = statusChanged
         self.reservedShortcutHandler = reservedShortcutHandler
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
@@ -84,7 +109,9 @@ final class GhosttyTerminalView: NSView {
             createSurface(app: ghosttyApp)
         }
         updateSurfaceSize()
-        window?.makeFirstResponder(self)
+        // No makeFirstResponder here: entering a window is hydration, a zone
+        // install or a workspace switch, not the user choosing this terminal.
+        // Focus is FocusBroker's (acquireFocus -> runtime.focus) or a click's.
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -433,9 +460,88 @@ final class GhosttyTerminalView: NSView {
             closeSurface()
             statusChanged(.exited(exitCode: nil))
         } else {
+            closeRequestedByArray = true
             ghostty_surface_request_close(surface)
         }
     }
+
+    /// Set when Array itself asks Ghostty to close this surface. Ghostty's own
+    /// `close_surface` binding (⌘W in its default keymap) raises the same
+    /// callback; that one must not free a surface whose shell is still running,
+    /// because only the tile's close path (with its confirm policy, session
+    /// record and canvas entry) may end a terminal.
+    private var closeRequestedByArray = false
+
+    // MARK: - Clipboard (Edit > Copy / Paste and Ghostty's callbacks)
+
+    /// Edit > Copy and ⌘C. Ghostty owns the selection, so the copy is its own
+    /// `copy_to_clipboard` binding, which lands in `writeClipboard`.
+    @objc func copy(_ sender: Any?) {
+        performGhosttyBinding("copy_to_clipboard")
+    }
+
+    /// Edit > Paste and ⌘V, through Ghostty's `paste_from_clipboard` binding so
+    /// bracketed paste and paste protection apply exactly as Ghostty defines them.
+    @objc func paste(_ sender: Any?) {
+        performGhosttyBinding("paste_from_clipboard")
+    }
+
+    @discardableResult
+    func performGhosttyBinding(_ action: String) -> Bool {
+        guard let surface else { return false }
+        return action.withCString { pointer in
+            ghostty_surface_binding_action(surface, pointer, UInt(action.utf8.count))
+        }
+    }
+
+    /// `read_clipboard_cb`: hand Ghostty the pasteboard text unconfirmed. Ghostty
+    /// itself decides whether the content needs confirming and, if so, calls
+    /// back through `confirmClipboardRead`.
+    func completeClipboardRead(location: ghostty_clipboard_e, state: UnsafeMutableRawPointer?) -> Bool {
+        guard let surface else { return false }
+        let text = clipboard.readString(from: location) ?? ""
+        text.withCString { pointer in
+            ghostty_surface_complete_clipboard_request(surface, pointer, state, false)
+        }
+        return true
+    }
+
+    /// `confirm_read_clipboard_cb`: an unsafe paste or an OSC 52 read. Nothing
+    /// reaches the program unless the user allows it; a refusal still completes
+    /// the request (with nothing) so Ghostty frees it.
+    func confirmClipboardRead(text: String, state: UnsafeMutableRawPointer?, request: ghostty_clipboard_request_e) {
+        let kind: TerminalClipboard.Request
+        switch request {
+        case GHOSTTY_CLIPBOARD_REQUEST_OSC_52_READ: kind = .osc52Read
+        case GHOSTTY_CLIPBOARD_REQUEST_OSC_52_WRITE: kind = .osc52Write
+        default: kind = .paste
+        }
+        qaClipboardConfirmRequests.append(kind)
+        clipboard.confirm(text, kind, window) { [weak self] allowed in
+            guard let self, let surface = self.surface else { return }
+            let delivered = allowed ? text : ""
+            delivered.withCString { pointer in
+                ghostty_surface_complete_clipboard_request(surface, pointer, state, true)
+            }
+        }
+    }
+
+    /// `write_clipboard_cb`: a copy, or an OSC 52 write (confirmed first when
+    /// Ghostty's `clipboard-write` policy asks for it).
+    func writeClipboard(_ text: String, location: ghostty_clipboard_e, confirm: Bool) {
+        guard confirm else {
+            clipboard.write(text, to: location)
+            return
+        }
+        qaClipboardConfirmRequests.append(.osc52Write)
+        clipboard.confirm(text, .osc52Write, window) { [weak self] allowed in
+            guard let self, allowed else { return }
+            self.clipboard.write(text, to: location)
+        }
+    }
+
+    /// QA: every confirmation Ghostty asked this surface for, in order.
+    private(set) var qaClipboardConfirmRequests: [TerminalClipboard.Request] = []
 
     func visibleText() -> String {
         guard let surface else { return "" }
@@ -479,6 +585,7 @@ final class GhosttyTerminalView: NSView {
         guard let userdata else { return }
         let view = Unmanaged<GhosttyTerminalView>.fromOpaque(userdata).takeUnretainedValue()
         DispatchQueue.main.async {
+            if processAlive, !view.closeRequestedByArray { return }
             view.statusChanged(.exited(exitCode: nil))
             view.closeSurface()
         }
@@ -526,6 +633,8 @@ final class GhosttyTerminalView: NSView {
             statusChanged(.error(message: "ghostty_surface_new returned nil"))
             return
         }
+        Self.liveSurfaceCount += 1
+        Self.liveSurfaceViews.add(self)
 
         statusChanged(.running)
         applyRequestedOcclusion()
@@ -565,6 +674,8 @@ final class GhosttyTerminalView: NSView {
         guard let surface else { return }
         self.surface = nil
         ghostty_surface_free(surface)
+        Self.liveSurfaceCount -= 1
+        Self.liveSurfaceViews.remove(self)
     }
 
     private func reportSurfaceSize() {

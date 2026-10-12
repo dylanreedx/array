@@ -40,6 +40,7 @@ public struct RegistryStore: Sendable {
     }
 
     public func load() throws -> Registry {
+        StoreReadProbe.shared.record()
         let registry: Registry = try writer.read(at: registryFile)
         if registry.schemaVersion > Registry.currentSchemaVersion {
             throw RegistryStoreError.unknownFutureSchema(

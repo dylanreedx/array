@@ -557,6 +557,15 @@ enum SidebarProductionCorpus {
         /// Zone for it. Every other flow's tile id is a bare UUID with no tile behind
         /// it — which is exactly why their placement band renders empty.
         func spawnPlaced(title: String, zoneOffset: CGFloat = 0) throws -> AgentID {
+            let tileId = try placeTile(title: title, zoneOffset: zoneOffset)
+            return supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot,
+                harness: .codex, model: "openai-codex/gpt-5.6-sol",
+                thinking: "medium", projectId: projectId, tileId: tileId)
+        }
+
+        /// Put a managed-agent tile on the project canvas, as ⌘K's spawn does.
+        func placeTile(title: String, zoneOffset: CGFloat = 0) throws -> UUID {
             let tileId = UUID()
             let store = ProjectStore(projectRoot: projectRoot)
             var canvas = (try? store.loadCanvas())
@@ -569,14 +578,16 @@ enum SidebarProductionCorpus {
                 zPosition: .fromLegacyRank(canvas.tiles.count + 1),
                 runtimeRef: nil, metadata: TileMetadata()))
             try store.saveCanvas(canvas)
-            return supervisor.spawn(
-                role: nil, prompt: nil, cwd: projectRoot,
-                harness: .codex, model: "openai-codex/gpt-5.6-sol",
-                thinking: "medium", projectId: projectId, tileId: tileId)
+            return tileId
         }
 
         /// Spawn through the real supervisor entry point every ⌘K and headless path
         /// reaches. `prompt: nil` is the untouched-composer case.
+        ///
+        /// A TILED spawn's tile really exists on the canvas, because in production
+        /// it does: ⌘K creates the tile first. A record naming a tile no canvas
+        /// holds is a closed window and derives into History (confidence pass,
+        /// sidebar stream), so a bare UUID would no longer model a live agent.
         func spawn(
             prompt: String? = nil,
             model: String = "openai-codex/gpt-5.6-sol",
@@ -593,7 +604,7 @@ enum SidebarProductionCorpus {
                 thinking: "medium",
                 projectId: projectId,
                 parentAgentID: parent,
-                tileId: tiled ? UUID() : nil)
+                tileId: tiled ? (try? placeTile(title: "agent")) ?? UUID() : nil)
         }
 
         /// The first accepted Send, through the supervisor's own accept seam.

@@ -26,6 +26,22 @@ if CommandLine.arguments.contains("--live-model-catalog-check") {
     Foundation.exit(0)
 }
 
+// Confidence pass S4. The agent record, context and row-builder sections are
+// registered after the KNOWN-RED seed-1 pin in the bare run, so they never
+// reported to the matrix; this arm runs them, plus the sidebar's own lifecycle
+// derivations, where the gate can see them.
+if CommandLine.arguments.contains("--sidebar-lifecycle-check") {
+    runAgentRecordChecks()
+    runAgentContextIndexChecks()
+    runAgentInboxRowBuilderChecks()
+    runAgentInventoryChecks()
+    runSidebarLifecycleChecks()
+    runManagedSessionRootIsolationChecks()
+    runSidebarTreeMembershipChecks()
+    print("SidebarLifecycleChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--layout-pressure-check") {
     runLayoutPressureChecks()
     runCanvasAutoLayoutChecks()
@@ -155,6 +171,12 @@ if CommandLine.arguments.contains("--codex-appserver-runner-check") {
 if CommandLine.arguments.contains("--command-center-check") {
     runCommandCenterChecks()
     print("CommandCenterChecks passed")
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--unreadable-canvas-store-check") {
+    runUnreadableCanvasStoreChecks()
+    print("UnreadableCanvasStoreChecks passed")
     Foundation.exit(0)
 }
 
@@ -4224,6 +4246,8 @@ do {
     }
 
     try store.saveCanvas(canvas)
+
+    runUnreadableCanvasStoreChecks()
 
     let s1 = TerminalSessionDescriptor(
         id: UUID(),

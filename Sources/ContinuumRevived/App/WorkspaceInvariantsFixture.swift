@@ -265,8 +265,13 @@ final class WorkspaceInvariantsFixture {
 
         let zoneRenderModels = AppDelegate.zoneRenderModels(from: active.document, registry: registry)
         let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == bootProjectId })?.placement
+        // Launch's rule: an unreadable boot canvas boots an empty flat snapshot
+        // (never written) and the mount reports the project unavailable.
+        let bootProjectCanvas: CanvasState?
+        do { bootProjectCanvas = try bootController.projectStore.tryLoadCanvas() }
+        catch ProjectStoreError.canvasUnreadable, ProjectStoreError.unknownFutureSchema { bootProjectCanvas = nil }
         let bootCanvas = AppDelegate.isolatedBootCanvasState(
-            projectCanvas: try bootController.projectStore.tryLoadCanvas()
+            projectCanvas: bootProjectCanvas
                 ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
             bootProjectId: bootProjectId,
             selectedWorkspaceId: active.workspaceId,

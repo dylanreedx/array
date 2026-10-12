@@ -116,7 +116,7 @@ public enum AgentInboxRowBuilder {
             lifecycleFacts: lifecycleFacts,
             now: now
         )
-        return boardRows.map { boardRow in
+        let built = boardRows.map { boardRow in
             var facts = lifecycleFacts[boardRow.agentId] ?? AgentLifecycleFacts()
             facts.descendantBlockers = facts.descendantBlockers.includingDescendants([
                 childBlockers[boardRow.agentId] ?? .unblocked
@@ -130,6 +130,45 @@ public enum AgentInboxRowBuilder {
                 autoSettleAfter: autoSettleAfter,
                 now: now
             )
+        }
+        return placingChildrenWithParents(built)
+    }
+
+    /// CHILDREN FOLLOW THEIR PARENT (confidence pass, sidebar stream).
+    ///
+    /// A subagent's own lifecycle is not where it should be drawn: closing the
+    /// parent's tile parked ONE record, and every child stayed Active — where
+    /// `InboxSort` nests per lifecycle block and promotes a child whose parent is
+    /// absent from its block to a ROOT. Every subagent of a closed parent became a
+    /// stray top-level row, which is also what made the next agent "look like a
+    /// sub agent" (2026-09-22). Here each child takes its topmost present
+    /// ancestor's lifecycle, its Finishing fact and its workspace, so a group is
+    /// always drawn in one section, under one scope, as one block.
+    ///
+    /// A child whose parent is not in the list at all keeps its own placement:
+    /// there is nothing to follow, and hiding it would lose an agent.
+    public static func placingChildrenWithParents(_ rows: [AgentInboxRow]) -> [AgentInboxRow] {
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func topmostAncestor(of row: AgentInboxRow) -> AgentInboxRow? {
+            var visited: Set<UUID> = [row.id]
+            var current = row
+            var found: AgentInboxRow?
+            while let parentId = current.parentId, let parent = byId[parentId],
+                  visited.insert(parentId).inserted {
+                found = parent
+                current = parent
+            }
+            return found
+        }
+        return rows.map { row in
+            guard row.parentId != nil, let root = topmostAncestor(of: row) else { return row }
+            let workspaceName = root.workspaceName ?? row.workspaceName
+            guard row.lifecycle != root.lifecycle
+                    || row.closingSince != root.closingSince
+                    || row.workspaceName != workspaceName else { return row }
+            return row.followingParent(
+                lifecycle: root.lifecycle, closingSince: root.closingSince,
+                workspaceName: workspaceName)
         }
     }
 
@@ -198,6 +237,7 @@ public enum AgentInboxRowBuilder {
             autoSettleAfter: autoSettleAfter,
             now: now
         ) ?? .active
+        let closingSince = record?.closingSince(facts: observedFacts, now: now)
         return AgentInboxRow(
             id: boardRow.agentId,
             title: title(for: context),
@@ -253,7 +293,8 @@ public enum AgentInboxRowBuilder {
             terminalEvent: record?.latestTerminalEvent,
             terminalIsUnread: record.map {
                 ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
-            } ?? false
+            } ?? false,
+            closingSince: closingSince
         )
     }
 

@@ -158,19 +158,25 @@ public struct AgentLifecycleFacts: Equatable, Sendable {
     /// bounded on both sides of `now` so a peer clock cannot pin a row forever.
     public var unadoptedPromptAt: Date?
     public var graceWindow: TimeInterval
+    /// The record names a tile that no workspace document (and no live canvas)
+    /// holds. Observation, never persisted: the caller that loaded every canvas
+    /// says so, and a tile that comes back (a recovered zone) makes it false again.
+    public var tileUnreachable: Bool
 
     public init(
         attentionIsYours: Bool = false,
         hasLiveRunner: Bool = false,
         descendantBlockers: LifecycleBlockers = .unblocked,
         unadoptedPromptAt: Date? = nil,
-        graceWindow: TimeInterval = 30
+        graceWindow: TimeInterval = 30,
+        tileUnreachable: Bool = false
     ) {
         self.attentionIsYours = attentionIsYours
         self.hasLiveRunner = hasLiveRunner
         self.descendantBlockers = descendantBlockers
         self.unadoptedPromptAt = unadoptedPromptAt
         self.graceWindow = max(0, graceWindow)
+        self.tileUnreachable = tileUnreachable
     }
 
     public func hasUnadoptedPrompt(now: Date) -> Bool {
@@ -458,6 +464,18 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// When it left the list. **`archived` ≠ `settled`**: settled stays in the
     /// list, slim and readable; archived is gone from it.
     public var archivedAt: Date?
+    /// When the human closed this agent's tile — the INTENT, written at once and
+    /// whatever the agent is doing (confidence pass, sidebar stream).
+    ///
+    /// `archivedAt` cannot carry it: closing the tile of a working agent must not
+    /// bury the turn in History (P2A.5: the work continues), so `close` refuses a
+    /// busy agent — and before this field nothing remembered that the tile had been
+    /// closed, so the row sat in Active as "ready" for the three days auto-settle
+    /// takes. With the intent stored, `lifecycle` derives the rest: blocked, the row
+    /// says "Finishing"; the moment nothing blocks it, it is History. No completion
+    /// hook writes anything. Optional, decode-if-present, no schema bump — the
+    /// `snoozedAt` convention.
+    public var closeRequestedAt: Date?
 
     /// The only timestamps that keep a neutral row out of auto-settle. A prompt
     /// or a turn start is real work; `lastActivityAt` is deliberately absent.
@@ -545,16 +563,40 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // one representable step gives this adapter the packet's strict `>` rule
         // without reopening that shared precedence function.
         let strictWindow = autoSettleAfter.map(\.nextUp)
+        // The close intent is rung 0 too, but only once nothing blocks it: a
+        // blocked agent whose tile was closed stays active (and says "Finishing",
+        // `closingSince`), and leaves for History by itself when its turn ends.
+        let closedAt = archivedAt ?? (facts.blocksSettlement(now: now) ? nil : closeIntentAt(facts: facts))
         return InboxLifecycle.resolve(
             override: settledOverride,
             blockers: blockers,
             settledAt: explicitSettledDate,
             snoozedUntil: snoozeHonoured,
-            archivedAt: archivedAt,
+            archivedAt: closedAt,
             lastActivityAt: effectiveRealActivityAt,
             autoSettleAfter: strictWindow,
             now: now
         )
+    }
+
+    /// When this agent was asked to leave the live list: the stored close intent,
+    /// or — for a record bound to a tile no workspace document holds — the moment
+    /// it last did anything. A binding nothing can find is a closed window
+    /// whichever path lost the tile (`.plans/05`, measured: eight records on the
+    /// owner's store named tiles the canvas had lost), and it is derived here at
+    /// every rebuild rather than repaired lazily on click.
+    public func closeIntentAt(facts: AgentLifecycleFacts) -> Date? {
+        if let closeRequestedAt { return closeRequestedAt }
+        guard facts.tileUnreachable, tileId != nil else { return nil }
+        return lastActivityAt
+    }
+
+    /// The "Finishing" fact: the tile was closed (or lost) while something still
+    /// blocks the agent, so the row stays live — slim — until its turn ends. nil
+    /// for every agent that is not closing, and for one already archived.
+    public func closingSince(facts: AgentLifecycleFacts, now: Date) -> Date? {
+        guard archivedAt == nil, facts.blocksSettlement(now: now) else { return nil }
+        return closeIntentAt(facts: facts)
     }
 
     /// Snooze is a visibility action. A live runner is allowed; only a pending
@@ -690,7 +732,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
         snoozedAt: Date? = nil,
-        archivedAt: Date? = nil
+        archivedAt: Date? = nil,
+        closeRequestedAt: Date? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -736,6 +779,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.snoozedUntil = snoozedUntil
         self.snoozedAt = snoozedAt
         self.archivedAt = archivedAt
+        self.closeRequestedAt = closeRequestedAt
     }
 
     /// Defensive read for legacy records that used a model id, role id, UUID, or
@@ -921,6 +965,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // reason: the newness test compares against it, so drift on reload
         // would move the line between "I already saw that" and "this is new".
         case snoozedAtReferenceInterval
+        // Confidence pass: the close intent, encoded like every lifecycle date.
+        case closeRequestedAtReferenceInterval
     }
 
     public init(from decoder: Decoder) throws {
@@ -1031,6 +1077,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             .map(Date.init(timeIntervalSinceReferenceDate:))
         archivedAt = try container.decodeIfPresent(Double.self, forKey: .archivedAtReferenceInterval)
             .map(Date.init(timeIntervalSinceReferenceDate:))
+        // Tolerant: a malformed close stamp reads as absent rather than dropping
+        // the record — losing a close is recoverable, losing the agent is not.
+        closeRequestedAt = ((try? container.decodeIfPresent(
+            Double.self, forKey: .closeRequestedAtReferenceInterval)) ?? nil)
+            .map(Date.init(timeIntervalSinceReferenceDate:))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1105,6 +1156,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .snoozedAtReferenceInterval)
         try container.encodeIfPresent(archivedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .archivedAtReferenceInterval)
+        try container.encodeIfPresent(closeRequestedAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .closeRequestedAtReferenceInterval)
     }
 
     // Lifecycle (settle / snooze) landed above in P4.1 as STORED FACTS ONLY.

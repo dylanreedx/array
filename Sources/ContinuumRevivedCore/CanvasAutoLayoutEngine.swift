@@ -18,12 +18,17 @@ public struct CanvasLayoutTransaction: Equatable, Sendable {
     /// `latchedSwapTarget` so the exchange is hysteretic instead of re-derived
     /// from jittery per-frame geometry.
     public var swapTargetTileId: UUID?
+    /// The zone each committed tile belongs to, alongside its frame: a drop into
+    /// another zone changes membership in the same commit as geometry, and a
+    /// writer that persisted the frame alone left the old stamp on disk.
+    public var tileZoneIds: [UUID: UUID]
 
-    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = [], swapTargetTileId: UUID? = nil) {
+    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = [], swapTargetTileId: UUID? = nil, tileZoneIds: [UUID: UUID] = [:]) {
         self.tileFrames = tileFrames
         self.zonePlacements = zonePlacements
         self.blockedZoneIds = blockedZoneIds
         self.swapTargetTileId = swapTargetTileId
+        self.tileZoneIds = tileZoneIds
     }
 }
 

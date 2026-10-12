@@ -20,6 +20,11 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     case all
     case project(String)
     case workspace(String)
+    /// Whichever workspace is on screen (confidence pass, sidebar stream): the
+    /// DEFAULT, so out of the box the list is the agents whose tiles you can see,
+    /// and it follows a workspace switch. Resolved by the view against the name
+    /// the host hands it; unresolved (no host), it filters nothing.
+    case currentWorkspace
 
     /// The word on the popup entry. A project or workspace shows its own NAME and
     /// nothing else — no "Project: " prefix — because the two kinds never collide
@@ -27,11 +32,13 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .all: return InboxScope.allTitle
+        case .currentWorkspace: return InboxScope.currentWorkspaceTitle
         case .project(let name), .workspace(let name): return name
         }
     }
 
     public static let allTitle = "All agents"
+    public static let currentWorkspaceTitle = "This workspace"
 
     /// What `UserDefaults` stores. TAGGED, so a project called "all" and a
     /// workspace and a project that share a name are three different scopes, and
@@ -40,6 +47,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     public var storageValue: String {
         switch self {
         case .all: return "all"
+        case .currentWorkspace: return "current"
         case .project(let name): return "project:\(name)"
         case .workspace(let name): return "workspace:\(name)"
         }
@@ -52,6 +60,10 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     public init?(storageValue: String) {
         if storageValue == "all" {
             self = .all
+            return
+        }
+        if storageValue == "current" {
+            self = .currentWorkspace
             return
         }
         guard let separator = storageValue.firstIndex(of: ":") else { return nil }
@@ -73,7 +85,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// silently kept it would be claiming otherwise. `.all` is where it is found.
     public func matches(_ row: AgentInboxRow) -> Bool {
         switch self {
-        case .all: return true
+        case .all, .currentWorkspace: return true
         case .project(let name): return row.projectName == name
         case .workspace(let name): return row.workspaceName == name
         }
@@ -113,7 +125,8 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     public static func entries(
         for rows: [AgentInboxRow],
         catalog: [InboxScope] = [],
-        including selected: InboxScope = .all
+        including selected: InboxScope = .all,
+        currentWorkspace: String? = nil
     ) -> [InboxScope] {
         var projectNames = rows.compactMap(\.projectName)
         var workspaceNames = rows.compactMap(\.workspaceName)
@@ -121,10 +134,11 @@ public enum InboxScope: Equatable, Hashable, Sendable {
             switch scope {
             case .project(let name): projectNames.append(name)
             case .workspace(let name): workspaceNames.append(name)
-            case .all: break
+            case .all, .currentWorkspace: break
             }
         }
-        var entries = [InboxScope.all]
+        // "This workspace" leads when the host knows which one is on screen.
+        var entries = (currentWorkspace == nil ? [] : [InboxScope.currentWorkspace]) + [InboxScope.all]
             + names(projectNames).map(InboxScope.project)
             + names(workspaceNames).map(InboxScope.workspace)
         if !entries.contains(selected) { entries.append(selected) }
@@ -148,9 +162,17 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     public static func filter(
         rows: [AgentInboxRow],
         scope: InboxScope,
-        openAgentId: UUID? = nil
+        openAgentId: UUID? = nil,
+        currentWorkspace: String? = nil
     ) -> [AgentInboxRow] {
-        guard scope != .all else { return rows }
-        return rows.filter { $0.id == openAgentId || scope.matches($0) }
+        let resolved: InboxScope
+        if scope == .currentWorkspace {
+            guard let currentWorkspace else { return rows }
+            resolved = .workspace(currentWorkspace)
+        } else {
+            resolved = scope
+        }
+        guard resolved != .all else { return rows }
+        return rows.filter { $0.id == openAgentId || resolved.matches($0) }
     }
 }

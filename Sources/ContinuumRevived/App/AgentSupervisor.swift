@@ -6184,17 +6184,48 @@ final class AgentSupervisor {
         return true
     }
 
+    /// Closing an agent's TILE (confidence pass, sidebar stream). Unlike `close`,
+    /// this never refuses: the close INTENT is stamped at once, whatever the agent
+    /// is doing, and the agent is parked in History immediately only when nothing
+    /// blocks it. A busy agent keeps running (P2A.5) and its row reads "Finishing"
+    /// until the turn ends — then `AgentRecord.lifecycle` derives History from the
+    /// stamp, with no completion hook to forget.
+    ///
+    /// Before this, `deleteTile` called `close`, a busy agent's close was refused,
+    /// and nothing ever retried it: the row sat in Active as "ready" for the three
+    /// days auto-settle takes. That was most of "I delete a tile and the sidebar
+    /// keeps it".
+    ///
+    /// Returns true when the agent was parked now.
+    @discardableResult
+    func requestClose(agentID id: AgentID, now: Date = Date()) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.requestClose: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.archivedAt == nil else { return false }
+        if record.closeRequestedAt == nil { record.closeRequestedAt = now }
+        if !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) {
+            record.archivedAt = now
+        }
+        records[id] = record
+        persist(record)
+        return record.archivedAt != nil
+    }
+
     /// The way out of History. Reopening a closed agent is asking for it back, so
     /// the stamp is cleared — otherwise the row it was revealed from would still be
-    /// in History while its tile sits on the canvas.
+    /// in History while its tile sits on the canvas. The close INTENT goes with it:
+    /// a reopened agent that is still finishing a turn is not closing any more.
     @discardableResult
     func reopen(agentID id: AgentID) -> Bool {
         guard var record = records[id] else {
             warn("AgentSupervisor.reopen: no agent \(id.rawValue.uuidString)")
             return false
         }
-        guard record.archivedAt != nil else { return false }
+        guard record.archivedAt != nil || record.closeRequestedAt != nil else { return false }
         record.archivedAt = nil
+        record.closeRequestedAt = nil
         records[id] = record
         persist(record)
         return true
@@ -15026,7 +15057,7 @@ private func checkDetachOutlivesItsTile(
     // …and it parks. Without this line the branch reverts to what filled the
     // sidebar with unobservable rows: a record with no tile, no runner and no way
     // out of the live list (.plans/05-close-to-history.md).
-    guard branch.contains("close(agentID:") else {
+    guard branch.contains("requestClose(agentID:") else {
         throw fail("deleteTile's .managedAgent branch never parks the agent: a closed tile would leave its record in the live list forever, with no tile to observe it and no section to hold it:\n\(branch)")
     }
     let stopPattern = try NSRegularExpression(pattern: "\\.stop\\s*\\(")

@@ -60,7 +60,7 @@ final class TileSpawner {
     private let tmuxPathResolver: (UserDefaults) -> String?
     private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
-    private var browserProfiles: [BrowserProfile]
+    private(set) var browserProfiles: [BrowserProfile]
     fileprivate var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
     fileprivate var managedAgentCreationScopes: [UUID: CreationScope] = [:]
 
@@ -106,7 +106,8 @@ final class TileSpawner {
     var browserRuntimeSpawnedHandler: ((WKWebViewBrowserRuntime) -> Void)?
 
     /// Called after every note text change so the AppDelegate can schedule a
-    /// debounced note body + index save.
+    /// debounced note body + index save. A view captures it when wired: it
+    /// outlives this spawner, which the next project-changing arm replaces.
     var notePersistenceHandler: (() -> Void)?
 
     /// Called after file-tree expansion, selection, or search changes so the
@@ -339,11 +340,17 @@ final class TileSpawner {
             agentDescriptor: agentDescriptor
         )
         do {
+            // Nothing was installed: leave no session descriptor behind either.
+            if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
             try persistProjectCanvas(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
+            // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            try? projectStore.deleteSession(id: runtime.id)
             if let target = wrappedProfile.windowTarget {
                 let reach = project.remoteEnvironment?.reach ?? .localhost
                 if let tmuxPath = tmuxPathResolver(defaults) {
@@ -586,7 +593,11 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
-        let projectRoot = terminalProjectRoot()
+        // A restart rebuilds a tile that already sits in a zone. When that zone is
+        // THIS spawner's project's, its root and tmux session are this project's —
+        // not the armed zone's, which is what the creation providers answer.
+        let ownsTile = canvasView.zoneId(containing: tileId).flatMap { canvasView.projectId(forZone: $0) } == project.id
+        let projectRoot = ownsTile ? project.rootPath : terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
             in: projectRoot,
@@ -619,7 +630,7 @@ final class TileSpawner {
             wrappedProfile = try tmuxWrappedProfileIfAvailable(
                 profileWithCwd,
                 tileId: existing.id,
-                target: terminalSessionTargetProvider?(),
+                target: ownsTile ? .project(projectId: project.id) : terminalSessionTargetProvider?(),
                 existingWindowTarget: persistedWindowTarget
             )
         } catch {
@@ -957,6 +968,14 @@ final class TileSpawner {
             )
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
+            // Leave nothing behind: no web view process, no drawn tile nothing
+            // persisted, no browser-state row for a tile that does not exist.
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            if var state = try? projectStore.tryLoadBrowserState(), state.tiles.contains(where: { $0.tileId == tile.id }) {
+                state.tiles.removeAll { $0.tileId == tile.id }
+                try? projectStore.saveBrowserState(state)
+            }
             return .failure(error)
         }
 
@@ -1585,6 +1604,7 @@ final class TileSpawner {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
+            withdrawFailedSpawn(tileId, target: target, in: canvasView)
             return .failure(error)
         }
         managedAgentLaunchSelections[tileId] = resolvedSelection
@@ -1998,7 +2018,7 @@ final class TileSpawner {
             return .failure(error)
         }
         let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
-        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: tileId, destination: url))
         }
@@ -2135,7 +2155,7 @@ final class TileSpawner {
         }
         let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
         let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
-        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        view.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: activeTile.id, destination: url))
         }
@@ -2215,7 +2235,7 @@ final class TileSpawner {
         _ tile: Tile, noteId: UUID, body: String, canvasView: CanvasNSView
     ) {
         let restored = NoteTileNSView(tile: tile, noteId: noteId, initialBody: body)
-        restored.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        restored.onTextChange = { [notePersistenceHandler] in notePersistenceHandler?() }
         restored.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(
                 noteId: noteId, tileId: tile.id, destination: url
@@ -2448,6 +2468,15 @@ final class TileSpawner {
         return TileArrangement.dockDestination(seed, direction: .left, against: anchor, gap: anchoredFileGap)
     }
 
+    /// A spawn that installed its tile and then failed to persist it must take
+    /// the tile back off the canvas: left there it is drawn, has no record on
+    /// disk, and comes back as nothing after a relaunch. A refused install
+    /// (`.unplaced`) put nothing on the canvas.
+    private func withdrawFailedSpawn(_ tileId: UUID, target: CanvasNSView.ProjectTileTarget, in canvasView: CanvasNSView) {
+        guard target != .unplaced else { return }
+        canvasView.removeTile(id: tileId)
+    }
+
     /// Persists through the model that actually received the tile. The flat
     /// `canvasState` is only authoritative while the single-zone boot path owns the
     /// active project; once `setZones` has installed layers, the layer's tiles are.
@@ -2458,9 +2487,13 @@ final class TileSpawner {
         switch target {
         case .flatCanvasState:
             try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+        case .unplaced:
+            throw SpawnError.canvasUnavailable
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
-            let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+            // An unreadable file is not an empty one: merging against "nothing"
+            // and writing would replace it. `saveCanvas` refuses as well.
+            let persisted = try projectStore.tryLoadCanvas() ?? CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [],
                 groups: [],
@@ -6278,8 +6311,11 @@ final class TileSpawner {
     ) -> (FileTreeViewModel, CanvasNSView.ProjectTileTarget) {
         let viewModel = FileTreeViewModel()
         let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
-        view.onPersist = { [weak self] _ in
-            self?.fileTreePersistenceHandler?()
+        // Captured, not reached through `self`: every project-changing arm mints
+        // new spawners, and a view outlives the spawner that built it. Through a
+        // weak `self` its edits stopped being saved at the first such click.
+        view.onPersist = { [fileTreePersistenceHandler] _ in
+            fileTreePersistenceHandler?()
         }
         view.onSpawnFile = { [weak self] path in
             guard let self else { return }

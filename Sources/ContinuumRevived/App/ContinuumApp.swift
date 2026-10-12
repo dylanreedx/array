@@ -934,7 +934,13 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 installMainMenu()
-                try runMenuContractSelfCheck()
+                try runMenuContractSelfCheck(expectDeveloperMenus: showsDeveloperMenusOnLiveChannel)
+                // The other channel's developer surfaces too, so a dev run still
+                // witnesses what the prod build hides and vice versa. (Only that
+                // subset: AppKit keeps the first Services menu it was given.)
+                installMainMenu(showsDeveloperMenus: !showsDeveloperMenusOnLiveChannel)
+                guard let otherChannelMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
+                try expectDeveloperSurfaces(in: otherChannelMenu, expected: !showsDeveloperMenusOnLiveChannel)
                 if let sentinel = launchProbeSentinelPath() {
                     try "menu-contract-check passed\n".write(toFile: sentinel, atomically: true, encoding: .utf8)
                 }
@@ -1124,6 +1130,26 @@ enum ContinuumApp {
                 Foundation.exit(0)
             } catch {
                 fputs("zone-unacquired-project check failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        // Confidence pass S2: tiles never vanish, and every visible zone can hold tiles.
+        let zoneTruthLegs: [(String, () throws -> URL)] = [
+            ("--zone-layer-move-check", ZoneTruthChecks.runLayerMove),
+            ("--canvas-unreadable-check", ZoneTruthChecks.runCanvasUnreadable),
+            ("--zone-close-strand-check", ZoneTruthChecks.runZoneCloseStrand),
+            ("--stranded-tile-recovery-check", ZoneTruthChecks.runStrandedTileRecovery),
+            ("--layout-commit-truth-check", ZoneTruthChecks.runLayoutCommitTruth),
+            ("--refused-spawn-teardown-check", ZoneTruthChecks.runRefusedSpawnTeardown),
+        ]
+        for (flag, leg) in zoneTruthLegs where CommandLine.arguments.contains(flag) {
+            do {
+                _ = NSApplication.shared
+                let artifact = try leg()
+                print("ContinuumRevivedZoneTruthChecks \(flag) passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL \(flag): \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
@@ -2090,6 +2116,22 @@ enum ContinuumApp {
                 fputs("FAIL: \(error)\n", stderr)
                 Foundation.exit(1)
             }
+        }
+
+        if CommandLine.arguments.contains("--sidebar-truth-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarTruthChecks.run()
+                    print("ContinuumRevivedSidebarTruthChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // Async: supervisor events and the turn-end push are main-queue hops.
+            NSApp.run()
         }
 
         if CommandLine.arguments.contains("--agent-inbox-check") {
@@ -3405,6 +3447,30 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--language-server-release-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try LanguageServerReleaseCheck.run()
+                print("ContinuumRevivedLanguageServerReleaseChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-click-recency-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserClickRecencySelfCheck()
+                print("ContinuumRevivedBrowserClickRecencyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
@@ -3490,6 +3556,31 @@ enum ContinuumApp {
             do {
                 let artifact = try AppDelegate.runAgentInputSelfCheck()
                 print("ContinuumRevivedAgentInputChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--attention-notification-check") {
+            _ = NSApplication.shared
+            do {
+                let artifact = try NeedsAttentionNotification.runSelfCheck()
+                print("ContinuumRevivedAttentionNotificationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--diff-review-off-main-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try DiffReviewOffMainCheck.run()
+                print("ContinuumRevivedDiffReviewOffMainChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -3663,6 +3754,21 @@ enum ContinuumApp {
             }
         }
 
+        // A tile's own project, never the armed zone's, owns its saves, close,
+        // exit, restart and teardown. Real shells in an off-display window, so it
+        // sits below `ghostty_init()` like the leg above.
+        if CommandLine.arguments.contains("--tile-project-scope-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileProjectScopeChecks.run()
+                print("ContinuumRevivedTileProjectScopeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-runtime-duplication-check") {
             do {
                 _ = NSApplication.shared
@@ -3800,6 +3906,45 @@ enum ContinuumApp {
             do {
                 let artifact = try GhosttyTerminalRuntime.runTerminalFillsTileSelfCheck()
                 print("ContinuumRevivedTerminalFillsTileChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-clipboard-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runClipboardCheck()
+                print("ContinuumRevivedTerminalClipboardChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-focus-grab-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runFocusGrabCheck()
+                print("ContinuumRevivedTerminalFocusGrabChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-cmd-w-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TerminalInputConfidenceChecks.runCmdWCheck()
+                print("ContinuumRevivedTerminalCmdWChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -3981,8 +4126,15 @@ enum ContinuumApp {
         return true
     }
 
+    /// Debug > Companion Sync and View > Component Lab are developer surfaces:
+    /// sync is gated off for the alpha and the lab spins up real Ghostty/WebKit
+    /// surfaces. The prod channel (the /Applications bundle) never shows them.
+    private static var showsDeveloperMenusOnLiveChannel: Bool {
+        Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier
+    }
+
     @MainActor
-    private static func installMainMenu() {
+    private static func installMainMenu(showsDeveloperMenus: Bool = showsDeveloperMenusOnLiveChannel) {
         let appName = "Array"
         let mainMenu = NSMenu(title: "Main Menu")
 
@@ -4046,20 +4198,24 @@ enum ContinuumApp {
         let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
         sidebarItem.tag = registeredSidebarMenuTag
         viewMenu.addItem(sidebarItem)
-        viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        if showsDeveloperMenus {
+            viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
+        }
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
-        let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
-        let debugMenu = NSMenu(title: "Debug")
-        let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
-        let companionMenu = NSMenu(title: "Companion Sync")
-        companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
-        companionItem.submenu = companionMenu
-        debugMenu.addItem(companionItem)
-        debugMenuItem.submenu = debugMenu
-        mainMenu.addItem(debugMenuItem)
+        if showsDeveloperMenus {
+            let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+            let debugMenu = NSMenu(title: "Debug")
+            let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
+            let companionMenu = NSMenu(title: "Companion Sync")
+            companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+            companionItem.submenu = companionMenu
+            debugMenu.addItem(companionItem)
+            debugMenuItem.submenu = debugMenu
+            mainMenu.addItem(debugMenuItem)
+        }
 
         let helpMenuItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         let helpMenu = NSMenu(title: "Help")
@@ -4118,7 +4274,7 @@ enum ContinuumApp {
     }
 
     @MainActor
-    private static func runMenuContractSelfCheck() throws {
+    private static func runMenuContractSelfCheck(expectDeveloperMenus: Bool) throws {
         guard let mainMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
         guard mainMenu.items.first?.title == "Array",
               let appMenu = mainMenu.items.first?.submenu,
@@ -4162,7 +4318,6 @@ enum ContinuumApp {
               sidebarItem.title.hasPrefix("Show Workspace Sidebar") else {
             throw SelfCheckError("registered Activity Dock menu item is missing or retained a hardcoded key equivalent")
         }
-        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let helpMenu = mainMenu.item(withTitle: "Help")?.submenu else { throw SelfCheckError("missing Help menu") }
         guard helpMenu === NSApp.helpMenu else { throw SelfCheckError("Help menu is not NSApp.helpMenu") }
@@ -4170,6 +4325,19 @@ enum ContinuumApp {
         try expectMenuItem(helpMenu, title: "Environment Setup…", action: #selector(AppDelegate.openEnvironmentSetupFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(helpMenu, title: "Report a Problem…", action: #selector(AppDelegate.reportProblemFromMenu(_:)), keyEquivalent: "")
 
+        try expectDeveloperSurfaces(in: mainMenu, expected: expectDeveloperMenus)
+    }
+
+    /// Developer surfaces exist on the dev channel and are absent on prod.
+    @MainActor
+    private static func expectDeveloperSurfaces(in mainMenu: NSMenu, expected: Bool) throws {
+        guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
+        guard expected else {
+            if viewMenu.item(withTitle: "Component Lab") != nil { throw SelfCheckError("prod channel must not show View > Component Lab") }
+            if mainMenu.item(withTitle: "Debug") != nil { throw SelfCheckError("prod channel must not show the Debug menu") }
+            return
+        }
+        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
         try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
@@ -4353,22 +4521,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var qaExternalPointerEvents: [[String: Any]] = []
     private var ghostty: GhosttyRuntimeContext?
     private var browserEngine: BrowserEngineContext?
-    private var runtimes: [GhosttyTerminalRuntime] {
-        get { workspaceRuntime?.activeController?.runtimes ?? [] }
-        set { workspaceRuntime?.activeController?.runtimes = newValue }
-    }
-    private var browserRuntimes: [WKWebViewBrowserRuntime] {
-        get { workspaceRuntime?.activeController?.browserRuntimes ?? [] }
-        set { workspaceRuntime?.activeController?.browserRuntimes = newValue }
-    }
-    private var noteViews: [UUID: NoteTileNSView] {
-        get { workspaceRuntime?.activeController?.noteViews ?? [:] }
-        set { workspaceRuntime?.activeController?.noteViews = newValue }
-    }
-    private var fileTreeViews: [UUID: FileTreeTileNSView] {
-        get { workspaceRuntime?.activeController?.fileTreeViews ?? [:] }
-        set { workspaceRuntime?.activeController?.fileTreeViews = newValue }
-    }
+    // There are deliberately no `runtimes`/`browserRuntimes`/`noteViews`/
+    // `fileTreeViews` accessors here. They used to resolve to the ARMED zone's
+    // project and were called from code acting on one tile, so with two projects
+    // mounted a note edit saved into the wrong `.array/`, a close tore down
+    // through the wrong project and left the process and the canvas entry, and
+    // quit freed only one project's Ghostty surfaces. Resolve the owner:
+    // `controller(owningTile:)`, `controller(owning:)` for a spawner's product,
+    // a search of `liveControllers` by runtime id for a runtime callback, and
+    // `liveControllers` for teardown.
     var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
@@ -4405,6 +4566,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceRuntime: WorkspaceRuntime?
     private let editorLanguageServices = EditorLanguageServiceManager()
     private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
+
+    /// Every project controller the mounted workspace holds live.
+    private var liveControllers: [ZoneRuntimeController] { workspaceRuntime?.liveControllers ?? [] }
+
+    /// The controller of the project `spawner` builds for — where a runtime or a
+    /// view it made is held and saved. Not the armed zone's.
+    private func controller(owning spawner: TileSpawner) -> ZoneRuntimeController? {
+        workspaceRuntime?.controller(for: spawner.spawnerProjectId)
+    }
+
+    /// The controller of the project whose zone holds `tileId`: the owner of its
+    /// runtimes, its stores and its spawner, armed or not. nil for a project
+    /// tile whose project has no live controller — callers refuse rather than
+    /// fall back to the armed project.
+    private func controller(owningTile tileId: UUID) -> ZoneRuntimeController? {
+        guard let workspaceRuntime else { return nil }
+        if let canvasView, let zoneId = canvasView.zoneId(containing: tileId),
+           let placement = canvasView.installedZonePlacement(for: zoneId) {
+            if let projectId = placement.projectId { return workspaceRuntime.controller(for: projectId) }
+            // A group zone's tile: its runtime went to the spawner that built it.
+            return controller(holdingRuntimeOfTile: tileId)
+        }
+        // No layer holds it: the flat boot scene, which is the boot project's.
+        return controller(holdingRuntimeOfTile: tileId) ?? workspaceRuntime.activeController
+    }
+
+    private func controller(holdingRuntimeOfTile tileId: UUID) -> ZoneRuntimeController? {
+        liveControllers.first { controller in
+            controller.runtimes.contains { $0.tileId == tileId }
+                || controller.browserRuntimes.contains { $0.tileId == tileId }
+        }
+    }
+
+    /// True when `tileId` sits in a PROJECT zone's layer — a tile whose owner
+    /// must be found, never guessed.
+    private func isProjectZoneTile(_ tileId: UUID) -> Bool {
+        guard let canvasView, let zoneId = canvasView.zoneId(containing: tileId) else { return false }
+        return canvasView.installedZonePlacement(for: zoneId)?.projectId != nil
+    }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     /// Internal, not private: the WS9 zone/project witness and the WS7 asset-sweep
     /// witness both drive production entry points that need a scratch registry.
@@ -4534,6 +4734,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
     private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
+    private var sidebarTurnObserverToken: UUID?
+    /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
+    /// switch witness reads the delta across one switch.
+    private(set) var qaStructuralSidebarReloadCount = 0
+    /// A canvas model change is waiting for the next run-loop turn's reload.
+    private var sidebarReloadPending = false
+    /// What the last structural rebuild read from disk (`SidebarModelInputs`).
+    private var sidebarModelInputsFromDisk: SidebarModelInputs?
+    private var sidebarTerminalDescriptors: [TerminalSessionDescriptor] = []
     /// P2B.7: the snapshot as the surfaces last SAW it. `pushAgentSurfaces` diffs
     /// against this to publish `agentActivity.lastChange`, so a push that coalesced
     /// several incremental events reports all of them and not just the last one.
@@ -4756,7 +4965,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 : []
 
             var canvasState: CanvasState
-            let existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            // An unreadable (or newer-format) boot canvas is not fatal: the flat
+            // boot state is only a snapshot, the store refuses to write over the
+            // file, and a persisted workspace's mount reports the project
+            // unavailable. `WorkspaceInvariantsFixture.mount` mirrors this.
+            let existingCanvasResult: CanvasEngine.CanvasSanitizationResult?
+            do {
+                existingCanvasResult = try projectStore.tryLoadCanvasWithSanitizationResult()
+            } catch ProjectStoreError.canvasUnreadable, ProjectStoreError.unknownFutureSchema {
+                existingCanvasResult = nil
+            }
             let selectedProjectHadCanvasState = existingCanvasResult != nil
             if let existing = existingCanvasResult {
                 canvasState = existing.canvas
@@ -4972,11 +5190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             } else if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
             } else if CommandLine.arguments.contains("--terminal-scroll-ergonomics-check") {
-                runTerminalScrollErgonomicsCheck(window: window, runtime: runtimes.first)
+                runTerminalScrollErgonomicsCheck(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
             } else if CommandLine.arguments.contains("--previous-focus-navigation-check") {
                 runPreviousFocusNavigationCheck(window: window)
             } else if smokeTestEnabled {
-                runSmokeTest(window: window, runtime: runtimes.first)
+                runSmokeTest(window: window, runtime: liveControllers.flatMap(\.runtimes).first)
             } else {
                 startDesktopCompanionSyncService()
                 presentOnboardingIfFirstRun(
@@ -5907,6 +6125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.updateContextualAgentLineage(forFocusedTile: tileId)
             self.recordAcceptedTileFocusInHistory(tileId, reason: reason)
             self.armZoneForFocusedTile(tileId, reason: reason)
+            if deliberate { self.noteBrowserUse(tileId) }
         }
     }
 
@@ -6232,7 +6451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.restartTerminalTile(tileId: tile.id) {
         case let .restarted(runtime):
             wireRuntimeExitHandler(runtime)
-            runtimes.append(runtime)
+            controller(owning: spawner)?.runtimes.append(runtime)
         case let .missingCommand(executable):
             installRestartPlaceholder(
                 for: tile,
@@ -6286,7 +6505,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onRestart = nil
         }
         let view = TerminalRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
-        canvasView.install(tileView: view, for: tile)
+        // Replacing the view of a tile that exists, in whichever model holds it —
+        // never the flat install, which drew a layer tile's placeholder at the
+        // zone's negative origin and left the dead view underneath.
+        canvasView.materializeProjectTile(tileView: view, for: tile)
     }
 
     private func wireRuntimeExitHandler(_ runtime: GhosttyTerminalRuntime) {
@@ -6307,22 +6529,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// registry, budget enforcement, and every teardown path. Same registration
     /// the hydration seam (`onBrowserRuntimeHydrated`) performs.
     private func wireBrowserRuntimeRegistration(on spawner: TileSpawner) {
+        let projectId = spawner.spawnerProjectId
         spawner.browserRuntimeSpawnedHandler = { [weak self] runtime in
             guard let self else { return }
             self.wireContentProcessTerminationHandler(runtime)
-            self.browserRuntimes.append(runtime)
+            self.workspaceRuntime?.controller(for: projectId)?.browserRuntimes.append(runtime)
             self.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             self.workspaceRuntime?.enforceBrowserRuntimeBudget()
         }
     }
 
     private func handleBrowserContentProcessTerminated(runtimeId: BrowserRuntimeID) {
-        guard let runtime = browserRuntimes.first(where: { $0.id == runtimeId }) else { return }
+        guard let owner = liveControllers.first(where: { $0.browserRuntimes.contains { $0.id == runtimeId } }),
+              let runtime = owner.browserRuntimes.first(where: { $0.id == runtimeId }) else { return }
         let tileId = runtime.tileId
 
-        tileSpawner?.writeBrowserTileSnapshot(for: runtime)
+        owner.tileSpawner?.writeBrowserTileSnapshot(for: runtime)
 
-        browserRuntimes.removeAll { $0.id == runtimeId }
+        owner.browserRuntimes.removeAll { $0.id == runtimeId }
         runtime.terminate(policy: .force)
 
         guard let canvasView,
@@ -6343,22 +6567,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func handleRuntimeExited(runtimeId: TerminalSessionID, exitCode: Int32?) {
         // Late .exited after windowWillClose teardown -- already handled there.
-        guard let runtime = runtimes.first(where: { $0.id == runtimeId }) else { return }
+        // The runtime's OWN controller, whichever zone is armed: its store gets
+        // `lastExit` and its observer lets the tile go.
+        guard let owner = liveControllers.first(where: { $0.runtimes.contains { $0.id == runtimeId } }),
+              let runtime = owner.runtimes.first(where: { $0.id == runtimeId }) else { return }
         let tileId = runtime.tileId
 
-        if let projectStore, var descriptor = try? projectStore.loadSession(id: runtimeId) {
+        if var descriptor = try? owner.projectStore.loadSession(id: runtimeId) {
             descriptor.lastExit = TerminalLastExit(exitCode: exitCode, signal: nil, at: Date())
-            try? projectStore.saveSession(descriptor)
+            try? owner.projectStore.saveSession(descriptor)
         }
 
-        runtimes.removeAll { $0.id == runtimeId }
+        owner.runtimes.removeAll { $0.id == runtimeId }
         runtime.terminate(policy: .force)
         // C2 (round-3 continuation): an exited runtime must tear down its
         // observation/watcher BEFORE the restart placeholder goes in, same as
         // the deliberate-delete path below — otherwise a stale observation
         // survives the exit and the observer keeps issuing writes against a
         // tile that no longer has a live runtime.
-        workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: tileId)
+        owner.sessionObserverTileDidClose(tileId: tileId)
 
         guard let canvasView,
               let tile = canvasView.tileRecord(for: tileId)
@@ -6412,11 +6639,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func sendReviewCommentsFromMenu(reviewTileId: UUID) {
         do {
-            guard let target = try firstEligibleAgentTileIdForReviewFlyback() else {
+            guard let target = try firstEligibleAgentTileIdForReviewFlyback(reviewTileId: reviewTileId) else {
                 NSSound.beep()
                 return
             }
-            let sourceDescription = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId }).map { DiffReviewSource(metadata: $0.metadata).displayName } ?? "working tree vs HEAD"
+            let sourceDescription = canvasView?.tileRecord(for: reviewTileId).map { DiffReviewSource(metadata: $0.metadata).displayName } ?? "working tree vs HEAD"
             _ = try sendReviewCommentsToAgent(reviewTileId: reviewTileId, targetAgentTileId: target, diffSourceDescription: sourceDescription)
         } catch {
             fputs("sendReviewCommentsFromMenu failed: \(error)\n", stderr)
@@ -6424,24 +6651,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func firstEligibleAgentTileIdForReviewFlyback() throws -> UUID? {
-        guard let projectStore else { throw ReviewFlybackError.missingProjectStore }
-        let sessions = try projectStore.listSessions()
+    /// An agent terminal in the review tile's OWN project, not the armed one's.
+    private func firstEligibleAgentTileIdForReviewFlyback(reviewTileId: UUID) throws -> UUID? {
+        guard let owner = controller(owningTile: reviewTileId) else { throw ReviewFlybackError.missingProjectStore }
+        let sessions = try owner.projectStore.listSessions()
         return sessions.first { session in
             guard var descriptor = session.agentDescriptor else { return false }
             if let liveStatus = canvasView?.agentStatus(for: session.tileId) { descriptor.status = liveStatus }
             guard AgentTileInput.canSend(to: descriptor.status) else { return false }
-            return runtimes.contains(where: { $0.tileId == session.tileId })
+            return owner.runtimes.contains(where: { $0.tileId == session.tileId })
         }?.tileId
     }
 
     @discardableResult
     func sendReviewCommentsToAgent(reviewTileId: UUID, targetAgentTileId: UUID, diffSourceDescription: String) throws -> ReviewFlybackPrompt {
-        guard let projectStore else { throw ReviewFlybackError.missingProjectStore }
-        guard let reviewTile = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId && $0.kind == .diffReview }) else { throw ReviewFlybackError.missingReviewTile }
+        guard let owner = controller(owningTile: reviewTileId) else { throw ReviewFlybackError.missingProjectStore }
+        let projectStore = owner.projectStore
+        guard let reviewTile = canvasView?.tileRecord(for: reviewTileId), reviewTile.kind == .diffReview else { throw ReviewFlybackError.missingReviewTile }
         guard let reviewId = reviewTile.metadata.reviewId else { throw ReviewFlybackError.reviewTileHasNoReviewId }
         guard let session = try projectStore.listSessions().first(where: { $0.tileId == targetAgentTileId && $0.agentDescriptor != nil }) else { throw ReviewFlybackError.missingTargetAgentSession }
-        guard let runtime = runtimes.first(where: { $0.tileId == targetAgentTileId }) else { throw ReviewFlybackError.missingLiveAgentEndpoint }
+        guard let runtime = owner.runtimes.first(where: { $0.tileId == targetAgentTileId }) else { throw ReviewFlybackError.missingLiveAgentEndpoint }
 
         var descriptor = session.agentDescriptor
         if let liveStatus = canvasView?.agentStatus(for: targetAgentTileId) { descriptor?.status = liveStatus }
@@ -6473,6 +6702,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // returned silently — the same class of bug, one model further out.
         guard let tile = canvasView.allWorkspaceTiles().first(where: { $0.id == id })
             ?? canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
+        // Every step below acts on the tile's OWN project — its runtimes, stores,
+        // tmux reach and canvas file — never the armed zone's. The close button,
+        // the context menu, the inbox and a group zone's delete all reach here
+        // without arming the tile's zone first. A project tile with no live owner
+        // is refused, never torn down through another project.
+        let owner = controller(owningTile: id)
+        if owner == nil, isProjectZoneTile(id) {
+            fputs("deleteTile refused: tile \(id.uuidString) has no live project controller\n", stderr)
+            NSSound.beep()
+            return
+        }
+        let ownerStore = owner?.projectStore
 
         fputs("deleteTile entry kind=\(tile.kind.rawValue) id=\(id.uuidString)\n", stderr)
         var deleteOutcome = "deleted"
@@ -6505,7 +6746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let policy = DeleteConfirmPolicy.current
-        if policy.requiresConfirmation(for: tile.kind) {
+        if !zoneDeleteConfirmed, policy.requiresConfirmation(for: tile.kind) {
             let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
             alert.messageText = configuration.message
@@ -6527,15 +6768,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Deliberate user tile deletion is the only path that may issue a tmux kill.
             // Project release flows through ZoneRuntimeRegistry.release -> close(), which
             // has no tmux surface and must remain detach-only.
-            killTmuxWindowForDeletedTerminalTile(tileId: id)
-            if let runtime = runtimes.first(where: { $0.tileId == id }) {
-                if let projectStore, var descriptor = try? projectStore.loadSession(id: runtime.id) {
+            killTmuxWindowForDeletedTerminalTile(tileId: id, owner: owner)
+            if let owner, let runtime = owner.runtimes.first(where: { $0.tileId == id }) {
+                if var descriptor = try? owner.projectStore.loadSession(id: runtime.id) {
                     descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: Date())
-                    try? projectStore.saveSession(descriptor)
+                    try? owner.projectStore.saveSession(descriptor)
                 }
-                runtimes.removeAll { $0.id == runtime.id }
+                owner.runtimes.removeAll { $0.id == runtime.id }
                 runtime.terminate(policy: .force)
-                try? projectStore?.deleteSession(id: runtime.id)
+                try? owner.projectStore.deleteSession(id: runtime.id)
             }
             // C2 (round-3 continuation): unconditional, not just the
             // live-runtime branch above — a tile deleted while it has no live
@@ -6543,29 +6784,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // `handleRuntimeExited`) must still drop its observation/watcher.
             // `tileDidClose` is idempotent, so calling it again in the
             // live-runtime case above is harmless.
-            workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: id)
-            try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
+            owner?.sessionObserverTileDidClose(tileId: id)
+            try? owner?.managedSessionStore.delete(tileId: id)
             reconciledManagedSessionSource.invalidateCache()
         case .browser:
-            if let runtime = browserRuntimes.first(where: { $0.tileId == id }) {
-                browserRuntimes.removeAll { $0.id == runtime.id }
+            if let owner, let runtime = owner.browserRuntimes.first(where: { $0.tileId == id }) {
+                owner.browserRuntimes.removeAll { $0.id == runtime.id }
                 runtime.terminate(policy: .force)
             }
-            _ = tileSpawner?.deleteBrowserInspectors(inspecting: id, in: canvasView)
+            _ = owner?.tileSpawner?.deleteBrowserInspectors(inspecting: id, in: canvasView)
             // Drop the persisted browser tile snapshot so the boot loop won't
             // try to resurrect this tile from BrowserState on next launch.
-            if let projectStore,
+            if let projectStore = ownerStore,
                var browserState = try? projectStore.tryLoadBrowserState() {
                 browserState.tiles.removeAll { $0.tileId == id }
                 browserState.inspectorStates.removeAll { $0.inspectedBrowserTileId == id }
                 try? projectStore.saveBrowserState(browserState)
             }
         case .browserInspector:
-            tileSpawner?.deleteBrowserInspector(tileId: id)
+            owner?.tileSpawner?.deleteBrowserInspector(tileId: id)
         case .note:
             if let noteId = tile.metadata.noteId {
-                noteViews.removeValue(forKey: noteId)
-                if let projectStore {
+                owner?.noteViews.removeValue(forKey: noteId)
+                if let projectStore = ownerStore {
                     if var noteState = try? projectStore.tryLoadNoteState() {
                         noteState.tiles.removeAll { $0.id == noteId || $0.tileId == id }
                         try? projectStore.saveNoteState(noteState)
@@ -6577,8 +6818,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // No on-disk descriptor to purge — file tiles only carry metadata.
             try? workspaceRuntime?.removeDocumentLinks(tileId: id)
         case .fileTree:
-            fileTreeViews.removeValue(forKey: id)
-            if let projectStore,
+            owner?.fileTreeViews.removeValue(forKey: id)
+            if let projectStore = ownerStore,
                var fileTreeState = try? projectStore.tryLoadFileTreeState() {
                 fileTreeState.tiles.removeAll { $0.tileId == id }
                 try? projectStore.saveFileTreeState(fileTreeState)
@@ -6591,12 +6832,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Closing a board tile is closing a WINDOW, not deleting the board —
             // the same rule `case .managedAgent` states below. The document and
             // its index row survive; only the tile pointer is cleared.
-            if let boardId = tile.metadata.boardId, let projectStore {
+            if let boardId = tile.metadata.boardId, let projectStore = ownerStore {
                 BoardRuntime.detachTile(id, boardId: boardId, in: projectStore)
             }
         case .diffReview:
             if let reviewId = tile.metadata.reviewId,
-               let projectStore {
+               let projectStore = ownerStore {
                 try? projectStore.deleteReviewCommentState(reviewId: reviewId)
             }
         case .runArtifacts:
@@ -6619,12 +6860,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // THE PARK IS WHY THE SIDEBAR STOPS FILLING UP (.plans/05-close-to-history.md).
             // Before it, a closed tile left its record in the live list with no tile
             // and no runner — unobservable, so the row froze at "Unconfirmed" and
-            // stayed there forever. `close` refuses a busy agent, so a tile closed
-            // mid-turn still leaves its row where you can see the work finish.
-            try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
+            // stayed there forever. The close INTENT is always recorded now
+            // (confidence pass): an idle agent parks at once, and a busy one reads
+            // "Finishing" and leaves for History by itself when its turn ends — it
+            // used to be refused, never retried, and sat in Active for days.
+            try? owner?.managedSessionStore.delete(tileId: id)
             reconciledManagedSessionSource.invalidateCache()
             if let agentId = agentSupervisor.agent(forTile: id) {
-                agentSupervisor.close(agentID: agentId)
+                agentSupervisor.requestClose(agentID: agentId)
                 agentSupervisor.detachView(agentID: agentId)
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
@@ -6632,11 +6875,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         canvasView.removeTile(id: id)
         recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
-        flushCanvasSave()
+        // The OWNER's canvas file: it is the one still holding the tile.
+        if let owner {
+            owner.scheduleCanvasSave()
+            do { try owner.flushCanvasSave() } catch {
+                fputs("deleteTile: the canvas stays unsaved: \(error)\n", stderr)
+            }
+        } else {
+            flushCanvasSave()
+        }
         refreshAgentSurfaces()
     }
 
-    private func killTmuxWindowForDeletedTerminalTile(tileId: UUID) {
+    private func killTmuxWindowForDeletedTerminalTile(tileId: UUID, owner: ZoneRuntimeController?) {
         // LIFECYCLE INVARIANT: this is the only site that may issue a tmux kill
         // for terminal-tile removal. It is reached from deleteTile(_:) on a
         // .terminal tile, a deliberate user action. Project release must never call
@@ -6646,10 +6897,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let tmuxPath = tmuxPathResolver(tmuxDefaults) else {
             return
         }
-        let reach = workspaceRuntime?.activeController?.project.remoteEnvironment?.reach ?? .localhost
+        let reach = owner?.project.remoteEnvironment?.reach ?? .localhost
         let control = makeTmuxControl(tmuxPath: tmuxPath, reach: reach)
 
-        let target = managedSessionRecord(forTileId: tileId)?.tmuxWindowTarget()
+        let target = (try? owner?.managedSessionStore.load(tileId: tileId))?.tmuxWindowTarget()
         if let target, TmuxSession.isValidPaneId(target) {
             if let error = Self.runTmuxControlOperationSync({ try await control.killWindow(target: target) }) {
                 fputs("tmux kill-window failed for tile=\(tileId.uuidString) target=\(target): \(error)\n", stderr)
@@ -6668,8 +6919,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func terminalSessionDescriptor(forTileId tileId: UUID) -> TerminalSessionDescriptor? {
-        guard let projectStore else { return nil }
-        if let runtime = runtimes.first(where: { $0.tileId == tileId }),
+        guard let owner = controller(owningTile: tileId) else { return nil }
+        let projectStore = owner.projectStore
+        if let runtime = owner.runtimes.first(where: { $0.tileId == tileId }),
            let descriptor = try? projectStore.loadSession(id: runtime.id) {
             return descriptor
         }
@@ -6677,7 +6929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func managedSessionRecord(forTileId tileId: UUID) -> ManagedAgentSessionRecord? {
-        try? workspaceRuntime?.activeController?.managedSessionStore.load(tileId: tileId)
+        try? controller(owningTile: tileId)?.managedSessionStore.load(tileId: tileId)
     }
 
     /// What `currentManagedAgentActivities()` found, plus WHICH of those agents
@@ -6727,8 +6979,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             in: (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
         )
         let discovered = try reconciledManagedSessionSource.records(roots: roots, now: Date())
+        // Per root (confidence pass, R4): the active project's own store failing to
+        // list is that project's problem, not the whole list's — the walk above
+        // already carries its last good listing.
         if let activeStore = workspaceRuntime?.activeController?.managedSessionStore {
-            for record in try activeStore.reconciledRecords(reconciledManagedSessionSource.proof())
+            let proof = try reconciledManagedSessionSource.proof()
+            let activeRecords: [ManagedAgentSessionRecord]
+            do {
+                activeRecords = try activeStore.reconciledRecords(proof)
+            } catch {
+                fputs("agent activity: the active project's managed sessions are unreadable, using its last listing — \(error)\n", stderr)
+                activeRecords = []
+            }
+            for record in activeRecords
             where seenTiles.insert(record.tileId).inserted {
                 records.append(record)
             }
@@ -6992,9 +7255,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///   2. the live canvas tile view, for a tile that is rendering;
     ///   3. `observedAgentStatuses`, the runtime observer's map.
     private func rebuildAgentActivitySnapshot(now: Date = Date()) {
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        // THE ONE DISK READ of the sidebar's inputs (confidence pass, R5): a
+        // structural rebuild refreshes them, and every push between two rebuilds
+        // derives from this plus the live canvas — no file is opened for an event.
+        sidebarModelInputsFromDisk = SidebarModelInputs.load(registryStore: registryStore)
+        let inputs = currentSidebarModelInputs()
+        let registry = inputs.registry
+        let projectCanvases = inputs.projectCanvases
         let descriptors = currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases)
+        sidebarTerminalDescriptors = descriptors
 
         var liveStatuses: [UUID: AgentStatus] = [:]
         for descriptor in descriptors {
@@ -7158,7 +7427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// own activity takes the incremental path below instead.
     private func refreshAgentSurfaces(notify: Bool = true) {
         rebuildAgentActivitySnapshot()
-        pushAgentSurfaces(notify: notify)
+        pushAgentSurfaces(notify: notify, reloadsTopBar: true)
         warmCheckedOutBranchesIfNeeded()
     }
 
@@ -7194,14 +7463,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// publish the change-set that got it there. Split out of
     /// `refreshAgentSurfaces` by P2B.7 so the agent-event path can reach the
     /// surfaces without the disk read.
-    private func pushAgentSurfaces(notify: Bool = true) {
+    /// `reloadsTopBar`: only a structural refresh can have changed what the top
+    /// bar shows (it re-reads the registry and the workspace file); an agent's own
+    /// event cannot, so the event path leaves it alone and opens no file.
+    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false) {
         agentActivity.lastChange = AgentsBoardProjection.changeSet(
             from: agentActivityChangeBase, to: agentActivity.snapshot
         )
         agentActivityChangeBase = agentActivity.snapshot
         applyAgentStatusesToCanvas()
         updateAgentAttentionSurface(notify: notify)
-        reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar)
     }
 
     /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
@@ -7269,12 +7541,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return box.error
     }
 
+    /// The placeholder's Restart: through the tile's OWN project's spawner, so
+    /// its session, cwd and runtime belong to that project whichever is armed.
     private func restartTile(tileId: UUID) {
-        guard let spawner = tileSpawner, let canvasView else { return }
+        guard let canvasView, let owner = controller(owningTile: tileId), let spawner = owner.tileSpawner else { return }
         switch spawner.restartTerminalTile(tileId: tileId) {
         case let .restarted(runtime):
             wireRuntimeExitHandler(runtime)
-            runtimes.append(runtime)
+            owner.runtimes.append(runtime)
         case let .missingCommand(executable):
             if let tile = canvasView.tileRecord(for: tileId) {
                 installRestartPlaceholder(
@@ -7304,7 +7578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.restartBrowserTile(tileId: tile.id) {
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
-            browserRuntimes.append(runtime)
+            controller(owning: spawner)?.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
@@ -7346,15 +7620,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             onRestart = nil
         }
         let view = BrowserRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
-        canvasView.install(tileView: view, for: tile)
+        canvasView.materializeProjectTile(tileView: view, for: tile)
     }
 
     private func restartBrowserTile(tileId: UUID) {
-        guard let spawner = tileSpawner else { return }
+        guard let owner = controller(owningTile: tileId), let spawner = owner.tileSpawner else { return }
         switch spawner.restartBrowserTile(tileId: tileId) {
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
-            browserRuntimes.append(runtime)
+            owner.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
@@ -7378,7 +7652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installInitialNoteTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
         spawner.installNoteTile(tile, in: canvasView)
         if let view = canvasView.tileView(for: tile.id) as? NoteTileNSView {
-            noteViews[view.noteId] = view
+            controller(owning: spawner)?.noteViews[view.noteId] = view
         }
     }
 
@@ -7537,7 +7811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.restartFileTreeTile(tileId: tile.id) {
         case .restarted:
             if let view = canvasView.tileView(for: tile.id) as? FileTreeTileNSView {
-                fileTreeViews[tile.id] = view
+                controller(owning: spawner)?.fileTreeViews[tile.id] = view
             }
         case .tileNotFound:
             fputs("Boot file-tree install failed: tile \(tile.id) not found in canvas\n", stderr)
@@ -7548,7 +7822,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialTicketQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
-            self?.dispatchAgent(for: row)
+            self?.dispatchAgent(for: row, fromQueueTile: tile.id)
         }, fanOutHandler: { [weak self] rows in
             self?.fanOutAgents(for: rows, from: tile.id)
         })
@@ -7589,13 +7863,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         wireManagedAgentTile(tile.id)
     }
 
-    private func dispatchAgent(for row: LinearTicketQueueRow) {
-        guard let spawner = tileSpawner else { return }
-        let activeProject = workspaceRuntime?.activeController?.project
-        let prompt = AgentKickoffPrompt.make(row: row, repoPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: activeProject?.name)
+    /// The queue tile's OWN project and zone: the agent's terminal lands beside
+    /// the queue and works in its repository, whichever zone is armed.
+    private func dispatchAgent(for row: LinearTicketQueueRow, fromQueueTile queueTileId: UUID) {
+        guard let (spawner, scope) = spawnerAndScope(forTile: queueTileId) else { return }
+        explicitCreationScopeOverride = scope
+        defer { explicitCreationScopeOverride = nil }
+        let project = controller(owning: spawner)?.project
+        let prompt = AgentKickoffPrompt.make(row: row, repoPath: project?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: project?.name)
         switch spawner.spawnTerminal(profileId: "claude") {
         case let .spawned(runtime):
-            installSpawnedTerminal(runtime)
+            installSpawnedTerminal(runtime, from: spawner)
             runtime.sendInput(Data((prompt + "\n").utf8))
         case let .unknownProfile(id):
             fputs("Ticket queue dispatch failed: unknown launch profile \(id)\n", stderr)
@@ -7618,7 +7896,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// optional here — N agents fanned out over one checkout is exactly the
     /// clobbering P2C exists to prevent.
     private func fanOutAgents(for rows: [LinearTicketQueueRow], from tileId: UUID) {
-        let project = activeProject
+        // The queue tile's own project, not the armed one's.
+        let project = controller(owningTile: tileId)?.project
         let repoPath = project?.rootPath ?? FileManager.default.currentDirectoryPath
         let model = AgentModelConfig.resolvedFromDefaults()
         let items = rows.map {
@@ -7733,13 +8012,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             // CX-01: a click is the user's newer intent for focus and selection.
             self.workspaceRuntime?.noteUserInteraction()
-            if let clickedTileId,
-               canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
-                self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
-            }
+            if let clickedTileId { self.noteBrowserUse(clickedTileId) }
             return event
         }
         self.tileFocusMonitor = monitor
+    }
+
+    /// A click on (or deliberate focus of) a browser tile is use: refresh its
+    /// slot in the WKWebView budget so the browser in use is never the one
+    /// evicted when another opens.
+    func noteBrowserUse(_ tileId: UUID) {
+        // `tileRecord(for:)`, not `canvasState.tiles`: once zones are installed
+        // the flat list holds the departed project's tiles (hazard 9), so a
+        // browser in a zone layer never registered its use.
+        guard canvasView?.tileRecord(for: tileId)?.kind == .browser else { return }
+        workspaceRuntime?.registerLiveBrowser(tileId: tileId)
+    }
+
+    /// QA (`--browser-click-recency-check`): adopt a fixture workspace runtime.
+    func qaAdoptWorkspaceRuntime(_ runtime: WorkspaceRuntime) {
+        workspaceRuntime = runtime
     }
 
     /// Trackpad gestures (two-finger scroll, pinch) get consumed by tile
@@ -8334,9 +8626,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func stopHarnessRun(tileId: UUID) {
-        guard let session = (try? projectStore?.listSessions())??.first(where: { $0.tileId == tileId }),
-              let runId = session.agentDescriptor?.runId,
-              let projectRoot = activeProject?.rootPath else { return }
+        // The run lives under the tile's OWN project, armed or not.
+        guard let owner = controller(owningTile: tileId),
+              let session = (try? owner.projectStore.listSessions())?.first(where: { $0.tileId == tileId }),
+              let runId = session.agentDescriptor?.runId else { return }
+        let projectRoot = owner.project.rootPath
         let runDirectory = URL(fileURLWithPath: projectRoot, isDirectory: true)
             .appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -8354,11 +8648,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func updateAgentStatus(tileId: UUID, status: AgentStatus, now: Date = Date()) {
         canvasView?.tileView(for: tileId)?.agentStatus = status
-        if var sessions = try? projectStore?.listSessions(), let index = sessions.firstIndex(where: { $0.tileId == tileId }), var descriptor = sessions[index].agentDescriptor {
+        let store = controller(owningTile: tileId)?.projectStore
+        if var sessions = try? store?.listSessions(), let index = sessions.firstIndex(where: { $0.tileId == tileId }), var descriptor = sessions[index].agentDescriptor {
             descriptor.status = status
             descriptor.statusUpdatedAt = now
             sessions[index].agentDescriptor = descriptor
-            try? projectStore?.saveSession(sessions[index])
+            try? store?.saveSession(sessions[index])
         }
         // One rebuild, all four surfaces (P2B.4) — this was a dock refresh and a
         // sidebar reload that each re-derived the status this method just wrote.
@@ -8472,10 +8767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func deliverNeedsAttentionNotification(count: Int) {
-        let notification = NSUserNotification()
-        notification.title = "Continuum agent needs attention"
-        notification.informativeText = count == 1 ? "1 agent needs input." : "\(count) agents need input."
-        NSUserNotificationCenter.default.deliver(notification)
+        NeedsAttentionNotification.deliver(count: count)
     }
 
     private func moveNavSelection(direction: TileArrangement.Direction) {
@@ -8901,13 +9193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView?.isHidden = false
     }
 
+    /// The companion is chosen from the primary tile's OWN zone and project —
+    /// the installed scene — never from the flat boot list or the armed project.
     private func focusModeCompanionAgent(for primaryTileId: UUID) -> UUID? {
         guard let canvasView else { return nil }
-        let primaryZoneId = canvasView.activeZone?.zoneId ?? canvasView.navZoneRenderModels.first?.placement.zoneId ?? UUID()
-        let currentTerminalTileIds = Set(canvasView.canvasState.tiles.filter { $0.kind == .terminal }.map(\.id))
-        let sessions = (try? projectStore?.listSessions()) ?? []
+        let primaryZoneId = canvasView.zoneId(containing: primaryTileId)
+            ?? canvasView.activeZone?.zoneId ?? canvasView.navZoneRenderModels.first?.placement.zoneId ?? UUID()
+        let zoneTiles = canvasView.tiles(inZone: primaryZoneId) ?? canvasView.allWorkspaceTiles()
+        let currentTerminalTileIds = Set(zoneTiles.filter { $0.kind == .terminal }.map(\.id))
+        let sessions = (try? controller(owningTile: primaryTileId)?.projectStore.listSessions()) ?? []
         let agentTileIds = Set(sessions.filter { currentTerminalTileIds.contains($0.tileId) && $0.agentDescriptor != nil }.map(\.tileId))
-        let candidates = canvasView.canvasState.tiles.map { tile in
+        let candidates = zoneTiles.map { tile in
             FocusModePairingCandidate(
                 tileId: tile.id,
                 zoneId: primaryZoneId,
@@ -10368,7 +10664,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         window.titlebarSeparatorStyle = .none
     }
 
+    /// A tile-less agent has no view to ingest its turn ending, so nothing told the
+    /// sidebar: a closed tile's "Finishing" row would have sat there until something
+    /// structural moved. The supervisor's own turn seam tells it instead.
+    private func installSidebarTurnObserver() {
+        if let token = sidebarTurnObserverToken {
+            agentSupervisor.removeTurnCapabilitiesObserver(token)
+        }
+        sidebarTurnObserverToken = agentSupervisor.addTurnCapabilitiesObserver { [weak self] id in
+            guard let self, self.agentSupervisor.records[id]?.tileId == nil else { return }
+            self.scheduleAgentSurfacePush(debounce: 0.05)
+        }
+    }
+
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
+        installSidebarTurnObserver()
+        // Confidence pass: Settled folds behind a counted heading and the shelves
+        // sink to the bottom of the list (T3 nightly's layout).
+        sidebar.agentInbox.foldsSettledIntoShelf = true
         sidebar.onSelection = { [weak self] selection in
             self?.handleWorkspaceSidebarSelection(selection)
         }
@@ -10521,6 +10834,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             if let model = try buildWorkspaceTopBarModel() {
                 topBar.reload(model)
+                // A message raised before the bar existed (the mount's offers) keeps its action.
+                if let action = workspaceManagementAction, topBar.notificationView.actionTitle == nil {
+                    topBar.setManagementMessage(workspaceManagementMessage, kind: workspaceManagementKind, action: action)
+                }
             } else {
                 // 0721: no registry store, or no current workspace at all. The chrome
                 // stays unloaded either way — say which, rather than leaving a live
@@ -10534,24 +10851,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func buildWorkspaceSidebarTree() throws -> SidebarTree {
-        guard let registryStore else { return SidebarTree(workspaces: []) }
-        let registry = try registryStore.loadOrEmpty()
-        let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        var documents: [UUID: WorkspaceDocument] = [:]
-        for workspace in registry.workspaces {
-            let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
-            if let document = try? store.tryLoad() {
-                documents[workspace.id] = document
-            }
-        }
-        if let workspaceRuntime {
-            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
-        }
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        guard registryStore != nil else { return SidebarTree(workspaces: []) }
+        let inputs = currentSidebarModelInputs()
         return SidebarTreeBuilder.build(
-            registry: registry,
-            documents: documents,
-            projectCanvases: projectCanvases,
+            registry: inputs.registry,
+            documents: inputs.documents,
+            projectCanvases: inputs.projectCanvases,
             // P2B.4: from the one snapshot. This used to be its own walk over every
             // project's sessions with the observer map layered on top — a third
             // reading of the same statuses the badges and the dock were computing
@@ -10561,19 +10866,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
-    private func workspaceSidebarProjectCanvasSnapshots(registry: Registry) -> [UUID: CanvasState] {
-        var snapshots: [UUID: CanvasState] = [:]
-        for project in registry.projects {
-            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
-            if let canvas = try? store.tryLoadCanvas() {
-                snapshots[project.id] = canvas
-            }
-        }
-        if let activeProjectId = workspaceRuntime?.activeController?.project.id,
-           let canvasView {
-            snapshots[activeProjectId] = canvasView.canvasState
-        }
-        return snapshots
+    /// The sidebar's inputs as of NOW: the last structural disk read, with the
+    /// mounted document and every installed zone layer's live tiles laid over it
+    /// (`SidebarModelInputs`). Reads disk only when nothing has been read yet.
+    private func currentSidebarModelInputs() -> SidebarModelInputs {
+        let fromDisk = sidebarModelInputsFromDisk ?? {
+            let loaded = SidebarModelInputs.load(registryStore: registryStore)
+            sidebarModelInputsFromDisk = loaded
+            return loaded
+        }()
+        return fromDisk.overlaying(
+            currentWorkspaceId: workspaceRuntime?.workspaceId,
+            currentDocument: workspaceRuntime?.document,
+            activeProjectId: workspaceRuntime?.activeController?.project.id,
+            canvas: canvasView)
     }
 
     /// `rebuildAgentActivity: false` is for `refreshAgentSurfaces`, which has just
@@ -10600,19 +10906,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Read-state is layered on here rather than inside the fold, because
     /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
     private func buildAgentInboxRows(now: Date = Date()) -> [AgentInboxRow] {
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
-        var documents: [UUID: WorkspaceDocument] = [:]
-        if let registryStore {
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            for workspace in registry.workspaces {
-                let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
-                if let document = try? store.tryLoad() { documents[workspace.id] = document }
-            }
-        }
-        if let workspaceRuntime {
-            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
-        }
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        // In memory (R5): the inputs the last structural rebuild read, with the
+        // live canvas over them. An agent event never opens a file.
+        let inputs = currentSidebarModelInputs()
+        let registry = inputs.registry
+        let documents = inputs.documents
+        let projectCanvases = inputs.projectCanvases
+        // R3: a record bound to a tile no document holds is a closed window,
+        // derived at every build — not repaired lazily when someone clicks it.
+        let reachableTiles = inputs.reachableTileIds(canvas: canvasView)
         let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
         var checkedOutBranches: [UUID: String] = [:]
         var attention: [UUID: InboxAttention] = [:]
@@ -10627,7 +10929,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             attention[record.id.rawValue] = agentSupervisor.attention(for: record.id, now: now)
             lifecycleFacts[record.id.rawValue] = AgentLifecycleFacts(
-                hasLiveRunner: agentSupervisor.isRunning(record.id))
+                hasLiveRunner: agentSupervisor.isRunning(record.id),
+                tileUnreachable: inputs.tileIsUnreachable(record, reachable: reachableTiles))
             if let snapshot = agentSupervisor.turnSnapshot(for: record.id) {
                 turnSnapshots[record.id.rawValue] = snapshot
             }
@@ -10636,7 +10939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             registry: registry,
             documents: documents,
             projectCanvases: projectCanvases,
-            terminalDescriptors: currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases),
+            terminalDescriptors: sidebarTerminalDescriptors,
             agents: records,
             checkedOutBranches: checkedOutBranches
         )
@@ -10694,11 +10997,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return agentSupervisor.agent(forTile: tileId)?.rawValue ?? tileId
     }
 
-    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
-        if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
-        defer { reloadWorkspaceTopBar() }
+    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
+        if rebuildAgentActivity {
+            qaStructuralSidebarReloadCount += 1
+            sidebarReloadPending = false
+            rebuildAgentActivitySnapshot()
+        }
+        defer { if reloadsTopBar ?? rebuildAgentActivity { reloadWorkspaceTopBar() } }
         guard let sidebar = workspaceSidebarView else { return }
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        let registry = currentSidebarModelInputs().registry
         // P3.6: the inbox is the sidebar's content, so it is fed on the same
         // reload. `applyInbox` and not `reloadInbox` — the change set says which
         // agents moved, and rebuilding every row for one streamed token is what
@@ -10708,6 +11015,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
         sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
+        // R6: the default scope is the workspace on screen.
+        let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
+        sidebar.setInboxCurrentWorkspace(registry.workspaces.first { $0.id == onScreen }?.name)
         sidebar.agentInbox.setProjectIconSources(Dictionary(
             uniqueKeysWithValues: registry.projects.filter { !$0.missing }.map {
                 ($0.id, URL(fileURLWithPath: $0.rootPath, isDirectory: true))
@@ -12488,11 +12798,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 needs you") == true, "zone row should include needs-attention rollup text")
 
         canvas.install(tileView: TileNSView(tile: createdTile), for: createdTile)
+        // Canvas model changes reload the sidebar on the NEXT run-loop turn,
+        // coalesced (confidence pass): drain that turn, as the app's own loop does.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileCreateUpdatedSidebar = sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileCreateUpdatedSidebar, "tile install should update the existing sidebar view")
 
         canvas.removeTile(id: createdTileId)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileDeleteUpdatedSidebar = !sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileDeleteUpdatedSidebar, "tile removal should update the existing sidebar view")
@@ -13640,7 +13954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             appliedCount += 1
         }
 
-        for runtime in browserRuntimes {
+        for runtime in liveControllers.flatMap(\.browserRuntimes) {
             apply(to: runtime)
         }
 
@@ -13810,14 +14124,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
-    private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime) {
+    private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime, from spawner: TileSpawner) {
         wireRuntimeExitHandler(runtime)
-        runtimes.append(runtime)
+        controller(owning: spawner)?.runtimes.append(runtime)
         focusSpawnedTile(runtime.tileId)
     }
 
     private func liveTerminalRuntimeCount() -> Int {
-        runtimes.filter { runtime in
+        liveControllers.flatMap(\.runtimes).filter { runtime in
             switch runtime.status {
             case .configuring, .running:
                 return true
@@ -13841,7 +14155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
-            installSpawnedTerminal(runtime)
+            installSpawnedTerminal(runtime, from: spawner)
             return true
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: profileId)
@@ -14422,7 +14736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnFileTree(rootPath: url.path) {
         case let .spawned(tileId, _):
             if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
-                fileTreeViews[tileId] = view
+                controller(owning: spawner)?.fileTreeViews[tileId] = view
             }
             focusSpawnedTile(tileId)
         case .invalidPath:
@@ -14655,7 +14969,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnBrowser(url: url) {
         case let .spawned(runtime):
             wireContentProcessTerminationHandler(runtime)
-            browserRuntimes.append(runtime)
+            controller(owning: spawner)?.browserRuntimes.append(runtime)
             focusSpawnedTile(runtime.tileId)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
@@ -14670,12 +14984,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func switchBrowserTileProfile(tileId: UUID, profileId: UUID) {
-        guard let spawner = tileSpawner else { return }
+        guard let owner = controller(owningTile: tileId), let spawner = owner.tileSpawner else { return }
         switch spawner.switchBrowserTileProfile(tileId: tileId, profileId: profileId) {
         case let .switched(oldRuntimeId, runtime):
-            if let oldRuntimeId { browserRuntimes.removeAll { $0.id == oldRuntimeId } }
+            if let oldRuntimeId { owner.browserRuntimes.removeAll { $0.id == oldRuntimeId } }
             wireContentProcessTerminationHandler(runtime)
-            browserRuntimes.append(runtime)
+            owner.browserRuntimes.append(runtime)
             workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
             workspaceRuntime?.enforceBrowserRuntimeBudget()
             focusSpawnedTile(runtime.tileId)
@@ -14697,7 +15011,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var registry = try registryStore.loadOrEmpty()
             guard let profile = BrowserProfilePersistenceActions.createProfile(named: name, in: &registry) else { return }
             try registryStore.save(registry)
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
             switchBrowserTileProfile(tileId: tileId, profileId: profile.id)
         } catch {
             fputs("Create Browser Profile failed: \(error)\n", stderr)
@@ -14712,7 +15026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let name = promptForBrowserProfileName(title: "Rename Browser Profile", defaultValue: existing.name) else { return }
             guard BrowserProfilePersistenceActions.renameProfile(id: profileId, to: name, in: &registry) else { return }
             try registryStore.save(registry)
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
         } catch {
             fputs("Rename Browser Profile failed: \(error)\n", stderr)
         }
@@ -14726,9 +15040,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performBrowserProfileDeletion(tileId: tileId, profileId: profileId)
+    }
+
+    /// The deletion the confirmed alert runs: the registry, then EVERY mounted
+    /// project's browser state and tiles — a profile is app-wide, and rewriting
+    /// only the armed project's left the others pointing at a deleted profile.
+    private func performBrowserProfileDeletion(tileId: UUID, profileId: UUID) {
+        guard let registryStore else { return }
         do {
             var registry = try registryStore.loadOrEmpty()
-            var browserState = try projectStore?.loadBrowserState()
+            let registryBefore = registry
+            var noBrowserState: BrowserState?
             // While the boot-only flat scene is live it is the model; once retired
             // it is a stale boot snapshot, so rewrite the mounted tiles instead
             // and let each project's controller persist its own file.
@@ -14736,10 +15059,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var canvasState: CanvasState? = flatState ?? canvasView.map {
                 CanvasState(viewport: $0.viewport, tiles: $0.allWorkspaceTiles(), groups: [], lastActiveTileId: nil)
             }
-            let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &browserState, canvasState: &canvasState)
+            let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &noBrowserState, canvasState: &canvasState)
             guard rewrite.registryDeleted else { return }
             try registryStore.save(registry)
-            if let browserState { try projectStore?.saveBrowserState(browserState) }
+            let stores: [any ProjectStoring] = workspaceRuntime == nil
+                ? [projectStore].compactMap { $0 }
+                : liveControllers.map(\.projectStore)
+            var browserTileIds: [UUID] = []
+            for store in stores {
+                var scratchRegistry = registryBefore
+                var browserState = try store.tryLoadBrowserState()
+                var noCanvas: CanvasState?
+                let rewritten = BrowserProfilePersistenceActions.deleteProfile(
+                    id: profileId, in: &scratchRegistry, browserState: &browserState, canvasState: &noCanvas)
+                guard !rewritten.browserTileIdsRewritten.isEmpty, let browserState else { continue }
+                try store.saveBrowserState(browserState)
+                browserTileIds += rewritten.browserTileIdsRewritten
+            }
             if let canvasState {
                 if flatState != nil {
                     for tile in canvasState.tiles { canvasView?.updateTile(tile) }
@@ -14750,8 +15086,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     workspaceRuntime?.scheduleCanvasSaveForMountedProjects()
                 }
             }
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
-            let idsToSwitch = rewrite.affectedTileIds.isEmpty ? [tileId] : rewrite.affectedTileIds
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
+            let affected = Array(Set(rewrite.canvasTileIdsRewritten + browserTileIds))
+            let idsToSwitch = affected.isEmpty ? [tileId] : affected
             for affectedTileId in idsToSwitch {
                 switchBrowserTileProfile(tileId: affectedTileId, profileId: BrowserProfile.defaultProfileId)
             }
@@ -14760,6 +15097,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+
+    /// Every mounted project's spawner, not only the armed one's: each restores
+    /// and switches its own browsers against this list.
+    private func broadcastBrowserProfiles(_ profiles: [BrowserProfile]) {
+        for controller in liveControllers { controller.tileSpawner?.updateBrowserProfiles(profiles) }
+        bootTileSpawner?.updateBrowserProfiles(profiles)
+    }
 
     private func promptForBrowserProfileName(title: String, defaultValue: String) -> String? {
         let alert = NSAlert()
@@ -15118,45 +15462,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Appends the placement as-is (origin/size come from the drag rect) to the stored
     /// Present the keep-or-delete confirm for closing a zone (zone-unify P5),
     /// then drive `closeZone`. Keep is the default (non-destructive) button.
+    /// QA: answers the zone-close confirm instead of running it modally.
+    var qaZoneCloseResponse: ((UUID) -> NSApplication.ModalResponse)?
+
     private func presentZoneCloseConfirm(_ zoneId: UUID) {
-        let alert = NSAlert()
-        alert.messageText = "Close this zone?"
-        alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
-        alert.addButton(withTitle: "Keep Tiles")
-        alert.addButton(withTitle: "Delete Tiles")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: true)
+        let response: NSApplication.ModalResponse
+        if let answer = qaZoneCloseResponse?(zoneId) {
+            response = answer
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Close this zone?"
+            alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
+            alert.addButton(withTitle: "Keep Tiles")
+            alert.addButton(withTitle: "Delete Tiles")
+            alert.addButton(withTitle: "Cancel")
+            response = alert.runModal()
+        }
+        switch response {
+        case .alertFirstButtonReturn: closeZoneKeepingTiles(zoneId)
         case .alertSecondButtonReturn: deleteZoneWithTiles(zoneId)
         default: break
         }
+    }
+
+    /// "Keep Tiles". A project zone's members move, unmoved on screen, into
+    /// another zone of their project (or a fresh one) before the zone goes:
+    /// spilled to "bare canvas" they kept the closed zone's id, and the next
+    /// mount hid them forever. A group zone keeps its old spill.
+    private func closeZoneKeepingTiles(_ zoneId: UUID) {
+        guard let canvasView else { return }
+        // Z6: a group zone's kept tiles became zone-less ambient tiles, which no
+        // mount renders, so they vanished on the next launch. A tile must belong
+        // to a zone, and new group zones are not made, so the zone stays.
+        if workspaceRuntime != nil, canvasView.isGroupZone(zoneId), !canvasView.tileIds(inZone: zoneId).isEmpty {
+            setWorkspaceManagementMessage(
+                "The group zone wasn't closed: its tiles have nowhere else to live. "
+                + "Choose Delete Tiles to remove them with it.", kind: .warning)
+            return
+        }
+        if let workspaceRuntime, !canvasView.isGroupZone(zoneId) {
+            do {
+                try workspaceRuntime.rehomeMembersOfClosingZone(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+        }
+        canvasView.closeZone(zoneId: zoneId, keepTiles: true)
     }
 
     /// Tiles deleted by the in-flight "Delete Tiles" zone close, read by
     /// `persistClosedZone` so they leave the WorkspaceDocument rather than being
     /// demoted to ambient tiles that rehydrate on the next mount.
     private var zoneCloseDeletedTileIds: Set<UUID> = []
+    /// The user confirmed "Delete Tiles" for a whole zone; its members do not
+    /// each ask again.
+    private var zoneDeleteConfirmed = false
 
     /// "Delete Tiles" on the zone-close alert.
     ///
     /// Every member goes through `deleteTile(id:)` — the same path the tile's own
     /// close button uses — so the PTY, browser, note store, managed session and
-    /// agent record are torn down exactly once each. `CanvasNSView.closeZone`
-    /// used to do the deletion itself over `canvasState.tiles`, which is empty
-    /// for a hydrated zone, so the loop body never ran and nothing was deleted.
+    /// agent record are torn down exactly once each. That now holds for a
+    /// PROJECT zone too: it used to silently do "Keep", and the tiles it said it
+    /// deleted came back hidden. A member that survives its delete (a dirty
+    /// file the user kept) keeps the zone open rather than being dropped with
+    /// it, so nothing is removed without its teardown.
     private func deleteZoneWithTiles(_ zoneId: UUID) {
         guard let canvasView else { return }
-        // A project zone's tiles are the PROJECT's: shared, persisted in its own
-        // store, and not this zone's to delete. Closing one keeps them.
-        guard canvasView.isGroupZone(zoneId) else {
-            canvasView.closeZone(zoneId: zoneId, keepTiles: true)
-            return
+        let isGroupZone = canvasView.isGroupZone(zoneId)
+        var projectId: UUID?
+        if let workspaceRuntime, !isGroupZone {
+            do {
+                try workspaceRuntime.prepareZoneForWholeZoneMutation(zoneId)
+            } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: \(error.localizedDescription)", kind: .error)
+                return
+            }
+            projectId = canvasView.zonePlacement(for: zoneId)?.projectId
         }
         let memberIds = canvasView.tileIds(inZone: zoneId)
+        zoneDeleteConfirmed = true
         for id in memberIds { deleteTile(id: id) }
+        zoneDeleteConfirmed = false
+        let survivors = canvasView.tileIds(inZone: zoneId)
+        if let projectId, let controller = workspaceRuntime?.controller(for: projectId) {
+            // While the zone's layer is still installed: only an installed zone
+            // may report its tiles deleted (`mergeProjectTilesForPersistence`).
+            controller.scheduleCanvasSave()
+            do { try controller.flushCanvasSave() } catch {
+                setWorkspaceManagementMessage(
+                    "The zone wasn't closed: its tiles couldn't be saved (\(error.localizedDescription)).", kind: .error)
+                return
+            }
+        }
+        guard survivors.isEmpty else {
+            setWorkspaceManagementMessage(
+                "\(survivors.count) tile(s) were kept, so the zone stays open.", kind: .warning)
+            return
+        }
         zoneCloseDeletedTileIds = Set(memberIds)
         defer { zoneCloseDeletedTileIds = [] }
-        canvasView.closeZone(zoneId: zoneId, keepTiles: false)
+        canvasView.closeZone(zoneId: zoneId, keepTiles: !isGroupZone)
     }
 
     /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
@@ -15168,6 +15577,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 reloadWorkspaceSidebar()
             } catch {
                 fputs("persistClosedZone failed: \(error)\n", stderr)
+                setWorkspaceManagementMessage(
+                    "The zone was closed but couldn't be saved; it will reappear next launch "
+                    + "(\(error.localizedDescription)).", kind: .error)
             }
             return
         }
@@ -15285,6 +15697,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the workspace document are saved synchronously from one snapshot. If any
     /// write fails, already-written project canvases are restored before the
     /// caller rolls the preview back in memory.
+    enum LayoutCommitError: Error, CustomStringConvertible {
+        case tilesWithoutStore(Int)
+        var description: String { "\(count) moved tile(s) belong to no saved canvas" }
+        private var count: Int { switch self { case let .tilesWithoutStore(count): return count } }
+    }
+
     private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) -> Bool {
         guard let registryStore else { return false }
         do {
@@ -15318,9 +15736,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // well subtracted the zone origin twice, so an ambient tile drifted by
             // −zoneOrigin on every commit/remount cycle and the error accumulated.
             // Witness: `--ambient-tile-frame-space-check`.
+            // Every committed tile must land in exactly the file that owns it. A
+            // tile found in none (its project unregistered, its canvas missing)
+            // used to be skipped while the commit still reported success, so the
+            // gesture looked saved and came back moved on the next launch.
+            var unplacedTileIds = Set(transaction.tileFrames.keys)
             for (tileId, worldFrame) in transaction.tileFrames {
                 guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
                 document.ambientTiles[index].frame = worldFrame
+                unplacedTileIds.remove(tileId)
             }
 
             let registry = try registryStore.loadOrEmpty()
@@ -15333,6 +15757,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
                 guard let original = try projectStore.tryLoadCanvas() else { continue }
+                unplacedTileIds.subtract(original.tiles.map(\.id))
                 var updated = original
                 var changed = false
                 // WS2 F2, same defect as the ambient register above: `canvas.json`
@@ -15346,9 +15771,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 for index in updated.tiles.indices {
                     guard let worldFrame = transaction.tileFrames[updated.tiles[index].id] else { continue }
                     updated.tiles[index].frame = worldFrame
+                    // Membership commits with geometry: a cross-zone drop must not
+                    // leave the old stamp behind the new frame.
+                    if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
+                       document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
+                        updated.tiles[index].zoneId = zoneId
+                    }
                     changed = true
                 }
                 if changed { projectWrites.append((projectStore, original, updated)) }
+            }
+
+            guard unplacedTileIds.isEmpty else {
+                throw LayoutCommitError.tilesWithoutStore(unplacedTileIds.count)
             }
 
             var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []
@@ -15376,6 +15811,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         } catch {
             fputs("persistLayoutTransaction failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "That layout change couldn't be saved, so it was undone: \(error).", kind: .error)
             return false
         }
     }
@@ -15674,7 +16111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         switch spawner.spawnHarnessRoleRun(role: role, prompt: prompt) {
         case let .spawned(runtime):
-            installSpawnedTerminal(runtime)
+            installSpawnedTerminal(runtime, from: spawner)
         case let .failure(error):
             fputs("TileSpawner.spawnHarnessRoleRun failed: \(error)\n", stderr)
         case let .missingCommand(executable):
@@ -15712,13 +16149,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func setWorkspaceManagementMessage(_ message: String?, kind: WorkspaceNotificationView.Kind = .warning) {
+    private func setWorkspaceManagementMessage(
+        _ message: String?,
+        kind: WorkspaceNotificationView.Kind = .warning,
+        action: (title: String, handler: () -> Void)? = nil
+    ) {
         workspaceManagementMessage = message
-        workspaceTopBarView?.setManagementMessage(message, kind: kind)
+        workspaceManagementAction = action
+        workspaceManagementKind = kind
+        workspaceTopBarView?.setManagementMessage(message, kind: kind, action: action)
         workspaceTopBarView?.notificationView.onDismiss = { [weak self] in
             self?.workspaceManagementMessage = nil
+            self?.workspaceManagementAction = nil
         }
         workspaceSidebarView?.setManagementMessage(message)
+    }
+
+    /// The action the current notification offers, if any.
+    private var workspaceManagementAction: (title: String, handler: () -> Void)?
+    private var workspaceManagementKind: WorkspaceNotificationView.Kind = .warning
+
+    /// QA: press the current notification's action, the way its button does.
+    /// Returns its title, or nil when the notification offers none.
+    @discardableResult
+    func qaPerformWorkspaceNotificationAction() -> String? {
+        guard let action = workspaceManagementAction else { return nil }
+        workspaceManagementMessage = nil
+        workspaceManagementAction = nil
+        action.handler()
+        return action.title
     }
 
     private func createWorkspaceFromChrome() {
@@ -16117,7 +16576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnNote(title: "New Note") {
         case let .spawned(noteId, tileId):
             if let view = canvasView?.tileView(for: tileId) as? NoteTileNSView {
-                noteViews[noteId] = view
+                controller(owning: spawner)?.noteViews[noteId] = view
             }
             focusSpawnedTile(tileId)
             return true
@@ -16298,8 +16757,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .systemBrowser:
             return NSWorkspace.shared.open(url)
         case .array:
+            // The authoring tile's OWN project's spawner: the browser lands in
+            // that tile's zone, so it must persist into that project's canvas.
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                  let spawner = tileSpawner,
+                  let owner = controller(owningTile: sourceTileId),
+                  let spawner = owner.tileSpawner,
                   let source = canvasView?.navigationTileSnapshot(for: sourceTileId)
             else { return false }
             switch spawner.spawnBrowser(
@@ -16308,7 +16770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 targetZoneId: source.zoneId
             ) {
             case let .spawned(runtime):
-                browserRuntimes.append(runtime)
+                owner.browserRuntimes.append(runtime)
                 workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
                 workspaceRuntime?.enforceBrowserRuntimeBudget()
                 focusSpawnedTile(runtime.tileId)
@@ -16349,8 +16811,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.fileEditorConfigurator = { [weak self] view in
             self?.configureFileEditor(view)
         }
+        let ownerProjectId = spawner.spawnerProjectId
         spawner.noteConvertedHandler = { [weak self] noteId, _ in
-            self?.noteViews.removeValue(forKey: noteId)
+            self?.workspaceRuntime?.controller(for: ownerProjectId)?.noteViews.removeValue(forKey: noteId)
         }
     }
 
@@ -16587,6 +17050,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// store while leaving the active zone in place would install the tile into one
     /// project's layer and persist it into another's — a mismatch worse than the
     /// one being fixed.
+    /// The spawner of `tileId`'s own project, scoped to `tileId`'s own zone: for
+    /// a spawn a tile asks for, wherever the armed zone is.
+    private func spawnerAndScope(forTile tileId: UUID) -> (TileSpawner, CreationScope)? {
+        guard let zoneId = canvasView?.zoneId(containing: tileId),
+              let placement = canvasView?.installedZonePlacement(for: zoneId),
+              let projectId = placement.projectId,
+              let (spawner, projectScope) = spawnerAndScope(forProject: projectId) else { return nil }
+        return (spawner, CreationScope(
+            projectId: projectId,
+            projectRoot: projectScope.projectRoot,
+            homeRelativePath: placement.homeRelativePath,
+            source: .zone,
+            zoneId: zoneId
+        ))
+    }
+
     private func spawnerAndScope(forProject projectId: UUID) -> (TileSpawner, CreationScope)? {
         guard let spawner = workspaceRuntime?.controller(for: projectId)?.tileSpawner,
               let zone = workspaceRuntime?.document.zones.first(where: { $0.projectId == projectId }),
@@ -16622,6 +17101,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
     /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
     func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
+    /// QA: the agent-status write a stopped harness run lands through.
+    func qaUpdateAgentStatus(_ tileId: UUID, _ status: AgentStatus) { updateAgentStatus(tileId: tileId, status: status) }
+    /// QA: the quit's managed-session sweep, minus the rest of termination.
+    func qaSweepManagedSessionsAtQuit() { sweepManagedSessionsAtQuit() }
+    /// QA: the deletion a confirmed "Delete Browser Profile" alert runs.
+    func qaDeleteBrowserProfile(tileId: UUID, profileId: UUID) { performBrowserProfileDeletion(tileId: tileId, profileId: profileId) }
+    /// QA: a ticket-queue tile's Dispatch button, for a row.
+    func qaDispatchTicket(_ row: LinearTicketQueueRow, fromQueueTile tileId: UUID) { dispatchAgent(for: row, fromQueueTile: tileId) }
+    /// QA: the companion focus mode pairs with `primaryTileId`.
+    func qaFocusModeCompanion(for primaryTileId: UUID) -> UUID? { focusModeCompanionAgent(for: primaryTileId) }
+    /// QA: Ghostty surfaces still alive when `windowWillClose` reached the
+    /// `ghostty_app_free` step. Anything above zero traps there (ADR-0010).
+    private(set) var qaLiveTerminalSurfacesAtGhosttyShutdown: Int?
     /// QA: host the mounted canvas in `window` and install the keyDown monitor
     /// launch installs, so a check's key events take the production route
     /// (`NSApp.sendEvent` → local monitor → `handleHotkey`). The quit teardown
@@ -16633,7 +17125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): whether a spawner is reachable at all.
     var qaHasTileSpawner: Bool { tileSpawner != nil }
     /// QA (M1.11): live browser runtimes, to prove none was built and dropped.
-    var qaBrowserRuntimeCount: Int { browserRuntimes.count }
+    var qaBrowserRuntimeCount: Int { liveControllers.reduce(0) { $0 + $1.browserRuntimes.count } }
 
     /// QA (T1-T3, `.plans/47`): the resolver every filesystem-backed spawn reads.
     /// A leg asserts the project AND the zone, because the pair disagreeing is
@@ -16754,6 +17246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         self.workspaceRuntime = runtime
         self.registryStore = registryStore
     }
+
+    /// `--sidebar-truth-check` (confidence pass): install a sidebar exactly as boot
+    /// does, and run the structural refresh boot and every tile change run.
+    func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
+        workspaceSidebarView = sidebar
+        configureWorkspaceSidebar(sidebar)
+    }
+
+    func qaRefreshAgentSurfaces() { refreshAgentSurfaces(notify: false) }
+    /// The agent-EVENT push (what `scheduleAgentSurfacePush` fires), not a rebuild.
+    func qaPushAgentSurfacesForEvent() { pushAgentSurfaces(notify: false) }
 
     func qaPrepareForOfflineSceneCheck(
         canvas: CanvasNSView,
@@ -17059,6 +17562,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.onSpawnerCreated = { [weak self] arriving in
             self?.configureCreationAndRuntimeRoutes(on: arriving)
         }
+        // A project whose zone cannot be mounted (its canvas is unreadable, or
+        // its `.array/` is held elsewhere) used to go stderr-only.
+        workspaceRuntime?.onZoneProjectUnavailable = { [weak self] projectId, error in
+            self?.reportZoneProjectUnavailable(projectId: projectId, error: error)
+        }
+        workspaceRuntime?.onStrandedTilesFound = { [weak self] found, leftAlone in
+            self?.offerStrandedTileRecovery(found, leftAlone: leftAlone)
+        }
+        workspaceRuntime?.agentProjectForTile = { [weak self] tileId in
+            guard let self, let agentId = agentSupervisor.agent(forTile: tileId) else { return nil }
+            return agentSupervisor.records[agentId]?.projectId
+        }
         workspaceRuntime?.hydrateZoneLayerTiles = { [weak self] canvas, layers, phase in
             self?.hydrateZoneLayerTiles(canvas, layers, phase: phase)
         }
@@ -17068,6 +17583,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 record.tileId.map { (record.id, $0) }
             })
         }
+    }
+
+    /// Tiles whose zone no registered workspace holds are never repaired
+    /// silently (`.plans/67` §4): the mount preserves and classifies them, and
+    /// this offers the repair. Nothing moves until the user presses Recover.
+    private func offerStrandedTileRecovery(
+        _ found: [UUID: [Tile]], leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]
+    ) {
+        let count = found.values.reduce(0) { $0 + $1.count }
+        let copies = leftAlone.values.reduce(0) { $0 + $1.count }
+        guard count + copies > 0 else { return }
+        let registry = (try? registryStore?.loadOrEmpty()) ?? nil
+        func names(_ ids: [UUID]) -> String {
+            let quoted = Set(ids).compactMap { id in registry?.projects.first(where: { $0.id == id })?.name }
+                .sorted()
+                .map { "\u{201C}\($0)\u{201D}" }
+            return ListFormatter.localizedString(byJoining: quoted)
+        }
+        var sentences: [String] = []
+        if count > 0 {
+            let place = names(Array(found.keys))
+            sentences.append("\(count) \(count == 1 ? "tile is" : "tiles are") hidden\(place.isEmpty ? "" : " in " + place): "
+                + "they belong to a zone that no longer exists. Recover puts them in a new zone, keeping their layout.")
+        }
+        if copies > 0 {
+            let owners = names(leftAlone.values.flatMap(\.elsewhere))
+            sentences.append("\(copies) \(copies == 1 ? "copy" : "copies") of tiles\(owners.isEmpty ? "" : " in " + owners) "
+                + "\(copies == 1 ? "is" : "are") left alone, so no tile or agent is shown twice.")
+        }
+        var action: (title: String, handler: () -> Void)?
+        if count > 0 {
+            action = (title: "Recover", handler: { [weak self] in self?.recoverStrandedTiles() })
+        }
+        setWorkspaceManagementMessage(sentences.joined(separator: " "), kind: .warning, action: action)
+    }
+
+    private func recoverStrandedTiles() {
+        guard let workspaceRuntime else { return }
+        do {
+            let recovered = try workspaceRuntime.recoverStrandedTiles()
+            reloadWorkspaceSidebar()
+            setWorkspaceManagementMessage(
+                "Recovered \(recovered) tile\(recovered == 1 ? "" : "s") into a new zone.", kind: .success)
+        } catch {
+            setWorkspaceManagementMessage(
+                "The hidden tiles couldn't be recovered: \(error.localizedDescription). Nothing was changed.",
+                kind: .error)
+        }
+    }
+
+    private func reportZoneProjectUnavailable(projectId: UUID, error: Error) {
+        let name = (try? registryStore?.loadOrEmpty())?.projects.first(where: { $0.id == projectId })?.name ?? "A project"
+        let reason: String
+        switch error {
+        case ProjectStoreError.canvasUnreadable:
+            reason = "its canvas file can't be read. Array is leaving the file untouched and showing none of its tiles"
+        case let ProjectStoreError.unknownFutureSchema(_, version, supported):
+            reason = "its canvas was saved by a newer Array (format \(version), this build reads \(supported)). "
+                + "Array is leaving the file untouched and showing none of its tiles"
+        default:
+            reason = error.localizedDescription
+        }
+        setWorkspaceManagementMessage("\u{201C}\(name)\u{201D} is unavailable: \(reason).", kind: .error)
     }
 
     // MARK: - Zone tile hydration (M1.2, `.plans/46`)
@@ -17144,7 +17722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 controller?.tileSpawner?.saveNoteAsMarkdown(
                     noteId: noteId, tileId: tile.id, destination: url)
             }
-            noteViews[noteId] = view
+            // The layer's OWN controller, which flushes it into its own store.
+            // Phase A runs before the arriving project is the active one.
+            controller.noteViews[noteId] = view
             return view
 
         case .file:
@@ -17157,7 +17737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         case .ticketQueue:
             let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
-                self?.dispatchAgent(for: row)
+                self?.dispatchAgent(for: row, fromQueueTile: tile.id)
             }, fanOutHandler: { [weak self] rows in
                 self?.fanOutAgents(for: rows, from: tile.id)
             })
@@ -17243,6 +17823,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // written for. Retire it first; see `retireOrphanedRuntimes`.
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
                 if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
+                    // Wired like a boot or a spawned terminal: without it a shell's
+                    // `exit` left a dead tile with no Restart and no `lastExit`.
+                    wireRuntimeExitHandler(runtime)
                     controller.runtimes.append(runtime)
                 }
             case .browser:
@@ -17254,7 +17837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             case .fileTree:
                 if case .restarted = spawner.restartFileTreeTile(tileId: tile.id),
                    let view = canvas.tileView(for: tile.id) as? FileTreeTileNSView {
-                    fileTreeViews[tile.id] = view
+                    controller.fileTreeViews[tile.id] = view
                 }
             default:
                 continue
@@ -17294,20 +17877,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// that `TileSpawner.restartBrowserTile` owns, so it belongs in the spawner
     /// rather than duplicated here.
     private func retireOrphanedRuntimes(forTile tileId: UUID, controller: ZoneRuntimeController) {
-        for runtime in controller.runtimes where runtime.tileId == tileId {
-            runtime.detach()
-            runtime.terminate(policy: .force)
-        }
-        controller.runtimes.removeAll { $0.tileId == tileId }
-        for runtime in controller.browserRuntimes where runtime.tileId == tileId {
-            runtime.detach()
-            runtime.terminate(policy: .force)
-        }
-        controller.browserRuntimes.removeAll { $0.tileId == tileId }
+        // Terminate before detach, inside `releaseRuntimes`: detaching first let
+        // go of the view `terminate` reaches the surface through, so the old
+        // surface was never freed.
+        controller.releaseRuntimes(tileId: tileId)
     }
 
     private func configureCreationAndRuntimeRoutes(on spawner: TileSpawner) {
-        spawner.creationScopeProvider = { [weak self] in self?.resolvedCreationScope() }
+        // Every spawn reads its scope here, before framing and installing its tile,
+        // so this is where an armed zone below the live tier gets the layer the
+        // tile must install into. Without one it fell to the retired flat model.
+        spawner.creationScopeProvider = { [weak self] in
+            let scope = self?.resolvedCreationScope()
+            if let zoneId = scope?.zoneId { self?.workspaceRuntime?.ensureZoneLayer(forZone: zoneId) }
+            return scope
+        }
         spawner.terminalProjectContextProvider = { [weak self] in self?.activeZoneProjectEntry() }
         spawner.terminalSessionTargetProvider = { [weak self] in
             guard let self else { return nil }
@@ -17337,11 +17921,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.browserProfileCreateHandler = { [weak self] tileId in self?.createBrowserProfile(for: tileId) }
         spawner.browserProfileRenameHandler = { [weak self] tileId, profileId in self?.renameBrowserProfile(tileId: tileId, profileId: profileId) }
         spawner.browserProfileDeleteHandler = { [weak self] tileId, profileId in self?.deleteBrowserProfile(tileId: tileId, profileId: profileId) }
-        spawner.browserPersistenceHandler = { [weak self] in self?.scheduleBrowserSave() }
-        spawner.notePersistenceHandler = { [weak self] in self?.scheduleNoteSave() }
-        spawner.fileTreePersistenceHandler = { [weak self] in self?.scheduleFileTreeSave() }
+        // The spawner's OWN project saves what it built, whichever zone is armed
+        // when the edit happens. Keyed by id, not by the spawner: an arming change
+        // mints new spawners, and a view outlives the one that built it.
+        let ownerProjectId = spawner.spawnerProjectId
+        spawner.browserPersistenceHandler = { [weak self] in
+            self?.workspaceRuntime?.controller(for: ownerProjectId)?.scheduleBrowserSave()
+        }
+        spawner.notePersistenceHandler = { [weak self] in
+            self?.workspaceRuntime?.controller(for: ownerProjectId)?.scheduleNoteSave()
+        }
+        spawner.fileTreePersistenceHandler = { [weak self] in
+            self?.workspaceRuntime?.controller(for: ownerProjectId)?.scheduleFileTreeSave()
+        }
         spawner.boardRuntimeProvider = { [weak self] in
-            guard let self, let controller = self.workspaceRuntime?.activeController else { return nil }
+            guard let self, let controller = self.workspaceRuntime?.controller(for: ownerProjectId) else { return nil }
             return self.configuredBoardRuntime(controller)
         }
         configureFileOpenRoute(on: spawner)
@@ -17384,7 +17978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnFileTreeForCreationScope() {
         case let .spawned(tileId, _):
             if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
-                fileTreeViews[tileId] = view
+                controller(owning: spawner)?.fileTreeViews[tileId] = view
             }
             focusSpawnedTile(tileId)
         case .invalidPath:
@@ -17423,17 +18017,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func applicationWillTerminate(_ notification: Notification) {
         agentSupervisor.stopAll()
         editorLanguageServices.shutdown()
-        // P3.1: the identical sweep the launch runs, with the reason a clean quit
-        // deserves. Best-effort — a quit can be a kill we never see, which is why
-        // the launch sweep is the load-bearing one.
-        if let store = workspaceRuntime?.activeController?.managedSessionStore {
+        sweepManagedSessionsAtQuit()
+        Task { await agentComposerDraftStore.flushAll() }
+    }
+
+    /// P3.1: the identical sweep the launch runs, with the reason a clean quit
+    /// deserves — over EVERY mounted project's store, not the armed one's.
+    /// Best-effort — a quit can be a kill we never see, which is why the launch
+    /// sweep is the load-bearing one.
+    private func sweepManagedSessionsAtQuit() {
+        for controller in liveControllers {
             do {
-                try ManagedSessionReconciliation.reconcile(store: store, reason: .continuumQuit, now: Date())
+                try ManagedSessionReconciliation.reconcile(
+                    store: controller.managedSessionStore, reason: .continuumQuit, now: Date())
             } catch {
-                fputs("managed-session reconcile: quit sweep failed: \(error)\n", stderr)
+                fputs("managed-session reconcile: quit sweep failed for \(controller.project.name): \(error)\n", stderr)
             }
         }
-        Task { await agentComposerDraftStore.flushAll() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -17556,30 +18156,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         localPairingListener?.stop()
         localPairingListener = nil
 
-        // Browsers tear down first: WKWebView's process pool teardown is
-        // independent of GhosttyKit's. Inverting the order risks WebKit KVO
-        // callbacks firing into a half-torn-down app.
-        for runtime in browserRuntimes {
-            runtime.terminate(policy: .force)
-        }
-        browserRuntimes.removeAll()
-
-        // Free every Ghostty surface before ghostty_app_free, per ADR-0010.
+        // Free every Ghostty surface before ghostty_app_free, per ADR-0010 —
+        // EVERY mounted project's, not only the armed zone's.
         // ghostty_app_free walks the surface registry and dereferences
         // PAC-protected pointers; if a surface is still alive at that point,
-        // deinit traps with EXC_BAD_ACCESS.
-        for runtime in runtimes {
-            runtime.terminate(policy: .force)
-        }
-        // Release zone layers and controllers after terminating runtimes so that
-        // the runtimes/browserRuntimes computed properties (which proxy through
-        // workspaceRuntime?.activeController) are still readable during the loops above.
+        // deinit traps with EXC_BAD_ACCESS. Releasing a controller frees its
+        // runtimes (browsers first, see `releaseRuntimes`); the sweep after
+        // catches any controller the registry did not close (still referenced,
+        // or kept warm).
+        let controllers = liveControllers
         workspaceRuntime?.closeAll()
+        for controller in controllers { controller.releaseRuntimes() }
         canvasView = nil
-        runtimes.removeAll()
-        noteViews.removeAll()
-        fileTreeViews.removeAll()
         bootTileSpawner = nil
+        qaLiveTerminalSurfacesAtGhosttyShutdown = GhosttyTerminalView.liveSurfaceCount
         ghostty?.shutdown()
         ghostty = nil
         browserEngine?.shutdown()
@@ -17605,8 +18195,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// A change to one tile's record saves through the tile's OWN project.
+    /// `canvasDidChange` schedules the armed project only, so a retitle, an
+    /// activation or a raise of a tile in another zone was never written.
+    func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID) {
+        canvasDidChange(canvas)
+        if let owner = controller(owningTile: tileId), owner !== workspaceRuntime?.activeController {
+            owner.scheduleCanvasSave()
+        }
+    }
+
+    /// COALESCED (confidence pass): at most one sidebar reload per run-loop turn.
+    /// Every restored terminal, browser and file-tree tile reports a model change,
+    /// and each used to cost a full structural reload — a workspace switch paid one
+    /// per restored tile, hundreds of file reads on the main thread. Any full
+    /// reload that runs before the deferred one (the switch's own) satisfies it.
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {
-        reloadWorkspaceSidebar()
+        guard !sidebarReloadPending else { return }
+        sidebarReloadPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sidebarReloadPending else { return }
+            self.reloadWorkspaceSidebar()
+        }
     }
 
     private var lastReconciledViewport: CanvasViewport?
@@ -19540,7 +20150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnTerminal(profileId: "shell") {
             case let .spawned(secondary):
                 self.wireRuntimeExitHandler(secondary)
-                self.runtimes.append(secondary)
+                self.controller(owning: spawner)?.runtimes.append(secondary)
                 secondaryRuntimeId = secondary.id
                 secondaryTileId = secondary.tileId
             case let .missingCommand(executable):
@@ -19569,7 +20179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Restart placeholder.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             if let id = secondaryRuntimeId,
-               let secondary = self.runtimes.first(where: { $0.id == id }) {
+               let secondary = self.liveControllers.flatMap(\.runtimes).first(where: { $0.id == id }) {
                 secondary.dispatchInsertedText("exit")
                 secondary.dispatchKeyDown(keyCode: 0x24, characters: "\r")
             }
@@ -19596,7 +20206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnBrowser(url: browserDataURL) {
             case let .spawned(runtime):
                 self.wireContentProcessTerminationHandler(runtime)
-                self.browserRuntimes.append(runtime)
+                self.controller(owning: spawner)?.browserRuntimes.append(runtime)
                 browserRuntimeId = runtime.id
                 browserTileId = runtime.tileId
             case let .invalidURL(url):
@@ -19705,9 +20315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
             // dropped without canvas update — that's a regression worth failing on.
-            let browserCardinalityOk = self.browserRuntimes.count == browserTileCount
+            let browserCardinalityOk = self.qaBrowserRuntimeCount == browserTileCount
             if !browserCardinalityOk {
-                fputs("Smoke cardinality: browserRuntimes.count=\(self.browserRuntimes.count) != browserTileCount=\(browserTileCount)\n", stderr)
+                fputs("Smoke cardinality: browserRuntimes.count=\(self.qaBrowserRuntimeCount) != browserTileCount=\(browserTileCount)\n", stderr)
             }
             do {
                 let project = try self.projectStore?.loadProject()
@@ -19744,7 +20354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let secondaryOnCanvas = secondaryTileId.map { id in
                     canvasOnDisk?.tiles.contains(where: { $0.id == id && $0.kind == .terminal }) ?? false
                 } ?? false
-                let liveRuntimeIds = Set(self.runtimes.map { $0.id })
+                let liveRuntimeIds = Set(self.liveControllers.flatMap(\.runtimes).map { $0.id })
                 let noOrphanSessions = sessions.allSatisfy { session in
                     session.lastExit != nil || liveRuntimeIds.contains(session.id)
                 }
@@ -19760,7 +20370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // live tile for a TerminalRestartTileNSView and stamped lastExit
                 // on its descriptor. The runtime must no longer be live.
                 if let id = secondaryRuntimeId, let tileId = secondaryTileId {
-                    let runtimeRemoved = !self.runtimes.contains(where: { $0.id == id })
+                    let runtimeRemoved = !self.liveControllers.flatMap(\.runtimes).contains(where: { $0.id == id })
                     let placeholderInstalled = self.canvasView?.tileView(for: tileId) is TerminalRestartTileNSView
                     let descriptorStamped = sessions.first(where: { $0.id == id })?.lastExit != nil
                     midExitOk = runtimeRemoved && placeholderInstalled && descriptorStamped
@@ -19780,7 +20390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let noteIndexMatches = noteState?.tiles.contains(where: {
                         $0.id == Self.smokeNoteId && $0.tileId == Self.smokeNoteTileId
                     }) ?? false
-                    let trackedViewMatches = self.noteViews[Self.smokeNoteId] === noteView
+                    let trackedViewMatches = self.liveControllers.contains { $0.noteViews[Self.smokeNoteId] === noteView }
                     let canvasMetadataMatches = noteTile.metadata.noteId == Self.smokeNoteId
                     let bodyMatches = noteView.textView.string == Self.smokeNoteBody
                     // Guards against the regression where the text view ended up
@@ -19836,7 +20446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }) ?? false
                     let fileTreeView = self.canvasView?.tileView(for: fileTreeTile.id) as? FileTreeTileNSView
                     let fileTreeInstalled = fileTreeView != nil
-                    let fileTreeTracked = self.fileTreeViews[Self.smokeFileTreeTileId] === fileTreeView
+                    let fileTreeTracked = self.liveControllers.contains { $0.fileTreeViews[Self.smokeFileTreeTileId] === fileTreeView }
                     let snapshotPaths = Set(fileTreeView?.currentSnapshot?.nodes.map(\.relativePath) ?? [])
                     let fileTreeLeavesVisible = snapshotPaths.contains("a.txt")
                         && snapshotPaths.contains("b/c.txt")
@@ -19880,7 +20490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         && storageIdMatches
                         && runtimeIdPresent
                     if let runtimeId = browserRuntimeId,
-                       let browserRuntime = self.browserRuntimes.first(where: { $0.id == runtimeId }) {
+                       let browserRuntime = self.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.id == runtimeId }) {
                         self.canvasView?.bringToFront(tileId: browserRuntime.tileId)
                         self.canvasView?.layoutSubtreeIfNeeded()
                         browserRuntime.webView.layoutSubtreeIfNeeded()
@@ -20092,7 +20702,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
             wireRuntimeExitHandler(runtime)
-            runtimes.append(runtime)
+            controller(owning: spawner)?.runtimes.append(runtime)
             return "spawned profile \(profileId)"
         case let .missingCommand(executable):
             return "missing command \(executable) for profile \(profileId)"
@@ -20203,7 +20813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnBrowser(url: url) {
             case let .spawned(spawned):
                 self.wireContentProcessTerminationHandler(spawned)
-                self.browserRuntimes.append(spawned)
+                self.controller(owning: spawner)?.browserRuntimes.append(spawned)
                 runtime = spawned
                 browserTile = self.canvasView?.tileView(for: spawned.tileId) as? BrowserTileNSView
             case let .invalidURL(invalid):
@@ -20286,7 +20896,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,<html><head><title>qa-browser-url-focus</title></head><body>browser url focus</body></html>") {
             case let .spawned(runtime):
                 self.wireContentProcessTerminationHandler(runtime)
-                self.browserRuntimes.append(runtime)
+                self.controller(owning: spawner)?.browserRuntimes.append(runtime)
                 tileId = runtime.tileId
                 capture("browser-url-focus-spawned", 0.4, "spawned browser \(runtime.id)")
             case let .invalidURL(url):
@@ -20347,7 +20957,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch spawner.spawnBrowser(url: url) {
         case let .spawned(runtime):
             wireContentProcessTerminationHandler(runtime)
-            browserRuntimes.append(runtime)
+            controller(owning: spawner)?.browserRuntimes.append(runtime)
             return "spawned browser \(runtime.id)"
         case let .invalidURL(url):
             return "invalid URL \(url)"
@@ -20368,7 +20978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnTerminal(profileId: "shell") {
             case let .spawned(runtime):
                 self.wireRuntimeExitHandler(runtime)
-                self.runtimes.append(runtime)
+                self.controller(owning: spawner)?.runtimes.append(runtime)
                 runtimeId = runtime.id
                 capture("terminal-spawned", 0.4, "spawned shell runtime")
             case let .missingCommand(executable):
@@ -20383,7 +20993,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             if let id = runtimeId,
-               let runtime = self.runtimes.first(where: { $0.id == id }) {
+               let runtime = self.liveControllers.flatMap(\.runtimes).first(where: { $0.id == id }) {
                 runtime.sendInput(Data("exit\n".utf8))
             }
             capture("terminal-exit-requested", 0.8, nil)
@@ -22226,7 +22836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             project: project
         )
         defer {
-            delegate.browserRuntimes.forEach { $0.terminate(policy: .requestClose) }
+            delegate.liveControllers.flatMap(\.browserRuntimes).forEach { $0.terminate(policy: .requestClose) }
             browserEngine.shutdown()
         }
 
@@ -22236,9 +22846,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let browserTiles = canvas.canvasState.tiles.filter { $0.kind == .browser }
         try expect(browserTiles.count == 2, "expected 2 browser tiles, got \(browserTiles.count)")
-        try expect(delegate.browserRuntimes.count == 2, "expected 2 browser runtimes, got \(delegate.browserRuntimes.count)")
+        try expect(delegate.qaBrowserRuntimeCount == 2, "expected 2 browser runtimes, got \(delegate.qaBrowserRuntimeCount)")
         try expect(browserTiles.map { $0.metadata.url } == ["about:blank", explicitURL], "unexpected browser tile URLs: \(browserTiles.map { $0.metadata.url ?? "nil" })")
-        try expect(delegate.browserRuntimes.map(\.url) == ["about:blank", explicitURL], "unexpected runtime URLs: \(delegate.browserRuntimes.map(\.url))")
+        try expect(delegate.liveControllers.flatMap(\.browserRuntimes).map(\.url) == ["about:blank", explicitURL], "unexpected runtime URLs: \(delegate.liveControllers.flatMap(\.browserRuntimes).map(\.url))")
         let persisted = try store.loadBrowserState().tiles.map(\.url)
         try expect(persisted == ["about:blank", explicitURL], "unexpected persisted browser URLs: \(persisted)")
 
@@ -22251,9 +22861,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let manifest: [String: Any] = [
             "check": "palette-browser-spawn",
             "tileCount": browserTiles.count,
-            "runtimeCount": delegate.browserRuntimes.count,
+            "runtimeCount": delegate.liveControllers.flatMap(\.browserRuntimes).count,
             "tileURLs": browserTiles.map { $0.metadata.url ?? "" },
-            "runtimeURLs": delegate.browserRuntimes.map(\.url),
+            "runtimeURLs": delegate.liveControllers.flatMap(\.browserRuntimes).map(\.url),
             "persistedURLs": persisted,
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
@@ -22828,7 +23438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let browserTile = canvas.canvasState.tiles.last(where: { $0.kind == .browser }) else {
             throw CheckError.failed("new browser spawn did not create a browser tile")
         }
-        guard let browserRuntime = delegate.browserRuntimes.last else {
+        guard let browserRuntime = delegate.liveControllers.flatMap(\.browserRuntimes).last else {
             throw CheckError.failed("new browser spawn did not create a browser runtime")
         }
         try expect(delegate.focusBroker.activeSurface == .tile(browserTile.id), "spawned browser did not become active")
@@ -25111,7 +25721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switch spawner.spawnTerminal(profileId: "shell") {
             case let .spawned(runtime):
                 self.wireRuntimeExitHandler(runtime)
-                self.runtimes.append(runtime)
+                self.controller(owning: spawner)?.runtimes.append(runtime)
                 runtimeId = runtime.id
                 tileId = runtime.tileId
                 capture("restart-terminal-spawned", 0.4, nil)
@@ -25127,7 +25737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             if let id = runtimeId,
-               let runtime = self.runtimes.first(where: { $0.id == id }) {
+               let runtime = self.liveControllers.flatMap(\.runtimes).first(where: { $0.id == id }) {
                 runtime.sendInput(Data("exit\n".utf8))
             }
             capture("restart-placeholder-requested", 0.8, nil)
@@ -25197,11 +25807,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         branchView.onSourceChanged = { updated in
             if let idx = materialized.tiles.firstIndex(where: { $0.id == updated.id }) { materialized.tiles[idx] = updated }
         }
-        guard branchView.selectSourcePickerItemForQA(title: "Branch feature vs main") else {
-            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
-        }
+        // Git runs off the main thread: the branch list loads once the tile is
+        // in a window, and each diff lands asynchronously.
         branchView.frame = window.contentView?.bounds ?? .zero
         window.contentView = branchView
+        guard branchView.waitForPendingLoadsForQA(timeout: 15),
+              branchView.selectSourcePickerItemForQA(title: "Branch feature vs main"),
+              branchView.waitForPendingLoadsForQA(timeout: 15) else {
+            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
+        }
         window.layoutIfNeeded()
         let branchEvidence = branchView.visibilityEvidence(containing: "+feature branch")
         guard branchEvidence.ok,
@@ -30774,6 +31388,9 @@ extension AppDelegate {
         let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
         app.configureWorkspaceSidebar(sidebar)
+        // The corpus reads every flow's rendered row, the settled one included,
+        // so the folded Settled shelf is opened (confidence pass).
+        sidebar.inboxForQA.expandSettledShelfForQA()
 
         // A real window, so the offscreen table has a viewport in which to
         // materialize cells — without one, every rendered-cell read is vacuous.
@@ -31196,14 +31813,18 @@ extension AppDelegate {
     let scopeSuite = "continuum.inbox.scope.\(UUID().uuidString)"
     let scopeDefaults = UserDefaults(suiteName: scopeSuite)!
     defer { scopeDefaults.removePersistentDomain(forName: scopeSuite) }
+    // Confidence pass (sidebar stream): the default is the workspace on screen.
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .currentWorkspace,
+               "with no stored scope the inbox shows the workspace on screen")
+    WorkspaceSidebarConfig.setScope(.all, defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "with no stored scope the inbox shows every agent")
+               "an explicitly picked 'All agents' is honoured over the default")
     WorkspaceSidebarConfig.setScope(.workspace("Overnight"), defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .workspace("Overnight"),
                "the picked scope comes back after a relaunch — got \(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults))")
     scopeDefaults.set("zone:main", forKey: WorkspaceSidebarConfig.scopeKey)
-    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "an unreadable stored scope opens the list up rather than emptying it")
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == WorkspaceSidebarConfig.defaultScope,
+               "an unreadable stored scope falls back to the default rather than emptying the list")
     // …and the restore path is the one the app uses, with no write-back.
     let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
     var restoreWrites = 0
@@ -32433,11 +33054,19 @@ extension AppDelegate {
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
-    try expect(sidebar.inboxForQA.rowIdsForQA == [tiledId.rawValue],
-               "…and applied: the tiled agent is in workspace 'Default' and the headless one is in no workspace — got \(sidebar.inboxForQA.titlesForQA)")
+    // Confidence pass (sidebar stream): a tile-less agent belongs to its project's
+    // one workspace, so 'Default' holds all three agents — the headless one and its
+    // child included, which a workspace-scoped list could otherwise never show.
+    try expect(Set(sidebar.inboxForQA.rowIdsForQA) == [tiledId.rawValue, headlessId.rawValue, childId.rawValue],
+               "…and applied: every agent of workspace 'Default' — tiled, headless and child — got \(sidebar.inboxForQA.titlesForQA)")
+    // …and the scope BITES: a project with no agent in it shows no row.
+    try expect(sidebar.inboxForQA.pickScopeForQA(.project("Quiet")), "'Quiet' must be pickable")
+    sidebar.inboxForQA.layoutForQA()
+    try expect(sidebar.inboxForQA.rowIdsForQA.isEmpty,
+               "a scope must filter: 'Quiet' has no agent — got \(sidebar.inboxForQA.titlesForQA)")
     // The menu comes from the REGISTRY, not only from the rows: this run's project and
     // workspace are both offered while the list is showing one row.
-    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["All agents", "Continuum", "Quiet", "Default"],
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "Continuum", "Quiet", "Default"],
                "the popup offers the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.
@@ -34459,6 +35088,9 @@ extension AppDelegate {
     try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
                "setup: adopting a settled agent clears nothing")
     revealApp.refreshAgentSurfaces(notify: false)
+    // The app folds Settled behind a heading (confidence pass); this section reads
+    // and clicks settled rows, so it opens the shelf first.
+    revealSidebar.inboxForQA.expandSettledShelfForQA()
     revealSidebar.inboxForQA.layoutForQA()
 
     // The shipped list is the source of truth for section placement. `refreshAgentSurfaces`

@@ -71,6 +71,12 @@ final class ZoneRuntimeController {
     /// attach paths apart.
     var qaHoldsProcessWideAttachments: Bool { sessionObserver != nil || sessionPruner != nil }
     private var isCanvasDirty = false
+    /// Why this project's `canvas.json` cannot be read, once anything found out.
+    /// An unreadable canvas is not an empty one: it is never written (the store
+    /// refuses too), never merged against, and never marked dirty, so it cannot
+    /// block a quit or a switch either. Nothing of the user's could be placed in
+    /// it, because no layer is built over it.
+    private(set) var canvasUnavailable: Error?
     /// Canvas writes handed to the save queue, and the outcome of the newest
     /// one to resolve, recorded on the queue itself so a synchronous flush can
     /// read it after its barrier without waiting on the main actor.
@@ -212,8 +218,39 @@ final class ZoneRuntimeController {
                 try? managedSessionStore.upsert(record)
             }
         }
+        releaseRuntimes()
 
         projectLock?.release()
+    }
+
+    /// Free the Ghostty surface and web view of every runtime this controller
+    /// holds — or only `tileId`'s — and forget them.
+    ///
+    /// Not an exit: each exit handler is dropped first, so no placeholder or
+    /// `lastExit` follows. Terminate BEFORE detach: `terminate` reaches the surface
+    /// through the view that `detach` lets go of, so the other order frees nothing
+    /// and leaves a live surface holding a dangling pointer to its view. With tmux,
+    /// freeing the surface only ends the attached client; the session survives
+    /// (D16). Called by `close()`, by the quit teardown for every live controller,
+    /// and before Phase B restarts a tile.
+    func releaseRuntimes(tileId: UUID? = nil) {
+        // Browsers first: WKWebView's process-pool teardown is independent of
+        // GhosttyKit's, and the other order risks WebKit KVO callbacks firing
+        // into a half-torn-down app.
+        let browsers = browserRuntimes.filter { tileId == nil || $0.tileId == tileId }
+        browserRuntimes.removeAll { tileId == nil || $0.tileId == tileId }
+        for runtime in browsers {
+            runtime.onContentProcessTerminated = nil
+            runtime.terminate(policy: .force)
+            runtime.detach()
+        }
+        let terminals = runtimes.filter { tileId == nil || $0.tileId == tileId }
+        runtimes.removeAll { tileId == nil || $0.tileId == tileId }
+        for runtime in terminals {
+            runtime.onRuntimeExited = nil
+            runtime.terminate(policy: .force)
+            runtime.detach()
+        }
     }
 
     /// A spawner for a live but NON-active controller. M1.3b (`.plans/46`).
@@ -667,8 +704,26 @@ final class ZoneRuntimeController {
     /// newly ACTIVE controller, the first canvas change after a workspace switch
     /// wrote project A's tiles into project B's file. Witnessed by
     /// `--canvas-persistence-model-check`.
-    private func canvasStateToPersist(canvasView: CanvasNSView) -> CanvasState {
-        let persistedTiles = ((try? projectStore.tryLoadCanvas()) ?? nil)?.tiles ?? []
+    func markCanvasUnavailable(_ error: Error) {
+        if canvasUnavailable == nil {
+            fputs("ZoneRuntimeController: \(project.name)'s canvas cannot be read and will not be written: \(error)\n", stderr)
+        }
+        canvasUnavailable = error
+        isCanvasDirty = false
+        saveTimer?.invalidate()
+        saveTimer = nil
+    }
+
+    private func canvasStateToPersist(canvasView: CanvasNSView) throws -> CanvasState {
+        let persistedTiles: [Tile]
+        do {
+            persistedTiles = try projectStore.tryLoadCanvas()?.tiles ?? []
+        } catch {
+            // Merging against "nothing" would delete every tile of a zone below
+            // the live tier; writing at all would destroy the unreadable file.
+            markCanvasUnavailable(error)
+            throw error
+        }
         // Base on the LIVE canvas: this path's whole job is saving the camera.
         return canvasView.canvasStateForPersistence(
             projectId: project.id,
@@ -678,6 +733,7 @@ final class ZoneRuntimeController {
     }
 
     func scheduleCanvasSave() {
+        guard canvasUnavailable == nil else { return }
         // Coalesce drag-rate writes: schedule a save after the last change.
         // flushPendingSaves() runs immediately for project switch and close.
         isCanvasDirty = true
@@ -700,8 +756,8 @@ final class ZoneRuntimeController {
     private func flushCanvasSaveOffMain() {
         saveTimer?.invalidate()
         saveTimer = nil
-        guard isCanvasDirty, let canvasView else { return }
-        let snapshot = canvasStateToPersist(canvasView: canvasView)
+        guard isCanvasDirty, let canvasView,
+              let snapshot = try? canvasStateToPersist(canvasView: canvasView) else { return }
         let store = projectStore
         let outcomes = canvasSaveOutcomes
         isCanvasDirty = false
@@ -763,8 +819,7 @@ final class ZoneRuntimeController {
     func flushCanvasSave() throws {
         saveTimer?.invalidate()
         saveTimer = nil
-        if isCanvasDirty, let canvasView {
-            let snapshot = canvasStateToPersist(canvasView: canvasView)
+        if isCanvasDirty, let canvasView, let snapshot = try? canvasStateToPersist(canvasView: canvasView) {
             let store = projectStore
             let outcomes = canvasSaveOutcomes
             canvasSubmittedGeneration &+= 1
