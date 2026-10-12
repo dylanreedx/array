@@ -16,8 +16,16 @@ final class DiffReviewTileNSView: TileNSView {
     /// it in the new theme. `nil` until a diff is applied.
     private var renderedModel: GitDiffModel?
     var onSourceChanged: ((Tile) -> Void)?
+    private let gitExecutableURL: URL
 
-    init(tile: Tile, repositoryURL: URL, source: DiffReviewSource? = nil, sendCommentsToAgent: (() -> Void)? = nil) {
+    init(
+        tile: Tile,
+        repositoryURL: URL,
+        source: DiffReviewSource? = nil,
+        gitExecutableURL: URL = URL(fileURLWithPath: "/usr/bin/git"),
+        sendCommentsToAgent: (() -> Void)? = nil
+    ) {
+        self.gitExecutableURL = gitExecutableURL
         let tv = NSTextView()
         tv.isEditable = false
         tv.isSelectable = true
@@ -80,6 +88,7 @@ final class DiffReviewTileNSView: TileNSView {
         self.scrollView = sv
         self.sendCommentsToAgent = sendCommentsToAgent
         self.repositoryURL = nil
+        self.gitExecutableURL = URL(fileURLWithPath: "/usr/bin/git")
         self.sourceSelection = DiffReviewSource(metadata: tile.metadata)
         super.init(tile: tile)
         setContentView(sv)
@@ -110,6 +119,20 @@ final class DiffReviewTileNSView: TileNSView {
 
     var selectedSourceDescription: String { sourceSelection.displayName }
 
+    var qaSourcePickerTitles: [String] { sourcePicker?.itemTitles ?? [] }
+    var qaRenderedText: String { textView.string }
+
+    /// QA: spin the runloop until no git work is in flight.
+    @discardableResult
+    func waitForPendingLoadsForQA(timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while diffLoad != nil || branchLoad != nil {
+            if Date() >= deadline { return false }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        return true
+    }
+
     private func installFlybackMenuIfNeeded() {
         guard sendCommentsToAgent != nil else { return }
         let menu = NSMenu()
@@ -121,31 +144,149 @@ final class DiffReviewTileNSView: TileNSView {
 
     @objc private func sendCommentsToAgentMenuItem(_ sender: Any?) { sendCommentsToAgent?() }
 
+    // MARK: - Git, off the main thread
+    //
+    // This view is built on the main thread at every palette spawn, boot, zone
+    // hydration and workspace switch. It used to run `git diff` once per branch
+    // right here in `init` (to discover the base branch, once per candidate per
+    // branch) — seconds of frozen app on a repo with many branches. Now nothing
+    // in `init` touches git: the diff loads in a detached task, the branch list
+    // loads once the tile is actually in a window, and every result is dropped
+    // if a newer request superseded it or the tile left the window.
+
+    /// The cheap facts the picker needs: branches, the checked-out branch, and
+    /// which of main/master exists. Three or four git processes, never a diff.
+    private struct BranchInventory: Sendable {
+        var branches: [String]
+        var current: String?
+        var defaultBase: String?
+    }
+
+    private var diffLoad: Task<Void, Never>?
+    private var diffLoadGeneration = 0
+    private var branchLoad: Task<Void, Never>?
+    private var branchInventory: BranchInventory?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            loadBranchInventoryIfNeeded()
+        } else {
+            branchLoad?.cancel()
+            branchLoad = nil
+        }
+    }
+
+    private func loadBranchInventoryIfNeeded() {
+        guard let repositoryURL, branchInventory == nil, branchLoad == nil else { return }
+        let git = gitExecutableURL
+        branchLoad = Task { @MainActor [weak self] in
+            let inventory = await Task.detached(priority: .utility) {
+                Self.branchInventory(repositoryURL: repositoryURL, git: git)
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.branchLoad = nil
+            self.branchInventory = inventory
+            self.populateBranchItems(inventory)
+        }
+    }
+
+    nonisolated private static func runGit(_ arguments: [String], in repositoryURL: URL, git: URL) -> String? {
+        let process = Process()
+        process.executableURL = git
+        process.arguments = arguments
+        process.currentDirectoryURL = repositoryURL
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        // Read to EOF BEFORE waiting: a child that fills the 64 KB pipe buffer
+        // (a long branch list) blocks until someone reads it.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated private static func branchInventory(repositoryURL: URL, git: URL) -> BranchInventory {
+        let branches = (runGit(["branch", "--format=%(refname:short)"], in: repositoryURL, git: git) ?? "")
+            .split(separator: "\n").map(String.init).filter { !$0.isEmpty }.sorted()
+        let current = runGit(["branch", "--show-current"], in: repositoryURL, git: git)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultBase = ["main", "master"].first { candidate in
+            runGit(["rev-parse", "--verify", "--quiet", "\(candidate)^{commit}"], in: repositoryURL, git: git) != nil
+        }
+        return BranchInventory(
+            branches: branches,
+            current: current?.isEmpty == false ? current : nil,
+            defaultBase: defaultBase
+        )
+    }
+
+    nonisolated private static func currentBranch(repositoryURL: URL, git: URL) throws -> String {
+        let branch = runGit(["branch", "--show-current"], in: repositoryURL, git: git)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return branch.isEmpty ? "HEAD" : branch
+    }
+
+    private static let workingTreeTitle = "Working tree vs HEAD"
+    private static let worktreeTitle = "This worktree branch vs base"
+
+    private static func branchTitle(_ branch: String, base: String) -> String {
+        "Branch \(branch) vs \(base)"
+    }
+
+    private static func branchRepresentation(_ branch: String, base: String) -> String {
+        "\(DiffReviewSourceKind.branchVsBase.rawValue)|\(branch)|\(base)"
+    }
+
+    /// The picker starts with what needs no git: the two fixed sources and the
+    /// tile's own persisted branch choice. Other branches arrive with the
+    /// inventory.
     private func installSourcePicker() {
         guard repositoryURL != nil else { return }
         let picker = NSPopUpButton(frame: .zero, pullsDown: false)
         picker.controlSize = .small
         picker.font = NSFont.systemFont(ofSize: 11)
-        picker.addItem(withTitle: "Working tree vs HEAD")
+        picker.addItem(withTitle: Self.workingTreeTitle)
         picker.lastItem?.representedObject = DiffReviewSourceKind.workingTreeVsHEAD.rawValue
-        for branch in branchNames() where branch != defaultBaseBranch() {
-            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
-            picker.addItem(withTitle: "Branch \(branch) vs \(base)")
-            picker.lastItem?.representedObject = "\(DiffReviewSourceKind.branchVsBase.rawValue)|\(branch)|\(base)"
+        if sourceSelection.kind == .branchVsBase, let branch = sourceSelection.branch, let base = sourceSelection.baseBranch {
+            picker.addItem(withTitle: Self.branchTitle(branch, base: base))
+            picker.lastItem?.representedObject = Self.branchRepresentation(branch, base: base)
         }
-        picker.addItem(withTitle: "This worktree branch vs base")
+        picker.addItem(withTitle: Self.worktreeTitle)
         picker.lastItem?.representedObject = DiffReviewSourceKind.worktreeVsBase.rawValue
         picker.target = self
         picker.action = #selector(sourcePickerChanged(_:))
-        if sourceSelection.kind == .workingTreeVsHEAD {
-            picker.selectItem(withTitle: "Working tree vs HEAD")
-        } else if sourceSelection.kind == .branchVsBase, let branch = sourceSelection.branch, let base = sourceSelection.baseBranch {
-            picker.selectItem(withTitle: "Branch \(branch) vs \(base)")
-        } else {
-            picker.selectItem(withTitle: "This worktree branch vs base")
-        }
         self.sourcePicker = picker
+        selectPickerItemForCurrentSource()
         setTitleBarAccessory(picker)
+    }
+
+    private func selectPickerItemForCurrentSource() {
+        guard let picker = sourcePicker else { return }
+        if sourceSelection.kind == .workingTreeVsHEAD {
+            picker.selectItem(withTitle: Self.workingTreeTitle)
+        } else if sourceSelection.kind == .branchVsBase, let branch = sourceSelection.branch, let base = sourceSelection.baseBranch {
+            picker.selectItem(withTitle: Self.branchTitle(branch, base: base))
+        } else {
+            picker.selectItem(withTitle: Self.worktreeTitle)
+        }
+    }
+
+    private func populateBranchItems(_ inventory: BranchInventory) {
+        guard let picker = sourcePicker else { return }
+        let base = sourceSelection.baseBranch ?? inventory.defaultBase ?? "main"
+        let worktreeIndex = picker.indexOfItem(withTitle: Self.worktreeTitle)
+        var insertAt = worktreeIndex >= 0 ? worktreeIndex : picker.numberOfItems
+        for branch in inventory.branches where branch != inventory.defaultBase {
+            let title = Self.branchTitle(branch, base: base)
+            guard picker.indexOfItem(withTitle: title) < 0 else { continue }
+            picker.insertItem(withTitle: title, at: insertAt)
+            picker.item(at: insertAt)?.representedObject = Self.branchRepresentation(branch, base: base)
+            insertAt += 1
+        }
+        selectPickerItemForCurrentSource()
     }
 
     @objc private func sourcePickerChanged(_ sender: NSPopUpButton) {
@@ -161,17 +302,19 @@ final class DiffReviewTileNSView: TileNSView {
         applySourceSelection(resolved)
     }
 
+    /// Resolved from the cached inventory only — never a git call on main. A
+    /// worktree source with no inventory yet leaves its branch for the diff
+    /// load to resolve (off main) through `gitSource`'s resolver.
     private func resolvedSource(kind: DiffReviewSourceKind) -> DiffReviewSource {
+        let base = sourceSelection.baseBranch ?? branchInventory?.defaultBase ?? "main"
         switch kind {
         case .workingTreeVsHEAD:
             return DiffReviewSource(kind: .workingTreeVsHEAD)
         case .branchVsBase:
-            let branch = sourceSelection.branch ?? currentBranch() ?? "HEAD"
-            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
+            let branch = sourceSelection.branch ?? branchInventory?.current ?? "HEAD"
             return DiffReviewSource(kind: .branchVsBase, branch: branch, baseBranch: base)
         case .worktreeVsBase:
-            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
-            return DiffReviewSource(kind: .worktreeVsBase, branch: currentBranch(), baseBranch: base)
+            return DiffReviewSource(kind: .worktreeVsBase, branch: branchInventory?.current, baseBranch: base)
         }
     }
 
@@ -184,61 +327,38 @@ final class DiffReviewTileNSView: TileNSView {
         reloadDiff()
     }
 
+    private enum DiffLoadOutcome: Sendable {
+        case loaded(GitDiffModel)
+        case failed(String)
+    }
+
     private func reloadDiff() {
         guard let repositoryURL else { return }
-        do {
-            let model = try GitDiffEngine().diff(repositoryURL: repositoryURL, source: try sourceSelection.gitSource(repositoryURL: repositoryURL, currentBranchResolver: Self.currentBranch))
-            apply(model)
-        } catch {
-            showMessage("Unable to load diff: \(error)")
+        diffLoad?.cancel()
+        diffLoadGeneration += 1
+        let generation = diffLoadGeneration
+        let source = sourceSelection
+        let git = gitExecutableURL
+        if renderedModel == nil { showMessage("Loading diff…") }
+        diffLoad = Task { @MainActor [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) { () -> DiffLoadOutcome in
+                do {
+                    let gitSource = try source.gitSource(repositoryURL: repositoryURL) { url in
+                        try Self.currentBranch(repositoryURL: url, git: git)
+                    }
+                    return .loaded(try GitDiffEngine(gitExecutableURL: git).diff(repositoryURL: repositoryURL, source: gitSource))
+                } catch {
+                    return .failed("Unable to load diff: \(error)")
+                }
+            }.value
+            // A newer selection superseded this one: its result must not land.
+            guard let self, !Task.isCancelled, generation == self.diffLoadGeneration else { return }
+            self.diffLoad = nil
+            switch outcome {
+            case let .loaded(model): self.apply(model)
+            case let .failed(message): self.showMessage(message)
+            }
         }
-    }
-
-    private func currentBranch() -> String? {
-        try? Self.currentBranch(repositoryURL: repositoryURL!)
-    }
-
-    private static func currentBranch(repositoryURL: URL) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["branch", "--show-current"]
-        process.currentDirectoryURL = repositoryURL
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let branch = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return branch.isEmpty ? "HEAD" : branch
-    }
-
-    private func branchNames() -> [String] {
-        guard let repositoryURL else { return [] }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["branch", "--format=%(refname:short)"]
-        process.currentDirectoryURL = repositoryURL
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init).filter { !$0.isEmpty }.sorted()
-        } catch {
-            return []
-        }
-    }
-
-    private func defaultBaseBranch() -> String? {
-        guard let repositoryURL else { return nil }
-        let candidates = ["main", "master"]
-        for candidate in candidates where (try? GitDiffEngine().diff(repositoryURL: repositoryURL, source: .branchVsBase(branch: currentBranch() ?? "HEAD", base: candidate))) != nil {
-            return candidate
-        }
-        return nil
     }
 
     func apply(_ model: GitDiffModel) {

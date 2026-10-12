@@ -80,4 +80,13 @@ project's `.array/`, or the default tmux socket; commits as Dylan, subject
 
 ## Status
 
-(updated as streams merge)
+- S1 merged (b1fd4fa0): `--tile-project-scope-check`; follow-up S1b in progress.
+- S2 merged (35a5755c): zone layers on spawn, unreadable canvas never overwritten,
+  zone close never strands, offered recovery, truthful layout commit; S2b
+  (copies excluded from recovery, hazard 9) in progress.
+- S7 merged: clipboard, focus, Cmd-W, diff review off main, notification naming,
+  Esc cancels rename, prod menus, codex stderr, MCP config failure, browser
+  recency, language-server release.
+- Merged head verified: S1/S2/S7 legs green. Terminal legs need the display awake
+  (`caffeinate -u`); a locked screen reads as "terminal surface missing".
+- S3, S4, S5 in progress; S6 (composer) and S8 (transcript) wait on S3.
