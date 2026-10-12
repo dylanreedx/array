@@ -17,6 +17,9 @@ final class WorkspaceRuntime {
         case bootMounted
         case firstHydrationPhase
         case settled
+        /// A switch passed its re-entrancy guard and is about to do work. QA
+        /// reads the chrome here: it must already name the target.
+        case switchBegan(UUID)
         case switchCompleted(UUID)
         case saveGenerationAcknowledged(UInt64)
         case closeFlushCompleted
@@ -107,6 +110,21 @@ final class WorkspaceRuntime {
     /// Every project controller this workspace holds live. Teardown that must
     /// reach every runtime iterates this, never `activeController`.
     var liveControllers: [ZoneRuntimeController] { registry.liveControllers }
+
+    /// Whether `projectId` belongs to the mounted scene — not merely live, which
+    /// a warm workspace's projects also are.
+    func isProjectMounted(_ projectId: UUID) -> Bool {
+        mountedControllers.contains { $0.project.id == projectId }
+    }
+
+    /// The controllers of the mounted scene, not of warm ones: every live
+    /// controller of a project this scene acquired or has a zone for.
+    private var mountedControllers: [ZoneRuntimeController] {
+        let zoneProjects = document.zones.filter { !foreignZoneIds.contains($0.zoneId) }.compactMap(\.projectId)
+        var seen = Set<ObjectIdentifier>()
+        return (acquiredProjectIds + zoneProjects).compactMap { registry.controller(for: $0) }
+            .filter { seen.insert(ObjectIdentifier($0)).inserted }
+    }
 
     /// Keep the runtime's in-memory document aligned with app-level canvas zone
     /// callbacks that mutate the WorkspaceDocument directly. Without this, a later
@@ -862,7 +880,7 @@ final class WorkspaceRuntime {
         // Cold launch and an in-process switch must mount the same semantic scene.
         // Preserve legacy foreign placements in the document, but never draw them
         // in a workspace that does not own their project.
-        let mountableZones = try Self.mountableZones(
+        let mountableZones = Self.mountableZones(
             in: document, workspaceId: workspaceId, registry: appRegistry)
         foreignZoneIds = Set(document.zones.map(\.zoneId)).subtracting(mountableZones.map(\.zoneId))
         self.canvasView = canvasView
@@ -983,11 +1001,7 @@ final class WorkspaceRuntime {
     /// any layer or controller is released. A failed write deliberately leaves
     /// the scene mounted so callers can surface the failure and retry or cancel.
     func flushMountedWorkspaceState() throws {
-        if let canvasView {
-            for tile in canvasView.allWorkspaceTiles() where tile.kind == .file {
-                try (canvasView.tileView(for: tile.id) as? FileTileNSView)?.captureForSceneTransition()
-            }
-        }
+        try captureFileEditorsForSceneTransition()
         let focus = departingFocusSnapshot(from: canvasView)
         try flushAll()
         try flushPendingArmingSave()
@@ -995,9 +1009,61 @@ final class WorkspaceRuntime {
         lifecycleObserver?(.closeFlushCompleted)
     }
 
+    /// How long a scene transition waits, in total, for every file editor's web
+    /// bridge to hand over its text. It used to be 5.5 s PER editor, waited one
+    /// after another, and an editor that never answered failed the whole switch.
+    static let fileEditorBarrierBudget: TimeInterval = 0.35
+
+    /// File editors that did not answer the last scene-transition barrier.
+    private(set) var lastFlushUnansweredEditors = 0
+
+    /// Ask every file editor for its text at once and wait for all of them —
+    /// boundedly. An editor that does not answer in time keeps the last draft the
+    /// tile already holds (it is written to the recovery file all the same) and
+    /// the transition goes ahead; only a draft that cannot be written fails it.
+    /// The wait runs the main run loop, which is why `switchWorkspace` refuses
+    /// re-entry and hydration does not re-plan while it is switching.
+    private func captureFileEditorsForSceneTransition() throws {
+        lastFlushUnansweredEditors = 0
+        guard let canvasView else { return }
+        let editors = canvasView.allWorkspaceTiles().filter { $0.kind == .file }
+            .compactMap { canvasView.tileView(for: $0.id) as? FileTileNSView }
+        guard !editors.isEmpty else { return }
+        final class Settled { var count = 0 }
+        let settled = Settled()
+        var answered = Set<ObjectIdentifier>()
+        for editor in editors {
+            let id = ObjectIdentifier(editor)
+            var finished = false
+            editor.beginSceneTransitionCapture { _ in
+                guard !finished else { return }
+                finished = true
+                answered.insert(id)
+                settled.count += 1
+            }
+        }
+        let deadline = Date().addingTimeInterval(Self.fileEditorBarrierBudget)
+        while settled.count < editors.count, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        lastFlushUnansweredEditors = editors.count - answered.count
+        var firstFailure: Error?
+        for editor in editors {
+            do { try editor.finishSceneTransitionCapture() } catch {
+                if firstFailure == nil { firstFailure = error }
+            }
+        }
+        if let firstFailure { throw firstFailure }
+    }
+
     /// Release every acquired controller via the registry (ref-count → close-at-zero),
     /// clear the canvas zone set (which unregisters tile adapters), drop references.
+    /// Warm scenes go too: closing is the only way their controllers flush and
+    /// give their locks back.
     func closeAll() {
+        let warm = warmScenes
+        warmScenes = []
+        for scene in warm { evict(scene) }
         // Clear zone layers first (while the focusBroker ref is still live on the canvas)
         // so that ZoneLayer tile adapters are unregistered before the controllers close.
         canvasView?.setZones([])
@@ -1377,6 +1443,10 @@ final class WorkspaceRuntime {
     enum TileHydrationPhase {
         case beforeInstall
         case afterInstall
+        /// A warm scene re-attached: its views are real and its agents wired, so
+        /// only a runtime-backed placeholder still waiting for its restore — one
+        /// that was in flight when the scene was parked — is restored.
+        case afterRemount
     }
 
     /// Turns a ZoneLayer's `DescriptorTileNSView` placeholders into real tiles.
@@ -1413,7 +1483,10 @@ final class WorkspaceRuntime {
     /// one.
     private func attachActiveControllerUI(canvasView: CanvasNSView) {
         let active = activeController
-        for controller in registry.liveControllers {
+        // The MOUNTED scene's controllers only. A warm workspace's controllers are
+        // live too, but rebuilding their spawners on every arming change is work
+        // for tiles nobody can see.
+        for controller in mountedControllers {
             let spawner = makeSpawner(for: controller, canvasView: canvasView)
             if controller === active {
                 controller.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
@@ -1933,169 +2006,76 @@ final class WorkspaceRuntime {
         lifecycleObserver?(.saveGenerationAcknowledged(generation))
     }
 
-    // MARK: - Workspace Switch (T09)
+    // MARK: - Workspace Switch (T09, `.plans/70` S5)
 
-    /// Tear down the current workspace's zone layers + runtimes and install the target
-    /// workspace's in-process (no app relaunch). Steps:
-    ///   1. Flush all current controllers and persist departing viewport/focus.
-    ///   2. Load the target `WorkspaceDocument` from disk.
-    ///   3. Diff current vs target project sets: release departing (ref-count → close-at-zero),
-    ///      keep shared (same instance, ref-count unchanged), acquire arriving.
-    ///   4. Build `ZoneLayer`s for the target workspace and call `setZones` on the canvas
-    ///      (which unregisters old adapters and registers new ones via T05).
-    ///   5. Set the canvas viewport to the target document's saved viewport.
-    ///   6. Restore focus to the target workspace's last-active tile (or `.canvas`).
-    ///   7. Update `workspaceId`, `document`, `acquiredProjectIds`.
-    ///
     /// The relaunch-spy seam: `_relaunchSpy` is non-nil only in checks; production leaves it nil.
     var _relaunchSpy: (() -> Void)?
 
+    /// How many recently left workspaces stay warm (`.plans/70` S5).
+    var warmSceneCapacity: Int = WorkspaceWarmSceneConfig.capacity()
+    private(set) var lastSwitchReport: WorkspaceSwitchReport?
+    /// True while a switch runs. A second switch is refused, and hydration is
+    /// not re-planned underneath it.
+    private(set) var isSwitching = false
+
+    /// A workspace the user left recently, kept whole: its document as it was
+    /// saved on the way out, its layers with their REAL tile views (detached,
+    /// out of the view tree, no per-frame work), and one controller reference per
+    /// project — so its terminals, web views and transcripts keep running and
+    /// going back re-attaches them instead of rebuilding.
+    private struct WarmScene {
+        let workspaceId: UUID
+        let document: WorkspaceDocument
+        let layers: [CanvasNSView.ZoneLayer]
+        let acquiredProjectIds: [UUID]
+        let foreignZoneIds: Set<UUID>
+    }
+
+    /// Most recently left first.
+    private var warmScenes: [WarmScene] = []
+    var qaWarmWorkspaceIds: [UUID] { warmScenes.map(\.workspaceId) }
+
+    /// Unmount the current workspace and mount `targetWorkspaceId` in-process.
+    ///
+    /// Every step that can fail runs before anything on screen changes, and a
+    /// failure gives back what it took: the controllers (and so the project
+    /// locks) acquired for the target are released, and a warm target goes back
+    /// to the warm set. The departing scene is parked warm rather than torn
+    /// down; beyond `warmSceneCapacity` the least recent is released through
+    /// the ordinary path (`ZoneRuntimeRegistry.release` → `close()`).
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
         reportedUnreadableProjectIds = []
         // M1.10: the defect this milestone exists to fix was that EVERY canvas call
         // below optional-chained through a nil `canvasView` and did nothing, for
         // months, in silence. Refusing loudly means any future path that reaches a
         // canvas-less runtime fails at the first click instead.
-        guard canvasView != nil else { throw WorkspaceSwitchError.noCanvas }
-        // Validate and load the target before touching the mounted scene or either
-        // workspace file. Do not validate the departing document here: the mounted
-        // canvas is the current truth, and a legacy foreign zone in the old saved
-        // document must not trap the user in that workspace after they close it.
-        // A target may contain a legacy foreign zone too. The declared project
-        // owner remains authoritative: preserve that zone in the target document,
-        // but exclude it from the mounted scene. Rejecting the entire target here
-        // made every old A↔B pair permanently unswitchable when either side carried
-        // one stale pre-exclusive-ownership placement.
-        var appRegistry = try registryStore.loadOrEmpty()
-        guard var targetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
-            throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
+        guard let canvas = canvasView else { throw WorkspaceSwitchError.noCanvas }
+        // The editor barrier below runs the main run loop, so a timer or a
+        // queued callback can ask for another switch while this one is half
+        // done. That nested switch ran to completion inside the outer one and
+        // crashed the app; it is refused instead.
+        guard !isSwitching else { throw WorkspaceSwitchError.switchInProgress }
+        isSwitching = true
+        defer { isSwitching = false }
+        hydrationReconcileTimer?.invalidate()
+        hydrationReconcileTimer = nil
+
+        let clock = WorkspaceSwitchPhaseClock()
+        var report = WorkspaceSwitchReport(from: workspaceId, to: targetWorkspaceId)
+        lifecycleObserver?(.switchBegan(targetWorkspaceId))
+        do {
+            try performSwitch(to: targetWorkspaceId, canvas: canvas, clock: clock, report: &report)
+            report.succeeded = true
+        } catch {
+            report.failure = "\(error)"
+            clock.finish()
+            report.phases = clock.phases
+            lastSwitchReport = report
+            throw error
         }
-        let targetZones = try Self.mountableZones(
-            in: targetDocument, workspaceId: targetWorkspaceId, registry: appRegistry)
-        let targetZoneIds = Set(targetZones.map(\.zoneId))
-        if let active = targetDocument.lastActiveZoneId, !targetZoneIds.contains(active) {
-            targetDocument.lastActiveZoneId = targetDocument.zonesInZOrder
-                .last(where: { targetZoneIds.contains($0.zoneId) })?.zoneId
-        }
-
-        // Capture every visible register and synchronously save it while the
-        // departing scene is still mounted and interactive.
-        try flushMountedWorkspaceState()
-
-        // 3. Diff project sets.
-        // `targetZones` holds only projects the target owns, so a project in both
-        // sets was acquired by the departing workspace through a stale foreign
-        // placement. Hand its controller over. Refusing here trapped the user in
-        // the departing workspace until a third one reset the acquisitions.
-        let currentProjectIds = Set(acquiredProjectIds)
-        let targetProjectIds = Set(
-            targetZones.compactMap(\.projectId)
-        )
-        let departing = currentProjectIds.subtracting(targetProjectIds)
-        let arriving = targetProjectIds.subtracting(currentProjectIds)
-
-        // Build new ZoneLayers for the target workspace before releasing (so shared controllers stay alive).
-        let plan = ZoneHydrationOrchestrator.plan(
-            zones: targetZones,
-            viewport: targetDocument.viewport,
-            visibleSize: canvasView.map { CGSize(width: $0.bounds.width > 0 ? $0.bounds.width : 1280,
-                                                  height: $0.bounds.height > 0 ? $0.bounds.height : 720) }
-                ?? CGSize(width: 1280, height: 720),
-            focusedTileZone: targetDocument.lastActiveZoneId,
-            maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
-        )
-
-        // Acquire arriving project controllers (only truly new ones — shared ones already have ref-count).
-        // newlyAcquired tracks the full set of projectIds this workspace owns after the switch (de-duped).
-        var newlyAcquired: [UUID] = []
-        var acquiredSet = Set<UUID>()
-        for zone in targetZones {
-            guard let projectId = zone.projectId else { continue }
-            guard plan.tier(for: zone.zoneId) == .live else { continue }
-            if arriving.contains(projectId) && !acquiredSet.contains(projectId) {
-                // Truly new: acquire (creates controller at ref=1).
-                _ = try registry.acquire(projectId: projectId)
-            }
-            if !acquiredSet.contains(projectId) {
-                newlyAcquired.append(projectId)
-                acquiredSet.insert(projectId)
-            }
-        }
-
-        // Build layers from newly acquired + shared controllers.
-        var layers: [CanvasNSView.ZoneLayer] = []
-        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
-        for zone in targetZones {
-            guard let projectId = zone.projectId else {
-                // Ambient zone: rendered from the workspace document's ambientTiles
-                // register, same as install (ticket 03).
-                layers.append(Self.makeAmbientZoneLayer(zone: zone, document: targetDocument))
-                continue
-            }
-            guard plan.tier(for: zone.zoneId) == .live else { continue }
-            guard let controller = registry.controller(for: projectId) else { continue }
-
-            // M1.0/M1.10: see `install`. One repaired membership answer per
-            // project; the per-zone filter it replaces rendered a foreign-stamped
-            // tile nowhere.
-            if let layer = makeProjectZoneLayer(
-                zone: zone, projectId: projectId, controller: controller,
-                document: targetDocument, registry: appRegistry, membershipCache: &membershipCache) {
-                layers.append(layer)
-            }
-        }
-
-        // Commit the selected workspace only after every throwing preparation step
-        // has succeeded, but before changing the mounted canvas. A failed registry
-        // save therefore leaves the departing scene intact; a successful switch is
-        // also the workspace restored on the next launch.
-        appRegistry.lastActiveWorkspaceId = targetWorkspaceId
-        try registryStore.save(appRegistry)
-
-        // 4. Swap canvas. The first switch also retires the boot-only flat
-        // compatibility scene so tiles from the departing project cannot remain
-        // visible or navigable in an unrelated (including empty) workspace.
-        canvasView?.retireFlatCompatibilityScene()
-        if let canvas = canvasView { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
-        canvasView?.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers, registry: appRegistry))
-        installedLayers = layers
-        foreignZoneIds = Set(targetDocument.zones.map(\.zoneId)).subtracting(targetZoneIds)
-
-        // 5. Release departing (after setZones so adapters are already unregistered by T05).
-        for projectId in departing {
-            registry.release(projectId: projectId)
-        }
-
-        // 6. Set viewport. The background is resolved from the TARGET document,
-        // so it is applied here rather than after `document = targetDocument`
-        // below — the canvas must not draw one frame of the departing
-        // workspace's background under the arriving workspace's tiles.
-        canvasView?.setCanvasBackground(CanvasBackgroundResolver.effective(
-            workspace: targetDocument.canvasBackground,
-            global: CanvasBackgroundGlobalStore.load(defaults: canvasBackgroundDefaults)))
-        canvasView?.setViewport(targetDocument.viewport)
-
-        // 7. Re-establish focus.
-        workspaceId = targetWorkspaceId
-        mountEpoch &+= 1
-        document = targetDocument
-        acquiredProjectIds = newlyAcquired
-        refreshDocumentRelationships()
-        canvasView?.activateUndoWorkspace(targetWorkspaceId)
-
-        // Attach UI to the new active controller.
-        if let canvas = canvasView {
-            canvas.setActiveProjectZone(targetDocument.lastActiveZoneId)
-            attachActiveControllerUI(canvasView: canvas)
-            // Phase B needs the active controller's spawner, built on the line above.
-            hydrateZoneLayerTiles?(canvas, layers, .afterInstall)
-        }
-
-        if let canvas = canvasView {
-            restoreFocus(from: canvas, frameWorkspaceOnFallback: true)
-        } else {
-            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
-        }
+        clock.finish()
+        report.phases = clock.phases
+        lastSwitchReport = report
         classifyStrandedTiles()
         lifecycleObserver?(.switchCompleted(targetWorkspaceId))
         // CX-01: a switch is newer intent for every pending presentation, and a
@@ -2104,29 +2084,245 @@ final class WorkspaceRuntime {
         noteStructuralCommit()
     }
 
-    enum WorkspaceSwitchError: Error, CustomStringConvertible {
+    private func performSwitch(
+        to targetWorkspaceId: UUID,
+        canvas: CanvasNSView,
+        clock: WorkspaceSwitchPhaseClock,
+        report: inout WorkspaceSwitchReport
+    ) throws {
+        // 1. Validate and load the target before touching the mounted scene or
+        // either workspace file. Do not validate the departing document here: the
+        // mounted canvas is the current truth, and a legacy foreign zone in the old
+        // saved document must not trap the user in that workspace. A target's
+        // legacy foreign zone is preserved in its document and left unmounted.
+        clock.begin("validate")
+        var appRegistry = try registryStore.loadOrEmpty()
+        guard let loadedTargetDocument = try loadWorkspaceDocument(workspaceId: targetWorkspaceId) else {
+            throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
+        }
+        var targetDocument = loadedTargetDocument
+        let targetZones = Self.mountableZones(
+            in: targetDocument, workspaceId: targetWorkspaceId, registry: appRegistry)
+        let targetZoneIds = Set(targetZones.map(\.zoneId))
+        if let active = targetDocument.lastActiveZoneId, !targetZoneIds.contains(active) {
+            targetDocument.lastActiveZoneId = targetDocument.zonesInZOrder
+                .last(where: { targetZoneIds.contains($0.zoneId) })?.zoneId
+        }
+
+        // 2. Capture every visible register and save it while the departing scene
+        // is still mounted and interactive.
+        clock.begin("flush")
+        try flushMountedWorkspaceState()
+        report.unansweredEditors = lastFlushUnansweredEditors
+
+        // 3. Prepare the target: re-attach a warm one, or acquire and build.
+        clock.begin("prepare")
+        let warm = takeWarmScene(
+            for: targetWorkspaceId, document: loadedTargetDocument, mountableZoneIds: targetZoneIds)
+        report.warm = warm != nil
+        var acquiredNow: [UUID] = []
+        let targetAcquired: [UUID]
+        let layers: [CanvasNSView.ZoneLayer]
+        if let warm {
+            targetAcquired = warm.acquiredProjectIds
+            layers = warm.layers
+        } else {
+            let plan = ZoneHydrationOrchestrator.plan(
+                zones: targetZones,
+                viewport: targetDocument.viewport,
+                visibleSize: CGSize(width: canvas.bounds.width > 0 ? canvas.bounds.width : 1280,
+                                    height: canvas.bounds.height > 0 ? canvas.bounds.height : 720),
+                focusedTileZone: targetDocument.lastActiveZoneId,
+                maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
+            )
+            // One reference per live project for THIS scene, even when another
+            // scene (the departing one, a warm one) holds the same controller.
+            var acquired: [UUID] = []
+            do {
+                for zone in targetZones {
+                    guard let projectId = zone.projectId, plan.tier(for: zone.zoneId) == .live,
+                          !acquired.contains(projectId) else { continue }
+                    // A project whose folder is gone, or that is no longer
+                    // registered, cannot be opened; its zone draws without tiles
+                    // (the reconcile pass says why) rather than refusing the switch.
+                    guard let entry = appRegistry.projects.first(where: { $0.id == projectId }), !entry.missing else {
+                        continue
+                    }
+                    do {
+                        _ = try registry.acquire(projectId: projectId)
+                    } catch {
+                        throw WorkspaceProjectAcquisitionError.from(error, projectName: entry.name)
+                    }
+                    acquiredNow.append(projectId)
+                    acquired.append(projectId)
+                }
+            } catch {
+                for projectId in acquiredNow { registry.release(projectId: projectId) }
+                throw error
+            }
+            targetAcquired = acquired
+            report.acquiredProjects = acquired.count
+            layers = buildLayers(for: targetZones, plan: plan, document: targetDocument, registry: appRegistry)
+        }
+
+        // 4. Commit the selected workspace: the last throwing step, before the
+        // canvas changes. A failure gives back everything step 3 took.
+        clock.begin("commit")
+        do {
+            appRegistry.markWorkspaceMounted(targetWorkspaceId, now: Date())
+            try registryStore.save(appRegistry)
+        } catch {
+            if let warm { warmScenes.insert(warm, at: 0) } else {
+                for projectId in acquiredNow { registry.release(projectId: projectId) }
+            }
+            throw error
+        }
+
+        // 5. Swap. The departing layers come off the canvas WITHOUT being retired
+        // — their views keep running, detached — and the first switch also
+        // retires the boot-only flat compatibility scene.
+        clock.begin("swap")
+        canvas.retireFlatCompatibilityScene()
+        // A project the departing scene acquired without owning a zone of it (a
+        // stale foreign acquisition) is handed back now, not kept warm.
+        let departingOwned = Set(document.zones.filter { !foreignZoneIds.contains($0.zoneId) }.compactMap(\.projectId))
+        for projectId in acquiredProjectIds where !departingOwned.contains(projectId) {
+            registry.release(projectId: projectId)
+        }
+        let departing = WarmScene(
+            workspaceId: workspaceId,
+            document: document,
+            layers: canvas.parkZoneLayers(),
+            acquiredProjectIds: acquiredProjectIds.filter { departingOwned.contains($0) },
+            foreignZoneIds: foreignZoneIds)
+        for projectId in departing.acquiredProjectIds where !targetAcquired.contains(projectId) {
+            registry.controller(for: projectId)?.parkUI()
+        }
+        if warm == nil { hydrateZoneLayerTiles?(canvas, layers, .beforeInstall) }
+        canvas.setZones(layers, documentZones: Self.zoneRenderModels(for: targetZones, layers: layers, registry: appRegistry))
+        installedLayers = layers
+        foreignZoneIds = Set(targetDocument.zones.map(\.zoneId)).subtracting(targetZoneIds)
+
+        // The background is resolved from the TARGET document, so the canvas
+        // never draws one frame of the departing background under the arriving
+        // tiles. The camera is the target's saved one, and nothing below may
+        // overwrite it (fit-all used to, whenever no tile could take focus).
+        canvas.setCanvasBackground(CanvasBackgroundResolver.effective(
+            workspace: targetDocument.canvasBackground,
+            global: CanvasBackgroundGlobalStore.load(defaults: canvasBackgroundDefaults)))
+        canvas.setViewport(targetDocument.viewport)
+
+        workspaceId = targetWorkspaceId
+        mountEpoch &+= 1
+        document = targetDocument
+        acquiredProjectIds = targetAcquired
+
+        // 6. Park the departing scene warm; release whatever falls off the end.
+        clock.begin("park")
+        warmScenes.insert(departing, at: 0)
+        while warmScenes.count > max(0, warmSceneCapacity) {
+            let evicted = warmScenes.removeLast()
+            report.evictedWorkspaces.append(evicted.workspaceId)
+            evict(evicted)
+        }
+
+        // 7. Attach and hydrate.
+        clock.begin("attach")
+        refreshDocumentRelationships()
+        canvas.activateUndoWorkspace(targetWorkspaceId)
+        canvas.setActiveProjectZone(targetDocument.lastActiveZoneId)
+        attachActiveControllerUI(canvasView: canvas)
+        // Phase B needs the active controller's spawner, built on the line above.
+        // A warm scene only finishes what it had not finished.
+        hydrateZoneLayerTiles?(canvas, layers, warm == nil ? .afterInstall : .afterRemount)
+
+        clock.begin("focus")
+        restoreFocus(from: canvas)
+    }
+
+    /// The target's warm scene, if it is still the scene the target would mount:
+    /// its saved document unchanged on disk and the same zones mountable. A
+    /// stale one is released, never re-attached.
+    private func takeWarmScene(for workspaceId: UUID, document loaded: WorkspaceDocument,
+                               mountableZoneIds: Set<UUID>) -> WarmScene? {
+        guard let index = warmScenes.firstIndex(where: { $0.workspaceId == workspaceId }) else { return nil }
+        let scene = warmScenes.remove(at: index)
+        let wasMountable = Set(scene.document.zones.map(\.zoneId)).subtracting(scene.foreignZoneIds)
+        guard scene.document == loaded, wasMountable == mountableZoneIds else {
+            evict(scene)
+            return nil
+        }
+        return scene
+    }
+
+    /// A workspace being deleted must not stay warm: its controllers are
+    /// released through the ordinary path (flush, surfaces freed, locks given
+    /// back), so no shell or agent of it keeps running with no tile anywhere.
+    func discardWarmScene(workspaceId: UUID) {
+        guard let index = warmScenes.firstIndex(where: { $0.workspaceId == workspaceId }) else { return }
+        evict(warmScenes.remove(at: index))
+    }
+
+    /// Release a warm scene through the ordinary path: its views are told they
+    /// left the scene, and its controller references are dropped — at zero the
+    /// controller closes (flush, surfaces freed, lock released).
+    private func evict(_ scene: WarmScene) {
+        for layer in scene.layers {
+            for view in layer.tileViews.values { view.retireFromScene() }
+        }
+        for projectId in scene.acquiredProjectIds { registry.release(projectId: projectId) }
+    }
+
+    /// The target's layers, built cold: one repaired membership answer per
+    /// project, WORLD frames converted to ZONE-LOCAL, descriptor placeholders the
+    /// hydrator replaces.
+    private func buildLayers(
+        for zones: [ZonePlacement],
+        plan: ZoneHydrationPlan,
+        document: WorkspaceDocument,
+        registry appRegistry: Registry
+    ) -> [CanvasNSView.ZoneLayer] {
+        var layers: [CanvasNSView.ZoneLayer] = []
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
+        for zone in zones {
+            guard let projectId = zone.projectId else {
+                // Ambient zone: rendered from the workspace document's ambientTiles
+                // register, same as install (ticket 03).
+                layers.append(Self.makeAmbientZoneLayer(zone: zone, document: document))
+                continue
+            }
+            guard plan.tier(for: zone.zoneId) == .live,
+                  let controller = registry.controller(for: projectId) else { continue }
+            // M1.0/M1.10: see `install`. One repaired membership answer per
+            // project; an unreadable store yields no layer, never an empty one.
+            if let layer = makeProjectZoneLayer(
+                zone: zone, projectId: projectId, controller: controller,
+                document: document, registry: appRegistry, membershipCache: &membershipCache) {
+                layers.append(layer)
+            }
+        }
+        return layers
+    }
+
+    enum WorkspaceSwitchError: Error, CustomStringConvertible, LocalizedError {
         case documentNotFound(UUID)
         /// M1.10: the runtime was asked to switch before anything gave it a canvas.
         case noCanvas
+        /// A switch was asked for while one was running.
+        case switchInProgress
         var description: String {
             switch self {
             case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)"
             case .noCanvas:
                 return "switchWorkspace: this WorkspaceRuntime has no canvas — nothing called adoptCanvas(_:), so the switch would have silently changed the document and left the canvas alone"
+            case .switchInProgress: return "switchWorkspace: a workspace switch is already in progress"
             }
         }
-    }
-
-    private static func validateProjectOwnership(
-        in document: WorkspaceDocument,
-        workspaceId: UUID,
-        registry: Registry
-    ) throws {
-        for projectId in Set(document.zones.compactMap(\.projectId)) {
-            guard try registry.exclusiveWorkspaceOwner(of: projectId) == workspaceId else {
-                let owner = try registry.exclusiveWorkspaceOwner(of: projectId) ?? workspaceId
-                throw ProjectWorkspaceOwnershipError.alreadyOwned(
-                    projectId: projectId, workspaceId: owner)
+        var errorDescription: String? {
+            switch self {
+            case .documentNotFound: return "Its workspace file is missing."
+            case .noCanvas: return "The canvas isn't ready yet."
+            case .switchInProgress: return "Another workspace switch is still in progress."
             }
         }
     }
@@ -2135,15 +2331,16 @@ final class WorkspaceRuntime {
     /// scene contains only ambient zones and zones whose project declares this
     /// workspace as its owner. Ordinary switching never moves, deletes, or rewrites
     /// a legacy foreign placement; the explicit project-move flow remains the only
-    /// ownership writer.
+    /// ownership writer. A zone whose project is no longer registered is not
+    /// mountable either — it used to make the whole mount throw.
     private static func mountableZones(
         in document: WorkspaceDocument,
         workspaceId: UUID,
         registry: Registry
-    ) throws -> [ZonePlacement] {
-        try document.zones.filter { zone in
+    ) -> [ZonePlacement] {
+        document.zones.filter { zone in
             guard let projectId = zone.projectId else { return true }
-            return try registry.exclusiveWorkspaceOwner(of: projectId) == workspaceId
+            return (try? registry.exclusiveWorkspaceOwner(of: projectId)) == .some(workspaceId)
         }
     }
 
@@ -2152,9 +2349,7 @@ final class WorkspaceRuntime {
         workspaceId: UUID,
         registry: Registry
     ) -> Set<UUID> {
-        guard let mountable = try? mountableZones(in: document, workspaceId: workspaceId, registry: registry) else {
-            return []
-        }
+        let mountable = mountableZones(in: document, workspaceId: workspaceId, registry: registry)
         return Set(document.zones.map(\.zoneId)).subtracting(mountable.map(\.zoneId))
     }
 
@@ -2192,7 +2387,10 @@ final class WorkspaceRuntime {
 
     /// Enforce the WKWebView cap across the UNION of live browser tiles in ALL live zones.
     func enforceBrowserRuntimeBudget() {
-        let liveControllers = registry.liveControllers
+        // Mounted only: a warm workspace's web views are kept alive on purpose,
+        // and evicting one would install its snapshot tile into a canvas that is
+        // not showing it.
+        let liveControllers = mountedControllers
         let liveTileIds: [UUID] = liveControllers.flatMap { $0.browserRuntimes.map(\.tileId) }
         let protected = currentProtectedBrowserTileIds()
         let evictIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
@@ -2220,6 +2418,10 @@ final class WorkspaceRuntime {
     /// Called when the canvas viewport changes (pan/zoom). Schedules a debounced
     /// `reconcileHydration()`. Callers: `canvasDidChange` viewport-delta gate.
     func onViewportChanged() {
+        // A switch sets the camera itself and plans hydration for it; re-planning
+        // 200 ms later was a second hitch that could re-arm a zone and rebuild
+        // every spawner.
+        guard !isSwitching else { return }
         let intervalMs = ZoneHydrationReconcileConfig.intervalMs()
         hydrationReconcileTimer?.invalidate()
         if intervalMs == 0 {
@@ -2830,4 +3032,41 @@ final class WorkspaceRuntime {
 // Required for ProjectEntry construction in the check (mirrors existing check patterns).
 private extension Registry {
     // ProjectEntry is already public in Registry.swift; this just satisfies the access.
+}
+
+/// How many recently left workspaces keep their scene warm: controllers,
+/// runtimes and real tile views detached but alive, so going back re-attaches
+/// them instead of rebuilding. Beyond it, the least recently used is released
+/// through the ordinary path. `continuum.workspace.warmScenes` overrides it.
+enum WorkspaceWarmSceneConfig {
+    static let key = "continuum.workspace.warmScenes"
+    static let defaultCapacity = 2
+
+    static func capacity(defaults: UserDefaults = .standard) -> Int {
+        guard defaults.object(forKey: key) != nil else { return defaultCapacity }
+        return max(0, defaults.integer(forKey: key))
+    }
+}
+
+/// A project a switch needed but could not open, named for the user.
+enum WorkspaceProjectAcquisitionError: Error, LocalizedError, CustomStringConvertible {
+    /// Another copy of Array holds its `.array/lock` (hazard 10).
+    case heldElsewhere(projectName: String)
+    case unavailable(projectName: String, underlying: Error)
+
+    static func from(_ error: Error, projectName: String) -> WorkspaceProjectAcquisitionError {
+        if case ProjectLockError.alreadyLocked = error { return .heldElsewhere(projectName: projectName) }
+        if let mapped = error as? WorkspaceProjectAcquisitionError { return mapped }
+        return .unavailable(projectName: projectName, underlying: error)
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case let .heldElsewhere(name):
+            return "\u{201C}\(name)\u{201D} is open in another copy of Array. Close it there, then try again."
+        case let .unavailable(name, underlying):
+            return "\u{201C}\(name)\u{201D} couldn't be opened: \(underlying.localizedDescription)"
+        }
+    }
+    var description: String { errorDescription ?? "project unavailable" }
 }

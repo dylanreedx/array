@@ -310,8 +310,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
 
     /// Freeze web input while the snapshot crosses the bridge. Native draft and
     /// revision become authoritative before presenting any Save/Discard choice.
+    /// QA: the editor's web bridge never answers the barrier — a suspended,
+    /// crashed or still-loading content process. Nil/false in production.
+    var qaEditorBarrierNeverAnswers = false
+
     func flushEditorBarrier(_ completion: @escaping (Bool) -> Void) {
         guard !documentTransitionPending else { completion(false); return }
+        if qaEditorBarrierNeverAnswers { documentTransitionPending = true; return }
         guard let codeEditor else { completion(true); return }
         documentTransitionPending = true
         let identity = bridgeDocumentID
@@ -1058,25 +1063,23 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
 
     func flushUnsavedRecovery() { flushRecoveryDraft() }
 
-    /// Existing workspace lifecycle APIs are synchronous. Pump only the main
-    /// run loop until the asynchronous web barrier acknowledges, and fail the
-    /// owner's transition closed on timeout instead of tearing down stale text.
-    func captureForSceneTransition() throws {
-        var captured: Bool?
-        flushEditorBarrier { captured = $0 }
-        let deadline = Date().addingTimeInterval(5.5)
-        while captured == nil, Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
-        }
-        guard captured == true else {
-            resumeEditorAfterBarrier()
-            throw CodeEditorHostError.bridgeUnavailable
-        }
+    /// A scene transition (switch, quit, close) asks every editor at once:
+    /// `completion(true)` once this one has handed its text over. The caller
+    /// waits for all of them, boundedly, then calls
+    /// `finishSceneTransitionCapture` whether or not this one answered.
+    func beginSceneTransitionCapture(_ completion: @escaping (Bool) -> Void) {
+        flushEditorBarrier(completion)
+    }
+
+    /// Write the recovery draft from the text the tile now holds — the editor's
+    /// snapshot if it answered, its last known draft if it did not — and let the
+    /// editor resume. Only a draft that cannot be written throws: an editor that
+    /// never answered must not cost the user the transition.
+    func finishSceneTransitionCapture() throws {
+        defer { resumeEditorAfterBarrier() }
         guard flushRecoveryDraft() else {
-            resumeEditorAfterBarrier()
             throw CodeEditorHostError.javaScript("The recovery draft could not be saved.")
         }
-        resumeEditorAfterBarrier()
     }
 
     @objc private func modeControlChanged(_ sender: NSSegmentedControl) {

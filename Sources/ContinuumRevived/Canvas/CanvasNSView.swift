@@ -5559,6 +5559,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     private func layoutAllTiles(invalidateTileDisplay: Bool = true, onlyChangedTiles: Bool = false) {
+        WorkspaceSwitchCounters.layoutPasses += 1
         layoutZoneChromeViews()
         // Gesture transactions restore a complete baseline-relative scene, but
         // only changed occurrences need AppKit layout or surface invalidation.
@@ -6395,6 +6396,28 @@ final class CanvasNSView: NSView, TokenThemed {
         // back into this canvas. Pruning here is what stops a workspace switch from
         // accumulating megabytes of pixels for tiles nobody can reach.
         tileSurfaceStore.prune(keeping: Set(tileViewsInVisualOrder.map { $0.tile.id }))
+    }
+
+    /// Take every installed layer off the canvas WITHOUT retiring its views, and
+    /// hand the layers back. A warm workspace (`WorkspaceRuntime`) keeps them: the
+    /// views leave the tree and the focus broker and give up their surface
+    /// residency, but are not told they left the scene, so a terminal keeps its
+    /// surface, a web view its page and an agent tile its subscription. `setZones`
+    /// re-adopts them; the runtime retires them if it evicts the workspace.
+    func parkZoneLayers() -> [ZoneLayer] {
+        let parked = zoneLayers
+        for layer in parked {
+            for view in layer.tileViews.values {
+                focusBroker?.unregister(view.focusSurfaceID)
+                releaseSurfaceResidency(of: view)
+                view.removeFromSuperview()
+            }
+        }
+        zoneLayers = []
+        zoneLayerOrder = []
+        activeProjectZoneId = nil
+        clearFocusBorder()
+        return parked
     }
 
     enum FlatSceneError: Error, CustomStringConvertible {

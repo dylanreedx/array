@@ -3757,6 +3757,39 @@ enum ContinuumApp {
         // A tile's own project, never the armed zone's, owns its saves, close,
         // exit, restart and teardown. Real shells in an off-display window, so it
         // sits below `ghostty_init()` like the leg above.
+        // .plans/70 S5: a workspace switch is instant, certain and cheap to undo.
+        // Counted, never timed: an A→B→A round trip re-attaches a warm scene, no
+        // tmux round trip blocks the main thread, nothing re-plans afterwards; a
+        // held lock or a failed commit leaves nothing acquired; an editor that
+        // never answers costs a bounded wait; the titlebar leads the work.
+        if CommandLine.arguments.contains("--workspace-switch-confidence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceSwitchConfidenceChecks.run()
+                print("ContinuumRevivedWorkspaceSwitchConfidenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        // .plans/70 S5: workspace delete, create and rename through the entry points
+        // a person uses: ⌘K rename asks, delete lands on the most recent workspace
+        // that mounts and keeps a recoverable copy, a deleted warm workspace's
+        // runtimes are released, create selects only once mounted, no orphans.
+        if CommandLine.arguments.contains("--workspace-lifecycle-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceLifecycleChecks.run()
+                print("ContinuumRevivedWorkspaceLifecycleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-project-scope-check") {
             do {
                 _ = NSApplication.shared
@@ -4447,7 +4480,7 @@ private struct AgentDeleteConfirmationRequest: Equatable {
     let branchesAtStake: [String]
 }
 
-private struct WorkspaceDeleteConfirmationRequest: Equatable {
+struct WorkspaceDeleteConfirmationRequest: Equatable {
     let workspaceId: UUID
     let workspaceName: String
     let projectCount: Int
@@ -4626,7 +4659,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // built is dropped on the floor. Note and browser spawning "succeeded" into
         // that hole, silently, which is why an empty workspace looked broken rather
         // than merely empty.
-        if let runtime = workspaceRuntime, runtime.controller(for: boot.spawnerProjectId) == nil {
+        // `.plans/70` S5: "live" is not enough — a warm workspace's project is
+        // live and hidden, and spawning into it would land a tile nobody sees.
+        if let runtime = workspaceRuntime, !runtime.isProjectMounted(boot.spawnerProjectId) {
             return nil
         }
         return boot
@@ -5028,15 +5063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     throw NSError(domain: "WorkspaceRuntime", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Array closed while opening a workspace project."])
                 }
-                let liveRegistry = try registryStore.loadOrEmpty()
-                guard let entry = liveRegistry.projects.first(where: { $0.id == projectId && !$0.missing }) else {
-                    throw NSError(domain: "WorkspaceRuntime", code: 2,
-                                  userInfo: [NSLocalizedDescriptionKey: "That workspace's project is no longer registered."])
-                }
-                return try self.presentLockContentionUXIfNeeded(
-                    projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true),
-                    registry: liveRegistry
-                )
+                return try self.makeWorkspaceProjectController(projectId: projectId)
             })
             if let activeWorkspace, bootProjectBelongsToSelectedWorkspace {
                 self.workspaceRuntime = WorkspaceRuntime(
@@ -7526,6 +7553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// call already blocked on — no observable behavior change, just routed
     /// through the injectable seam.
     private static func runTmuxControlOperationSync(_ operation: @escaping @Sendable () async throws -> Void) -> Error? {
+        WorkspaceSwitchCounters.syncTmuxOperationsOnMain += 1
         final class ErrorBox: @unchecked Sendable { var error: Error? }
         let box = ErrorBox()
         let semaphore = DispatchSemaphore(value: 0)
@@ -10999,6 +11027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
         if rebuildAgentActivity {
+            WorkspaceSwitchCounters.sidebarReloads += 1
             qaStructuralSidebarReloadCount += 1
             sidebarReloadPending = false
             rebuildAgentActivitySnapshot()
@@ -11075,16 +11104,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     private func switchWorkspaceFromSidebarIfNeeded(_ workspaceId: UUID) -> Bool {
         if currentWorkspaceIdForSidebar() == workspaceId { return true }
+        return performWorkspaceSwitch(to: workspaceId)
+    }
+
+    /// The one route every workspace switch takes — the titlebar popup, ⌘K, a
+    /// sidebar row, the owning-workspace offer (`.plans/70` S5).
+    ///
+    /// The chrome answers the click BEFORE the work: the titlebar names the
+    /// target and shows progress, painted now, because the switch holds the main
+    /// thread. On success the chrome reloads onto the target; on failure it
+    /// reloads onto the workspace still mounted and says why where the user can
+    /// see it. The popup and ⌘K used to log the failure to stderr and leave the
+    /// popup naming a workspace that was never mounted.
+    @discardableResult
+    private func performWorkspaceSwitch(to workspaceId: UUID) -> Bool {
+        guard let workspaceRuntime else { return false }
+        if workspaceRuntime.workspaceId == workspaceId { return true }
+        let name = workspaceDisplayName(workspaceId: workspaceId)
+        workspaceTopBarView?.beginSwitching(to: workspaceId, name: name)
         do {
-            guard let workspaceRuntime else { return false }
             try workspaceRuntime.switchWorkspace(to: workspaceId)
+            workspaceTopBarView?.endSwitching()
             navSelectedZoneId = nil
-            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
+            // The name read above, not a second registry read.
+            canvasView?.showWorkspaceTransitionLabel("Switched to \(name)")
             reloadWorkspaceSidebar()
             return workspaceRuntime.workspaceId == workspaceId
         } catch {
-            fputs("Workspace sidebar switch failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch workspaces: \(error.localizedDescription)", kind: .error)
+            workspaceTopBarView?.endSwitching()
+            fputs("Workspace switch failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "Couldn't switch to \u{201C}\(name)\u{201D}: \(error.localizedDescription)", kind: .error)
+            reloadWorkspaceSidebar()
             return false
         }
     }
@@ -13768,17 +13819,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(roundTripFocusRestored, "round trip should restore workspace A's saved focused tile")
 
         try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: deletedTileB))
-        let expectedFallbackViewport = CanvasEngine.fit(
-            worldRect: CGRect(x: 200, y: 100, width: 720, height: 520),
-            viewportSize: canvas.bounds.size
-        )
+        // `.plans/70` S5: the camera stays where B was left. Framing the workspace
+        // here threw the saved viewport away whenever no tile could take focus.
+        let expectedFallbackViewport = mutatedBViewport
         try expect(app.switchWorkspaceFromSidebarIfNeeded(workspaceB), "switch to workspace B with deleted focus should succeed")
         canvas.layoutSubtreeIfNeeded()
         let deletedFocusFallbackWorked = app.focusBroker.activeSurface == .canvas
             && canvas.canvasState.lastActiveTileId != deletedTileB
             && viewportsNearlyEqual(canvas.viewport, expectedFallbackViewport)
         let transitionLabelShown = app.qaWorkspaceSwitchTransitionLabelText == "Switched to Beta Workspace"
-        try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and frame workspace bounds")
+        try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and keep the saved viewport")
         try expect(transitionLabelShown, "workspace switch should show transition label")
 
         // FOREIGN PLACEMENT. Dylan's "personal" document still held zones for two
@@ -13869,7 +13919,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let switchedToWork = foreignApp.switchWorkspaceFromSidebarIfNeeded(work)
             let switchedBack = switchedToWork && foreignApp.switchWorkspaceFromSidebarIfNeeded(personal)
             foreignRuntime.flushPendingHydrationReconcile()
-            let releasedAfterReturn = switchedBack && foreignZoneRegistry.controller(for: projectW) == nil
+            // `.plans/70` S5: work stays warm, holding its own project; what must
+            // not survive is personal's stale hold on it.
+            let releasedAfterReturn = switchedBack && !foreignRuntime.isProjectMounted(projectW)
             return (reconcileAcquiredForeign, switchedToWork, switchedBack, releasedAfterReturn)
         }
 
@@ -15196,7 +15248,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             createWorkspaceFromChrome()
             return workspaceRuntime?.workspaceId != before
         case let .renameWorkspace(workspaceId):
-            return renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
+            // Ask, like every other rename route. This renamed to the literal
+            // "Renamed Workspace".
+            return renameWorkspaceFromTopBar(workspaceId: workspaceId)
         case let .deleteWorkspace(workspaceId):
             return deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .switchWorkspace(workspaceId):
@@ -16200,18 +16254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let workspace: WorkspaceEntry
         do {
-            var registry = try registryStore.loadOrEmpty()
-            workspace = registry.createWorkspace(name: trimmed, now: Date())
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            try WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport).save(
-                WorkspaceDocument(
-                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                    zones: [],
-                    zoneZOrder: [],
-                    lastActiveZoneId: nil
-                )
-            )
-            try registryStore.save(registry)
+            workspace = try createEmptyWorkspace(name: trimmed)
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
             setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)", kind: .error)
@@ -16221,6 +16264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Creation and navigation are deliberately reported separately. Once
             // the registry entry and empty document are durable, a switch problem
             // must not tell the user that creation failed or encourage duplicates.
+            // The switch, not the creation, makes it the launch workspace.
             try workspaceRuntime?.switchWorkspace(to: workspace.id)
             setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.", kind: .success)
         } catch {
@@ -16233,15 +16277,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return true
     }
 
-    private func renameWorkspaceFromTopBar(workspaceId: UUID) {
-        guard let registryStore else { return }
+    /// An empty workspace, as one unit: its document, then its registry entry —
+    /// and the document removed again if the entry cannot be saved, so a failed
+    /// create leaves no orphan `workspaces/<id>/`. It is NOT selected for launch;
+    /// the switch into it does that once it has actually mounted.
+    private func createEmptyWorkspace(name: String) throws -> WorkspaceEntry {
+        guard let registryStore else { throw CocoaError(.fileWriteUnknown) }
+        var registry = try registryStore.loadOrEmpty()
+        let workspace = registry.createWorkspace(name: name, now: Date(), selectForLaunch: false)
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
+        try store.save(WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [],
+            zoneZOrder: [],
+            lastActiveZoneId: nil
+        ))
+        do {
+            try registryStore.save(registry)
+        } catch {
+            try? FileManager.default.removeItem(at: store.layout.workspaceDirectory)
+            throw error
+        }
+        return workspace
+    }
+
+    @discardableResult
+    private func renameWorkspaceFromTopBar(workspaceId: UUID) -> Bool {
+        guard let registryStore else { return false }
         do {
             let registry = try registryStore.loadOrEmpty()
-            guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else { return }
-            guard let newName = workspaceRenamePromptProvider?(currentName) ?? promptForWorkspaceRename(currentName: currentName) else { return }
-            _ = renameWorkspace(workspaceId: workspaceId, name: newName)
+            guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else {
+                setWorkspaceManagementMessage("Workspace could not be found.")
+                return false
+            }
+            let newName = workspaceRenamePromptProvider.map { $0(currentName) }
+                ?? promptForWorkspaceRename(currentName: currentName)
+            guard let newName else { return false }
+            return renameWorkspace(workspaceId: workspaceId, name: newName)
         } catch {
             fputs("Rename Workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Rename workspace failed: \(error.localizedDescription)", kind: .error)
+            return false
         }
     }
 
@@ -16336,7 +16413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let request = WorkspaceDeleteConfirmationRequest(
                 workspaceId: workspaceId,
                 workspaceName: target.name,
-                projectCount: target.projectIds.count,
+                // Owned projects: ownership is the project's own record.
+                projectCount: registry.projects.filter { $0.workspaceId == workspaceId }.count,
                 zoneCount: zoneCount,
                 deletionCopy: Self.workspaceDeleteSemanticsCopy
             )
@@ -16361,11 +16439,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             // The one step that can throw. It runs while the registry on disk still
-            // holds every workspace, so a failure leaves nothing half-done.
-            if deletingCurrent,
-               let nextWorkspaceId = pending.lastActiveWorkspaceId ?? pending.workspaces.first?.id {
-                try workspaceRuntime?.switchWorkspace(to: nextWorkspaceId)
+            // holds every workspace, so a failure leaves nothing half-done. The
+            // next workspace is the most recently used one that can actually be
+            // mounted; one that cannot is skipped rather than failing the delete,
+            // and if none can, a fresh empty workspace is made to land in.
+            if deletingCurrent {
+                try switchAwayFromDeletedWorkspace(workspaceId, candidates: pending.workspacesByRecency(excluding: workspaceId))
             }
+            // Its scene must not stay warm: release its runtimes now.
+            workspaceRuntime?.discardWarmScene(workspaceId: workspaceId)
 
             // `switchWorkspace` saves the registry itself (it commits the selected
             // workspace), so re-read and re-apply the removal to the freshest copy
@@ -16380,14 +16462,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Past the commit point: the workspace IS deleted. Anything that fails
             // from here is cleanup, and must not be reported as a failed delete.
             killAmbientTmuxSessionForDeletedWorkspace(workspaceId: workspaceId)
+            var trashed: URL?
             if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
                 do {
-                    try store.deleteDocument()
+                    trashed = try store.moveDocumentToTrash()
                 } catch {
                     fputs("Delete Workspace: document cleanup failed: \(error)\n", stderr)
                 }
             }
-            setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.", kind: .success)
+            setWorkspaceManagementMessage(
+                "Deleted workspace “\(target.name)”. Projects and project tile data were not deleted"
+                    + (trashed != nil ? "; its layout is kept in the workspace trash." : "."),
+                kind: .success)
             reloadWorkspaceSidebar()
             return true
         } catch {
@@ -16397,6 +16483,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("Delete workspace failed, so “\(workspaceNameForMessage(workspaceId: workspaceId))” was kept: \(error.localizedDescription)", kind: .error)
             reloadWorkspaceSidebar()
             return false
+        }
+    }
+
+    /// Leave the workspace being deleted for the first candidate that mounts.
+    private func switchAwayFromDeletedWorkspace(_ workspaceId: UUID, candidates: [WorkspaceEntry]) throws {
+        guard let workspaceRuntime else { return }
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                try workspaceRuntime.switchWorkspace(to: candidate.id)
+                return
+            } catch {
+                fputs("Delete Workspace: \(candidate.name) could not be opened, trying the next: \(error)\n", stderr)
+                lastError = error
+            }
+        }
+        // Nothing mounts: land in a fresh empty workspace — and if even that
+        // cannot be mounted, take it back out, so a refused delete leaves the
+        // registry exactly as it was.
+        let fresh: WorkspaceEntry
+        do { fresh = try createEmptyWorkspace(name: "Untitled Workspace") } catch { throw lastError ?? error }
+        do {
+            try workspaceRuntime.switchWorkspace(to: fresh.id)
+        } catch {
+            if let registryStore, var registry = try? registryStore.loadOrEmpty() {
+                registry.workspaces.removeAll { $0.id == fresh.id }
+                try? registryStore.save(registry)
+                try? FileManager.default.removeItem(at: WorkspaceStore(
+                    workspaceId: fresh.id,
+                    applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent()
+                ).layout.workspaceDirectory)
+            }
+            throw lastError ?? error
         }
     }
 
@@ -16439,14 +16558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func switchWorkspaceAndRelaunch(workspaceId: UUID) {
-        do {
-            // Switch in-process — no relaunch needed.
-            try workspaceRuntime?.switchWorkspace(to: workspaceId)
-            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
-            reloadWorkspaceSidebar()
-        } catch {
-            fputs("Switch Workspace failed: \(error)\n", stderr)
-        }
+        performWorkspaceSwitch(to: workspaceId)
     }
 
     private func addProjectZone(projectId: UUID) {
@@ -16507,14 +16619,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("“\(project.name)” remains in “\(workspace.name)”.")
             return
         }
-        do {
-            try workspaceRuntime?.switchWorkspace(to: workspaceId)
-            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
+        if performWorkspaceSwitch(to: workspaceId) {
             setWorkspaceManagementMessage("Switched to “\(workspace.name)” for “\(project.name)”.", kind: .success)
-            reloadWorkspaceSidebar()
-        } catch {
-            fputs("Switch to owning workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch to “\(workspace.name)”: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -17092,10 +17198,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var qaProfilePalette: LaunchProfilePalette? { profilePalette }
     /// QA (M1.11): `openProfilePalette` is private; a leg drives the real one.
     func qaOpenProfilePalette() { openProfilePalette() }
-    /// QA (M1.11): the spoken refusal, so "it refused audibly" is assertable.
-    var qaWorkspaceManagementMessage: String? { workspaceManagementMessage }
-    /// QA (M1.11): reach the broken state through the real "+" route.
+    /// QA (M1.11): the spoken refusal, so "it refused audibly" is assertable.    /// QA (M1.11): reach the broken state through the real "+" route.
     func qaCreateWorkspaceFromChrome() { createWorkspaceFromChrome() }
+    func qaSetWorkspaceRenamePrompt(_ provider: ((String) -> String?)?) { workspaceRenamePromptProvider = provider }
+    func qaSetWorkspaceDeleteConfirmation(_ provider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?) {
+        workspaceDeleteConfirmationProvider = provider
+    }
+    func qaDeleteWorkspace(_ workspaceId: UUID) -> Bool { deleteWorkspaceAndRelaunch(workspaceId: workspaceId) }
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
@@ -17167,6 +17276,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaSwitchWorkspaceFromSidebar(_ workspaceId: UUID) -> Bool {
         switchWorkspaceFromSidebarIfNeeded(workspaceId)
     }
+
+    /// QA: install a real top bar, wired exactly as the window's is.
+    func qaAttachWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
+        workspaceTopBarView = topBar
+        configureWorkspaceTopBar(topBar)
+        reloadWorkspaceTopBar()
+    }
+
+    var qaWorkspaceManagementMessage: String? { workspaceManagementMessage }
 
     /// QA (WS9): the project whose spawner a filesystem-backed creation would
     /// actually use. The creation SCOPE and the SPAWNER are resolved separately
@@ -17686,6 +17804,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             case .afterInstall:
                 hydrateRuntimeBackedTiles(in: layer, controller: controller, canvas: canvas)
+            case .afterRemount:
+                hydrateRuntimeBackedTiles(in: layer, controller: controller, canvas: canvas, wiresAgents: false)
             }
         }
     }
@@ -17792,7 +17912,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func hydrateRuntimeBackedTiles(
         in layer: CanvasNSView.ZoneLayer,
         controller: ZoneRuntimeController,
-        canvas: CanvasNSView
+        canvas: CanvasNSView,
+        wiresAgents: Bool = true
     ) {
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
@@ -17800,7 +17921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // An unbound or unavailable tile is wired too: `wireManagedAgentTile` gives
         // it its explicit state and never mints for a tile this process did not
         // create (hazard 10).
-        for tile in layer.tiles where tile.kind == .managedAgent {
+        for tile in layer.tiles where wiresAgents && tile.kind == .managedAgent {
             wireManagedAgentTile(tile.id)
         }
 
@@ -17822,11 +17943,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // the two workspaces, which `switchWorkspace` is explicitly
                 // written for. Retire it first; see `retireOrphanedRuntimes`.
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
-                if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
-                    // Wired like a boot or a spawned terminal: without it a shell's
-                    // `exit` left a dead tile with no Restart and no `lastExit`.
-                    wireRuntimeExitHandler(runtime)
+                // Wired like a boot or a spawned terminal: without it a shell's
+                // `exit` left a dead tile with no Restart and no `lastExit`.
+                let adopt: @MainActor (TileSpawner.RestartOutcome) -> Void = { [weak self, weak controller] outcome in
+                    guard case let .restarted(runtime) = outcome, let controller else { return }
+                    self?.wireRuntimeExitHandler(runtime)
                     controller.runtimes.append(runtime)
+                }
+                if workspaceRuntime?.isSwitching == true {
+                    // `.plans/70` S5: on a switch the tmux round trips run off the
+                    // main thread and the terminal comes live a moment later. The
+                    // restore is dropped if its scene has been left by then.
+                    let epoch = workspaceRuntime?.mountEpoch
+                    spawner.restartTerminalTileDeferringTmux(
+                        tileId: tile.id,
+                        stillWanted: { [weak self] in self?.workspaceRuntime?.mountEpoch == epoch },
+                        completion: adopt)
+                } else {
+                    adopt(spawner.restartTerminalTile(tileId: tile.id))
                 }
             case .browser:
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
@@ -18263,6 +18397,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return registry.projects.first(where: { $0.id == projectId })
     }
 
+    /// The zone-runtime factory: one project's controller, its `.array/` lock
+    /// taken. Launch builds its `ZoneRuntimeRegistry` with this, and so does the
+    /// workspace fixture, so a witness drives the same acquisition a switch does.
+    func makeWorkspaceProjectController(projectId: UUID) throws -> ZoneRuntimeController {
+        guard let registryStore else {
+            throw NSError(domain: "WorkspaceRuntime", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Array closed while opening a workspace project."])
+        }
+        let liveRegistry = try registryStore.loadOrEmpty()
+        guard let entry = liveRegistry.projects.first(where: { $0.id == projectId && !$0.missing }) else {
+            throw NSError(domain: "WorkspaceRuntime", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "That workspace's project is no longer registered."])
+        }
+        // Never the boot lock alert: this runs mid-session (a switch, an arming,
+        // a reconcile), where its choices were to quit the app from inside the
+        // switch, open the project unlocked (hazard 10), or open a DIFFERENT root
+        // under this project's id. A held lock is a named failure instead.
+        do {
+            return try ZoneRuntimeController(root: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
+        } catch {
+            throw WorkspaceProjectAcquisitionError.from(error, projectName: entry.name)
+        }
+    }
+
+    /// QA: answers the project-lock alert instead of a person, and records that
+    /// it was asked. Nil in production.
+    var qaProjectLockAlertResponder: ((URL) -> ProjectLockAlertChoice)?
+
     private func presentLockContentionUXIfNeeded(projectRoot: URL, registry: Registry) throws -> ZoneRuntimeController {
         var candidate = projectRoot
         while true {
@@ -18291,13 +18453,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private enum ProjectLockAlertChoice {
+    enum ProjectLockAlertChoice {
         case chooseAnotherProject
         case openAnyway
         case quit
     }
 
     private func presentProjectLockAlert(lockFile: URL) -> ProjectLockAlertChoice {
+        if let qaProjectLockAlertResponder { return qaProjectLockAlertResponder(lockFile) }
         let config = ProjectLockPolicy.alertConfiguration(lockFile: lockFile)
         let alert = NSAlert()
         alert.messageText = config.message
@@ -19779,6 +19942,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // switchWorkspace persists the departing viewport before loading the target.
         let mutatedWAViewport = CanvasViewport(x: 77, y: 88, zoom: 1)
         canvas.setViewport(mutatedWAViewport)
+        // `.plans/70` S5: a left workspace is kept warm by default. inv4 is about
+        // the RELEASE path (ref-counts at zero, controllers closed), so this leg
+        // keeps nothing warm; `--workspace-switch-confidence-check` owns warm.
+        runtime.warmSceneCapacity = 0
         try expect(canvas.viewport.x == 77, "pre-switch: WA viewport must be 77 after in-memory mutation")
 
         // Wire no-relaunch spy.
@@ -23153,8 +23320,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         releaseRuntime.closeAll()
         try expect(releaseTmuxControl.log.isEmpty, "project release must detach only and issue no tmux kill command; got \(releaseTmuxControl.log)")
         try expect(releaseRuntime.controller(for: releaseProjectId) == nil, "project release should drop the registry controller")
+        // `.plans/70` S5: release is a detach (D16), not an exit. A stamp here made
+        // the next controller prune the descriptor, so the terminal came back at
+        // the project root with its agent status reset.
         let releaseLastExitStamped = try releaseStore.loadSession(id: releaseRuntimeId).lastExit != nil
-        try expect(releaseLastExitStamped, "project release should stamp lastExit on at least one live runtime descriptor")
+        try expect(!releaseLastExitStamped, "project release must not stamp lastExit on a live runtime's descriptor")
 
         let sentinelTmuxControl = InMemoryTmuxControl()
         try expect(Self.runTmuxControlOperationSync({

@@ -188,10 +188,34 @@ final class ZoneRuntimeController {
         TmuxSession.killProjectSessionCommand(projectId: project.id, tmuxPath: tmuxPath)
     }
 
+    /// The project's workspace was left but is kept warm (`WorkspaceRuntime`):
+    /// give up the process-wide attachments only the active controller may hold —
+    /// the session observer, the tmux reaper, the focus broker's callbacks — and
+    /// keep everything else. Its runtimes keep running; its spawner and canvas
+    /// stay so its own saves still work. `attachUI` takes them back.
+    func parkUI() {
+        stopReaper()
+        sessionObserver?.stop()
+        sessionObserver = nil
+        if let focusBroker {
+            focusBroker.onAcceptedTileFocus = nil
+            focusBroker.onAcceptedTileFocusWithReason = nil
+            focusBroker.onAcceptedCanvasScope = nil
+            focusBroker.activationFallbackSurfaces = nil
+        }
+        focusBroker = nil
+    }
+
     // D16 (docs/38-locked-decisions.md): project release = DETACH, never kill.
     // This function intentionally issues no tmux command. The controller holds no
     // TmuxControl or Process, so release has no executable tmux path. Sessions stay
     // alive across workspace switches; only explicit user tile close may issue kill-window.
+    //
+    // A release is not an exit, so nothing is stamped exited and no session is
+    // marked stopped. That stamp used to make the next controller's prune delete
+    // the descriptor, so a terminal came back at the project root with its agent
+    // status reset to "configuring". An actual exit stamps itself
+    // (`handleRuntimeExited`); a restore supersedes the descriptor it reads.
     func close() {
         guard !isClosed else { return }
         isClosed = true
@@ -205,19 +229,6 @@ final class ZoneRuntimeController {
             fputs("ZoneRuntimeController: closing with an unsaved canvas: \(error)\n", stderr)
         }
         detachUI()
-
-        let now = Date()
-        for runtime in runtimes {
-            if var descriptor = try? projectStore.loadSession(id: runtime.id) {
-                descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: now)
-                try? projectStore.saveSession(descriptor)
-            }
-            if var record = try? managedSessionStore.load(tileId: runtime.tileId) {
-                record.status = .stopped
-                record.lastSeenAt = now
-                try? managedSessionStore.upsert(record)
-            }
-        }
         releaseRuntimes()
 
         projectLock?.release()

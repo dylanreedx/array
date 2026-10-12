@@ -851,6 +851,24 @@ run_app_check .build/debug/Array --tile-materialize-check
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
+# .plans/70 S5: a workspace switch is instant, certain and cheap to undo, through
+# mountWorkspaceSceneAtBoot and launch's own project factory. Counted across each
+# switch: A→B→A re-attaches a warm scene (no tile view built, the same terminal
+# runtimes and web view, descriptors untouched), no synchronous tmux round trip
+# on the main thread, one sidebar reload, the camera where it was left, nothing
+# re-planned after the switch returns. A released workspace keeps its terminal
+# descriptors; a nested switch is refused; a held project lock fails with the
+# project's name and no modal; a failed registry commit releases every
+# acquisition and lock; an editor that never answers costs a bounded wait; the
+# titlebar names the target before the work and reverts on failure.
+run_app_check .build/debug/Array --workspace-switch-confidence-check
+# .plans/70 S5: delete, create and rename. ⌘K "Rename X…" asks for the name;
+# deleting the current workspace lands on the most recently used one that
+# mounts (a fresh empty one if none does) and moves its directory to the
+# workspace trash byte for byte; a deleted warm workspace's controllers and
+# locks are released; a created workspace becomes the launch workspace only
+# once mounted; a create whose registry write fails leaves no orphan document.
+run_app_check .build/debug/Array --workspace-lifecycle-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
 # production dispatch entry. Same-named file in two checkouts, dirty draft
 # preserved, world frames at a non-zero zone origin, partial relationship
@@ -897,6 +915,12 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # asset contract) is exhaustive and fast, and a long process-heavy binary is a
 # bad place to bisect it.
 run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
+# .plans/70 S5: project ownership is recorded once. Both field registry shapes
+# (2026-10-05 consistent, 2026-09-27 four-of-seven disagreeing) decode through
+# RegistryStore without an ownership throw and migrate losslessly and
+# idempotently; deleting a workspace never un-owns another workspace's project
+# and falls back to the most recently mounted survivor.
+run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 # The RENDERER, in pixels, in an offscreen fixture window: it sits below
 # worldPlane and hit-transparent, base+image are screen-fixed while the grid is
 # world-aligned (sampled before and after a pan into negative world space), a

@@ -165,6 +165,7 @@ final class TileSpawner {
         }
         self.environmentProvider = environmentProvider
         self.browserProfiles = browserProfiles
+        WorkspaceSwitchCounters.spawnersBuilt += 1
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
             guard let self else { return }
             if let fileOpenHandler {
@@ -414,99 +415,141 @@ final class TileSpawner {
         return contained
     }
 
+    /// What a tmux wrap needs from tmux itself — the process round trips —
+    /// captured on main so it can run on any thread (`.plans/70` S5).
+    private struct TmuxPaneQuery: Sendable {
+        let control: any TmuxControl
+        let sessionName: String
+        let viewSessionName: String
+        let existingWindowTarget: String?
+        let isProjectTarget: Bool
+        let cwd: String
+        let innerCommand: [String]?
+        let focusedPaneTarget: String?
+
+        struct Resolution: Sendable {
+            let viewSessionExisted: Bool
+            let paneTarget: String
+            let createdWindow: Bool
+        }
+
+        func run() async throws -> Resolution {
+            let viewSessionExisted = try await control.sessionExists(name: viewSessionName)
+            // Ticket 15: a restart/restore must not blindly create a new window when
+            // the persisted descriptor's pane is still alive — that orphans the old
+            // tmux window every relaunch. Re-bind to it instead.
+            if let existingWindowTarget, try await control.isAlive(paneTarget: existingWindowTarget) {
+                return Resolution(viewSessionExisted: viewSessionExisted, paneTarget: existingWindowTarget, createdWindow: false)
+            }
+            let paneTarget: String
+            if isProjectTarget {
+                do {
+                    paneTarget = try await control.newWindow(inSession: sessionName, cwd: cwd, innerCommand: innerCommand)
+                } catch {
+                    paneTarget = try await control.newSession(name: sessionName, cwd: cwd, innerCommand: innerCommand)
+                }
+            } else if try await control.sessionExists(name: sessionName) {
+                let windowCwd = try await TileSpawner.cwdForNewWindow(profileCwd: cwd, control: control, focusedPaneTarget: focusedPaneTarget)
+                paneTarget = try await control.newWindow(inSession: sessionName, cwd: windowCwd, innerCommand: innerCommand)
+            } else {
+                paneTarget = try await control.newSession(name: sessionName, cwd: cwd, innerCommand: innerCommand)
+            }
+            return Resolution(viewSessionExisted: viewSessionExisted, paneTarget: paneTarget, createdWindow: true)
+        }
+    }
+
+    /// A tmux wrap is either decided already (tmux off, no session target) or
+    /// needs one pane query, after which `finish` builds the profile on main.
+    private enum TmuxWrapStep {
+        case ready(TmuxWrappedProfile)
+        case query(TmuxPaneQuery, finish: (TmuxPaneQuery.Resolution) throws -> TmuxWrappedProfile)
+    }
+
+    private func tmuxWrapStep(
+        _ profile: LaunchProfile,
+        tileId: UUID,
+        target: TerminalSessionTarget?,
+        existingWindowTarget: String? = nil
+    ) -> TmuxWrapStep {
+        guard TmuxPersistenceConfig.enabled(defaults: defaults),
+              let tmuxPath = tmuxPathResolver(defaults) else {
+            return .ready(TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false))
+        }
+        let reach = project.remoteEnvironment?.reach ?? .localhost
+        let defaults = self.defaults
+        guard let target else {
+            return .ready(TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false))
+        }
+        if case .ambient = target,
+           !TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults) {
+            return .ready(TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false))
+        }
+        let control = tmuxControlFactory(tmuxPath, reach, defaults)
+        let sessionName: String
+        let isProjectTarget: Bool
+        switch target {
+        case let .project(projectId):
+            sessionName = TmuxSession.projectSessionName(projectId: projectId)
+            isProjectTarget = true
+        case let .ambient(workspaceId):
+            sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
+            isProjectTarget = false
+        }
+        let focusedPaneTarget: String? = isProjectTarget ? nil : terminalFocusedPaneTargetProvider?()
+        let query = TmuxPaneQuery(
+            control: control,
+            sessionName: sessionName,
+            viewSessionName: TmuxSession.viewSessionName(tileId: tileId),
+            existingWindowTarget: existingWindowTarget,
+            isProjectTarget: isProjectTarget,
+            cwd: profile.cwd,
+            innerCommand: Self.innerCommand(for: profile),
+            focusedPaneTarget: focusedPaneTarget)
+        return .query(query) { resolution in
+            guard TmuxSession.isValidPaneId(resolution.paneTarget) else {
+                if resolution.createdWindow,
+                   !resolution.paneTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let paneTarget = resolution.paneTarget
+                    Task.detached { try? await control.killWindow(target: paneTarget) }
+                }
+                throw SpawnError.invalidPaneId(resolution.paneTarget)
+            }
+            return TmuxWrappedProfile(
+                profile: try TmuxSession.groupedViewProfile(
+                    profile: profile,
+                    tileId: tileId,
+                    baseSessionName: sessionName,
+                    windowTarget: resolution.paneTarget,
+                    tmuxPath: tmuxPath,
+                    reach: reach,
+                    defaults: defaults
+                ),
+                windowTarget: resolution.paneTarget,
+                createdWindow: resolution.createdWindow,
+                viewSessionExisted: resolution.viewSessionExisted
+            )
+        }
+    }
+
+    /// The synchronous wrap, for spawn paths that build their view in the same
+    /// turn. One blocking bridge for the whole pane query (it used to be two or
+    /// three). Hydration on a workspace switch does not come here — see
+    /// `restartTerminalTileDeferringTmux`.
     private func tmuxWrappedProfileIfAvailable(
         _ profile: LaunchProfile,
         tileId: UUID,
         target: TerminalSessionTarget?,
         existingWindowTarget: String? = nil
     ) throws -> TmuxWrappedProfile {
-        guard TmuxPersistenceConfig.enabled(defaults: defaults),
-              let tmuxPath = tmuxPathResolver(defaults) else {
-            return TmuxWrappedProfile(profile: profile, windowTarget: nil, createdWindow: false, viewSessionExisted: false)
+        switch tmuxWrapStep(profile, tileId: tileId, target: target, existingWindowTarget: existingWindowTarget) {
+        case let .ready(wrapped):
+            return wrapped
+        case let .query(query, finish):
+            return try finish(try Self.runTmuxControlOperationSync { try await query.run() })
         }
-        let reach = project.remoteEnvironment?.reach ?? .localhost
-        guard let target else {
-            return TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false)
-        }
-        if case .ambient = target,
-           !TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults) {
-            return TmuxWrappedProfile(profile: TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), windowTarget: nil, createdWindow: false, viewSessionExisted: false)
-        }
-        let control = tmuxControlFactory(tmuxPath, reach, defaults)
-        let sessionName: String
-        switch target {
-        case let .project(projectId):
-            sessionName = TmuxSession.projectSessionName(projectId: projectId)
-        case let .ambient(workspaceId):
-            sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
-        }
-        let viewSessionName = TmuxSession.viewSessionName(tileId: tileId)
-        let viewSessionExisted = try Self.runTmuxControlOperationSync {
-            try await control.sessionExists(name: viewSessionName)
-        }
-        // Ticket 15: a restart/restore must not blindly create a new window when
-        // the persisted descriptor's pane is still alive — that orphans the old
-        // tmux window every relaunch. Re-bind to it instead.
-        if let existingWindowTarget, try Self.runTmuxControlOperationSync({ try await control.isAlive(paneTarget: existingWindowTarget) }) {
-            return TmuxWrappedProfile(
-                profile: try TmuxSession.groupedViewProfile(
-                    profile: profile,
-                    tileId: tileId,
-                    baseSessionName: sessionName,
-                    windowTarget: existingWindowTarget,
-                    tmuxPath: tmuxPath,
-                    reach: reach,
-                    defaults: defaults
-                ),
-                windowTarget: existingWindowTarget,
-                createdWindow: false,
-                viewSessionExisted: viewSessionExisted
-            )
-        }
-        let innerCommand = Self.innerCommand(for: profile)
-        let focusedPaneTarget: String? = {
-            guard case .ambient = target else { return nil }
-            return terminalFocusedPaneTargetProvider?()
-        }()
-        let paneTarget = try Self.runTmuxControlOperationSync {
-            if case .project = target {
-                do {
-                    return try await control.newWindow(inSession: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
-                } catch {
-                    return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
-                }
-            } else if try await control.sessionExists(name: sessionName) {
-                let cwd = try await Self.cwdForNewWindow(profileCwd: profile.cwd, control: control, focusedPaneTarget: focusedPaneTarget)
-                return try await control.newWindow(inSession: sessionName, cwd: cwd, innerCommand: innerCommand)
-            } else {
-                return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
-            }
-        }
-        guard TmuxSession.isValidPaneId(paneTarget) else {
-            if !paneTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try? Self.runTmuxControlOperationSync {
-                    try await control.killWindow(target: paneTarget)
-                }
-            }
-            throw SpawnError.invalidPaneId(paneTarget)
-        }
-        return TmuxWrappedProfile(
-            profile: try TmuxSession.groupedViewProfile(
-                profile: profile,
-                tileId: tileId,
-                baseSessionName: sessionName,
-                windowTarget: paneTarget,
-                tmuxPath: tmuxPath,
-                reach: reach,
-                defaults: defaults
-            ),
-            windowTarget: paneTarget,
-            createdWindow: true,
-            viewSessionExisted: viewSessionExisted
-        )
     }
 
-    private nonisolated static func cwdForNewWindow(profileCwd: String, control: any TmuxControl, focusedPaneTarget: String?) async throws -> String {
+    nonisolated static func cwdForNewWindow(profileCwd: String, control: any TmuxControl, focusedPaneTarget: String?) async throws -> String {
         guard let focusedPaneTarget,
               !focusedPaneTarget.isEmpty
         else {
@@ -521,6 +564,7 @@ final class TileSpawner {
     }
 
     private static func runTmuxControlOperationSync<T>(_ operation: @escaping @Sendable () async throws -> T) throws -> T {
+        WorkspaceSwitchCounters.syncTmuxOperationsOnMain += 1
         let box = TmuxSyncBox()
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
@@ -584,14 +628,92 @@ final class TileSpawner {
     /// Prefers the persisted descriptor's cwd (post-`cd` dir) over the resolved
     /// project-root cwd. Replays saved scrollback when enabled.
     func restartTerminalTile(tileId: UUID) -> RestartOutcome {
-        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
+        switch prepareTerminalRestart(tileId: tileId) {
+        case let .finished(outcome):
+            return outcome
+        case let .ready(plan, step):
+            let wrappedProfile: TmuxWrappedProfile
+            do {
+                switch step {
+                case let .ready(wrapped): wrappedProfile = wrapped
+                case let .query(query, finish):
+                    wrappedProfile = try finish(try Self.runTmuxControlOperationSync { try await query.run() })
+                }
+            } catch {
+                return .failure(error)
+            }
+            return finishTerminalRestart(plan, wrappedProfile: wrappedProfile)
+        }
+    }
+
+    /// The restore a workspace switch uses (`.plans/70` S5): the same restart,
+    /// except that the tmux round trips — two or three blocking process spawns
+    /// per terminal on the main thread — run off it. Returns true when the
+    /// restore was deferred; `completion` then runs on main once the pane query
+    /// answers, or never, if `stillWanted()` says the tile left the scene in the
+    /// meantime (a window this restore created is closed again). Without tmux
+    /// work to do, the restore completes before this returns.
+    @discardableResult
+    func restartTerminalTileDeferringTmux(
+        tileId: UUID,
+        stillWanted: @escaping @MainActor () -> Bool,
+        completion: @escaping @MainActor (RestartOutcome) -> Void
+    ) -> Bool {
+        switch prepareTerminalRestart(tileId: tileId) {
+        case let .finished(outcome):
+            completion(outcome)
+            return false
+        case let .ready(plan, .ready(wrapped)):
+            completion(finishTerminalRestart(plan, wrappedProfile: wrapped))
+            return false
+        case let .ready(plan, .query(query, finish)):
+            Task { @MainActor [weak self] in
+                let resolution: TmuxPaneQuery.Resolution
+                do { resolution = try await query.run() } catch {
+                    completion(.failure(error))
+                    return
+                }
+                guard let self, stillWanted(),
+                      self.canvasView?.tileView(for: tileId) is DescriptorTileNSView else {
+                    if resolution.createdWindow {
+                        let target = resolution.paneTarget
+                        Task.detached { try? await query.control.killWindow(target: target) }
+                    }
+                    return
+                }
+                do {
+                    completion(self.finishTerminalRestart(plan, wrappedProfile: try finish(resolution)))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+            return true
+        }
+    }
+
+    private struct TerminalRestartPlan {
+        let existing: Tile
+        let spec: LaunchProfileSpec
+        let profile: LaunchProfile
+        let projectRoot: String
+        let persistedDescriptor: TerminalSessionDescriptor?
+        let persistedWindowTarget: String?
+    }
+
+    private enum TerminalRestartPreparation {
+        case finished(RestartOutcome)
+        case ready(TerminalRestartPlan, TmuxWrapStep)
+    }
+
+    private func prepareTerminalRestart(tileId: UUID) -> TerminalRestartPreparation {
+        guard let canvasView else { return .finished(.failure(SpawnError.canvasUnavailable)) }
+        guard ghostty != nil else { return .finished(.failure(SpawnError.canvasUnavailable)) }
         guard let existing = canvasView.tileRecord(for: tileId) else {
-            return .tileNotFound
+            return .finished(.tileNotFound)
         }
         let profileId = existing.metadata.launchProfileId ?? "shell"
         guard let spec = registry.spec(for: profileId) else {
-            return .unknownProfile(id: profileId)
+            return .finished(.unknownProfile(id: profileId))
         }
         // A restart rebuilds a tile that already sits in a zone. When that zone is
         // THIS spawner's project's, its root and tmux session are this project's —
@@ -607,8 +729,8 @@ final class TileSpawner {
         let profile: LaunchProfile
         switch resolution {
         case let .found(p): profile = p
-        case let .missing(name): return .missingCommand(executable: name)
-        case let .notConfigured(id): return .notConfigured(profileId: id)
+        case let .missing(name): return .finished(.missingCommand(executable: name))
+        case let .notConfigured(id): return .finished(.notConfigured(profileId: id))
         }
 
         // Prefer the persisted descriptor's cwd (may be post-`cd`) over the
@@ -625,17 +747,25 @@ final class TileSpawner {
             cwd: restoredCwd,
             title: profile.title
         )
-        let wrappedProfile: TmuxWrappedProfile
-        do {
-            wrappedProfile = try tmuxWrappedProfileIfAvailable(
-                profileWithCwd,
-                tileId: existing.id,
-                target: ownsTile ? .project(projectId: project.id) : terminalSessionTargetProvider?(),
-                existingWindowTarget: persistedWindowTarget
-            )
-        } catch {
-            return .failure(error)
-        }
+        let step = tmuxWrapStep(
+            profileWithCwd,
+            tileId: existing.id,
+            target: ownsTile ? .project(projectId: project.id) : terminalSessionTargetProvider?(),
+            existingWindowTarget: persistedWindowTarget
+        )
+        return .ready(TerminalRestartPlan(
+            existing: existing, spec: spec, profile: profile, projectRoot: projectRoot,
+            persistedDescriptor: persistedDescriptor, persistedWindowTarget: persistedWindowTarget), step)
+    }
+
+    private func finishTerminalRestart(_ plan: TerminalRestartPlan, wrappedProfile: TmuxWrappedProfile) -> RestartOutcome {
+        guard let canvasView, let ghostty else { return .failure(SpawnError.canvasUnavailable) }
+        let existing = plan.existing
+        let spec = plan.spec
+        let profile = plan.profile
+        let projectRoot = plan.projectRoot
+        let persistedDescriptor = plan.persistedDescriptor
+        let persistedWindowTarget = plan.persistedWindowTarget
         let launchProfile = wrappedProfile.profile
 
         let runtime = GhosttyTerminalRuntime(

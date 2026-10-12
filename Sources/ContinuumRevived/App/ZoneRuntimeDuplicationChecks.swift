@@ -221,7 +221,7 @@ enum ZoneRuntimeDuplicationChecks {
                    "the empty target workspace did not mount")
         try expect(canvas.installedZoneLayerIds.isEmpty,
                    "the project-owned-by-A zone was mounted in workspace B")
-        try expect(runtime.controller(for: projectPs) == nil,
+        try expect(!runtime.isProjectMounted(projectPs),
                    "workspace B retained A's project controller")
         try expect(browserEngine.webViewCreationCountForQA == webViewsBeforeRejectedSwitch,
                    "the foreign zone created a replacement browser runtime")
