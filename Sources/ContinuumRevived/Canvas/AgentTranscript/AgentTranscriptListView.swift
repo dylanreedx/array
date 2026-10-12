@@ -172,6 +172,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     let scrollView = NSScrollView(frame: .zero)
     let collectionView = NSCollectionView(frame: .zero)
     let transcriptLayout = AgentTranscriptLayout()
+    /// Which grammar this transcript renders — see
+    /// `AgentTranscriptPresentationStyle.current`, the one switch point.
+    let presentationStyle: AgentTranscriptPresentationStyle
+    private var isTurnCards: Bool { presentationStyle == .turnCards }
 
     private let registry: AgentBlockRendererRegistry
     private let measurementCache: AgentBlockMeasurementCache
@@ -219,6 +223,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private let tailStatusLabel = NSTextField(labelWithString: "")
     private let tailThinkingIndicatorID = AgentNodeID(rawValue: "__agent_transcript_tail_thinking_indicator__")!
     private var tailThinkingIndicatorIsVisible = false
+    /// Whether the gyro tail is a row of the document. Turn cards carry the live
+    /// state in the newest turn's work strip instead, under its Ask, so the
+    /// present tense is never at the foot of the scroll.
+    private var tailRowIsPresented: Bool { tailThinkingIndicatorIsVisible && !isTurnCards }
     /// The tail row is showing a settled "Worked for Ns" (gyro hidden).
     private var tailIsSettled = false
     /// Whether the newest turn is still producing output.
@@ -280,6 +288,32 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// string. The two inputs that can legitimately change it are the display
     /// projection and the tool-detail records, and both clear this.
     private var clusterSummaryCache: [AgentNodeID: String] = [:]
+
+    // MARK: Turn cards (`.plans/70` S8) — state
+
+    /// What each display item is to a turn card, rebuilt with the plan (O(items),
+    /// never per delta) so `spacingBefore` — called per item in `prepare()` —
+    /// is an array read.
+    enum TurnCardRole: Equatable {
+        case turnHead
+        case strip
+        case log
+        case answer
+        case outcome
+    }
+    fileprivate var turnCardRoles: [TurnCardRole] = []
+    /// Per-turn facts a card reads (ticks, counts, span, Ask text, chips),
+    /// computed lazily for VISIBLE cards and dropped with the plan or a
+    /// tool-detail refresh — the only two inputs that can move them.
+    fileprivate var turnCardStatsCache: [AgentNodeID: TurnCardStats] = [:]
+    /// Measured Ask / outcome heights, keyed by id, width, rung and expansion.
+    /// Kept across plans: a settled turn's heading does not change, and
+    /// re-measuring every turn on every structural delta would be O(history).
+    fileprivate var turnCardHeightCache: [String: CGFloat] = [:]
+    /// The tile's one answer to "what is my message doing" (`AgentTurnPresence`).
+    fileprivate var turnPresence: AgentTurnPresence?
+    /// The tile's live phase line ("Reading Agent.swift · 12s"), re-driven per tick.
+    fileprivate var liveStatusText = ""
 
     /// Digest of the display sequence, maintained where the sequence is built.
     ///
@@ -434,8 +468,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         toolDetailStore: AgentToolDetailStore? = nil,
         toolDetailProvider: ((AgentToolDetailKey) -> AgentToolDetailRecord?)? = nil,
         toolDetailClock: (@Sendable () -> Date)? = nil,
-        toolDetailTimeToLive: TimeInterval? = nil
+        toolDetailTimeToLive: TimeInterval? = nil,
+        presentationStyle: AgentTranscriptPresentationStyle? = nil
     ) {
+        self.presentationStyle = presentationStyle ?? AgentTranscriptPresentationStyle.current
         self.registry = registry
         disclosureOwnerID = AgentID(rawValue: UUID())
         self.renderContext = renderContext
@@ -509,6 +545,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             AgentToolClusterHeaderItem.self,
             forItemWithIdentifier: AgentToolClusterHeaderItem.reuseIdentifier
         )
+        collectionView.register(
+            AgentTurnCardItem.self,
+            forItemWithIdentifier: AgentTurnCardItem.reuseIdentifier
+        )
+        if isTurnCards {
+            transcriptLayout.contentInsets = NSEdgeInsets(
+                top: AgentTurnCardMetrics.cardGap, left: AgentTurnCardMetrics.columnInset,
+                bottom: AgentTurnCardMetrics.cardGap, right: AgentTurnCardMetrics.columnInset)
+            transcriptLayout.maximumColumnWidth = AgentTurnCardMetrics.maximumColumnWidth
+        }
         scrollView.documentView = collectionView
         tailThinkingIndicator.isHidden = true
         tailThinkingIndicator.identifier = NSUserInterfaceItemIdentifier("agentTranscript.tailThinkingIndicator")
@@ -530,7 +576,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
         transcriptLayout.itemCount = { [weak self] in
             guard let self else { return 0 }
-            return displayItems.count + (tailThinkingIndicatorIsVisible ? 1 : 0)
+            return displayItems.count + (tailRowIsPresented ? 1 : 0)
         }
         // `.plans/45` T3. Three tiers of separation, decided where the neighbour
         // is known. Inside one prose block AssistantProseView already uses 8pt
@@ -539,6 +585,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // much weight as the next paragraph.
         transcriptLayout.spacingBefore = { [weak self] index in
             guard let self else { return nil }
+            if isTurnCards { return turnCardSpacing(before: index) }
             return displayStartsTurn(at: index) ? transcriptLayout.scaledInterTurnSpacing : nil
         }
         transcriptLayout.boundarySignature = { [weak self] in
@@ -552,13 +599,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         }
         transcriptLayout.measuredHeight = { [weak self] index, width in
             guard let self else { return 1 }
-            if index == displayItems.count, tailThinkingIndicatorIsVisible {
+            if index == displayItems.count, tailRowIsPresented {
                 return DualPlaneGyroIndicatorModel.side
             }
             guard displayItems.indices.contains(index) else { return 1 }
             let rowIndex: Int
             switch displayItems[index] {
-            case .header:
+            case let .header(header):
+                if let height = turnCardHeight(for: header, width: width) { return height }
                 // Fixed constant: no measurement, no cache entry (S4.3).
                 // WS5: fixed at a RUNG, not absolutely — the header is a row in
                 // the same column as everything else it groups.
@@ -607,6 +655,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 guard let item = collectionView.makeItem(withIdentifier: identifier, for: indexPath)
                     as? AgentTranscriptTailItem else { return nil }
                 item.install(indicator: tailThinkingIndicator, statusLabel: tailStatusLabel)
+                presentArrival(of: id, in: item)
+                return item
+            }
+            if let header = clusterHeadersByID[id], header.scope.isTurnCard {
+                guard let item = collectionView.makeItem(
+                    withIdentifier: AgentTurnCardItem.reuseIdentifier, for: indexPath)
+                    as? AgentTurnCardItem else { return nil }
+                configureTurnCardItem(item, header: header)
                 presentArrival(of: id, in: item)
                 return item
             }
@@ -843,7 +899,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             return nil
         }
         var children: [Any] = orderedChildren.sorted { $0.0 < $1.0 }.map { $0.1 }
-        if tailThinkingIndicatorIsVisible,
+        if tailRowIsPresented,
            let item = collectionView.item(at: IndexPath(item: displayItems.count, section: 0)) as? AgentTranscriptTailItem {
             children.append(item)
         }
@@ -874,7 +930,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if newWindow == nil {
             updateScheduler.flush()
             tailThinkingIndicator.stopAnimating()
-        } else if tailThinkingIndicatorIsVisible {
+        } else if tailRowIsPresented {
             tailThinkingIndicator.startAnimating()
         }
         super.viewWillMove(toWindow: newWindow)
@@ -901,7 +957,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     }
 
     private func transcriptY(for id: AgentNodeID) -> CGFloat? {
-        if id == tailThinkingIndicatorID, tailThinkingIndicatorIsVisible {
+        if id == tailThinkingIndicatorID, tailRowIsPresented {
             return collectionView.layoutAttributesForItem(
                 at: IndexPath(item: displayItems.count, section: 0)
             )?.frame.minY
@@ -933,7 +989,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     let followers = chipRunFollowersByLeader[rows[index].id] ?? []
                     return [rows[index]] + followers.compactMap { rowsByID[$0] }
                 case let .header(header):
-                    guard !header.isExpanded else { return [] }
+                    guard header.coversMembers else { return [] }
                     return header.memberIndexes.compactMap {
                         rows.indices.contains($0) ? rows[$0] : nil
                     }
@@ -1203,11 +1259,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         lastInvalidatedTopLevelCount = survivingChanged.count
         var changedHeight = false
         if !survivingChanged.isEmpty {
-            let width = max(
-                0, collectionView.bounds.width
-                    - transcriptLayout.scaledContentInsets.left
-                    - transcriptLayout.scaledContentInsets.right
-            )
+            let width = transcriptLayout.columnWidth(forCollectionWidth: collectionView.bounds.width)
             for id in survivingChanged {
                 let oldHeight = try oldRowsByID[id].map { try measuredHeight(for: $0, width: width) }
                 measurementCache.invalidate(id: id)
@@ -1221,7 +1273,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if !didSeedArrivedDisplayIDs {
             didSeedArrivedDisplayIDs = true
             arrivedDisplayIDs = Set(displayIDs)
-            if tailThinkingIndicatorIsVisible { arrivedDisplayIDs.insert(tailThinkingIndicatorID) }
+            if tailRowIsPresented { arrivedDisplayIDs.insert(tailThinkingIndicatorID) }
         }
         // The identity used to be a CONCATENATED array, so comparing it allocated
         // and walked the whole display sequence on every delta and the snapshot
@@ -1236,7 +1288,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
             snapshot.appendSections([0])
             snapshot.appendItems(displayIDs, toSection: 0)
-            if tailThinkingIndicatorIsVisible {
+            if tailRowIsPresented {
                 snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
             }
             dataSource.apply(snapshot, animatingDifferences: false)
@@ -1329,6 +1381,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 transcriptLayout.invalidateForStructureChange()
                 do { try updateVisibleHosts(ids: Set(rowsByID.keys)) }
                 catch { thrown = error }
+                refreshVisibleTurnCards(force: true)
                 // The anchor restore reads `transcriptY(for:)` immediately after
                 // this closure; the re-measured geometry has to be current for
                 // that to be a position rather than a guess.
@@ -1376,15 +1429,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             if visible, wasSettled {
                 // Settled -> working reuses the existing tail row: wake the gyro.
                 tailThinkingIndicator.isHidden = false
-                tailThinkingIndicator.startAnimating()
+                if !isTurnCards { tailThinkingIndicator.startAnimating() }
             }
+            refreshVisibleTurnCards()
             return
         }
         tailThinkingIndicatorIsVisible = visible
         tailThinkingIndicator.isHidden = !visible
         tailStatusLabel.isHidden = !visible
         if visible {
-            tailThinkingIndicator.startAnimating()
+            // Turn cards never install the gyro; animating it would run a
+            // display link for a view no one can see.
+            if !isTurnCards { tailThinkingIndicator.startAnimating() }
         } else {
             tailThinkingIndicator.stopAnimating()
             tailStatusLabel.stringValue = ""
@@ -1406,6 +1462,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             tailThinkingIndicatorIsVisible = true
             applyTailVisibilityWithScrollPreservation()
         }
+        refreshVisibleTurnCards()
     }
 
     var qaTailIsSettled: Bool { tailIsSettled }
@@ -1416,6 +1473,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// at that rate would fight scrolling and text selection.
     func setThinkingStatusText(_ text: String?) {
         let resolved = text ?? ""
+        if isTurnCards, liveStatusText != resolved {
+            liveStatusText = resolved
+            refreshVisibleTurnCards()
+        }
         guard tailStatusLabel.stringValue != resolved else { return }
         tailStatusLabel.stringValue = resolved
         tailStatusLabel.toolTip = resolved.isEmpty ? nil : resolved
@@ -1460,7 +1521,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
                 snapshot.appendSections([0])
                 snapshot.appendItems(displayIDs, toSection: 0)
-                if tailThinkingIndicatorIsVisible {
+                if tailRowIsPresented {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
                 dataSource.apply(snapshot, animatingDifferences: false)
@@ -1470,11 +1531,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         )
         jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
+        refreshVisibleTurnCards()
     }
 
     var qaThinkingIndicatorVisible: Bool { tailThinkingIndicatorIsVisible && !tailThinkingIndicator.isHidden }
     var qaTailIsVirtualDocumentRow: Bool {
-        tailThinkingIndicatorIsVisible &&
+        tailRowIsPresented &&
             collectionView.item(at: IndexPath(item: displayItems.count, section: 0)) is AgentTranscriptTailItem
     }
     var qaTranscriptDocumentHeight: CGFloat {
@@ -1982,10 +2044,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         for index in displayItems.indices where displayStartsTurn(at: index) {
             if case let .row(semanticIndex) = displayItems[index] {
                 boundaries.append((index, rows[semanticIndex].entryID))
+            } else if isTurnCards, let entryID = displayEntryID(at: index) {
+                boundaries.append((index, entryID))
             }
         }
         var starts = boundaries
         if let firstEntryID = displayEntryID(at: 0) { starts.insert((0, firstEntryID), at: 0) }
+        // A turn card prints its own time beside the Ask; the hover reveal is
+        // the row grammar's answer to the same question.
+        if isTurnCards { starts = [] }
         turnStartRowsByEntry = starts.map {
             ($0.row, $0.entryID, entryDatesByID[$0.entryID] ?? nil)
         }
@@ -2000,6 +2067,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         for boundary in boundaries {
             guard let frame = transcriptLayout.layoutAttributesForItem(
                 at: IndexPath(item: boundary.row, section: 0))?.frame else { continue }
+            if isTurnCards {
+                let gap = AgentTurnCardMetrics.scaled(AgentTurnCardMetrics.turnGap, renderContext.pageZoom)
+                let y = frame.minY - gap / 2
+                path.addRect(CGRect(x: frame.minX, y: y, width: frame.width, height: thickness))
+                continue
+            }
             let y = frame.minY - AgentTranscriptLayout.interTurnSpacing / 2
             path.addRect(CGRect(x: inset, y: y, width: width, height: thickness))
         }
@@ -2446,6 +2519,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // intact here is what preserves approved affected-file observations.
             self.toolDetailsByID = Dictionary(uniqueKeysWithValues: details.map { ($0.identity, $0) })
             self.clusterSummaryCache.removeAll(keepingCapacity: true)
+            self.turnCardStatsCache.removeAll(keepingCapacity: true)
             self.refreshVisibleToolDetails()
         }
     }
@@ -2457,13 +2531,13 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// rebuilding the array.
     /// Has the applied snapshot's item list moved since it was last applied?
     private func displayIdentityChanged() -> Bool {
-        lastAppliedTailVisible != tailThinkingIndicatorIsVisible
+        lastAppliedTailVisible != tailRowIsPresented
             || lastAppliedDisplayIDs != displayIDs
     }
 
     private func recordAppliedDisplayIdentity() {
         lastAppliedDisplayIDs = displayIDs
-        lastAppliedTailVisible = tailThinkingIndicatorIsVisible
+        lastAppliedTailVisible = tailRowIsPresented
     }
 
     private func rowFact(at index: Int) -> AgentTranscriptClusterPlanner.RowFact {
@@ -2471,8 +2545,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         var isToolRow = false
         var isFailure = false
         var isLive = false
+        var isDiff = false
         if let block = row.block {
             switch block.payload {
+            case .diff:
+                isDiff = true
             case let .toolCall(payload):
                 isToolRow = true
                 isFailure = payload.status == .failed || payload.status == .interrupted
@@ -2493,7 +2570,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             isLive: isLive,
             startsTurn: Self.startsTurn(rows, at: index),
             id: row.id,
-            isSuperseded: supersededRowIDs.contains(row.id) || chipRunLeaderByFollower[row.id] != nil
+            isSuperseded: supersededRowIDs.contains(row.id) || chipRunLeaderByFollower[row.id] != nil,
+            isUser: row.role == .user,
+            isUserProse: row.role == .user
+                && row.block.map { UserPromptRenderer.supportedKinds.contains($0.kind) } == true,
+            isReasoning: row.entry != nil,
+            isDiff: isDiff
         )
     }
 
@@ -2658,15 +2740,28 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // folds an entire completed turn under one "Worked for …" header,
         // preserving its terminal answer row. Never touches `rows`.
         defer { recomputeDisplayBoundarySignature() }
-        displayItems = AgentTranscriptClusterPlanner.foldTurns(
-            items: clusteredItems,
-            facts: facts,
-            turnRanges: AgentTranscriptClusterPlanner.turnRanges(facts: facts),
-            isExpanded: { [disclosureStateStore, disclosureOwnerID] id in
-                disclosureStateStore.explicitState(
-                    for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
-            }
-        )
+        let isExpanded: (AgentNodeID) -> Bool = { [disclosureStateStore, disclosureOwnerID] id in
+            disclosureStateStore.explicitState(
+                for: ToolDisclosureKey(agentID: disclosureOwnerID, blockID: id)) ?? false
+        }
+        if isTurnCards {
+            // Direction C: the turn is the unit. Replaces the whole-turn
+            // "Worked for …" fold, which turn cards subsume.
+            displayItems = AgentTranscriptClusterPlanner.turnCards(
+                items: clusteredItems,
+                facts: facts,
+                turnRanges: AgentTranscriptClusterPlanner.turnRanges(facts: facts),
+                liveTail: turnIsInFlight,
+                isExpanded: isExpanded
+            )
+        } else {
+            displayItems = AgentTranscriptClusterPlanner.foldTurns(
+                items: clusteredItems,
+                facts: facts,
+                turnRanges: AgentTranscriptClusterPlanner.turnRanges(facts: facts),
+                isExpanded: isExpanded
+            )
+        }
         displayIDs = displayItems.map { item in
             switch item {
             case let .row(index): return rows[index].id
@@ -2679,12 +2774,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         )
         clusterHeadersByID = [:]
         clusterSummaryCache.removeAll(keepingCapacity: true)
+        turnCardStatsCache.removeAll(keepingCapacity: true)
         headerIDByFoldedMemberID = [:]
         clusterMemberIDs = []
         for item in displayItems {
             guard case let .header(header) = item else { continue }
             clusterHeadersByID[header.id] = header
-            guard !header.isExpanded else {
+            guard header.coversMembers else {
+                // An outcome stands for nothing; an opened log or cluster
+                // renders its members behind the rail.
+                guard header.scope != .outcome else { continue }
                 for memberIndex in header.memberIndexes where rows.indices.contains(memberIndex) {
                     clusterMemberIDs.insert(rows[memberIndex].id)
                 }
@@ -2694,6 +2793,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 headerIDByFoldedMemberID[rows[memberIndex].id] = header.id
             }
         }
+        if isTurnCards { rebuildTurnCardRoles() }
     }
 
     /// Marks a tool row as a member of an EXPANDED cluster without otherwise
@@ -2733,6 +2833,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     private func displayStartsTurn(at index: Int) -> Bool {
         guard displayItems.indices.contains(index) else { return false }
+        if isTurnCards {
+            return index > 0 && turnCardRoles.indices.contains(index) && turnCardRoles[index] == .turnHead
+        }
         guard case let .row(semanticIndex) = displayItems[index] else { return false }
         return Self.startsTurn(rows, at: semanticIndex)
     }
@@ -2927,7 +3030,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 var snapshot = NSDiffableDataSourceSnapshot<Int, AgentNodeID>()
                 snapshot.appendSections([0])
                 snapshot.appendItems(displayIDs, toSection: 0)
-                if tailThinkingIndicatorIsVisible {
+                if tailRowIsPresented {
                     snapshot.appendItems([tailThinkingIndicatorID], toSection: 0)
                 }
                 dataSource.apply(snapshot, animatingDifferences: false)
@@ -2937,6 +3040,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
         )
         refreshTurnChrome()
+        // An Ask unclamping or a strip opening keeps its id, so the snapshot
+        // does not reload its item: re-drive the visible cards' models.
+        refreshVisibleTurnCards()
     }
 
     /// The `setThinkingStatusText` move for cluster headers: durations and
@@ -2958,6 +3064,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             }
             view.setSummaryText(summary)
         }
+        refreshVisibleTurnCards()
     }
 
     /// Opens every disclosure the surface offers — reasoning rows, tool rows and
@@ -3006,7 +3113,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             case let .header(header): return header.id
             }
         }
-        if tailThinkingIndicatorIsVisible { expectedIDs.append(tailThinkingIndicatorID) }
+        if tailRowIsPresented { expectedIDs.append(tailThinkingIndicatorID) }
         let snapshotIDs = dataSource.snapshot().itemIdentifiers
         if snapshotIDs != expectedIDs {
             return "snapshot [\(snapshotIDs.count)] diverged from display projection [\(expectedIDs.count)]"
@@ -3019,8 +3126,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             switch item {
             case let .row(index): displayed.insert(rows[index].id)
             case let .header(header):
-                guard !header.isExpanded else { continue }
-                if header.isLive || header.memberIndexes.count >= 2 {
+                guard header.coversMembers else { continue }
+                if header.isLive || header.memberIndexes.count >= 2 || header.scope.isTurnCard {
                     for index in header.memberIndexes { covered.insert(rows[index].id) }
                 } else {
                     return "header \(header.id.rawValue) covers \(header.memberIndexes.count) member(s)"
@@ -3047,6 +3154,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     func seedStoreSanitizedToolDetails(_ records: [AgentToolDetailKey: AgentToolDetailRecord]) {
         toolDetailsByID = records
         clusterSummaryCache.removeAll(keepingCapacity: true)
+        turnCardStatsCache.removeAll(keepingCapacity: true)
         refreshVisibleToolDetails()
     }
 
@@ -3489,6 +3597,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 zoom: zoom
             )
         }
+        refreshVisibleTurnCards(force: true)
     }
 
     /// WS5 positive control. Counts the times the tile actually pushed a NEW
@@ -3528,4 +3637,451 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             return (indexPath.item, id)
         }.sorted { $0.0 < $1.0 }.map(\.1)
     }
+}
+
+// MARK: - Turn cards (`.plans/70` S8, direction C)
+
+/// What one turn amounts to, for the pieces of its card. Built lazily for
+/// cards on screen and cached until the plan or the tool details move.
+struct TurnCardStats: Equatable {
+    var askText = ""
+    var timeText: String?
+    var ticks: [AgentWorkTick] = []
+    var steps = 0
+    var files = 0
+    var failures = 0
+    var errorLine: String?
+    var span: TimeInterval?
+    var answerLead: String?
+    var chips: [AgentTurnOutcomeModel.Chip] = []
+}
+
+extension AgentTranscriptListView {
+    fileprivate typealias Header = AgentTranscriptClusterPlanner.Header
+
+    fileprivate func rebuildTurnCardRoles() {
+        var roles: [TurnCardRole] = []
+        roles.reserveCapacity(displayItems.count)
+        var inLog = false
+        for item in displayItems {
+            switch item {
+            case let .header(header):
+                switch header.scope {
+                case .ask, .foldedTurn:
+                    roles.append(.turnHead)
+                    inLog = false
+                case .workStrip:
+                    roles.append(.strip)
+                    inLog = header.isExpanded
+                case .outcome:
+                    roles.append(.outcome)
+                    inLog = false
+                case .toolCluster, .turn:
+                    roles.append(inLog ? .log : .answer)
+                }
+            case let .row(index):
+                if inLog, cachedRowFacts.indices.contains(index), cachedRowFacts[index].isWork {
+                    roles.append(.log)
+                } else {
+                    inLog = false
+                    roles.append(.answer)
+                }
+            }
+        }
+        turnCardRoles = roles
+    }
+
+    /// The air above a display item. The card's parts sit `cardGap` apart, an
+    /// opened log is dense, and a turn starts after `turnGap` with the rule in
+    /// its middle. Nil is the ordinary row gap (answer → answer).
+    fileprivate func turnCardSpacing(before index: Int) -> CGFloat? {
+        guard index > 0, turnCardRoles.indices.contains(index) else { return nil }
+        let zoom = renderContext.pageZoom
+        let previous = turnCardRoles[index - 1]
+        switch turnCardRoles[index] {
+        case .turnHead:
+            return AgentTurnCardMetrics.scaled(AgentTurnCardMetrics.turnGap, zoom)
+        case .strip, .outcome:
+            return AgentTurnCardMetrics.scaled(AgentTurnCardMetrics.cardGap, zoom)
+        case .log:
+            return AgentTurnCardMetrics.scaled(
+                previous == .strip ? AgentTurnCardMetrics.logGap * 2 : AgentTurnCardMetrics.logGap, zoom)
+        case .answer:
+            return previous == .answer ? nil : AgentTurnCardMetrics.scaled(AgentTurnCardMetrics.cardGap, zoom)
+        }
+    }
+
+    // MARK: Facts
+
+    private func isNewestTurn(_ header: Header) -> Bool {
+        header.turnRange?.upperBound == rows.count
+    }
+
+    private func turnKey(_ header: Header) -> AgentNodeID {
+        guard let range = header.turnRange, rows.indices.contains(range.lowerBound) else { return header.id }
+        return rows[range.lowerBound].id
+    }
+
+    fileprivate func turnCardStats(for header: Header) -> TurnCardStats {
+        let key = turnKey(header)
+        if let cached = turnCardStatsCache[key] { return cached }
+        var stats = TurnCardStats()
+        guard let range = header.turnRange else { return stats }
+        var askBlocks: [AgentBlock] = []
+        var askOpen = true
+        var fileNames = Set<String>()
+        var leadAfterLastStep: String?
+        var firstLead: String?
+        var first: Date?
+        var last: Date?
+        for index in range where rows.indices.contains(index) {
+            let row = rows[index]
+            if let date = entryDatesByID[row.entryID] ?? nil {
+                if first == nil || date < first! { first = date }
+                if last == nil || date > last! { last = date }
+            }
+            if let end = entryEndDatesByID[row.entryID] ?? nil, last == nil || end > last! { last = end }
+            if askOpen, row.role == .user, let block = row.block,
+               UserPromptRenderer.supportedKinds.contains(block.kind),
+               index == range.lowerBound || !Self.startsTurn(rows, at: index) {
+                askBlocks.append(block)
+                continue
+            }
+            askOpen = false
+            guard !supersededRowIDs.contains(row.id), let block = row.block else { continue }
+            switch block.payload {
+            case let .toolCall(payload):
+                let failed = payload.status == .failed
+                stats.steps += 1
+                if failed { stats.failures += 1 }
+                stats.ticks.append(.of(toolName: payload.name, failed: failed))
+                leadAfterLastStep = nil
+            case let .commandOutput(payload):
+                let failed = payload.status == .failed
+                stats.steps += 1
+                if failed { stats.failures += 1 }
+                stats.ticks.append(failed ? .failed : .run)
+                leadAfterLastStep = nil
+            case .diff:
+                // A file change is a step too: presence counts it, and it is
+                // the step the reader most wants to see on the barcode.
+                stats.steps += 1
+                stats.ticks.append(.edit)
+                leadAfterLastStep = nil
+                guard case let .diff(payload) = presentedToolBlock(block).payload else { break }
+                if payload.files.isEmpty {
+                    // The provider's own safe label until (or unless) the file
+                    // list arrives — never a guessed path or count.
+                    let label = Self.firstLine(payload.summary ?? payload.text)
+                    stats.chips.append(.init(
+                        title: label.count > 48 ? String(label.prefix(47)) + "\u{2026}" : label,
+                        added: nil, removed: nil, blockID: block.id))
+                }
+                for file in payload.files {
+                    fileNames.insert(file.displayName)
+                    stats.chips.append(.init(
+                        title: (file.displayName as NSString).lastPathComponent,
+                        added: file.addedLineCount, removed: file.removedLineCount, blockID: block.id))
+                }
+            case .error:
+                if stats.errorLine == nil {
+                    stats.errorLine = Self.firstLine(AgentTranscriptCopyController.plainText(for: [block]))
+                }
+            default:
+                guard row.role == .assistant, UserPromptRenderer.supportedKinds.contains(block.kind) else { break }
+                let text = AgentTranscriptCopyController.plainText(for: [block])
+                if firstLead == nil { firstLead = text }
+                if leadAfterLastStep == nil { leadAfterLastStep = text }
+            }
+        }
+        stats.files = fileNames.count
+        stats.askText = AgentTranscriptCopyController.plainText(for: askBlocks)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if rows.indices.contains(range.lowerBound),
+           let date = entryDatesByID[rows[range.lowerBound].entryID] ?? nil {
+            stats.timeText = Self.hoverTimeFormatter.string(from: date)
+        }
+        if let first, let last, last.timeIntervalSince(first) > 0 { stats.span = last.timeIntervalSince(first) }
+        stats.answerLead = (leadAfterLastStep ?? firstLead).map(Self.firstSentence)
+        turnCardStatsCache[key] = stats
+        return stats
+    }
+
+    static func firstLine(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return line.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The answer's first sentence, for a folded turn's outcome line.
+    static func firstSentence(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        var end = flat.endIndex
+        for terminator in [". ", "! ", "? "] {
+            if let range = flat.range(of: terminator), range.lowerBound < end { end = range.lowerBound }
+        }
+        var sentence = String(flat[..<end])
+        if end < flat.endIndex { sentence += "." }
+        return sentence.count > 120 ? String(sentence.prefix(119)) + "\u{2026}" : sentence
+    }
+
+    private static func workTail(_ stats: TurnCardStats, liveSteps: Int? = nil) -> [String] {
+        let steps = max(stats.steps, liveSteps ?? 0)
+        var parts: [String] = []
+        if steps > 0 { parts.append("\(steps) step\(steps == 1 ? "" : "s")") }
+        if stats.files > 0 { parts.append("\(stats.files) file\(stats.files == 1 ? "" : "s")") }
+        if stats.failures > 0 { parts.append("\(stats.failures) failed") }
+        return parts
+    }
+
+    // MARK: Models
+
+    /// Whether the newest turn is open right now, by the best authority
+    /// available: the tile's presence, else the turn boundary it reported.
+    private var newestTurnIsLive: Bool {
+        if let turnPresence, turnPresence.phase != .idle { return turnPresence.isLive }
+        return turnIsInFlight || (tailThinkingIndicatorIsVisible && !tailIsSettled)
+    }
+
+    /// What the strip says while the turn is open. Never empty: the tile's own
+    /// phase line when it has one, otherwise the presence phase on its clock.
+    private func liveStripText(now: Date = Date()) -> String {
+        let tile = liveStatusText.trimmingCharacters(in: .whitespaces)
+        if !tile.isEmpty { return tile }
+        guard let presence = turnPresence, presence.isLive else { return "Working" }
+        var text: String
+        switch presence.phase {
+        case .starting: text = presence.startupDetail ?? "Starting\u{2026}"
+        case .thinking: text = "Thinking"
+        case let .tool(tool): text = "Running \(ManagedAgentTileNSView.shortToolTitle(tool))"
+        case .writing: text = "Writing"
+        case .idle, .settled, .failed: text = "Working"
+        }
+        if let started = presence.startedAt {
+            text += " \u{00B7} \(ManagedAgentTileNSView.liveElapsedText(now.timeIntervalSince(started)))"
+        }
+        return text
+    }
+
+    fileprivate func stripModel(for header: Header) -> AgentWorkStripModel {
+        let stats = turnCardStats(for: header)
+        let hasWork = !header.memberIndexes.isEmpty
+        var model = AgentWorkStripModel(
+            tone: .done, text: "", ticks: stats.ticks, countText: nil,
+            hasWork: hasWork, isExpanded: header.isExpanded)
+        let newest = isNewestTurn(header)
+        if newest, newestTurnIsLive {
+            let steps = max(stats.steps, turnPresence?.stepCount ?? 0)
+            model.tone = .working
+            model.text = liveStripText()
+            model.countText = steps > 0 ? "\(steps)" : nil
+            return model
+        }
+        if newest, let presence = turnPresence, presence.phase.isTerminal {
+            let duration = presence.settledDuration.map(ManagedAgentTileNSView.settledDurationText)
+            let tail = Self.workTail(stats, liveSteps: presence.stepCount)
+            func joined(_ head: String) -> String { ([head] + tail).joined(separator: " \u{00B7} ") }
+            switch presence.phase {
+            case .settled(.completed):
+                model.tone = .done
+                model.text = joined(duration.map { "Worked \($0)" } ?? "Worked")
+            case .settled(.stoppedByUser):
+                model.tone = .stopped
+                model.text = joined(duration.map { "You stopped after \($0)" } ?? "You stopped")
+            case .settled(.interrupted):
+                model.tone = .stopped
+                model.text = joined(duration.map { "Interrupted after \($0)" } ?? "Interrupted")
+            case .settled(.processLost):
+                model.tone = .failed
+                model.text = (duration.map { "Ended after \($0)" } ?? "Ended")
+                    + " \u{2014} the agent process exited without finishing"
+            case let .failed(message):
+                model.tone = .failed
+                let reason = (message ?? stats.errorLine).map(Self.firstLine)
+                model.text = ([duration.map { "Failed after \($0)" } ?? "Failed"] + (reason.map { [$0] } ?? []))
+                    .joined(separator: " \u{00B7} ")
+            case .idle, .starting, .thinking, .tool, .writing:
+                break
+            }
+            return model
+        }
+        // History: what the document itself can say. A missing timestamp
+        // drops the clause; it is never invented.
+        if let errorLine = stats.errorLine {
+            model.tone = .failed
+            model.text = "Failed \u{00B7} \(errorLine)"
+            return model
+        }
+        model.tone = .done
+        let head = stats.span.map { "Worked \(ManagedAgentTileNSView.settledDurationText($0))" } ?? "Worked"
+        model.text = ([head] + Self.workTail(stats)).joined(separator: " \u{00B7} ")
+        return model
+    }
+
+    fileprivate func askModel(for header: Header) -> AgentTurnAskModel {
+        let stats = turnCardStats(for: header)
+        return AgentTurnAskModel(
+            text: stats.askText, timeText: stats.timeText,
+            isExpanded: header.isExpanded, canFold: !isNewestTurn(header))
+    }
+
+    fileprivate func foldedModel(for header: Header) -> AgentFoldedTurnModel {
+        let stats = turnCardStats(for: header)
+        var parts: [String] = []
+        let tone: AgentTurnTone
+        if let errorLine = stats.errorLine {
+            tone = .failed
+            parts.append("Failed")
+            parts.append(errorLine)
+        } else {
+            tone = .done
+            if let span = stats.span { parts.append(ManagedAgentTileNSView.settledDurationText(span)) }
+            parts.append(contentsOf: Self.workTail(stats))
+            if let lead = stats.answerLead, !lead.isEmpty { parts.append("\u{201C}\(lead)\u{201D}") }
+        }
+        if parts.isEmpty { parts.append("Answered") }
+        let ask = stats.askText.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return AgentFoldedTurnModel(
+            askText: ask, timeText: stats.timeText, tone: tone,
+            outcomeText: parts.joined(separator: " \u{00B7} "))
+    }
+
+    fileprivate func outcomeModel(for header: Header) -> AgentTurnOutcomeModel {
+        AgentTurnOutcomeModel(chips: turnCardStats(for: header).chips)
+    }
+
+    // MARK: Measurement
+
+    fileprivate func turnCardHeight(for header: Header, width: CGFloat) -> CGFloat? {
+        guard header.scope.isTurnCard else { return nil }
+        let zoom = renderContext.pageZoom
+        switch header.scope {
+        case .workStrip:
+            return AgentTurnCardMetrics.stripHeight(zoom: zoom)
+        case .foldedTurn:
+            return AgentTurnCardMetrics.foldedHeight(zoom: zoom)
+        case .ask:
+            let model = askModel(for: header)
+            let key = "\(header.id.rawValue)|\(Int(width.rounded()))|\(zoom.percent)|\(model.isExpanded)|\(model.canFold)|\(model.text.hashValue)|\(model.timeText ?? "")"
+            if let cached = turnCardHeightCache[key] { return cached }
+            let height = AgentTurnAskView.measure(model, width: width, zoom: zoom).height
+            turnCardHeightCache[key] = height
+            return height
+        case .outcome:
+            let model = outcomeModel(for: header)
+            var hasher = Hasher()
+            hasher.combine(model.chips.count)
+            for chip in model.chips {
+                hasher.combine(chip.title)
+                hasher.combine(chip.added)
+                hasher.combine(chip.removed)
+            }
+            let key = "\(header.id.rawValue)|\(Int(width.rounded()))|\(zoom.percent)|\(hasher.finalize())"
+            if let cached = turnCardHeightCache[key] { return cached }
+            let height = max(1, AgentTurnOutcomeView.measuredHeight(for: model, width: width, zoom: zoom))
+            turnCardHeightCache[key] = height
+            return height
+        case .toolCluster, .turn:
+            return nil
+        }
+    }
+
+    // MARK: Presentation
+
+    fileprivate func configureTurnCardItem(_ item: AgentTurnCardItem, header: Header) {
+        switch header.scope {
+        case .ask:
+            let view = item.installAsk()
+            view.apply(id: header.id, model: askModel(for: header), context: renderContext)
+            let foldID = AgentTranscriptClusterPlanner.foldedTurnID(forTurnFirstMember: turnKey(header))
+            view.onToggleMore = { [weak self] in self?.toggleCluster(header.id) }
+            view.onFold = { [weak self] in self?.toggleCluster(foldID) }
+        case .workStrip:
+            let view = item.installStrip()
+            view.apply(id: header.id, model: stripModel(for: header), context: renderContext)
+            view.onToggle = { [weak self] in self?.toggleCluster(header.id) }
+        case .foldedTurn:
+            let view = item.installFolded()
+            view.apply(id: header.id, model: foldedModel(for: header), context: renderContext)
+            view.onOpen = { [weak self] in self?.toggleCluster(header.id) }
+        case .outcome:
+            let view = item.installOutcome()
+            view.apply(id: header.id, model: outcomeModel(for: header), context: renderContext)
+            view.onOpenChip = { [weak self] chip in
+                self?.renderContext.actions.perform(.openDiff(blockID: chip.blockID))
+            }
+        case .toolCluster, .turn:
+            break
+        }
+    }
+
+    /// The `setThinkingStatusText` move for turn cards: the live strip's words
+    /// and every visible card's model are re-driven in place, never through a
+    /// snapshot reload. O(visible cards).
+    func refreshVisibleTurnCards(force: Bool = false) {
+        guard isTurnCards else { return }
+        for case let item as AgentTurnCardItem in collectionView.visibleItems() {
+            if let view = item.stripView, let id = view.stripID, let header = clusterHeadersByID[id] {
+                let model = stripModel(for: header)
+                if force { view.apply(id: id, model: model, context: renderContext) }
+                else if model != view.model { view.setModel(model) }
+            } else if let view = item.askView, let id = view.askID, let header = clusterHeadersByID[id] {
+                let model = askModel(for: header)
+                if force || model != view.model { view.apply(id: id, model: model, context: renderContext) }
+            } else if let view = item.foldedView, let id = view.foldID, let header = clusterHeadersByID[id] {
+                let model = foldedModel(for: header)
+                if force || model != view.model { view.apply(id: id, model: model, context: renderContext) }
+            } else if let view = item.outcomeView, let id = view.outcomeID, let header = clusterHeadersByID[id] {
+                let model = outcomeModel(for: header)
+                if force || model != view.model { view.apply(id: id, model: model, context: renderContext) }
+            }
+        }
+    }
+
+    /// The tile's presence, pushed wherever it repaints its own status. Equal
+    /// values cost nothing.
+    func setTurnPresence(_ presence: AgentTurnPresence?) {
+        guard isTurnCards, turnPresence != presence else { return }
+        turnPresence = presence
+        refreshVisibleTurnCards()
+    }
+
+    // MARK: QA
+
+    /// Every display item with its turn-card role and frame, in display order.
+    var qaTurnCardItemsForChecks: [(id: AgentNodeID, role: TurnCardRole?, scope: AgentTranscriptClusterPlanner.Header.Scope?, frame: CGRect)] {
+        transcriptLayout.prepare()
+        return displayIDs.enumerated().map { index, id in
+            let frame = transcriptLayout.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame ?? .zero
+            let role = turnCardRoles.indices.contains(index) ? turnCardRoles[index] : nil
+            return (id, role, clusterHeadersByID[id]?.scope, frame)
+        }
+    }
+
+    /// The model each visible strip is showing right now.
+    var qaVisibleWorkStripModelsForChecks: [AgentWorkStripModel] {
+        collectionView.visibleItems().compactMap { ($0 as? AgentTurnCardItem)?.stripView?.model }
+    }
+
+    /// The strip model the newest turn WOULD show, whether or not it is on screen.
+    var qaNewestWorkStripModelForChecks: AgentWorkStripModel? {
+        guard let header = displayItems.reversed().compactMap({ item -> Header? in
+            if case let .header(header) = item, header.scope == .workStrip { return header }
+            return nil
+        }).first, isNewestTurn(header) else { return nil }
+        return stripModel(for: header)
+    }
+
+    var qaTurnCardFoldedModelsForChecks: [AgentFoldedTurnModel] {
+        displayItems.compactMap { item in
+            guard case let .header(header) = item, header.scope == .foldedTurn else { return nil }
+            return foldedModel(for: header)
+        }
+    }
+
+    var qaVisibleTurnCardItemsForChecks: [AgentTurnCardItem] {
+        collectionView.visibleItems().compactMap { $0 as? AgentTurnCardItem }
+    }
+
+    var qaTurnCardRolesForChecks: [TurnCardRole] { turnCardRoles }
 }
