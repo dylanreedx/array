@@ -39,6 +39,13 @@ class TileNSView: NSView, TokenThemed {
 
     final func rejoinScene() { hasRetiredFromScene = false }
 
+    /// Called when the view's workspace is parked warm (`.plans/70` S5): it
+    /// leaves the view tree but stays alive for the workspace's return. A view
+    /// that would otherwise do work per external event while nobody can see it
+    /// stops that here and resumes when it is wired again; the default keeps
+    /// running, which is what a terminal or a web view should do.
+    func prepareForParking() {}
+
     // MARK: - Visibility index maintenance
     //
     // A tile's frame is a WORLD frame, and the world plane keeps a spatial index
