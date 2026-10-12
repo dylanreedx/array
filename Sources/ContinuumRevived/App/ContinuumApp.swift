@@ -19213,6 +19213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let coldStartRollupText = productionCanvas.zoneChromeSnapshot(for: zoneId)?.agentRollupText
         let delegate = AppDelegate()
         delegate.canvasView = productionCanvas
+        // The sidebar/agent inputs read the registry from `registryStore` and overlay the
+        // live canvas only for registered projects, as production always has it set.
+        delegate.registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         let agentBrowserEngine = BrowserEngineContext()
         let agentBootController = ZoneRuntimeController(
             projectRoot: projectRoot,
