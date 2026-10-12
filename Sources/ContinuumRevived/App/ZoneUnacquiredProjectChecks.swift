@@ -178,8 +178,12 @@ enum ZoneUnacquiredProjectChecks {
             ghostty: nil,
             browserEngine: browserEngine
         )
-        var unavailableReports: [UUID] = []
-        runtime.onZoneProjectUnavailable = { projectId, _ in unavailableReports.append(projectId) }
+        // The report is read where the user reads it: the app's notification.
+        // Production wires `onZoneProjectUnavailable` in the boot mount.
+        func reportsFarUnavailable() -> Bool {
+            let message = delegate.qaWorkspaceManagementMessage ?? ""
+            return message.contains("Far") && message.contains("unavailable")
+        }
         delegate.qaPrepareForBootMountCheck(
             canvas: canvas, browserEngine: browserEngine, runtime: runtime, registryStore: registryStore)
 
@@ -233,7 +237,7 @@ enum ZoneUnacquiredProjectChecks {
                        "creation must run through the ARMED zone's spawner, not the active "
                        + "project's; got \(String(describing: delegate.qaCreationSpawnerProjectId)) "
                        + "instead of \(projectFar)")
-            try expect(unavailableReports.isEmpty,
+            try expect(!reportsFarUnavailable(),
                        "an acquirable project must not be reported unavailable")
         } else {
             // Locked: refuse rather than land somewhere wrong. `setActiveZone`'s
@@ -244,8 +248,9 @@ enum ZoneUnacquiredProjectChecks {
                        "when the armed zone's project cannot be acquired, creation must REFUSE "
                        + "(nil spawner, so the caller offers the picker) rather than silently use "
                        + "the other project; got \(String(describing: delegate.qaCreationSpawnerProjectId))")
-            try expect(unavailableReports.contains(projectFar),
-                       "an unacquirable project must be reported so the app can say so out loud")
+            try expect(reportsFarUnavailable(),
+                       "an unacquirable project must be reported so the app can say so out loud; "
+                       + "the notification reads \(delegate.qaWorkspaceManagementMessage ?? "nothing")")
         }
     }
 }

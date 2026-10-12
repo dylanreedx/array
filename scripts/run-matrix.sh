@@ -398,6 +398,9 @@ run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
 run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
+# An unreadable canvas.json throws instead of loading as empty, and the store
+# refuses to write over it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 # Worst-case cost of the exact zone-origin correction on the resize input path
 # (it runs per zone per mouseDragged). Registered so the bound is gated, not
 # merely measurable: the leg existed with a failing exit path no gate ran.
@@ -607,6 +610,28 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# Confidence pass S2: a tile dropped into another zone of its own project moves
+# to that zone's layer at its WORLD frame, persists the new stamp, and undoes.
+# Membership used to be re-read from the retired flat snapshot, so after the
+# mount no tile could ever change zone.
+run_app_check .build/debug/Array --zone-layer-move-check
+# Confidence pass S2: a canvas.json that exists and decodes nowhere read as
+# EMPTY; the mount built empty layers over it and the first pan saved that over
+# the file. The project is now unavailable: no layer, no write, a message.
+run_app_check .build/debug/Array --canvas-unreadable-check
+# Confidence pass S2: closing a project zone stranded its tiles. Keep now moves
+# them into the project's remaining (or a fresh) zone unmoved, Delete Tiles
+# deletes them, the canvas re-arms off the closed zone, and a project's last
+# zone closing releases it from the workspace.
+run_app_check .build/debug/Array --zone-close-strand-check
+# Confidence pass S2: tiles stamped with a zone no registered workspace holds
+# (Dylan's harmony/selectus shapes) were hidden forever. The mount now preserves
+# and classifies them and offers Recover, which brings each project's group back
+# into a new zone of its own, layout exact, overlapping nothing.
+run_app_check .build/debug/Array --stranded-tile-recovery-check
+# Confidence pass S2: the layout commit skipped tiles it could place in no file
+# and still reported success. It now fails, the move rolls back, and it says so.
+run_app_check .build/debug/Array --layout-commit-truth-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate
@@ -1099,6 +1124,8 @@ run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check
+run_app_check .build/debug/Array --browser-click-recency-check
+run_app_check .build/debug/Array --language-server-release-check
 run_app_check .build/debug/Array --zone-tier-transition-check
 run_app_check .build/debug/Array --spawn-placement-check
 run_app_check .build/debug/Array --focus-mode-check
@@ -1109,6 +1136,8 @@ run_app_check .build/debug/Array --ticket-queue-tile-check
 run_app_check .build/debug/Array --conductor-queue-tile-check
 run_app_check .build/debug/Array --agent-input-check
 run_app_check .build/debug/Array --diff-tile-check
+run_app_check .build/debug/Array --diff-review-off-main-check
+run_app_check .build/debug/Array --attention-notification-check
 run_app_check .build/debug/Array --file-tree-hardening-check
 run_app_check .build/debug/Array --viewport-sanitize-check
 run_app_check .build/debug/Array --project-lock-check
@@ -1123,7 +1152,7 @@ run_app_check .build/debug/Array --terminal-tmux-ambient-workspace-check
 run_app_check .build/debug/Array --session-observer-check
 run_app_check .build/debug/Array --terminal-tmux-observer-check
 run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
-# These five render a real terminal/Ghostty surface and time out in a headless
+# These render a real terminal/Ghostty surface and time out in a headless
 # sandbox ("waiting for initial real terminal surface"; --session-resume-check
 # ticks ghostty_app_tick until real output appears and times out identically
 # when the display is asleep/locked — proven at base commit edf2486 with no
@@ -1132,13 +1161,16 @@ run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 # visual gate — run the full matrix on a GUI host to cover them). Not fake-green:
 # they are deferred to where they can actually run, and the skip is printed loudly.
 if [[ "${CONTINUUM_SKIP_SURFACE_CHECKS:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
+  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check, --terminal-clipboard-check, --terminal-focus-grab-check, --terminal-cmd-w-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
 else
   run_app_check .build/debug/Array --terminal-tmux-live-integration-check
   run_app_check .build/debug/Array --terminal-theme-fidelity-check
   run_app_check .build/debug/Array --terminal-snapshot-tier-check
   run_app_check .build/debug/Array --terminal-fills-tile-check
   run_app_check .build/debug/Array --session-resume-check
+  run_app_check .build/debug/Array --terminal-clipboard-check
+  run_app_check .build/debug/Array --terminal-focus-grab-check
+  run_app_check .build/debug/Array --terminal-cmd-w-check
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then

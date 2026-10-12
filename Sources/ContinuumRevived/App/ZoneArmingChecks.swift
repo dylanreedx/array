@@ -49,13 +49,17 @@ enum ZoneArmingChecks {
         let zoneA = UUID(uuidString: "00000000-0000-0000-0000-00000000B204")!
         let zoneG = UUID(uuidString: "00000000-0000-0000-0000-00000000B205")!
         let noteA = UUID(uuidString: "00000000-0000-0000-0000-00000000B206")!
+        let projectPc = UUID(uuidString: "00000000-0000-0000-0000-00000000B207")!
+        let zoneC = UUID(uuidString: "00000000-0000-0000-0000-00000000B208")!
+        let zoneA2 = UUID(uuidString: "00000000-0000-0000-0000-00000000B209")!
 
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-zone-arming-\(UUID().uuidString)", isDirectory: true)
         let paRoot = tempRoot.appendingPathComponent("Pa", isDirectory: true)
         let pbRoot = tempRoot.appendingPathComponent("Pb", isDirectory: true)
+        let pcRoot = tempRoot.appendingPathComponent("Pc", isDirectory: true)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
-        for dir in [paRoot, pbRoot, appSupport] {
+        for dir in [paRoot, pbRoot, pcRoot, appSupport] {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         defer { try? fileManager.removeItem(at: tempRoot) }
@@ -74,8 +78,10 @@ enum ZoneArmingChecks {
 
         let projectPaObj = makeProject(id: projectPa, name: "Pa", root: paRoot)
         let projectPbObj = makeProject(id: projectPb, name: "Pb", root: pbRoot)
+        let projectPcObj = makeProject(id: projectPc, name: "Pc", root: pcRoot)
         let storePa = ProjectStore(projectRoot: paRoot)
         let storePb = ProjectStore(projectRoot: pbRoot)
+        let storePc = ProjectStore(projectRoot: pcRoot)
 
         var seedTile = Tile(
             id: noteA, kind: .note, title: "seed",
@@ -90,6 +96,10 @@ enum ZoneArmingChecks {
             tiles: [seedTile], groups: [], lastActiveTileId: noteA))
         try storePb.saveProject(projectPbObj)
         try storePb.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil))
+        try storePc.saveProject(projectPcObj)
+        try storePc.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [], groups: [], lastActiveTileId: nil))
 
@@ -107,8 +117,12 @@ enum ZoneArmingChecks {
         let docA = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             zones: [placement(zoneA, project: projectPa, x: 600, y: 200, color: "blue"),
-                    placement(zoneG, project: nil, x: 4000, y: 200, color: "gray")],
-            zoneZOrder: [zoneA, zoneG],
+                    placement(zoneG, project: nil, x: 4000, y: 200, color: "gray"),
+                    // Far from every camera position below, so neither is in the
+                    // live tier at mount and neither gets a layer then (section 7).
+                    placement(zoneC, project: projectPc, x: -20_000, y: 200, color: "teal"),
+                    placement(zoneA2, project: projectPa, x: -20_000, y: 20_000, color: "pink")],
+            zoneZOrder: [zoneA, zoneG, zoneC, zoneA2],
             lastActiveZoneId: zoneA
         )
         try WorkspaceStore(workspaceId: workspaceWA, applicationSupportDirectory: appSupport).save(docA)
@@ -116,12 +130,14 @@ enum ZoneArmingChecks {
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
         appRegistry.workspaces = [
-            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectPb], createdAt: now, updatedAt: now)
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa, projectPb, projectPc], createdAt: now, updatedAt: now)
         ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWA,
+                         lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectPc, name: "Pc", rootPath: pcRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
@@ -136,6 +152,9 @@ enum ZoneArmingChecks {
             }
             if projectId == projectPb {
                 return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storePb, project: projectPbObj)
+            }
+            if projectId == projectPc {
+                return ZoneRuntimeController(projectRoot: pcRoot, projectStore: storePc, project: projectPcObj)
             }
             throw Failure(message: "unexpected projectId in factory: \(projectId)")
         })
@@ -461,8 +480,115 @@ enum ZoneArmingChecks {
                    "persistence: the armed zone must survive a relaunch; on disk it is "
                    + "\(String(describing: reloaded.lastActiveZoneId))")
 
+        // ==================================================================
+        // 7. A zone reached AFTER the mount gets a LAYER, and an agent created
+        //    in it gets a RECORD.
+        //
+        //    The report: a second zone, an agent tile in it with a blank Home, a
+        //    Home menu that opened nothing and a composer reading "Unavailable".
+        //    The mount builds layers only for zones live at that moment;
+        //    reaching one later acquired its controller and armed it, but built
+        //    no layer, so the spawn installed into the retired flat model, whose
+        //    save then refused: the tile stayed on screen and no agent was
+        //    minted. 5b proved the SCOPE survives a missing layer and never
+        //    spawned; this spawns, through ⌘K's own path.
+        // ==================================================================
+        let priorArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(priorArguments, forName: UserDefaults.argumentDomain) }
+        guard let seedModel = AgentCatalogQAFixture.claude.defaultModel else {
+            throw Failure(message: "the QA claude fixture has no default model to spawn on")
+        }
+        // In-process only: the argument domain outranks the persistent one and is
+        // never written to disk.
+        UserDefaults.standard.setVolatileDomain(priorArguments.merging([
+            AgentHarnessConfig.key: AgentHarness.claudeCode.rawValue,
+            AgentModelConfig.modelKey: seedModel,
+            AgentModelConfig.thinkingKey: "high",
+        ]) { _, new in new }, forName: UserDefaults.argumentDomain)
+        AgentModelCatalog.shared.apply(readiness: .ready, for: .claudeCode)
+        let agentStoreRoot = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        delegate.agentSupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentStoreRoot),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+
+        func spawnAgentThroughPalette(into zoneId: UUID, project: UUID, root: URL,
+                                      store: ProjectStore, route: String) throws {
+            try expect(delegate.qaResolvedCreationScope?.zoneId == zoneId,
+                       "\(route): creation must scope to the zone just reached; got "
+                       + "\(String(describing: delegate.qaResolvedCreationScope?.zoneId))")
+            let before = Set(canvas.allWorkspaceTiles().map(\.id))
+            let modelApplied = delegate.qaPerformPaletteAction(.newManagedAgent)
+            canvas.layoutSubtreeIfNeeded()
+            let spawned = Set(canvas.allWorkspaceTiles().map(\.id)).subtracting(before)
+            guard let tileId = spawned.first, spawned.count == 1 else {
+                throw Failure(message: "\(route): expected exactly one new tile from ⌘K New Agent; got \(spawned.count)")
+            }
+            try expect(canvas.installedZonePlacement(for: zoneId) != nil,
+                       "\(route): the zone has no LAYER after a spawn into it. Its controller was "
+                       + "acquired and it armed, so creation scoped to it, but the tile fell "
+                       + "through to the retired flat model")
+            try expect(modelApplied, "\(route): ⌘K New Agent must report its model applied to the record")
+            try expect(canvas.tileView(for: tileId) is ManagedAgentTileNSView,
+                       "\(route): the agent tile must be findable by `tileView(for:)`; a tile in "
+                       + "the retired flat model is drawn but invisible to it")
+            guard let agentId = delegate.agentSupervisor.agent(forTile: tileId),
+                  let record = delegate.agentSupervisor.records[agentId] else {
+                throw Failure(message: "\(route): THE reported bug. The tile is on screen and no agent "
+                              + "record is bound to it, so its Home is blank, the Home menu opens "
+                              + "nothing and the composer says Unavailable")
+            }
+            try expect(record.projectId == project,
+                       "\(route): the agent must belong to the zone's project; got "
+                       + "\(String(describing: record.projectId))")
+            try expect(URL(fileURLWithPath: record.cwd).resolvingSymlinksInPath().path
+                       == root.resolvingSymlinksInPath().path,
+                       "\(route): the agent's Home must be the zone's project root; got \(record.cwd)")
+            try expect(delegate.agentSupervisor.locationSnapshot(for: agentId) != nil,
+                       "\(route): the Home menu reads the location snapshot; nil opens nothing")
+            guard let persisted = try store.loadCanvas().tiles.first(where: { $0.id == tileId }) else {
+                throw Failure(message: "\(route): the agent tile was not persisted into its project's canvas")
+            }
+            try expect(persisted.zoneId == zoneId,
+                       "\(route): the persisted tile must name its zone; got \(String(describing: persisted.zoneId))")
+            try expect(canvas.tilesInWorldFrames(forZoneId: zoneId)?.first(where: { $0.id == tileId })?.frame
+                       == persisted.frame,
+                       "\(route): canvas.json must hold the WORLD frame the tile is drawn at")
+            guard let zonePlacement = canvas.zonePlacement(for: zoneId) else {
+                throw Failure(message: "\(route): the zone vanished from the canvas")
+            }
+            let rect = CanvasEngine.zoneWorldFrame(zonePlacement)
+            try expect(persisted.frame.x >= rect.x - 0.001 && persisted.frame.y >= rect.y - 0.001
+                       && persisted.frame.x <= rect.x + rect.width + 0.001
+                       && persisted.frame.y <= rect.y + rect.height + 0.001,
+                       "\(route): the persisted WORLD frame (\(persisted.frame.x), \(persisted.frame.y)) "
+                       + "must sit inside the zone (\(rect.x), \(rect.y)) \(rect.width)x\(rect.height)")
+        }
+
+        // Positive control: both zones really are layerless here, or 7 tests nothing.
+        try expect(canvas.installedZonePlacement(for: zoneC) == nil
+                   && canvas.installedZonePlacement(for: zoneA2) == nil,
+                   "fixture: Zc and Za2 must be below the live tier until reached")
+
+        // 7a. The camera: the real delegate chain into `reconcileHydration`, for a
+        //     project nothing has acquired yet.
+        panCameraTo(CGPoint(x: -20_000 + 450, y: 200 + 350))
+        try expect(runtime.qaArmedZoneId == zoneC,
+                   "camera: settling over Zc must arm it; got \(String(describing: runtime.qaArmedZoneId))")
+        try spawnAgentThroughPalette(into: zoneC, project: projectPc, root: pcRoot, store: storePc,
+                                     route: "camera")
+
+        // 7b. A click, with no camera settle, for a second zone of a project whose
+        //     controller already exists. Arming builds no layer (a relaunch could
+        //     not reproduce one); the spawn must.
+        delegate.qaActivateZoneByClick(zoneA2)
+        try expect(runtime.qaArmedZoneId == zoneA2,
+                   "click: clicking Za2 must arm it; got \(String(describing: runtime.qaArmedZoneId))")
+        try spawnAgentThroughPalette(into: zoneA2, project: projectPa, root: paRoot, store: storePa,
+                                     route: "click")
+
         print("ZoneArmingChecks: adding a zone armed it, a spawn landed inside that zone's world "
               + "rect, click/focus/camera all re-armed, a group zone and empty canvas left the "
-              + "arming alone, and the choice persisted")
+              + "arming alone, the choice persisted, and a zone reached after the mount got a "
+              + "layer and its agent a record")
     }
 }

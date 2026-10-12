@@ -158,6 +158,12 @@ if CommandLine.arguments.contains("--command-center-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--unreadable-canvas-store-check") {
+    runUnreadableCanvasStoreChecks()
+    print("UnreadableCanvasStoreChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--document-location-check") {
     runDocumentLocationChecks()
     print("DocumentLocationChecks passed")
@@ -4224,6 +4230,8 @@ do {
     }
 
     try store.saveCanvas(canvas)
+
+    runUnreadableCanvasStoreChecks()
 
     let s1 = TerminalSessionDescriptor(
         id: UUID(),
