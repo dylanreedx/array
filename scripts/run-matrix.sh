@@ -819,6 +819,13 @@ run_app_check .build/debug/Array --workspace-switch-polish-check
 # acquisition and lock; an editor that never answers costs a bounded wait; the
 # titlebar names the target before the work and reverts on failure.
 run_app_check .build/debug/Array --workspace-switch-confidence-check
+# .plans/70 S5: delete, create and rename. ⌘K "Rename X…" asks for the name;
+# deleting the current workspace lands on the most recently used one that
+# mounts (a fresh empty one if none does) and moves its directory to the
+# workspace trash byte for byte; a deleted warm workspace's controllers and
+# locks are released; a created workspace becomes the launch workspace only
+# once mounted; a create whose registry write fails leaves no orphan document.
+run_app_check .build/debug/Array --workspace-lifecycle-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
 # production dispatch entry. Same-named file in two checkouts, dirty draft
 # preserved, world frames at a non-zero zone origin, partial relationship

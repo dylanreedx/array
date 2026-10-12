@@ -3669,6 +3669,22 @@ enum ContinuumApp {
             }
         }
 
+        // .plans/70 S5: workspace delete, create and rename through the entry points
+        // a person uses: ⌘K rename asks, delete lands on the most recent workspace
+        // that mounts and keeps a recoverable copy, a deleted warm workspace's
+        // runtimes are released, create selects only once mounted, no orphans.
+        if CommandLine.arguments.contains("--workspace-lifecycle-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceLifecycleChecks.run()
+                print("ContinuumRevivedWorkspaceLifecycleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-project-scope-check") {
             do {
                 _ = NSApplication.shared
@@ -14947,7 +14963,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             createWorkspaceFromChrome()
             return workspaceRuntime?.workspaceId != before
         case let .renameWorkspace(workspaceId):
-            return renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
+            // Ask, like every other rename route. This renamed to the literal
+            // "Renamed Workspace".
+            return renameWorkspaceFromTopBar(workspaceId: workspaceId)
         case let .deleteWorkspace(workspaceId):
             return deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .switchWorkspace(workspaceId):
@@ -15836,18 +15854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let workspace: WorkspaceEntry
         do {
-            var registry = try registryStore.loadOrEmpty()
-            workspace = registry.createWorkspace(name: trimmed, now: Date())
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            try WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport).save(
-                WorkspaceDocument(
-                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                    zones: [],
-                    zoneZOrder: [],
-                    lastActiveZoneId: nil
-                )
-            )
-            try registryStore.save(registry)
+            workspace = try createEmptyWorkspace(name: trimmed)
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
             setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)", kind: .error)
@@ -15857,6 +15864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Creation and navigation are deliberately reported separately. Once
             // the registry entry and empty document are durable, a switch problem
             // must not tell the user that creation failed or encourage duplicates.
+            // The switch, not the creation, makes it the launch workspace.
             try workspaceRuntime?.switchWorkspace(to: workspace.id)
             setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.", kind: .success)
         } catch {
@@ -15869,15 +15877,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return true
     }
 
-    private func renameWorkspaceFromTopBar(workspaceId: UUID) {
-        guard let registryStore else { return }
+    /// An empty workspace, as one unit: its document, then its registry entry —
+    /// and the document removed again if the entry cannot be saved, so a failed
+    /// create leaves no orphan `workspaces/<id>/`. It is NOT selected for launch;
+    /// the switch into it does that once it has actually mounted.
+    private func createEmptyWorkspace(name: String) throws -> WorkspaceEntry {
+        guard let registryStore else { throw CocoaError(.fileWriteUnknown) }
+        var registry = try registryStore.loadOrEmpty()
+        let workspace = registry.createWorkspace(name: name, now: Date(), selectForLaunch: false)
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
+        try store.save(WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [],
+            zoneZOrder: [],
+            lastActiveZoneId: nil
+        ))
+        do {
+            try registryStore.save(registry)
+        } catch {
+            try? FileManager.default.removeItem(at: store.layout.workspaceDirectory)
+            throw error
+        }
+        return workspace
+    }
+
+    @discardableResult
+    private func renameWorkspaceFromTopBar(workspaceId: UUID) -> Bool {
+        guard let registryStore else { return false }
         do {
             let registry = try registryStore.loadOrEmpty()
-            guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else { return }
-            guard let newName = workspaceRenamePromptProvider?(currentName) ?? promptForWorkspaceRename(currentName: currentName) else { return }
-            _ = renameWorkspace(workspaceId: workspaceId, name: newName)
+            guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else {
+                setWorkspaceManagementMessage("Workspace could not be found.")
+                return false
+            }
+            let newName = workspaceRenamePromptProvider.map { $0(currentName) }
+                ?? promptForWorkspaceRename(currentName: currentName)
+            guard let newName else { return false }
+            return renameWorkspace(workspaceId: workspaceId, name: newName)
         } catch {
             fputs("Rename Workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Rename workspace failed: \(error.localizedDescription)", kind: .error)
+            return false
         }
     }
 
@@ -15972,7 +16013,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let request = WorkspaceDeleteConfirmationRequest(
                 workspaceId: workspaceId,
                 workspaceName: target.name,
-                projectCount: target.projectIds.count,
+                // Owned projects: ownership is the project's own record.
+                projectCount: registry.projects.filter { $0.workspaceId == workspaceId }.count,
                 zoneCount: zoneCount,
                 deletionCopy: Self.workspaceDeleteSemanticsCopy
             )
@@ -15997,11 +16039,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             // The one step that can throw. It runs while the registry on disk still
-            // holds every workspace, so a failure leaves nothing half-done.
-            if deletingCurrent,
-               let nextWorkspaceId = pending.lastActiveWorkspaceId ?? pending.workspaces.first?.id {
-                try workspaceRuntime?.switchWorkspace(to: nextWorkspaceId)
+            // holds every workspace, so a failure leaves nothing half-done. The
+            // next workspace is the most recently used one that can actually be
+            // mounted; one that cannot is skipped rather than failing the delete,
+            // and if none can, a fresh empty workspace is made to land in.
+            if deletingCurrent {
+                try switchAwayFromDeletedWorkspace(workspaceId, candidates: pending.workspacesByRecency(excluding: workspaceId))
             }
+            // Its scene must not stay warm: release its runtimes now.
+            workspaceRuntime?.discardWarmScene(workspaceId: workspaceId)
 
             // `switchWorkspace` saves the registry itself (it commits the selected
             // workspace), so re-read and re-apply the removal to the freshest copy
@@ -16016,14 +16062,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Past the commit point: the workspace IS deleted. Anything that fails
             // from here is cleanup, and must not be reported as a failed delete.
             killAmbientTmuxSessionForDeletedWorkspace(workspaceId: workspaceId)
+            var trashed: URL?
             if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
                 do {
-                    try store.deleteDocument()
+                    trashed = try store.moveDocumentToTrash()
                 } catch {
                     fputs("Delete Workspace: document cleanup failed: \(error)\n", stderr)
                 }
             }
-            setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.", kind: .success)
+            setWorkspaceManagementMessage(
+                "Deleted workspace “\(target.name)”. Projects and project tile data were not deleted"
+                    + (trashed != nil ? "; its layout is kept in the workspace trash." : "."),
+                kind: .success)
             reloadWorkspaceSidebar()
             return true
         } catch {
@@ -16033,6 +16083,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("Delete workspace failed, so “\(workspaceNameForMessage(workspaceId: workspaceId))” was kept: \(error.localizedDescription)", kind: .error)
             reloadWorkspaceSidebar()
             return false
+        }
+    }
+
+    /// Leave the workspace being deleted for the first candidate that mounts.
+    private func switchAwayFromDeletedWorkspace(_ workspaceId: UUID, candidates: [WorkspaceEntry]) throws {
+        guard let workspaceRuntime else { return }
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                try workspaceRuntime.switchWorkspace(to: candidate.id)
+                return
+            } catch {
+                fputs("Delete Workspace: \(candidate.name) could not be opened, trying the next: \(error)\n", stderr)
+                lastError = error
+            }
+        }
+        // Nothing mounts: land in a fresh empty workspace — and if even that
+        // cannot be mounted, take it back out, so a refused delete leaves the
+        // registry exactly as it was.
+        let fresh: WorkspaceEntry
+        do { fresh = try createEmptyWorkspace(name: "Untitled Workspace") } catch { throw lastError ?? error }
+        do {
+            try workspaceRuntime.switchWorkspace(to: fresh.id)
+        } catch {
+            if let registryStore, var registry = try? registryStore.loadOrEmpty() {
+                registry.workspaces.removeAll { $0.id == fresh.id }
+                try? registryStore.save(registry)
+                try? FileManager.default.removeItem(at: WorkspaceStore(
+                    workspaceId: fresh.id,
+                    applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent()
+                ).layout.workspaceDirectory)
+            }
+            throw lastError ?? error
         }
     }
 
