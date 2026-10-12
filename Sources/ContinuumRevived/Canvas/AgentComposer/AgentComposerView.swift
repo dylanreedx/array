@@ -129,6 +129,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// `onSubmissionFinished(false)`. Absent when the submission never reached
     /// the sink at all (a lease or binding failure).
     var onSubmissionRefused: ((IntentRefusal) -> Void)?
+    /// A steer the sink accepted for the turn in flight. The tile shows it in
+    /// the transcript at once rather than when the provider gets to it.
+    var onSteerAccepted: ((AgentPrompt) -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
     // Keep an unbound composer useful as a real surface too. Managed tiles bind
@@ -1376,6 +1379,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 }
                 return
             }
+            if case let .steer(prompt) = intent { self.onSteerAccepted?(prompt) }
             if let submittedTaskContext {
                 self.onAcceptedBoardTask?(submittedTaskContext)
             }

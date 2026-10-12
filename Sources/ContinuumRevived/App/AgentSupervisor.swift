@@ -6485,7 +6485,8 @@ final class AgentSupervisor {
         for id: AgentID,
         offered: [AgentCommandDescriptor] = []
     ) {
-        guard transcriptStore != nil else { return }
+        // No store guard here: `appendLocalNotice` reaches the live tile first
+        // and persists only when a store exists.
         let (title, body) = Self.arrayOwnedCommandNoticeText(
             descriptor, record: records[id], offered: offered)
         appendLocalNotice(id: id, key: "array-command-\(descriptor.id)", title: title, body: body)

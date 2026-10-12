@@ -393,6 +393,9 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
             self?.beginOptimisticSubmission(prompt)
         }
+        v2Composer?.onSteerAccepted = { [weak self] prompt in
+            self?.showAcceptedSteer(prompt)
+        }
         v2Composer?.onSubmissionRefused = { [weak self] refusal in
             self?.pendingSubmissionRefusal = refusal
         }
@@ -636,8 +639,14 @@ final class ManagedAgentTileNSView: TileNSView {
             // a delivered steer) has no composer bubble; show it when it runs.
             if let token = promptEchoObserverToken { supervisor.removePromptEchoObserver(token, for: agentID) }
             promptEchoObserverToken = supervisor.addPromptEchoObserver(for: agentID) { [weak self] prompt in
-                guard self?.attachedAgentID == agentID else { return }
-                self?.appendUserPrompt(prompt)
+                guard let self, self.attachedAgentID == agentID else { return }
+                // A steer already on screen since it was accepted is the same
+                // message, not a second one.
+                if let index = self.inlineSteers.firstIndex(where: { $0.text == prompt.text }) {
+                    self.inlineSteers.remove(at: index)
+                    return
+                }
+                self.appendUserPrompt(prompt)
             }
             // S3: Array's own replies (`/status`, a held prompt that could not
             // go) land in the live transcript as they are written.
@@ -1516,10 +1525,49 @@ final class ManagedAgentTileNSView: TileNSView {
         model.appendUserPrompt(id: id, prompt: prompt)
         // final: true — the user's own words must not wait on the 30Hz streaming gate.
         synchronizeV2Transcript(final: true)
+        // S3: your own message is where the transcript goes, even if you had
+        // scrolled up to read something earlier.
+        transcriptCollectionFixture?.layoutSubtreeIfNeeded()
+        transcriptCollectionFixture?.jumpToLatest()
         transcriptCollectionFixture?.setTurnInFlight(true)
         refreshCompactStatus()
         transcriptCollectionFixture?.setThinkingStatusText("Sending")
         transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
+    }
+
+    /// Steers shown at acceptance and not yet echoed back by the supervisor.
+    private var inlineSteers: [(id: AgentNodeID, text: String)] = []
+
+    /// S3: a steer appears in the transcript the moment it is accepted. The
+    /// supervisor's echo when the provider takes it is then the same message;
+    /// a steer that leaves the queue without being taken is withdrawn.
+    private func showAcceptedSteer(_ prompt: AgentPrompt) {
+        guard let id = AgentNodeID(rawValue: "local-steer-\(UUID().uuidString)") else { return }
+        cancelStreamingMarkupParseTimer()
+        model.appendUserPrompt(id: id, prompt: prompt)
+        inlineSteers.append((id, prompt.text))
+        synchronizeV2Transcript(final: true)
+        transcriptCollectionFixture?.layoutSubtreeIfNeeded()
+        transcriptCollectionFixture?.jumpToLatest()
+        scheduleStreamingMarkupParseTimerIfNeeded()
+    }
+
+    private func withdrawInlineSteersNoLongerPending(_ pending: [AgentSupervisor.PendingSteer]) {
+        guard !inlineSteers.isEmpty else { return }
+        var stillPending = pending.map(\.text)
+        var kept: [(id: AgentNodeID, text: String)] = []
+        var withdrew = false
+        for steer in inlineSteers {
+            if let index = stillPending.firstIndex(of: steer.text) {
+                stillPending.remove(at: index)
+                kept.append(steer)
+            } else {
+                model.withdrawLocalPrompt(id: steer.id)
+                withdrew = true
+            }
+        }
+        inlineSteers = kept
+        if withdrew { synchronizeV2Transcript(final: true) }
     }
 
     /// The local presence before Return armed it, restored if the prompt is
@@ -2210,6 +2258,7 @@ final class ManagedAgentTileNSView: TileNSView {
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
                 v2Composer?.updateQueueRail(supervisor.queueRailState(for: agentID))
+                withdrawInlineSteersNoLongerPending(supervisor.pendingSteers(for: agentID))
             }
             // TR-06: the reply chips are a function of the turn state as well as
             // the document, and queueing moves ONLY the state — it appends no

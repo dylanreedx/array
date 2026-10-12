@@ -33,6 +33,7 @@ func runAgentPresenceChecks() async throws {
     if wants("failures") { summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath)) }
     if wants("silence") { summary.append(try await AgentPresenceChecks.checkSilenceIsModelled(originalPath: originalPath)) }
     if wants("tools") { summary.append(try await AgentPresenceChecks.checkLongToolsStayHonest(originalPath: originalPath)) }
+    if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
@@ -83,7 +84,9 @@ enum AgentPresenceChecks {
             supervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: root),
                 makeRunner: AgentSupervisor.productionRunner,
-                submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+                submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0),
+                // Production gives every supervisor a transcript store.
+                transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
             supervisor.interruptGrace = 3
             let (harness, model): (AgentHarness, String) = switch kind {
             case .claude: (.claudeCode, "anthropic/claude-haiku-4-5-20251001")
@@ -655,5 +658,79 @@ enum AgentPresenceChecks {
         }
         try expect(violations.isEmpty, "long tools must stay honest: " + violations.joined(separator: " | "))
         return "on claude, codex and pi a failed tool mid-turn never turned the status line Failed, a minute into an open tool the tail kept its verb and clock, and the running row carried its own live clock"
+    }
+
+    // MARK: - P1-6 — the user's own actions visibly land
+
+    static func userEntries(_ bench: Bench, containing text: String) -> Int {
+        bench.entryTexts(role: .user).filter { $0.contains(text) }.count
+    }
+
+    static func checkOwnActionsVisiblyLand(originalPath: String) async throws -> String {
+        var violations: [String] = []
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let bench = try Bench(kind, originalPath: originalPath)
+            defer { bench.tearDown() }
+            try await Task.sleep(for: .milliseconds(300))
+
+            // 1. Return scrolls a reader who had scrolled up back to the live edge.
+            let filler = (1...80).map { "Line \($0) of an earlier, long answer." }.joined(separator: "\n\n")
+            bench.tile.ingest(.contentDelta(threadId: bench.tile.qaThreadIdForChecks, turnId: "earlier",
+                                            streamKind: .assistant, delta: filler))
+            bench.tile.ingest(.turnCompleted(threadId: bench.tile.qaThreadIdForChecks, turnId: "earlier",
+                                             outcome: .completed, errorMessage: nil))
+            bench.tile.qaFlushStreamingMarkupForChecks(final: true)
+            try await Task.sleep(for: .milliseconds(400))
+            bench.window.layoutIfNeeded()
+            bench.tile.layoutSubtreeIfNeeded()
+            bench.tile.qaScrollTranscript(toY: 0)
+            guard bench.tile.qaTranscriptForChecks?.qaIsNearBottom == false else {
+                throw Failure(description: "presence: \(kind): the filler did not make the transcript scrollable — the scroll witness would pass vacuously")
+            }
+            var completed = bench.turnCompletedCount
+            try bench.pressReturn("PLAIN hello")
+            bench.window.layoutIfNeeded()
+            if bench.tile.qaTranscriptForChecks?.qaIsNearBottom != true {
+                violations.append("\(kind) scroll: Return left the reader scrolled up, away from their own message")
+            }
+            try await eventually("\(kind): the PLAIN turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+
+            // 2. A steer shows in the transcript the moment it is accepted, and
+            //    once only when the provider later takes it.
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("TOOL work")
+            try await eventually("\(kind): the TOOL turn never became steerable") {
+                bench.supervisor.turnSnapshot(for: bench.id)?.capabilities.canSteer == true
+                    && bench.supervisor.turnPresence(for: bench.id)?.isWorking == true
+            }
+            try bench.pressReturn("change course")
+            try await eventually("\(kind): the steer was never accepted") {
+                ((try? bench.composer.qaDraftText) ?? "x").isEmpty
+            }
+            if userEntries(bench, containing: "change course") != 1 {
+                violations.append("\(kind) steer: an accepted steer was not in the transcript at once (\(userEntries(bench, containing: "change course")) entries)")
+            }
+            try await eventually("\(kind): the steered turn never ended", timeout: 10) {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            if userEntries(bench, containing: "change course") != 1 {
+                violations.append("\(kind) steer: after the provider took it the steer reads \(userEntries(bench, containing: "change course")) times")
+            }
+
+            // 3. Array's own command reply reaches the live tile.
+            let before = bench.entryTexts(role: .system).count
+            let status = await bench.supervisor.accept(.providerCommand(AgentCommandInvocation(
+                descriptorID: "array:status", name: "status", surface: .array)), for: bench.id)
+            try expect(status == .accepted, "\(kind): /status was refused: \(status)")
+            try await Task.sleep(for: .milliseconds(200))
+            if !bench.entryTexts(role: .system).dropFirst(before).contains(where: { $0.contains("Harness:") }) {
+                violations.append("\(kind) /status: the reply never reached the live tile")
+            }
+        }
+        try expect(violations.isEmpty, "the user's own actions must visibly land: " + violations.joined(separator: " | "))
+        return "on claude, codex and pi Return brought a scrolled-up reader to their own message, a steer was in the transcript the moment it was accepted and once after the provider took it, and /status answered in the live tile"
     }
 }
