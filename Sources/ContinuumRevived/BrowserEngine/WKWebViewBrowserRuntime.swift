@@ -221,6 +221,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         self.title = ""
         self.consoleMessageHandlerName = Self.makeConsoleMessageHandlerName(id: id)
         super.init()
+        Self.qaUnterminatedCount += 1
         installConsoleBridge()
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -760,10 +761,15 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         return false
     }
 
+    /// QA: runtimes made and never terminated, process-wide. A spawn that fails
+    /// must not leave one behind (a WKWebView process nothing can reach).
+    private(set) static var qaUnterminatedCount = 0
+
     func terminate(policy: TerminationPolicy) {
         // Order matters: stop loads, drop observers, drop delegates, remove view.
         // Inverting the order risks KVO/delegate callbacks firing into a
         // half-torn-down runtime.
+        if !isTerminated { Self.qaUnterminatedCount -= 1 }
         isTerminated = true
         webView.stopLoading()
         cancelActiveDownloads()

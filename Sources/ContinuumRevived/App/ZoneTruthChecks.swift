@@ -240,9 +240,12 @@ enum ZoneTruthChecks {
     /// QA seam.
     static func runZoneCloseStrand() throws -> URL {
         var manifest: [String: Any] = [:]
-        func closeZone(_ fixture: Fixture, _ zoneId: UUID, choice: NSApplication.ModalResponse) throws {
+        /// `armFirst: false` is the header menu's "Close Zone…", which arms
+        /// nothing: teardown must still reach the closing zone's own project.
+        func closeZone(_ fixture: Fixture, _ zoneId: UUID, choice: NSApplication.ModalResponse,
+                       armFirst: Bool = true) throws {
             let m = try fixture.requireMounted("close")
-            try fixture.armByClick(zoneId)
+            if armFirst { try fixture.armByClick(zoneId) }
             m.delegate.qaZoneCloseResponse = { _ in choice }
             m.canvas.onZoneCloseRequested?(zoneId)
             m.canvas.layoutSubtreeIfNeeded()
@@ -336,7 +339,9 @@ enum ZoneTruthChecks {
             let fixture = try Fixture(label: "close-delete")
             defer { fixture.dispose() }
             try fixture.mount()
-            try closeZone(fixture, Fixture.zoneA1, choice: .alertSecondButtonReturn)
+            // Another project's zone is armed, as after "Close Zone…" from A1's menu.
+            try fixture.armByClick(Fixture.zoneA2)
+            try closeZone(fixture, Fixture.zoneA1, choice: .alertSecondButtonReturn, armFirst: false)
             var m = try fixture.requireMounted("delete")
             for id in a1Members {
                 try expect(m.canvas.tileRecord(for: id) == nil,
@@ -373,6 +378,33 @@ enum ZoneTruthChecks {
                        "close-last: Z5. The project is still owned by the workspace it has no zone in, so adding "
                        + "it elsewhere asks to switch to a workspace that cannot show it")
             manifest["closeLast"] = "released"
+        }
+        // 5. Z6: Keep on a legacy GROUP zone. Its members used to become
+        //    zone-less ambient tiles, which no mount renders: gone after a
+        //    relaunch. The zone must stay, with its tile, across a remount.
+        do {
+            let fixture = try Fixture(label: "close-group")
+            defer { fixture.dispose() }
+            let group = UUID(uuidString: "00000000-0000-0000-0000-0000000067C1")!
+            let member = UUID(uuidString: "00000000-0000-0000-0000-00000067C101")!
+            let store = WorkspaceStore(workspaceId: Fixture.workspaceA, applicationSupportDirectory: fixture.appSupport)
+            var document = try store.load()
+            document.zones.append(ZonePlacement(
+                zoneId: group, projectId: nil, origin: ZonePoint(x: 600, y: 1400), size: ZoneSize(width: 700, height: 400),
+                color: "gray", collapsed: false, hydrationPolicy: .automatic, name: "Group"))
+            var tile = Tile(id: member, kind: .note, title: "grouped", frame: TileFrame(x: 650, y: 1480, width: 240, height: 160),
+                            zPosition: .fromLegacyRank(80), runtimeRef: nil, metadata: TileMetadata(noteId: member))
+            tile.zoneId = group
+            document.ambientTiles.append(tile)
+            try store.save(document)
+            try fixture.mount()
+            try closeZone(fixture, group, choice: .alertFirstButtonReturn, armFirst: false)
+            try fixture.remount(crash: false)
+            let m = try fixture.requireMounted("close-group remount")
+            let kept = m.canvas.tilesInWorldFrames(forZoneId: group)?.first(where: { $0.id == member })
+            try expect(kept?.frame == tile.frame,
+                       "close-group: Z6. The kept group tile vanished after a remount; it is \(String(describing: kept))")
+            manifest["closeGroup"] = "kept"
         }
         return try writeArtifact("zone-close-strand", manifest)
     }
@@ -438,6 +470,38 @@ enum ZoneTruthChecks {
                                       origin: ZonePoint(x: 600, y: 200), size: ZoneSize(width: 1000, height: 700),
                                       color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "peronsal")],
                 zoneZOrder: [orphanZone], lastActiveZoneId: orphanZone))
+        // Copies (G: harmony's file holds 18 of personal's tiles, same ids and
+        // frames). Cedar (B1) owns three notes, bodies and all; Alder (A1) holds
+        // copies of them. And an agent tile in Alder whose session lives in
+        // Cedar's `.array/`. Recovering any of these into Alder would show one
+        // tile, or one agent, twice: they must be left alone and said so.
+        let personalShaped: [(UUID, TileFrame)] = [
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E401")!, TileFrame(x: 5200, y: 300, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E402")!, TileFrame(x: 5460, y: 300, width: 240, height: 160)),
+            (UUID(uuidString: "00000000-0000-0000-0000-00000067E403")!, TileFrame(x: 5200, y: 480, width: 500, height: 200)),
+        ]
+        try append(Fixture.projectB1, personalShaped, zone: orphanZone)   // owner, with note bodies
+        do {
+            let store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+            var canvas = try store.loadCanvas()
+            for (index, row) in personalShaped.enumerated() {
+                var copy = Tile(id: row.0, kind: .note, title: "stranded \(index)", frame: row.1,
+                                zPosition: .fromLegacyRank(60 + index), runtimeRef: nil,
+                                metadata: TileMetadata(noteId: row.0))
+                copy.zoneId = orphanZone
+                canvas.tiles.append(copy)
+            }
+            let agentTile = UUID(uuidString: "00000000-0000-0000-0000-00000067E501")!
+            var agent = Tile(id: agentTile, kind: .managedAgent, title: "agent", frame: TileFrame(x: 5200, y: 800, width: 480, height: 360),
+                             zPosition: .fromLegacyRank(70), runtimeRef: nil, metadata: TileMetadata())
+            agent.zoneId = deadZone
+            canvas.tiles.append(agent)
+            try store.saveCanvas(canvas)
+            try ManagedAgentSessionStore(projectRoot: fixture.projectRoots[Fixture.projectB1]!).upsert(
+                ManagedAgentSessionRecord(tileId: agentTile, agentKind: .shell, status: .running,
+                                          lastSeenAt: Date(timeIntervalSince1970: 1_900_000_000)))
+        }
+        let leftAloneIds = personalShaped.map(\.0) + [UUID(uuidString: "00000000-0000-0000-0000-00000067E501")!]
         let strandedIds = (harmonyShaped + selectusShaped).map(\.0)
         let owner = Dictionary(uniqueKeysWithValues:
             harmonyShaped.map { ($0.0, Fixture.projectA1) } + selectusShaped.map { ($0.0, Fixture.projectA2) })
@@ -448,6 +512,9 @@ enum ZoneTruthChecks {
         try expect(offer.contains("7 tiles are hidden"),
                    "classify: THE reported state. 7 tiles sit in zones no registered document holds and the user "
                    + "is not told; the notification reads \(offer.isEmpty ? "nothing" : offer)")
+        try expect(offer.contains("4 copies of tiles in \u{201C}Cedar\u{201D} are left alone"),
+                   "classify: copies of another project's tiles, and an agent tile whose session is another "
+                   + "project's, must be left alone and said so; the notification reads \(offer)")
         for id in strandedIds + [otherWorkspaceTile] {
             try expect(m.canvas.tileRecord(for: id) == nil, "classify: tile \(id) must not be placed before the user accepts")
         }
@@ -511,6 +578,13 @@ enum ZoneTruthChecks {
         try expect(m.canvas.tileRecord(for: otherWorkspaceTile) == nil
                    && disk(Fixture.projectA1)[otherWorkspaceTile]?.zoneId == Fixture.zoneB1,
                    "recover: a tile of another registered workspace's zone must be left alone")
+        for id in leftAloneIds {
+            try expect(m.canvas.tileRecord(for: id) == nil,
+                       "recover: THE duplicate hazard. Copy \(id) was recovered, so one tile (or agent) now shows twice")
+            try expect(disk(Fixture.projectA1)[id]?.zoneId != nil
+                       && m.runtime.document.zones.allSatisfy { $0.zoneId != disk(Fixture.projectA1)[id]?.zoneId },
+                       "recover: copy \(id) must stay untouched on disk")
+        }
 
         try fixture.remount(crash: false)
         m = try fixture.requireMounted("stranded remount")
@@ -577,5 +651,66 @@ enum ZoneTruthChecks {
         let message = m.delegate.qaWorkspaceManagementMessage ?? ""
         try expect(message.contains("couldn't be saved"), "the failure must be shown; the notification reads \(message)")
         return try writeArtifact("layout-commit-truth", ["outcome": "\(outcome)"])
+    }
+
+    // MARK: - --refused-spawn-teardown-check
+
+    /// A spawn that cannot be placed or persisted must leave nothing behind. A
+    /// refused browser spawn kept its WKWebView process alive with nothing to
+    /// reach it, and a spawn whose canvas write failed left its tile drawn with
+    /// no record on disk: it vanished on the next launch, its runtime with it.
+    static func runRefusedSpawnTeardown() throws -> URL {
+        // A. Refused outright: the armed zone's project is unavailable, so no
+        //    layer exists to install into.
+        do {
+            let fixture = try Fixture(label: "refused-spawn")
+            defer { fixture.dispose() }
+            let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
+            var json = try JSONSerialization.jsonObject(with: Data(contentsOf: layout.canvasFile)) as! [String: Any]
+            var tiles = json["tiles"] as! [[String: Any]]
+            tiles[0]["kind"] = "futureKind"
+            json["tiles"] = tiles
+            try JSONSerialization.data(withJSONObject: json).write(to: layout.canvasFile)
+            try? FileManager.default.removeItem(at: layout.backupsDirectory)
+            try fixture.mount()
+            let m = try fixture.requireMounted("refused-spawn")
+            try fixture.armByClick(Fixture.zoneA2)
+            let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+            let live = WKWebViewBrowserRuntime.qaUnterminatedCount
+            _ = m.delegate.qaPerformPaletteAction(.newBrowser)
+            try expect(Set(m.canvas.allWorkspaceTiles().map(\.id)) == before,
+                       "refused: a refused browser spawn must not add a tile")
+            try expect(WKWebViewBrowserRuntime.qaUnterminatedCount == live,
+                       "refused: a refused browser spawn leaked its web view runtime "
+                       + "(\(WKWebViewBrowserRuntime.qaUnterminatedCount - live) left running)")
+        }
+        // B. Installed, then the canvas write failed.
+        do {
+            let fixture = try Fixture(label: "failed-spawn")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            let m = try fixture.requireMounted("failed-spawn")
+            try fixture.armByClick(Fixture.zoneA1)
+            fixture.drain()
+            let root = fixture.projectRoots[Fixture.projectA1]!
+            let store = ProjectStore(projectRoot: root)
+            let browserRowsBefore = ((try? store.tryLoadBrowserState()) ?? nil)?.tiles.count ?? 0
+            let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+            let live = WKWebViewBrowserRuntime.qaUnterminatedCount
+            // Write 1 is the browser-state row, write 2 the canvas.
+            StoreFileWriter.install(.init(fault: .failWrite(2), scope: root))
+            _ = m.delegate.qaPerformPaletteAction(.newBrowser)
+            StoreFileWriter.uninstall()
+            let added = Set(m.canvas.allWorkspaceTiles().map(\.id)).subtracting(before)
+            try expect(added.isEmpty,
+                       "failed: THE ghost. A spawn whose canvas write failed left tile(s) \(added) on the canvas "
+                       + "with no record on disk")
+            try expect(WKWebViewBrowserRuntime.qaUnterminatedCount == live,
+                       "failed: the failed browser spawn leaked its web view runtime")
+            let browserRowsAfter = ((try? store.tryLoadBrowserState()) ?? nil)?.tiles.count ?? 0
+            try expect(browserRowsAfter == browserRowsBefore,
+                       "failed: the failed spawn left a browser-state row for a tile that does not exist")
+        }
+        return try writeArtifact("refused-spawn-teardown", ["ok": true])
     }
 }

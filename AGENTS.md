@@ -152,8 +152,11 @@ in checks only; a live app whose probe found nothing offers nothing.
    The canvas has TWO models for project tiles. At boot the flat
    `canvasState.tiles` (WORLD frames) owns the active project; once
    `WorkspaceRuntime` has called `setZones`, the active project's tiles live in a
-   `ZoneLayer` (ZONE-LOCAL frames) and the flat collection still holds the
-   DEPARTED project's. A spawn that ignores this installs into a stale model,
+   `ZoneLayer` (ZONE-LOCAL frames). Since the confidence pass (S2),
+   `retireFlatCompatibilityScene` empties the flat collection, and once it is
+   retired `installProjectTile` refuses a zone with no layer (`.unplaced`)
+   instead of installing flat; a spawn's scope lookup builds the missing layer.
+   Before that, a spawn that ignored this installed into a stale model,
    frames the tile against a zone that is no longer on screen, and persists it
    through the wrong project's store — this is exactly what file opening did
    until `.plans/15`. Use `CanvasNSView.installProjectTile` and
@@ -161,10 +164,8 @@ in checks only; a live app whose probe found nothing offers nothing.
 
    **Corrected 2026-08-22 (`.plans/46`), verified at `09de0b0`.** This hazard
    used to say terminal, note, browser and agent spawns were unmigrated. **All
-   four are migrated.** The remaining production spawns on the stale flat path
-   are **`spawnRunArtifacts`** (`TileSpawner.swift:2262`, the sole surviving
-   caller of `makePlacement` at `:2246`) and **`spawnDiffReviewFromPalette`**
-   (`ContinuumApp.swift:13505`). The `installInitial*` boot walk
+   four are migrated**, and so, since then, are `spawnRunArtifacts` and
+   `spawnDiffReviewFromPalette` (`makePlacement` no longer exists). The `installInitial*` boot walk
    (`ContinuumApp.swift:4053-4075`) and its `TileSpawner` helpers
    (`installNoteTile`, `installFileTile`, `installRunArtifactsTile`) are
    deliberately flat and boot-only.
@@ -210,12 +211,13 @@ in checks only; a live app whose probe found nothing offers nothing.
    **What a new tile kind owes.** Add it to `makeHydratedTileView` if it can be
    built from the persisted `Tile` alone; otherwise to Phase B, which needs the
    layer installed first, must go through `retireOrphanedRuntimes` so one tile
-   can never own two runtimes, and must not re-tidy the zone
-   (`withAutoLayoutSuppressed`). Everything resolves through
+   can never own two runtimes, and must not re-tidy the zone (use
+   `materializeProjectTile`, which moves nothing). Everything resolves through
    `controller(for: projectId)`, never the active project. Do NOT share the
    `installInitial*` boot walk: it mints missing `noteId`s and writes the canvas
    as a side effect, which a render path must not repeat. Still unhydrated after
-   a switch: `browserInspector`, ticket/conductor queue, diff review.
+   a switch: `browserInspector` (ticket/conductor queue and diff review are built
+   in Phase A).
 
    **Three invariants that now hold, and that new code must not break.**
 
