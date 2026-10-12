@@ -6408,6 +6408,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let parked = zoneLayers
         for layer in parked {
             for view in layer.tileViews.values {
+                view.prepareForParking()
                 focusBroker?.unregister(view.focusSurfaceID)
                 releaseSurfaceResidency(of: view)
                 view.removeFromSuperview()

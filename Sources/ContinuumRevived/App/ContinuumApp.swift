@@ -17967,7 +17967,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // An unbound or unavailable tile is wired too: `wireManagedAgentTile` gives
         // it its explicit state and never mints for a tile this process did not
         // create (hazard 10).
-        for tile in layer.tiles where wiresAgents && tile.kind == .managedAgent {
+        // A warm re-attach wires only the agent tiles that let go of their agent
+        // when they were parked; a cold hydration wires them all.
+        for tile in layer.tiles where tile.kind == .managedAgent {
+            if !wiresAgents, (canvas.tileView(for: tile.id) as? ManagedAgentTileNSView)?.isAttachedToAgent != false {
+                continue
+            }
             wireManagedAgentTile(tile.id)
         }
 

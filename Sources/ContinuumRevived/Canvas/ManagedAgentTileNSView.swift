@@ -990,6 +990,17 @@ final class ManagedAgentTileNSView: TileNSView {
         detach()
     }
 
+    /// A parked agent tile does no per-event view work: it lets go of its event
+    /// subscription and observers (the agent keeps running in the supervisor)
+    /// and the workspace's return re-attaches it from the supervisor's
+    /// transcript snapshot — the same view object, not a rebuilt one. `detach`
+    /// is idempotent, so an eviction after a park cancels nothing twice.
+    override func prepareForParking() {
+        detach()
+    }
+
+    var isAttachedToAgent: Bool { attachedAgentID != nil }
+
     func detach() {
         prepareStreamingMarkupForTeardown(final: true)
         // Detach is an immediate visual/lifecycle boundary: a retained transcript

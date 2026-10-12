@@ -2126,6 +2126,15 @@ final class WorkspaceRuntime {
         if let warm {
             targetAcquired = warm.acquiredProjectIds
             layers = warm.layers
+            // The document is the truth for each zone; a layer keeps the placement
+            // and render model it was BUILT with, and `setZones` installs Model B
+            // from them. Without this a Home or name changed after the cold mount
+            // drew stale on the way back and the next save wrote it back to disk.
+            for layer in layers {
+                guard let zone = targetDocument.zones.first(where: { $0.zoneId == layer.placement.zoneId }) else { continue }
+                layer.placement = zone
+                layer.renderModel = Self.renderModel(for: zone, registry: appRegistry)
+            }
         } else {
             let plan = ZoneHydrationOrchestrator.plan(
                 zones: targetZones,
