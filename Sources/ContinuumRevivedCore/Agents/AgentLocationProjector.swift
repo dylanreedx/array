@@ -87,6 +87,11 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// The supervisor stores it keyed by HARNESS, never on an `AgentRecord`.
     /// Not a location fact: the projector ignores it.
     case accountQuota(AgentAccountQuotaSnapshot)
+    /// S3 — the provider is retrying a failed request (claude `api_retry`,
+    /// codex `error` with `willRetry`, pi `auto_retry_start`); nil when it says
+    /// the retry is over (pi `auto_retry_end`). Turn presence, not location:
+    /// the projector ignores it.
+    case providerRetry(AgentTurnPresence.Retry?)
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -453,6 +458,10 @@ public struct AgentLocationProjector: Sendable {
             // An account-scoped quota reading is not a Home / Where / What fact,
             // and it is not this agent's state at all — the supervisor files it
             // by harness. Same shape as `.threadId`.
+            break
+
+        case .providerRetry:
+            // Turn presence (`AgentTurnPresence.noteRetry`), not location.
             break
         }
     }

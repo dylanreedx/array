@@ -668,6 +668,8 @@ final class ManagedAgentTileNSView: TileNSView {
             // producing any runtime EVENT, so nothing else in this tile would
             // repaint it.
             if case .accountQuota = observation { self?.refreshCompactStatus() }
+            // S3: a retry changes what the tail says without any runtime event.
+            if case .providerRetry = observation { self?.refreshCompactStatus() }
         }
         hydrateManagedImagesFromDocument()
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
@@ -1777,7 +1779,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 accountQuota: currentAccountQuota(),
                 enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(
+            transcriptCollectionFixture?.setThinkingStatusText(presenceTailOverride(now: now) ?? Self.tailStatusText(
                 for: presented.activity, liveToolVerb: liveToolVerb?.text,
                 startupDetail: currentPresence.startupDetail))
             syncCompactStatusTick(for: presented.activity)
@@ -1826,6 +1828,42 @@ final class ManagedAgentTileNSView: TileNSView {
     private func cancelCompactStatusTick() {
         compactStatusTickTimer?.invalidate()
         compactStatusTickTimer = nil
+    }
+
+    /// What the tail says instead of the phase when the provider's silence is
+    /// the news: a retry it announced ("Retrying (2/5) in 3s"), or a minute
+    /// with no output while no tool is running ("No output for 1m · still
+    /// running" — calm, not a failure; a running tool may legitimately be
+    /// quiet and keeps its own clock).
+    private func presenceTailOverride(now: Date) -> String? {
+        let presence = currentPresence
+        guard presence.isLive else { return nil }
+        if let retry = presence.retry {
+            var text = "Retrying"
+            if let maximum = retry.maxAttempts {
+                text += " (\(retry.attempt)/\(maximum))"
+            } else {
+                text += " (attempt \(retry.attempt))"
+            }
+            if let delay = retry.delay {
+                let remaining = Int((delay - now.timeIntervalSince(retry.observedAt)).rounded(.up))
+                if remaining > 0 { text += " in \(remaining)s" }
+            }
+            return text
+        }
+        if case .tool = presence.phase { return nil }
+        guard let quiet = presence.quietInterval(now: now), quiet >= Self.quietThreshold else { return nil }
+        return "No output for \(Self.quietDurationText(quiet)) · still running"
+    }
+
+    static let quietThreshold: TimeInterval = 60
+
+    /// "1m", "12m", "1h 5m" — silence is read in minutes.
+    static func quietDurationText(_ interval: TimeInterval) -> String {
+        let minutes = max(1, Int(interval) / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(minutes / 60)h" : "\(minutes / 60)h \(remainder)m"
     }
 
     /// The compact row's session/turn facts, projected from `currentPresence`

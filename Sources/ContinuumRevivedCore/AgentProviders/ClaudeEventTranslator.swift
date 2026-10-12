@@ -131,6 +131,17 @@ public struct ClaudeEventTranslator {
                     observedAt: now()
                 ))]
             }
+            if subtype == "api_retry" {
+                // S3: a request claude is retrying is the turn's status, not
+                // silence ("Retrying (2/10) in 3s").
+                let attempt = Self.intValue(object["attempt"]) ?? 1
+                let maximum = Self.intValue(object["max_retries"]) ?? Self.intValue(object["maxRetries"])
+                let delayMs = Self.doubleValue(object["retry_delay_ms"]) ?? Self.doubleValue(object["retryDelayMs"])
+                onRuntimeObservation?(.providerRetry(AgentTurnPresence.Retry(
+                    attempt: attempt, maxAttempts: maximum,
+                    delay: delayMs.map { $0 / 1000 }, observedAt: now())))
+                return []
+            }
             guard subtype == "init" else { return [] }
             if let id = object["session_id"] as? String {
                 threadId = id

@@ -79,6 +79,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     private var translator: PiEventTranslator
     private var started = false
     private var stopRequested = false
+    private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
     /// Signalled by the event stream when the in-flight turn reaches
     /// `.turnCompleted`. One at a time -- `run` is documented (like the other
     /// two runners) as blocking until its own turn finishes; the supervisor
@@ -143,9 +144,15 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         translator.onToolExecutionEnded = { [weak self] toolCallId in
             self?.hostToolReturnedOnQueue(toolCallId: toolCallId)
         }
-        transport.onExit = { [weak self] _ in
+        transport.onExit = { [weak self] code in
             self?.queue.sync {
                 guard let self else { return }
+                // S3 (N3): the session process left between turns, unasked.
+                if self.turnSemaphore == nil, self.compactionSemaphore == nil, !self.stopRequested,
+                   let handler = self.idleExitHandler {
+                    let tail = self.transport.stderrTail.summary
+                    DispatchQueue.global(qos: .utility).async { handler(code, tail, false) }
+                }
                 if let semaphore = self.turnSemaphore {
                     // Let the pipe's last bytes land before reading the tail.
                     Thread.sleep(forTimeInterval: 0.05)
@@ -685,3 +692,11 @@ extension PiRpcAgentRunner: ObservedRunReporting {
 extension PiRpcAgentRunner: HostToolBridging {}
 
 #endif  // os(macOS)
+
+#if os(macOS)
+extension PiRpcAgentRunner: AgentIdleExitReporting {
+    public func observeIdleExit(_ handler: @escaping @Sendable (Int32, String?, Bool) -> Void) {
+        queue.sync { idleExitHandler = handler }
+    }
+}
+#endif

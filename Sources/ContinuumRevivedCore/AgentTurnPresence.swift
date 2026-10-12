@@ -211,6 +211,13 @@ public struct AgentTurnPresence: Equatable, Sendable {
         lastProviderActivityAt = retry.observedAt
     }
 
+    /// The provider said its retry is over; its next output says how it went.
+    public mutating func clearRetry(at now: Date) {
+        guard retry != nil else { return }
+        retry = nil
+        if isLive { lastProviderActivityAt = now }
+    }
+
     /// Provider output that carries no event (a stderr line, a heartbeat).
     public mutating func noteProviderActivity(at now: Date) {
         guard isLive else { return }

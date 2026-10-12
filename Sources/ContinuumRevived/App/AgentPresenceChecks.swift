@@ -23,9 +23,16 @@ func runAgentPresenceChecks() async throws {
         else { unsetenv("CONTINUUM_CODEX_TRANSPORT") }
     }
     var summary: [String] = []
-    summary.append(try await AgentPresenceChecks.checkSpawnWindowNeverReadsIdle(originalPath: originalPath))
-    summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath))
-    summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath))
+    // CONTINUUM_PRESENCE_SECTIONS=silence,refusals… runs a subset (for a RED
+    // probe against older code); the matrix runs every section.
+    let only = ProcessInfo.processInfo.environment["CONTINUUM_PRESENCE_SECTIONS"]
+        .map { Set($0.split(separator: ",").map(String.init)) }
+    func wants(_ name: String) -> Bool { only?.contains(name) ?? true }
+    if wants("spawn") { summary.append(try await AgentPresenceChecks.checkSpawnWindowNeverReadsIdle(originalPath: originalPath)) }
+    if wants("refusals") { summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath)) }
+    if wants("failures") { summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath)) }
+    if wants("silence") { summary.append(try await AgentPresenceChecks.checkSilenceIsModelled(originalPath: originalPath)) }
+    if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -421,5 +428,156 @@ enum AgentPresenceChecks {
         }
         try expect(violations.isEmpty, "failures must say what happened: " + violations.joined(separator: " | "))
         return "an expired login on claude, codex and pi each showed one error row with the provider's own 401 and read Failed; a CLI that died mid-turn showed its stderr in one error row, and one that vanished without a result said the process left — neither ever read 'You stopped'"
+    }
+
+    // MARK: - P1-4 — silence, retries and a process that leaves are said out loud
+
+    static func checkSilenceIsModelled(originalPath: String) async throws -> String {
+        var violations: [String] = []
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let bench = try Bench(kind, originalPath: originalPath)
+            defer { bench.tearDown() }
+            try await Task.sleep(for: .milliseconds(300))
+
+            // A provider retry is the turn's status.
+            var completed = bench.turnCompletedCount
+            try bench.pressReturn("RETRY please")
+            do {
+                try await eventually("", timeout: 4) { bench.tile.qaTailStatusText.hasPrefix("Retrying (2/5)") }
+            } catch {
+                violations.append("\(kind) retry: the tail never said 'Retrying (2/5)', it read '\(bench.tile.qaTailStatusText)'")
+            }
+            try await eventually("\(kind): the RETRY turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+
+            // A minute of silence with no tool open reads "No output for 1m".
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("LONG think")
+            try await eventually("\(kind): the LONG turn never started") {
+                bench.supervisor.turnPresence(for: bench.id)?.isWorking == true
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            bench.tile.qaRefreshLocation(at: Date())
+            let fresh = bench.tile.qaTailStatusText
+            bench.tile.qaRefreshLocation(at: Date().addingTimeInterval(65))
+            let quiet = bench.tile.qaTailStatusText
+            if fresh.hasPrefix("No output") {
+                violations.append("\(kind) heartbeat: a turn that just spoke already reads '\(fresh)'")
+            }
+            if quiet != "No output for 1m · still running" {
+                violations.append("\(kind) heartbeat: after 65 s of silence the tail read '\(quiet)'")
+            }
+            _ = await bench.supervisor.accept(.stop, for: bench.id)
+            try await eventually("\(kind): the LONG turn never stopped") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+
+            // A session process that leaves between turns says so (claude and
+            // pi keep one; codex starts a process per turn, so has none to lose).
+            guard kind != .codex else { continue }
+            completed = bench.turnCompletedCount
+            let spawnsBefore = bench.spawns
+            try bench.pressReturn("EXITIDLE now")
+            try await eventually("\(kind): the EXITIDLE turn never ended") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+            do {
+                try await eventually("", timeout: 4) {
+                    bench.entryTexts(role: .system).contains {
+                        $0.contains("exited while idle") && $0.contains("session store is unreadable")
+                    }
+                }
+            } catch {
+                violations.append("\(kind) idle exit: no notice said the session process left; system entries \(bench.entryTexts(role: .system).suffix(2))")
+            }
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("PLAIN again")
+            do {
+                try await eventually("", timeout: 8) {
+                    bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+                        && bench.spawns > spawnsBefore
+                }
+            } catch {
+                violations.append("\(kind) idle exit: the next message did not start a fresh process (spawns \(bench.spawns))")
+            }
+        }
+        try expect(violations.isEmpty, "silence must be modelled: " + violations.joined(separator: " | "))
+        return "claude, codex and pi each read 'Retrying (2/5)' through a provider retry and 'No output for 1m · still running' after a quiet minute with no tool open; a claude or pi session process that left between turns said so with its stderr, and the next message started a fresh one"
+    }
+
+    /// N1 — a turn the provider starts on its own after a Stop must not inherit
+    /// that Stop. It used to: the leftover flag disarmed the no-result safety
+    /// net, and a runner that returned without a result left the tile Working
+    /// with no runner, forever.
+    static func checkUnsolicitedTurnAfterStopSettles() async throws -> String {
+        // Steering, like every production session runner: Stop INTERRUPTS it
+        // and the session stays in the idle pool, which is where claude's
+        // promoted steer becomes an unsolicited turn.
+        final class UnsolicitedAfterStopRunner: AgentUnsolicitedTurnReporting, AgentSteeringRunning, @unchecked Sendable {
+            private let lock = NSLock()
+            private let released = DispatchSemaphore(value: 0)
+            private var pending = false
+            private var unsolicitedHandler: (@Sendable () -> Void)?
+            private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
+            var acceptsSteerNow: Bool { lock.withLock { liveHandler != nil } }
+            var hasBackgroundWork: Bool { false }
+            func steer(_ prompt: AgentPrompt, id: UUID) throws { throw AgentSteerNotAccepted("check") }
+            func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void) {}
+            func interrupt() throws {
+                // The provider promoted something to its own next turn just as
+                // the user stopped this one.
+                let handler = lock.withLock { () -> (@Sendable (AgentRuntimeEvent) -> Void)? in
+                    pending = true
+                    return liveHandler
+                }
+                handler?(.turnCompleted(threadId: "provider", turnId: "prompted", outcome: .interrupted, errorMessage: nil))
+                released.signal()
+            }
+            var keepsSessionAliveBetweenTurns: Bool { true }
+            var canAcceptAnotherTurn: Bool { true }
+            var hasUnsolicitedTurn: Bool { lock.withLock { pending } }
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                lock.withLock { liveHandler = onEvent }
+                onEvent(.turnStarted(threadId: "provider", turnId: "prompted"))
+                released.wait()
+                lock.withLock { liveHandler = nil }
+            }
+            func stop() { released.signal() }
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+            var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+            func observeUnsolicitedTurns(_ handler: @escaping @Sendable () -> Void) {
+                lock.withLock { unsolicitedHandler = handler }
+            }
+            func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                lock.withLock { pending = false }
+                onEvent(.turnStarted(threadId: "provider", turnId: "unsolicited"))
+                // …and the process leaves without a result.
+            }
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-n1-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = UnsolicitedAfterStopRunner()
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root), makeRunner: { _ in runner })
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        defer { supervisor.stopAll() }
+        try expect(supervisor.send("go", to: id), "N1: the prompt was refused")
+        try await eventually("N1: the prompted turn never started") { supervisor.turnSnapshot(for: id)?.state == .working }
+        try expect(await supervisor.accept(.stop, for: id) == .accepted, "N1: Stop was refused")
+        // The interrupt lands, the session returns to the pool, the provider's
+        // own next turn is adopted and ends without a result.
+        try? await eventually("", timeout: 3) {
+            !supervisor.isRunning(id) && supervisor.turnPresence(for: id)?.submission ?? 0 >= 2
+                && supervisor.turnPresence(for: id)?.phase.isTerminal == true
+        }
+        let state = supervisor.turnSnapshot(for: id)?.state
+        try expect(state != .working && !supervisor.isRunning(id),
+                   "N1: an unsolicited turn after a Stop that ended without a result left the agent \(String(describing: state)) (running \(supervisor.isRunning(id))) — stuck Working with no runner")
+        try expect(supervisor.turnPresence(for: id)?.settleCause == .processLost,
+                   "N1: the unsolicited turn's end must read as the process leaving, got \(String(describing: supervisor.turnPresence(for: id)?.phase))")
+        return "an unsolicited turn after a Stop that ended without a result settled as process-lost instead of Working forever"
     }
 }

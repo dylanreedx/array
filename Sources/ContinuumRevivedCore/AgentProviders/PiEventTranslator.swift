@@ -181,6 +181,20 @@ public struct PiEventTranslator {
         case "agent_start":
             return beginRun()
 
+        case "auto_retry_start":
+            // S3: pi is retrying a failed request; the turn says so.
+            let attempt = Self.intValue(object["attempt"]) ?? 1
+            let maximum = Self.intValue(object["maxAttempts"])
+            let delayMs = (object["delayMs"] as? NSNumber)?.doubleValue
+            onRuntimeObservation?(.providerRetry(AgentTurnPresence.Retry(
+                attempt: attempt, maxAttempts: maximum,
+                delay: delayMs.map { $0 / 1000 }, observedAt: now())))
+            return []
+
+        case "auto_retry_end":
+            onRuntimeObservation?(.providerRetry(nil))
+            return []
+
         case "compaction_start":
             pendingCompactionTrigger = AgentCompactionTrigger(
                 providerValue: object["reason"] as? String)

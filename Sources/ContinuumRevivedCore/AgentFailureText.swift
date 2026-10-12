@@ -95,3 +95,13 @@ public final class AgentStderrTail: @unchecked Sendable {
     /// `AgentFailureText.stderrTail` of what has been captured.
     public var summary: String? { AgentFailureText.stderrTail(text) }
 }
+
+/// A session runner whose process outlives its turns (claude's stream-json
+/// session, pi's rpc session) and can tell when that process went away while
+/// no turn was running and nobody asked it to.
+public protocol AgentIdleExitReporting: AnyObject {
+    /// `handler` runs off the runner's queue with the exit code, the stderr
+    /// tail, and whether background work (a background job or subagent) was
+    /// still running when the process left.
+    func observeIdleExit(_ handler: @escaping @Sendable (_ exitCode: Int32, _ stderrTail: String?, _ hadBackgroundWork: Bool) -> Void)
+}

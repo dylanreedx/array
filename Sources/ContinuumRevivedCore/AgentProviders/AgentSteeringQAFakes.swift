@@ -30,6 +30,10 @@ import Foundation
 //   CRASH       writes a diagnostic line to stderr, then exits 3 mid-turn
 //               without a result
 //   VANISH      exits 0 mid-turn without a result and without a word
+//   RETRY       announces a provider retry (attempt 2 of 5), holds 1.5 s,
+//               then replies (pi also announces the retry's end)
+//   EXITIDLE    (claude, pi) a normal reply, then the session process exits
+//               on its own 0.3 s after the turn, writing to stderr
 //   APIERROR    the provider's own in-band failure for an expired login
 //               (claude: an `is_error` result whose subtype says "success";
 //               codex: turn/completed failed with an error message; pi: a
@@ -132,12 +136,20 @@ def crash():
     time.sleep(0.05)
     os._exit(3)
 
+def exit_soon():
+    def leave():
+        time.sleep(0.3)
+        sys.stderr.write("fatal: session store is unreadable\n")
+        sys.stderr.flush()
+        os._exit(2)
+    threading.Thread(target=leave, daemon=True).start()
+
 def delay_start(text):
     if "DELAYSTART" in text:
         time.sleep(1.2)
 
 def shape(text):
-    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH"):
+    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE"):
         if word in text:
             return word
     return "TEXT"
@@ -221,6 +233,15 @@ def run_turn(msg):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "RETRY":
+        out({"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 5, "retry_delay_ms": 3000,
+             "error_status": 529, "error": "overloaded_error", "session_id": SID})
+        time.sleep(1.5)
+    if kind == "EXITIDLE":
+        say("ok")
+        result()
+        exit_soon()
+        return
     if kind == "APIERROR":
         out({"type": "result", "subtype": "success", "is_error": True, "session_id": SID,
              "result": "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
@@ -310,6 +331,10 @@ def run_turn(turn_id, text):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "RETRY":
+        out({"method": "error", "params": {"threadId": THREAD, "turnId": turn_id,
+             "error": {"message": "Reconnecting... 2/5"}, "willRetry": True}})
+        time.sleep(1.5)
     if kind == "APIERROR":
         with lock:
             state["turn"] = None
@@ -431,6 +456,14 @@ def run_turn(text):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "RETRY":
+        out({"type": "auto_retry_start", "attempt": 2, "maxAttempts": 5, "delayMs": 3000, "errorMessage": "overloaded"})
+        time.sleep(1.5)
+        out({"type": "auto_retry_end", "success": True, "attempt": 2})
+    if kind == "EXITIDLE":
+        finish("stop")
+        exit_soon()
+        return
     if kind == "APIERROR":
         out({"type": "turn_end", "message": {"role": "assistant", "stopReason": "error",
              "errorMessage": "401 Unauthorized: OAuth token expired for provider openai-codex"}})

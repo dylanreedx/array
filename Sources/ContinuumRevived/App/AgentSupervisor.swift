@@ -1791,6 +1791,17 @@ final class AgentSupervisor {
             }
             return
         }
+        // S3: a provider retry is turn presence ("Retrying (2/5)"), then the
+        // tile hears it like any other observation.
+        if case let .providerRetry(retry) = observation {
+            if let retry {
+                turnFacts[id]?.presence.noteRetry(retry)
+            } else {
+                turnFacts[id]?.presence.clearRetry(at: Date())
+            }
+            runtimeObservationObservers[id]?.values.forEach { $0(observation) }
+            return
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -2907,6 +2918,15 @@ final class AgentSupervisor {
         if let reporting = runner as? AgentUnsolicitedTurnReporting {
             reporting.observeUnsolicitedTurns { [weak self] in
                 DispatchQueue.main.async { self?.adoptUnsolicitedTurn(from: reporting, for: id) }
+            }
+        }
+        // S3 (N3): a session process that leaves between turns says so.
+        if let reporting = runner as? AgentIdleExitReporting {
+            reporting.observeIdleExit { [weak self] code, tail, hadBackgroundWork in
+                DispatchQueue.main.async {
+                    self?.sessionProcessExitedWhileIdle(
+                        runner, for: id, code: code, stderrTail: tail, hadBackgroundWork: hadBackgroundWork)
+                }
             }
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -7133,6 +7153,29 @@ final class AgentSupervisor {
         // runner returned without a result read Working forever.
         stopRequestedAgents.remove(id)
         startTurn(on: runner, for: id) { onEvent in try runner.continueUnsolicitedTurn(onEvent: onEvent) }
+    }
+
+    /// S3 (N3) — the idle pool's process went away on its own. It leaves the
+    /// pool (the next send starts a fresh one that resumes the conversation)
+    /// and the transcript says so, with whatever the CLI said on its way out.
+    private func sessionProcessExitedWhileIdle(
+        _ runner: AgentRunning, for id: AgentID, code: Int32, stderrTail: String?, hadBackgroundWork: Bool
+    ) {
+        guard runners[id] !== runner else { return }  // a live turn reports its own exit
+        let wasPooled = idleSessionRunners[id] === runner
+        if wasPooled {
+            idleSessionRunners[id] = nil
+            idleReapTokens[id] = nil
+        }
+        guard wasPooled || idleSessionRunners[id] == nil else { return }
+        let harness = records[id]?.harness?.rawValue ?? "The agent"
+        var body = "\(harness)'s session process exited while idle (code \(code))"
+        if let stderrTail { body += ": \(stderrTail)" } else { body += "." }
+        if hadBackgroundWork { body += "\nBackground work it was running has stopped." }
+        body += "\nYour next message starts it again and resumes this conversation."
+        appendAgentDiagnostics("harness=\(harness) exit=idle code=\(code)", agentID: id)
+        appendLocalNotice(id: id, key: "session-exited-idle", title: "Session ended", body: body)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// D3 — an idle provider session is reaped after `idleRunnerTimeout`,

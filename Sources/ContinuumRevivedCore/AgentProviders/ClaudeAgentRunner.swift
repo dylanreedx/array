@@ -488,6 +488,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     /// before that is the only one the session-mode retry may replace.
     private var processSawInit = false
     private var turn: TurnWaiter?
+    private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
     private var unsolicited: UnsolicitedTurns?
     /// Steers written to stdin and not yet replayed, oldest first.
     private var pendingSteers: [(id: UUID, text: String)] = []
@@ -889,6 +890,14 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         }
         stderrBuffer.append(stderrRemainder)
         let stderr = String(decoding: stderrBuffer, as: UTF8.self)
+        // S3 (N3): a session process that leaves between turns, unasked, used
+        // to be silent — background jobs and subagents vanished with no row,
+        // and the next send quietly respawned.
+        if turn == nil, !stopRequested, let handler = idleExitHandler {
+            let tail = AgentFailureText.stderrTail(stderr)
+            let hadBackgroundWork = backgroundTaskCount > 0
+            DispatchQueue.global(qos: .utility).async { handler(code, tail, hadBackgroundWork) }
+        }
         child = nil
         backgroundTaskCount = 0
         interruptRequested = false
@@ -1038,3 +1047,11 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
 extension ClaudeAgentRunner: SubagentEventObserving {}
 
 #endif  // os(macOS)
+
+#if os(macOS)
+extension ClaudeAgentRunner: AgentIdleExitReporting {
+    public func observeIdleExit(_ handler: @escaping @Sendable (Int32, String?, Bool) -> Void) {
+        queue.sync { idleExitHandler = handler }
+    }
+}
+#endif
