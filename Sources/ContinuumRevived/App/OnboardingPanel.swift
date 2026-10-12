@@ -97,14 +97,16 @@ final class OnboardingPanel {
             {
                 guard let codex = locateOnPath("codex")() else { return nil }
                 // `codex login status` has no --json (it errors); parse the real
-                // text shape. `boundedOutput` returns stdout only on a clean exit
-                // (exit 0), so a non-nil value already implies exit 0 — the
-                // isLoggedIn text check then confirms the ChatGPT sign-in.
+                // text shape. It prints that text on STDERR, so read both streams
+                // (the catalog probe learned this first). `boundedOutput` returns
+                // only on a clean exit (exit 0), so a non-nil value already implies
+                // exit 0 — the isLoggedIn text check then confirms the sign-in.
                 guard let output = boundedOutput(
                     executable: codex,
                     arguments: ["login", "status"],
                     environment: environment(),
-                    timeout: 3.0
+                    timeout: 3.0,
+                    includeStderr: true
                 ) else { return nil }
                 guard CodexCLIBackend.isLoggedIn(statusOutput: output, exitCode: 0) else { return nil }
                 return "signed in (ChatGPT)"
@@ -213,12 +215,14 @@ final class OnboardingPanel {
     }
 
     /// Small bounded runner for probe subprocesses (`pi auth check`). Returns
-    /// stdout on clean exit within the timeout, nil otherwise.
+    /// stdout (and stderr, interleaved, when `includeStderr`) on clean exit
+    /// within the timeout, nil otherwise.
     private static func boundedOutput(
         executable: String,
         arguments: [String],
         environment: [String: String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        includeStderr: Bool = false
     ) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -226,7 +230,7 @@ final class OnboardingPanel {
         process.environment = environment
         let stdout = Pipe()
         process.standardOutput = stdout
-        process.standardError = Pipe()
+        process.standardError = includeStderr ? stdout : FileHandle.nullDevice
         do { try process.run() } catch { return nil }
         let killer = DispatchWorkItem {
             if process.isRunning { process.terminate() }
@@ -449,11 +453,41 @@ final class OnboardingPanel {
         }
     }
 
+    /// `codex login status` prints its verdict on STDERR. The live codex-auth
+    /// probe runs against a fake codex that does exactly that, so a probe that
+    /// reads stdout alone reports a signed-in user as signed out.
+    private static func runCodexAuthProbeSelfCheck() throws {
+        let fm = FileManager.default
+        let bin = fm.temporaryDirectory.appendingPathComponent("array-onboarding-codex-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: bin) }
+        let codex = bin.appendingPathComponent("codex")
+        func installFake(stderrLine: String, exitCode: Int) throws {
+            try "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then echo '\(stderrLine)' >&2; exit \(exitCode); fi\nexit 2\n"
+                .write(to: codex, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+        }
+        let probes = liveProbes(environment: { ["PATH": bin.path] })
+        guard let codexAuth = probes.first(where: { $0.id == "codex-auth" }) else {
+            throw SelfCheckError.message("live probes lost the codex-auth row")
+        }
+        try installFake(stderrLine: "Logged in using ChatGPT", exitCode: 0)
+        let signedIn = codexAuth.locate()
+        guard signedIn == "signed in (ChatGPT)" else {
+            throw SelfCheckError.message("codex prints its login status on stderr; onboarding read it as \(signedIn ?? "signed out")")
+        }
+        try installFake(stderrLine: "Not logged in", exitCode: 1)
+        guard codexAuth.locate() == nil else {
+            throw SelfCheckError.message("a signed-out codex must read as signed out")
+        }
+    }
+
     /// Deterministic witness: found/missing rows render status + guidance, a
     /// re-check picks up a tool that appeared, connect buttons follow found
     /// state and deliver their profile id, the render isn't blank, and the
     /// panel doesn't leak its window.
     static func runSelfCheck() throws {
+        try runCodexAuthProbeSelfCheck()
         final class MutableLocation: @unchecked Sendable {
             var path: String?
             init(_ path: String?) { self.path = path }

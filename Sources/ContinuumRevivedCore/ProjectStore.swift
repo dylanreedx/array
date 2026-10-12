@@ -3,6 +3,10 @@ import Foundation
 public enum ProjectStoreError: Error, Equatable {
     case missingFile(path: String)
     case unknownFutureSchema(path: String, version: Int, supported: Int)
+    /// The file exists, and neither it nor any backup decodes. Distinct from a
+    /// missing file: an absent canvas is empty, an unreadable one is not, and
+    /// must never be written over.
+    case canvasUnreadable(path: String)
 }
 
 public struct ProjectStoreLayout: Sendable {
@@ -144,7 +148,12 @@ public struct ProjectStore: Sendable {
 
     // MARK: - Canvas
 
+    /// Refuses to replace a canvas that exists and cannot be read (an unknown
+    /// tile kind, a newer schema, corruption): this write would be the one that
+    /// destroys it, and only three backups are kept. Every writer of the file
+    /// passes through here, so this is the one place the rule can hold.
     public func saveCanvas(_ canvas: CanvasState) throws {
+        _ = try tryLoadCanvas()
         try gatedWrite(canvas, to: layout.canvasFile)
     }
 
@@ -161,14 +170,22 @@ public struct ProjectStore: Sendable {
         return CanvasEngine.sanitizePersistedCanvas(canvas)
     }
 
+    /// nil only when there is no canvas file at all. A file that exists but
+    /// does not decode (nor does any backup) throws `.canvasUnreadable`; a newer
+    /// schema throws `.unknownFutureSchema`. Neither is an empty canvas.
     public func tryLoadCanvas() throws -> CanvasState? {
         do { return try loadCanvas() }
-        catch AtomicWriterError.noValidBackup { return nil }
+        catch AtomicWriterError.noValidBackup { return try absentOrUnreadableCanvas() }
     }
 
     public func tryLoadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult? {
         do { return try loadCanvasWithSanitizationResult() }
-        catch AtomicWriterError.noValidBackup { return nil }
+        catch AtomicWriterError.noValidBackup { return try absentOrUnreadableCanvas() }
+    }
+
+    private func absentOrUnreadableCanvas<T>() throws -> T? {
+        guard FileManager.default.fileExists(atPath: layout.canvasFile.path) else { return nil }
+        throw ProjectStoreError.canvasUnreadable(path: layout.canvasFile.path)
     }
 
     // MARK: - Sessions

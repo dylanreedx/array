@@ -12,6 +12,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     private let ghostty: GhosttyRuntimeContext
     private let launchProfile: LaunchProfile
     private let displayDefaults: UserDefaults
+    private let clipboard: TerminalClipboard
     private var state = TerminalRuntimeState()
     private weak var hostView: TerminalHostView?
     private var terminalView: GhosttyTerminalView?
@@ -33,7 +34,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         title: String,
         launchProfile: LaunchProfile,
         ghostty: GhosttyRuntimeContext,
-        displayDefaults: UserDefaults = .standard
+        displayDefaults: UserDefaults = .standard,
+        clipboard: TerminalClipboard = .system
     ) {
         self.id = id
         self.tileId = tileId
@@ -41,6 +43,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         self.launchProfile = launchProfile
         self.ghostty = ghostty
         self.displayDefaults = displayDefaults
+        self.clipboard = clipboard
     }
 
     func attach(to hostView: TerminalHostView) {
@@ -51,6 +54,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             ghosttyApp: try! ghostty.app,
             launchProfile: launchProfile,
             displayDefaults: displayDefaults,
+            clipboard: clipboard,
             reservedShortcutHandler: reservedShortcutHandler
         ) { [weak self] status in
             guard let self else { return }
@@ -81,7 +85,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
         terminalView = view
         view.updateSurfaceSize()
-        focus()
     }
 
     func detach() {
@@ -810,9 +813,15 @@ final class GhosttyRuntimeContext {
                 }
                 return false
             },
-            read_clipboard_cb: { _, _, _ in false },
-            confirm_read_clipboard_cb: { _, _, _, _ in },
-            write_clipboard_cb: { _, _, _, _, _ in },
+            read_clipboard_cb: { userdata, location, state in
+                GhosttyClipboardBridge.read(userdata: userdata, location: location, state: state)
+            },
+            confirm_read_clipboard_cb: { userdata, string, state, request in
+                GhosttyClipboardBridge.confirmRead(userdata: userdata, string: string, state: state, request: request)
+            },
+            write_clipboard_cb: { userdata, location, content, count, confirm in
+                GhosttyClipboardBridge.write(userdata: userdata, location: location, content: content, count: count, confirm: confirm)
+            },
             close_surface_cb: { userdata, processAlive in
                 scheduleGhosttyClose(userdata: userdata, processAlive: processAlive)
             }
