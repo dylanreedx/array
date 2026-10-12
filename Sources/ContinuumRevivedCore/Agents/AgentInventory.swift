@@ -223,6 +223,11 @@ public final class CrossProjectManagedSessionWalk {
     /// decode per record across every project on the machine.
     private let ttl: TimeInterval
     private var cached: (roots: [Root], readAt: Date, found: [Discovered])?
+    /// Each root's last listing that READ. One unreadable root contributes these
+    /// rather than failing every project's listing (confidence pass, R4).
+    private var lastGoodByRoot: [Root: [ManagedAgentSessionRecord]] = [:]
+    /// The roots whose most recent read failed, so a caller can say which.
+    public private(set) var unreadableRoots: Set<Root> = []
 
     public init(ttl: TimeInterval = 2) {
         self.ttl = ttl
@@ -273,7 +278,21 @@ public final class CrossProjectManagedSessionWalk {
             // not an implementation detail of the reader.
             guard FileManager.default.fileExists(atPath: root.projectRoot.path) else { continue }
             let store = ManagedAgentSessionStore(projectRoot: root.projectRoot)
-            let records = try store.reconciledRecords(proof)
+            // PER ROOT (confidence pass, R4). One unreadable project — a TCC-denied
+            // folder, a lock held by another install, a corrupt directory — used to
+            // throw the whole listing, which froze EVERY project's rows: the inbox
+            // push is skipped while unreconciled, so every later close left its row
+            // behind. It contributes its last good listing instead and is named in
+            // `unreadableRoots`; the rest of the machine keeps updating.
+            let records: [ManagedAgentSessionRecord]
+            do {
+                records = try store.reconciledRecords(proof)
+                lastGoodByRoot[root] = records
+                unreadableRoots.remove(root)
+            } catch {
+                records = lastGoodByRoot[root] ?? []
+                unreadableRoots.insert(root)
+            }
             for record in records.sorted(by: { $0.tileId.uuidString < $1.tileId.uuidString })
             where seenTiles.insert(record.tileId).inserted {
                 found.append(Discovered(projectId: root.projectId, record: record))
@@ -349,6 +368,13 @@ public final class ReconciledManagedSessionSource {
     /// swept anything, and every listing read refuses.
     private var armedReason: ManagedSessionEndReason?
     private var swept: Set<Root> = []
+    /// Roots whose sweep failed. Not listed — an unswept record may still claim
+    /// liveness — and retried by the next read.
+    public private(set) var unsweptRoots: Set<Root> = []
+
+    /// Roots whose listing could not be read on the last walk: their agents come
+    /// from the last listing that did.
+    public var unreadableRoots: Set<Root> { walk.unreadableRoots.union(unsweptRoots) }
 
     public init(ttl: TimeInterval = 2) {
         self.walk = CrossProjectManagedSessionWalk(ttl: ttl)
@@ -416,14 +442,23 @@ public final class ReconciledManagedSessionSource {
             // to terminalize — and recorded as such, so a registry full of dead
             // entries cannot make every later read re-stat them.
             if FileManager.default.fileExists(atPath: root.projectRoot.path) {
-                let (report, _) = try ManagedSessionReconciliation.reconcile(
-                    store: ManagedAgentSessionStore(projectRoot: root.projectRoot),
-                    reason: reason,
-                    now: now
-                )
-                scanned += report.scanned
-                terminalized += report.terminalized.count
+                // Per root, like the listing: a root that cannot be swept stays
+                // UNSWEPT (it is retried on the next read) and does not stop the
+                // sweep of every other project.
+                do {
+                    let (report, _) = try ManagedSessionReconciliation.reconcile(
+                        store: ManagedAgentSessionStore(projectRoot: root.projectRoot),
+                        reason: reason,
+                        now: now
+                    )
+                    scanned += report.scanned
+                    terminalized += report.terminalized.count
+                } catch {
+                    unsweptRoots.insert(root)
+                    continue
+                }
             }
+            unsweptRoots.remove(root)
             swept.insert(root)
             sweptRoots += 1
         }
@@ -447,7 +482,8 @@ public final class ReconciledManagedSessionSource {
             throw NotReady(requestedRoots: roots.count, sweptRoots: swept.count)
         }
         try reconcile(roots: roots, reason: armedReason, now: now)
-        return try walk.records(roots: roots, now: now, proof: proof())
+        return try walk.records(
+            roots: roots.filter { !unsweptRoots.contains($0) }, now: now, proof: proof())
     }
 
     /// The sweep's evidence, for the one caller that owns its own store instance:

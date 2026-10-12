@@ -398,6 +398,9 @@ run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
 run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
+# An unreadable canvas.json throws instead of loading as empty, and the store
+# refuses to write over it.
+run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 # Worst-case cost of the exact zone-origin correction on the resize input path
 # (it runs per zone per mouseDragged). Registered so the bound is gated, not
 # merely measurable: the leg existed with a failing exit path no gate ran.
@@ -413,6 +416,9 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+# Confidence pass S4: the record/context/row-builder sections sit after the
+# KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
+run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
@@ -607,6 +613,31 @@ run_app_check .build/debug/Array --empty-workspace-creation-check
 # the FIRST zone's project Home; and because .zone outranks .recentExplicit, the
 # scope picker's correction was overruled on the very next spawn.
 run_app_check .build/debug/Array --zone-arming-check
+# Confidence pass S2: a tile dropped into another zone of its own project moves
+# to that zone's layer at its WORLD frame, persists the new stamp, and undoes.
+# Membership used to be re-read from the retired flat snapshot, so after the
+# mount no tile could ever change zone.
+run_app_check .build/debug/Array --zone-layer-move-check
+# Confidence pass S2: a canvas.json that exists and decodes nowhere read as
+# EMPTY; the mount built empty layers over it and the first pan saved that over
+# the file. The project is now unavailable: no layer, no write, a message.
+run_app_check .build/debug/Array --canvas-unreadable-check
+# Confidence pass S2: closing a project zone stranded its tiles. Keep now moves
+# them into the project's remaining (or a fresh) zone unmoved, Delete Tiles
+# deletes them, the canvas re-arms off the closed zone, and a project's last
+# zone closing releases it from the workspace.
+run_app_check .build/debug/Array --zone-close-strand-check
+# Confidence pass S2: tiles stamped with a zone no registered workspace holds
+# (Dylan's harmony/selectus shapes) were hidden forever. The mount now preserves
+# and classifies them and offers Recover, which brings each project's group back
+# into a new zone of its own, layout exact, overlapping nothing.
+run_app_check .build/debug/Array --stranded-tile-recovery-check
+# Confidence pass S2: the layout commit skipped tiles it could place in no file
+# and still reported success. It now fails, the move rolls back, and it says so.
+run_app_check .build/debug/Array --layout-commit-truth-check
+# Confidence pass S2: a refused or failed spawn left its web view running and
+# its tile drawn with nothing on disk. It now takes back what it made.
+run_app_check .build/debug/Array --refused-spawn-teardown-check
 # WS3: visibility DISCOVERY must not grow with parked tiles. `visibleTileViews`
 # walked every world-plane subview per camera commit — a cost invisible to a
 # chrome counter. The plane now keeps a spatial index; this counts the candidate
@@ -708,6 +739,9 @@ run_app_check .build/debug/Array --browser-inspector-network-lite-check
 run_app_check .build/debug/Array --browser-inspector-link-lifecycle-check
 run_app_check .build/debug/Array --browser-inspector-actions-check
 run_app_check .build/debug/Array --agent-inbox-check
+# Confidence pass S4: closing a tile (idle, busy, parent) and a lost tile, driven
+# through the mounted scene and read off the drawn inbox.
+run_app_check .build/debug/Array --sidebar-truth-check
 # Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
 # 220/280/320 pt in both appearances, materialized before rows are applied.
 run_app_check .build/debug/Array --sidebar-ux-check
@@ -804,7 +838,10 @@ run_app_check .build/debug/Array --tile-materialize-check
 # project A1 armed, A2's note and file-tree saves, its tile closes (canvas.json,
 # stores, surface), a shell exit's placeholder and Restart, a status write and a
 # link opened beside its tile all land in A2; switching away and quitting leave
-# no Ghostty surface alive at ghostty_app_free.
+# no Ghostty surface alive at ghostty_app_free. Spawner callbacks survive arming
+# another project; a tile record change, a browser profile deletion, the quit
+# sweep, a ticket dispatch, focus pairing and review flyback all act in A2; a
+# surface a teardown missed is freed by Ghostty shutdown instead of trapping.
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
@@ -1120,6 +1157,8 @@ run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
 run_app_check .build/debug/Array --workspace-profile-check
 run_app_check .build/debug/Array --add-zone-check
 run_app_check .build/debug/Array --browser-lru-budget-check
+run_app_check .build/debug/Array --browser-click-recency-check
+run_app_check .build/debug/Array --language-server-release-check
 run_app_check .build/debug/Array --zone-tier-transition-check
 run_app_check .build/debug/Array --spawn-placement-check
 run_app_check .build/debug/Array --focus-mode-check
@@ -1130,6 +1169,8 @@ run_app_check .build/debug/Array --ticket-queue-tile-check
 run_app_check .build/debug/Array --conductor-queue-tile-check
 run_app_check .build/debug/Array --agent-input-check
 run_app_check .build/debug/Array --diff-tile-check
+run_app_check .build/debug/Array --diff-review-off-main-check
+run_app_check .build/debug/Array --attention-notification-check
 run_app_check .build/debug/Array --file-tree-hardening-check
 run_app_check .build/debug/Array --viewport-sanitize-check
 run_app_check .build/debug/Array --project-lock-check
@@ -1144,7 +1185,7 @@ run_app_check .build/debug/Array --terminal-tmux-ambient-workspace-check
 run_app_check .build/debug/Array --session-observer-check
 run_app_check .build/debug/Array --terminal-tmux-observer-check
 run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
-# These five render a real terminal/Ghostty surface and time out in a headless
+# These render a real terminal/Ghostty surface and time out in a headless
 # sandbox ("waiting for initial real terminal surface"; --session-resume-check
 # ticks ghostty_app_tick until real output appears and times out identically
 # when the display is asleep/locked — proven at base commit edf2486 with no
@@ -1153,13 +1194,16 @@ run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 # visual gate — run the full matrix on a GUI host to cover them). Not fake-green:
 # they are deferred to where they can actually run, and the skip is printed loudly.
 if [[ "${CONTINUUM_SKIP_SURFACE_CHECKS:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
+  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check, --terminal-clipboard-check, --terminal-focus-grab-check, --terminal-cmd-w-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
 else
   run_app_check .build/debug/Array --terminal-tmux-live-integration-check
   run_app_check .build/debug/Array --terminal-theme-fidelity-check
   run_app_check .build/debug/Array --terminal-snapshot-tier-check
   run_app_check .build/debug/Array --terminal-fills-tile-check
   run_app_check .build/debug/Array --session-resume-check
+  run_app_check .build/debug/Array --terminal-clipboard-check
+  run_app_check .build/debug/Array --terminal-focus-grab-check
+  run_app_check .build/debug/Array --terminal-cmd-w-check
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then

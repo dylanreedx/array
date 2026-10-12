@@ -321,6 +321,9 @@ public enum AgentStatusVocabulary {
     /// health — it is neither failed nor unconfirmed, and reopening the row brings
     /// it back exactly as it was left.
     public static let closed = "Closed"
+    /// A closed tile whose agent is still finishing its turn. Not "Working": the
+    /// window is gone, and the word says the row will leave by itself.
+    public static let finishing = "Finishing"
 }
 
 /// What the agent is doing. FIVE STATES, and only three MEANINGS get colour:
@@ -900,6 +903,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public let checkedOutBranch: String?
     public let terminalEvent: AgentTerminalEvent?
     public let terminalIsUnread: Bool
+    /// When this agent's tile was closed while it was still busy — the row reads
+    /// "Finishing" and draws slim until its turn ends, when the builder derives it
+    /// into History by itself. nil for every agent that is not closing.
+    public let closingSince: Date?
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -1010,7 +1017,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         harness: String? = nil,
         checkedOutBranch: String? = nil,
         terminalEvent: AgentTerminalEvent? = nil,
-        terminalIsUnread: Bool = false
+        terminalIsUnread: Bool = false,
+        closingSince: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -1031,8 +1039,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.depth = depth
         // Derive this at the model boundary so even a legacy caller that passes
         // the wrong compatibility value cannot make settled/snoozed work render
-        // as a card (or active work collapse as a slim row).
-        self.variant = RowVariant.forLifecycle(lifecycle)
+        // as a card (or active work collapse as a slim row). A closing agent is
+        // the one live row that collapses: its window is gone, it is only
+        // finishing what it started.
+        self.variant = closingSince == nil ? RowVariant.forLifecycle(lifecycle) : .slim
         self.createdAt = createdAt
         self.parentId = parentId
         self.isUnconfirmed = isUnconfirmed
@@ -1042,6 +1052,30 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.checkedOutBranch = checkedOutBranch
         self.terminalEvent = terminalEvent
         self.terminalIsUnread = terminalIsUnread
+        self.closingSince = closingSince
+    }
+
+    /// The same row, placed where its PARENT is: a subagent travels with the agent
+    /// that spawned it (confidence pass, sidebar stream) — into History with it,
+    /// into the Finishing tail with it, and inside its workspace's scope — so a
+    /// closed parent can never leave its children behind as stray top-level rows.
+    public func followingParent(
+        lifecycle: InboxLifecycle,
+        closingSince: Date?,
+        workspaceName: String?
+    ) -> AgentInboxRow {
+        AgentInboxRow(
+            id: id, title: title, projectName: projectName, projectId: projectId,
+            directoryName: directoryName, workspaceName: workspaceName,
+            state: state, attention: attention, lifecycle: lifecycle,
+            model: model, role: role, branch: branch, isIsolated: isIsolated,
+            elapsed: elapsed, elapsedStartedAt: elapsedStartedAt,
+            lastActiveAt: lastActiveAt, depth: depth, createdAt: createdAt,
+            parentId: parentId, isUnconfirmed: isUnconfirmed,
+            settlementBlocked: settlementBlocked, zoneName: zoneName,
+            harness: harness, checkedOutBranch: checkedOutBranch,
+            terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
+            closingSince: closingSince)
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
@@ -1103,6 +1137,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         // of ignorance into wallpaper — which is exactly what it had become when
         // every closed tile left one of these rows behind.
         if case .archived = lifecycle { return AgentStatusVocabulary.closed }
+        if closingSince != nil { return AgentStatusVocabulary.finishing }
         return isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
     }
 

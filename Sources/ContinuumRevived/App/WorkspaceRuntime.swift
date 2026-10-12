@@ -199,25 +199,151 @@ final class WorkspaceRuntime {
     /// clears `zoneId`, so without this they come back as ambient tiles on the
     /// next mount. The membership write still runs afterwards for the members
     /// that were KEPT, which spill onto the bare canvas.
+    ///
+    /// The closed zone's (now empty) layer leaves the canvas with it, and the
+    /// arming moves through `setActiveZone` to a remaining project zone. Writing
+    /// `lastActiveZoneId` alone left the canvas armed on the orphan layer, so the
+    /// next ⌘T landed, chrome-less, in a zone that no longer existed. A project
+    /// whose last zone this was is released: no controller (and no `.array/lock`)
+    /// held, and no workspace claiming it.
     func commitClosedZone(_ zoneId: UUID, deletingTileIds: Set<UUID> = []) throws {
-        guard document.zones.contains(where: { $0.zoneId == zoneId }) else {
+        guard let closing = document.zones.first(where: { $0.zoneId == zoneId }) else {
             throw WorkspaceMutationError.zoneNotFound(zoneId)
         }
         document.zones.removeAll { $0.zoneId == zoneId }
         document.removeTiles(ids: deletingTileIds)
         document.setTiles([], forZone: zoneId)
+        if canvasView?.tiles(inZone: zoneId)?.isEmpty == true {
+            canvasView?.removeZoneLayer(zoneId: zoneId)
+            installedLayers.removeAll { $0.placement.zoneId == zoneId }
+        }
         if document.lastActiveZoneId == zoneId {
-            document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId
+            document.lastActiveZoneId = nil
+            if let next = document.zonesInZOrder.last(where: { $0.projectId != nil }) {
+                setActiveZone(next.zoneId, reason: .explicit)
+            } else {
+                canvasView?.setActiveProjectZone(nil)
+            }
         }
         try persistWorkspaceDocument()
+        if let projectId = closing.projectId, !document.zones.contains(where: { $0.projectId == projectId }) {
+            releaseProjectWithoutZones(projectId)
+        }
+    }
+
+    private func releaseProjectWithoutZones(_ projectId: UUID) {
+        if acquiredProjectIds.contains(projectId) {
+            acquiredProjectIds.removeAll { $0 == projectId }
+            registry.release(projectId: projectId)
+        }
+        do {
+            var ownership = try registryStore.loadOrEmpty()
+            ownership.releaseProject(projectId, from: workspaceId, now: Date())
+            try registryStore.save(ownership)
+        } catch {
+            fputs("WorkspaceRuntime: could not release project \(projectId.uuidString) from its workspace: \(error)\n", stderr)
+        }
+    }
+
+    /// Give a zone about to be closed (or otherwise mutated as a whole) its
+    /// layer, so its members are acted on rather than forgotten: a zone below
+    /// the live tier holds its tiles only on disk, and closing it used to leave
+    /// every one of them naming a zone that no longer existed. Throws when the
+    /// project cannot be mounted (its `.array/` is held, its canvas unreadable).
+    func prepareZoneForWholeZoneMutation(_ zoneId: UUID) throws {
+        guard let zone = document.zones.first(where: { $0.zoneId == zoneId }),
+              let projectId = zone.projectId else { return }
+        if registry.controller(for: projectId) == nil {
+            _ = try registry.acquire(projectId: projectId)
+            if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
+        }
+        installZoneLayerIfMissing(zone)
+        guard canvasView?.installedZonePlacement(for: zoneId) != nil else {
+            throw WorkspaceMutationError.zoneUnavailable(zoneId)
+        }
+    }
+
+    /// "Keep Tiles" on a project zone. Every member moves, at its unchanged
+    /// WORLD frame, into the nearest other zone of the same project or, when
+    /// this is the project's only zone, into a fresh zone for the project that
+    /// encloses them. The project's canvas is saved before the zone goes, so no
+    /// tile is left naming a zone that no longer exists. Throws, moving nothing
+    /// further, when the members cannot be placed.
+    func rehomeMembersOfClosingZone(_ zoneId: UUID) throws {
+        guard let canvasView,
+              let zone = document.zones.first(where: { $0.zoneId == zoneId }),
+              let projectId = zone.projectId else { return }
+        try prepareZoneForWholeZoneMutation(zoneId)
+        let members = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
+        guard !members.isEmpty else { return }
+        let centre = CanvasEngine.zoneWorldFrame(zone)
+        func distance(_ other: ZonePlacement) -> Double {
+            let rect = CanvasEngine.zoneWorldFrame(other)
+            return hypot((rect.x + rect.width / 2) - (centre.x + centre.width / 2),
+                         (rect.y + rect.height / 2) - (centre.y + centre.height / 2))
+        }
+        let target: UUID
+        if let sibling = document.zones
+            .filter({ $0.projectId == projectId && $0.zoneId != zoneId && !foreignZoneIds.contains($0.zoneId) })
+            .min(by: { distance($0) < distance($1) }) {
+            try prepareZoneForWholeZoneMutation(sibling.zoneId)
+            target = sibling.zoneId
+        } else {
+            target = try addProjectZone(
+                projectId: projectId, enclosing: members.map(\.frame), name: zone.name, color: zone.color)
+        }
+        let moved = canvasView.moveLayerTiles(members.map(\.id), toZone: target)
+        guard moved.count == members.count else {
+            throw WorkspaceMutationError.tilesNotMoved(members.count - moved.count)
+        }
+        guard let controller = registry.controller(for: projectId) else {
+            throw WorkspaceMutationError.zoneUnavailable(zoneId)
+        }
+        controller.scheduleCanvasSave()
+        try controller.flushCanvasSave()
+    }
+
+    /// A new zone for `projectId` enclosing `worldFrames`, in the document and
+    /// on the canvas as an empty layer, ready for records to be moved into it.
+    @discardableResult
+    func addProjectZone(projectId: UUID, enclosing worldFrames: [TileFrame], name: String, color: String?) throws -> UUID {
+        guard let canvasView else { throw WorkspaceMutationError.zoneUnavailable(projectId) }
+        let bounds = CanvasEngine.zoneBounds(
+            memberFrames: worldFrames,
+            padding: ZoneBoundsConfig.padding(),
+            minSize: ZoneBoundsConfig.emptyMinSize(),
+            headerHeight: ZoneChromeNSView.headerHeight)
+        var placement = ZonePlacement(
+            zoneId: UUID(),
+            projectId: projectId,
+            origin: ZonePoint(x: bounds.x, y: bounds.y),
+            size: ZoneSize(width: bounds.width, height: bounds.height),
+            color: color ?? ZoneColorAllocator.nextColor(existingColors: document.zones.map(\.color)),
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: name)
+        placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
+        document.zones.append(placement)
+        document.bringZoneToFront(placement.zoneId)
+        try persistWorkspaceDocument()
+        let appRegistry = (try? registryStore.loadOrEmpty()) ?? Registry.empty()
+        let layer = CanvasNSView.ZoneLayer(
+            placement: placement, renderModel: Self.renderModel(for: placement, registry: appRegistry), tiles: [])
+        canvasView.upsertZoneLayer(layer)
+        installedLayers.append(layer)
+        return placement.zoneId
     }
 
     enum WorkspaceMutationError: Error, LocalizedError {
         case zoneNotFound(UUID)
+        case zoneUnavailable(UUID)
+        case tilesNotMoved(Int)
 
         var errorDescription: String? {
             switch self {
             case let .zoneNotFound(zoneId): return "Zone \(zoneId) is not part of the mounted workspace."
+            case .zoneUnavailable: return "The zone's project isn't available, so its tiles can't be moved."
+            case let .tilesNotMoved(count): return "\(count) tile(s) could not be moved out of the zone."
             }
         }
     }
@@ -579,16 +705,27 @@ final class WorkspaceRuntime {
     /// Considers every zone this project owns in the document, not just the live
     /// ones, so a tile belonging to a zone below the live tier stays where it is
     /// instead of being rescued onto the screen.
+    ///
+    /// Throws when the project's canvas exists and cannot be read. That project is
+    /// unavailable, never empty: it gets no layers (an empty layer is what a pan
+    /// then saved over the file), its controller refuses to write, and the user
+    /// is told once per mount.
     private func membership(
         forProject projectId: UUID,
         controller: ZoneRuntimeController,
         in document: WorkspaceDocument,
         cache: inout [UUID: [UUID: [Tile]]]
-    ) -> [UUID: [Tile]] {
+    ) throws -> [UUID: [Tile]] {
         if let cached = cache[projectId] { return cached }
-        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)
-            ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                           tiles: [], groups: [], lastActiveTileId: nil)
+        let persisted: CanvasState
+        do {
+            persisted = try controller.projectStore.tryLoadCanvas()
+                ?? CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                               tiles: [], groups: [], lastActiveTileId: nil)
+        } catch {
+            reportCanvasUnavailable(projectId: projectId, controller: controller, error: error)
+            throw error
+        }
         let projectZones = document.zones.filter { $0.projectId == projectId }
         guard !projectZones.isEmpty else {
             cache[projectId] = [:]
@@ -658,8 +795,8 @@ final class WorkspaceRuntime {
     /// it.
     func repairBootMembership(controller: ZoneRuntimeController, canvasView: CanvasNSView) {
         var cache: [UUID: [UUID: [Tile]]] = [:]
-        let byZone = membership(
-            forProject: controller.project.id, controller: controller, in: document, cache: &cache)
+        guard let byZone = try? membership(
+            forProject: controller.project.id, controller: controller, in: document, cache: &cache) else { return }
         for (zoneId, tiles) in byZone {
             for tile in tiles { canvasView.setTileZone(tile.id, zoneId: zoneId) }
         }
@@ -673,7 +810,11 @@ final class WorkspaceRuntime {
     @discardableResult
     private func ensureZone(forProject projectId: UUID, controller: ZoneRuntimeController) -> ZonePlacement? {
         if let existing = document.zones.first(where: { $0.projectId == projectId }) { return existing }
-        let persisted = ((try? controller.projectStore.tryLoadCanvas()) ?? nil)?.tiles ?? []
+        let persisted: [Tile]
+        do { persisted = try controller.projectStore.tryLoadCanvas()?.tiles ?? [] } catch {
+            reportCanvasUnavailable(projectId: projectId, controller: controller, error: error)
+            return nil
+        }
         let bounds = CanvasEngine.zoneBounds(
             memberFrames: persisted.map(\.frame),
             padding: ZoneBoundsConfig.padding(),
@@ -735,6 +876,7 @@ final class WorkspaceRuntime {
     /// get a controller acquired.
     func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
         mountEpoch &+= 1
+        reportedUnreadableProjectIds = []
         // Cold launch and an in-process switch must mount the same semantic scene.
         // Preserve legacy foreign placements in the document, but never draw them
         // in a workspace that does not own their project.
@@ -786,43 +928,11 @@ final class WorkspaceRuntime {
             // does not own -- which ordinary dragging produces -- rendering it
             // nowhere. `membership(forProject:…)` rescues those and persists the
             // repair once. See `CanvasEngine.resolveZoneMembership`.
-            let memberTiles = (membership(forProject: projectId, controller: controller,
-                                          in: document, cache: &membershipCache)[zone.zoneId] ?? [])
-            .map { tile -> Tile in
-                var adopted = tile
-                // M1.10 (`.plans/46`): the frame spaces differ, and the file is
-                // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
-                // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
-                // `canvas.json` in the field holds WORLD frames -- because layers
-                // have never been reachable from production, `canvasStateForPersistence`
-                // has always taken its flat branch and written the flat state
-                // verbatim. Handing a layer those frames unconverted moves every
-                // tile by the zone origin: for a zone at x=4000, the whole project
-                // jumps 4000pt right the first time you switch workspaces.
-                //
-                // Convert on the way in, convert back on the way out
-                // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
-                // on-disk convention never changes -- which is what keeps the boot
-                // flat path, and every installed copy of the app, reading the same
-                // file correctly.
-                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
-                return adopted
+            if let layer = makeProjectZoneLayer(
+                zone: zone, projectId: projectId, controller: controller,
+                document: document, registry: appRegistry, membershipCache: &membershipCache) {
+                layers.append(layer)
             }
-            // Build tile views (descriptor views — headless safe; real hydration is T08).
-            var tileViews: [UUID: TileNSView] = [:]
-            for tile in memberTiles {
-                let view = DescriptorTileNSView(tile: tile)
-                tileViews[tile.id] = view
-            }
-
-            let renderModel = Self.renderModel(for: zone, registry: appRegistry)
-            let layer = CanvasNSView.ZoneLayer(
-                placement: zone,
-                renderModel: renderModel,
-                tiles: memberTiles
-            )
-            layer.tileViews = tileViews
-            layers.append(layer)
         }
 
         for projectId in previouslyAcquired.subtracting(Set(newlyAcquired)) {
@@ -853,6 +963,7 @@ final class WorkspaceRuntime {
 
         // Restore focus: active zone's last-active tile, or fall back to canvas.
         restoreFocus(from: canvasView)
+        classifyStrandedTiles()
     }
 
     /// Schedule every mounted project's debounced canvas save; each controller
@@ -1061,6 +1172,9 @@ final class WorkspaceRuntime {
         let saveController = WorkspaceDocumentSaveController(store: workspaceStore)
         saveController.scheduleZoneLayoutSave(document)
         try saveController.flushPendingSave()
+        // A project added back (after its workspace was deleted, say) brings its
+        // old tiles stamped with zones nothing holds any more: offer them.
+        classifyStrandedTiles()
 
         return placement.zoneId
     }
@@ -1089,6 +1203,186 @@ final class WorkspaceRuntime {
         return layer
     }
 
+    // MARK: - Stranded tiles (preserve, classify, offer)
+
+    /// Tiles of a mounted project whose `zoneId` names a zone that NO registered
+    /// workspace document holds: a zone closed before close re-homed its members,
+    /// a deleted workspace's zones, an orphan document's. The mount sets them
+    /// aside (`resolveZoneMembership` defers any stamp outside the document) and
+    /// nothing ever shows them again. They are never repaired silently: they are
+    /// preserved on disk untouched, classified here at every mount, and offered
+    /// to the user through `onStrandedTilesFound`. A stamp naming another
+    /// registered workspace's zone is that workspace's business and is not
+    /// counted. Keyed by project.
+    private(set) var strandedTiles: [UUID: [Tile]] = [:]
+    /// Stranded tiles that are NOT offered, keyed by the project whose file holds
+    /// them: copies of another project's tiles (Dylan's harmony file holds 18 of
+    /// personal's, same ids and frames), and agent tiles whose agent belongs to
+    /// another project. Recovering either would put one tile id in two projects
+    /// and could bind a second view to one agent (CLAUDE.md hazard 10). They are
+    /// left untouched on disk; `elsewhere` names the projects they belong to.
+    private(set) var strandedLeftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)] = [:]
+    var onStrandedTilesFound: ((_ recoverable: [UUID: [Tile]], _ leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]) -> Void)?
+    /// The project of the agent record bound to a tile, if any (AppDelegate's
+    /// supervisor). Nil in production only before the supervisor exists.
+    var agentProjectForTile: ((UUID) -> UUID?)?
+
+    func classifyStrandedTiles() {
+        let found = findStrandedTiles()
+        strandedTiles = found.recoverable
+        strandedLeftAlone = found.leftAlone
+        if !found.recoverable.isEmpty || !found.leftAlone.isEmpty {
+            onStrandedTilesFound?(found.recoverable, found.leftAlone)
+        }
+    }
+
+    private func findStrandedTiles() -> (recoverable: [UUID: [Tile]], leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)]) {
+        guard let appRegistry = try? registryStore.loadOrEmpty() else { return ([:], [:]) }
+        var registeredZoneIds = Set(document.zones.map(\.zoneId))
+        for entry in appRegistry.workspaces where entry.id != workspaceId {
+            if let other = try? loadWorkspaceDocument(workspaceId: entry.id) {
+                registeredZoneIds.formUnion(other.zones.map(\.zoneId))
+            }
+        }
+        // Every registered project's tile ids: a stranded id found in another
+        // project's file is a copy unless the evidence says it is ours alone.
+        var roots: [UUID: URL] = [:]
+        var idsByProject: [UUID: Set<UUID>] = [:]
+        for entry in appRegistry.projects where !entry.missing {
+            let root = URL(fileURLWithPath: entry.rootPath, isDirectory: true)
+            roots[entry.id] = root
+            if let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas() {
+                idsByProject[entry.id] = Set(canvas.tiles.map(\.id))
+            }
+        }
+        func evidence(_ tile: Tile, belongsTo projectId: UUID) -> Bool {
+            guard let root = roots[projectId] else { return false }
+            if tile.metadata.filesystemProjectId == projectId { return true }
+            if let agentProject = agentProjectForTile?(tile.id) { return agentProject == projectId }
+            if tile.kind == .managedAgent,
+               (try? ManagedAgentSessionStore(projectRoot: root).load(tileId: tile.id)) != nil { return true }
+            if let noteId = tile.metadata.noteId,
+               FileManager.default.fileExists(atPath: ProjectStoreLayout(projectRoot: root).noteFile(id: noteId).path) {
+                return true
+            }
+            if let path = tile.metadata.filePath, path.hasPrefix(root.standardizedFileURL.path + "/") { return true }
+            return false
+        }
+
+        var recoverable: [UUID: [Tile]] = [:]
+        var leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)] = [:]
+        for projectId in Set(document.zones.compactMap(\.projectId)) where
+            !document.zones.filter({ $0.projectId == projectId }).allSatisfy({ foreignZoneIds.contains($0.zoneId) }) {
+            guard let root = roots[projectId],
+                  let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas()
+            else { continue }
+            for tile in canvas.tiles {
+                guard let zoneId = tile.zoneId, !registeredZoneIds.contains(zoneId) else { continue }
+                var elsewhere = Set(idsByProject.filter { $0.key != projectId && $0.value.contains(tile.id) }.keys)
+                if let agentProject = agentProjectForTile?(tile.id), agentProject != projectId {
+                    elsewhere.insert(agentProject)
+                }
+                // An agent tile whose session lives in another project's `.array/`
+                // is that project's view of the agent, not a second one of ours.
+                if tile.kind == .managedAgent {
+                    for (other, otherRoot) in roots where other != projectId
+                        && (try? ManagedAgentSessionStore(projectRoot: otherRoot).load(tileId: tile.id)) != nil {
+                        elsewhere.insert(other)
+                    }
+                }
+                // Ours alone: no other project holds the id, or only we have the
+                // evidence (its note body, its file, its agent, its session).
+                let ours = elsewhere.isEmpty
+                    || (evidence(tile, belongsTo: projectId)
+                        && !elsewhere.contains(where: { evidence(tile, belongsTo: $0) }))
+                if ours {
+                    recoverable[projectId, default: []].append(tile)
+                } else {
+                    var entry = leftAlone[projectId] ?? (0, [])
+                    entry.count += 1
+                    entry.elsewhere.formUnion(elsewhere)
+                    leftAlone[projectId] = entry
+                }
+            }
+        }
+        return (recoverable, leftAlone)
+    }
+
+    /// The user accepted the offer. Each project's stranded tiles move, as one
+    /// group (relative layout exact), into a new zone of that project: where
+    /// they already are when that overlaps nothing, otherwise translated right
+    /// of every zone in the workspace. Written to the project's own canvas
+    /// first, then the zone to the document, so a crash between the two leaves
+    /// them stranded and offered again rather than lost; the replaced
+    /// `canvas.json` stays in `.array/backups`. Returns how many tiles came back.
+    @discardableResult
+    func recoverStrandedTiles() throws -> Int {
+        guard let canvasView else { return 0 }
+        // Classified now, not at the offer: the scene may have changed since.
+        strandedTiles = findStrandedTiles().recoverable
+        var recovered = 0
+        for projectId in strandedTiles.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let tiles = strandedTiles[projectId], !tiles.isEmpty,
+                  let anchorZone = document.zones.first(where: { $0.projectId == projectId && !foreignZoneIds.contains($0.zoneId) })
+            else { continue }
+            try prepareZoneForWholeZoneMutation(anchorZone.zoneId)
+            guard let controller = registry.controller(for: projectId) else {
+                throw WorkspaceMutationError.zoneUnavailable(anchorZone.zoneId)
+            }
+            // Nothing queued for this file may land after the rewrite below.
+            try controller.flushCanvasSave()
+
+            let frames = tiles.map(\.frame)
+            let pad = ZoneBoundsConfig.padding()
+            func enclosing(_ frames: [TileFrame]) -> TileFrame {
+                CanvasEngine.zoneBounds(memberFrames: frames, padding: pad,
+                                        minSize: ZoneBoundsConfig.emptyMinSize(),
+                                        headerHeight: ZoneChromeNSView.headerHeight)
+            }
+            let obstacles = document.zones.map(CanvasEngine.zoneWorldFrame) + canvasView.allTilesInWorldFrames().map(\.frame)
+            func overlaps(_ a: TileFrame, _ b: TileFrame) -> Bool {
+                a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+            }
+            var rect = enclosing(frames)
+            var dx = 0.0
+            if obstacles.contains(where: { overlaps(rect, $0) }) {
+                let right = obstacles.map { $0.x + $0.width }.max() ?? rect.x
+                dx = (right + 120) - rect.x
+                rect.x += dx
+            }
+            let newZoneId = UUID()
+            let moved = Dictionary(uniqueKeysWithValues: tiles.map { tile -> (UUID, Tile) in
+                var copy = tile
+                copy.frame.x += dx
+                copy.zoneId = newZoneId
+                return (tile.id, copy)
+            })
+            guard var canvas = try controller.projectStore.tryLoadCanvas() else { continue }
+            canvas.tiles = canvas.tiles.map { moved[$0.id] ?? $0 }
+            try controller.projectStore.saveCanvas(canvas)
+
+            var placement = ZonePlacement(
+                zoneId: newZoneId,
+                projectId: projectId,
+                origin: ZonePoint(x: rect.x, y: rect.y),
+                size: ZoneSize(width: rect.width, height: rect.height),
+                color: ZoneColorAllocator.nextColor(existingColors: document.zones.map(\.color)),
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "Recovered")
+            placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
+            document.zones.append(placement)
+            document.bringZoneToFront(newZoneId)
+            try persistWorkspaceDocument()
+            installZoneLayerIfMissing(placement)
+            recovered += tiles.count
+        }
+        let after = findStrandedTiles()
+        strandedTiles = after.recoverable
+        strandedLeftAlone = after.leftAlone
+        return recovered
+    }
+
     // MARK: - Spawner ownership
 
     /// Called with every `TileSpawner` this runtime builds, so `AppDelegate` can
@@ -1100,6 +1394,16 @@ final class WorkspaceRuntime {
     /// another install, or its root is gone. Creation into that zone refuses
     /// rather than silently using a different project.
     var onZoneProjectUnavailable: ((UUID, Error) -> Void)?
+
+    /// Projects already reported unreadable in this mount, so a pan or a spawn
+    /// that rediscovers it does not repeat the message.
+    private var reportedUnreadableProjectIds: Set<UUID> = []
+
+    private func reportCanvasUnavailable(projectId: UUID, controller: ZoneRuntimeController, error: Error) {
+        controller.markCanvasUnavailable(error)
+        guard reportedUnreadableProjectIds.insert(projectId).inserted else { return }
+        onZoneProjectUnavailable?(projectId, error)
+    }
 
     /// The three construction inputs `attachActiveControllerUI` used to omit, now
     /// injectable. M1.3b (`.plans/46`).
@@ -1192,7 +1496,117 @@ final class WorkspaceRuntime {
         }
     }
 
+    /// One project zone's `ZoneLayer`, built from its controller's repaired
+    /// membership answer. The mount, the switch and `installZoneLayerIfMissing`
+    /// all build a layer this way.
+    private func makeProjectZoneLayer(
+        zone: ZonePlacement,
+        projectId: UUID,
+        controller: ZoneRuntimeController,
+        document: WorkspaceDocument,
+        registry appRegistry: Registry,
+        membershipCache: inout [UUID: [UUID: [Tile]]]
+    ) -> CanvasNSView.ZoneLayer? {
+        guard let byZone = try? membership(forProject: projectId, controller: controller,
+                                           in: document, cache: &membershipCache) else { return nil }
+        let memberTiles = (byZone[zone.zoneId] ?? [])
+        .map { tile -> Tile in
+            var adopted = tile
+            // M1.10 (`.plans/46`): the frame spaces differ, and the file is
+            // WORLD. A ZoneLayer lays its tiles out in ZONE-LOCAL coordinates
+            // (`_layoutLayerTile` -> `zoneLocalToWorld`), but every
+            // `canvas.json` in the field holds WORLD frames -- because layers
+            // have never been reachable from production, `canvasStateForPersistence`
+            // has always taken its flat branch and written the flat state
+            // verbatim. Handing a layer those frames unconverted moves every
+            // tile by the zone origin: for a zone at x=4000, the whole project
+            // jumps 4000pt right the first time you switch workspaces.
+            //
+            // Convert on the way in, convert back on the way out
+            // (`CanvasNSView.tilesInWorldFrames(forProjectId:)`), and the
+            // on-disk convention never changes -- which is what keeps the boot
+            // flat path, and every installed copy of the app, reading the same
+            // file correctly.
+            adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
+            return adopted
+        }
+        // Descriptor views — headless safe; `hydrateZoneLayerTiles` builds the real ones.
+        var tileViews: [UUID: TileNSView] = [:]
+        for tile in memberTiles {
+            tileViews[tile.id] = DescriptorTileNSView(tile: tile)
+        }
+        let layer = CanvasNSView.ZoneLayer(
+            placement: zone,
+            renderModel: Self.renderModel(for: zone, registry: appRegistry),
+            tiles: memberTiles)
+        layer.tileViews = tileViews
+        return layer
+    }
+
+    /// A layer for a mounted project zone that has none: one the camera brings
+    /// into the live tier after the mount, or the zone a spawn is about to land in.
+    ///
+    /// The mount and the switch build layers only for zones in the live tier at
+    /// that moment. `setActiveZone` and `reconcileHydration` later acquired a
+    /// controller for a zone the camera or a click reached, and stopped there. That
+    /// zone was armed, so creation scoped to it, but `installProjectTile` found no
+    /// layer and fell through to the flat model, whose save refuses once the boot
+    /// scene is retired. The spawn failed with its tile view already on screen and
+    /// no agent was ever minted: a blank Home, a Home menu that did nothing and a
+    /// composer that said "Unavailable", for a tile nothing had persisted.
+    ///
+    /// Arming alone does not build one. A click arms a zone the camera may not be
+    /// on, and a layer built there outlives the arming (focus moving back to
+    /// another zone re-arms it), so the mounted scene would depend on click
+    /// history a relaunch cannot reproduce (`--workspace-restart-fault-check`
+    /// compares the two). The creation scope still names the armed zone from
+    /// the document, and the spawn's scope lookup builds the layer.
+    func ensureZoneLayer(forZone zoneId: UUID) {
+        guard let zone = document.zones.first(where: { $0.zoneId == zoneId }) else { return }
+        installZoneLayerIfMissing(zone)
+    }
+
+    private func installZoneLayerIfMissing(_ zone: ZonePlacement) {
+        guard let canvasView,
+              // The boot-only flat scene owns its project's tiles itself; a layer
+              // over it would draw every one of them twice.
+              !canvasView.isFlatCompatibilitySceneActive,
+              let projectId = zone.projectId,
+              !foreignZoneIds.contains(zone.zoneId),
+              canvasView.installedZonePlacement(for: zone.zoneId) == nil,
+              let controller = registry.controller(for: projectId),
+              let appRegistry = try? registryStore.loadOrEmpty()
+        else { return }
+        // The zone as DRAWN: auto-layout grows a zone on the canvas ahead of the
+        // document, and the layer must not shrink it back.
+        let placement = canvasView.zonePlacement(for: zone.zoneId) ?? zone
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
+        guard let layer = makeProjectZoneLayer(
+            zone: placement, projectId: projectId, controller: controller,
+            document: document, registry: appRegistry, membershipCache: &membershipCache) else { return }
+        hydrateZoneLayerTiles?(canvasView, [layer], .beforeInstall)
+        canvasView.upsertZoneLayer(layer)
+        installedLayers.append(layer)
+        // Phase B needs this controller's spawner. Build one only if it has none:
+        // `attachActiveControllerUI` replaces EVERY spawner, and this runs inside a
+        // spawn's scope lookup, so the spawn's own managed-agent memo would land on
+        // a spawner already discarded and the agent would lose its Home.
+        if controller.tileSpawner == nil {
+            controller.attachSpawner(makeSpawner(for: controller, canvasView: canvasView), canvasView: canvasView)
+        }
+        hydrateZoneLayerTiles?(canvasView, [layer], .afterInstall)
+    }
+
     private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
+        // One spawner per project for as long as its controller lives on this
+        // canvas. This used to mint a fresh one for every live controller on every
+        // project-changing arm, and every view a spawner builds reaches it through
+        // a weak reference — so the first click into another zone silently killed
+        // Save as Markdown, the browser profile and inspector menus and a file
+        // tree's open-file on every tile built before it.
+        if let existing = controller.tileSpawner, existing.canvasView === canvasView {
+            return existing
+        }
         let previous = controller.tileSpawner
         let spawner = TileSpawner(
             canvasView: canvasView,
@@ -1207,8 +1621,7 @@ final class WorkspaceRuntime {
             managedSessionStore: controller.managedSessionStore
         )
         // T4 (`.plans/47`): a tile's managed-agent memos outlive the spawner that
-        // recorded them. This method runs for every live controller each time the
-        // active project changes, which is now as often as the user clicks a zone.
+        // recorded them, when a controller moves to a new canvas.
         if let previous, previous !== spawner { spawner.adoptManagedAgentMemos(from: previous) }
         onSpawnerCreated?(spawner)
         return spawner
@@ -1631,6 +2044,7 @@ final class WorkspaceRuntime {
     /// down; beyond `warmSceneCapacity` the least recent is released through
     /// the ordinary path (`ZoneRuntimeRegistry.release` → `close()`).
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
+        reportedUnreadableProjectIds = []
         // M1.10: the defect this milestone exists to fix was that EVERY canvas call
         // below optional-chained through a nil `canvasView` and did nothing, for
         // months, in silence. Refusing loudly means any future path that reaches a
@@ -1662,6 +2076,7 @@ final class WorkspaceRuntime {
         clock.finish()
         report.phases = clock.phases
         lastSwitchReport = report
+        classifyStrandedTiles()
         lifecycleObserver?(.switchCompleted(targetWorkspaceId))
         // CX-01: a switch is newer intent for every pending presentation, and a
         // structural change for every issued context.
@@ -1878,20 +2293,13 @@ final class WorkspaceRuntime {
             }
             guard plan.tier(for: zone.zoneId) == .live,
                   let controller = registry.controller(for: projectId) else { continue }
-            // M1.0/M1.10: see `install`. The file is WORLD; a layer is ZONE-LOCAL.
-            let memberTiles = (membership(forProject: projectId, controller: controller,
-                                          in: document, cache: &membershipCache)[zone.zoneId] ?? [])
-            .map { tile -> Tile in
-                var adopted = tile
-                adopted.frame = CanvasEngine.worldToZoneLocal(adopted.frame, zoneOrigin: zone.origin)
-                return adopted
+            // M1.0/M1.10: see `install`. One repaired membership answer per
+            // project; an unreadable store yields no layer, never an empty one.
+            if let layer = makeProjectZoneLayer(
+                zone: zone, projectId: projectId, controller: controller,
+                document: document, registry: appRegistry, membershipCache: &membershipCache) {
+                layers.append(layer)
             }
-            var tileViews: [UUID: TileNSView] = [:]
-            for tile in memberTiles { tileViews[tile.id] = DescriptorTileNSView(tile: tile) }
-            let layer = CanvasNSView.ZoneLayer(
-                placement: zone, renderModel: Self.renderModel(for: zone, registry: appRegistry), tiles: memberTiles)
-            layer.tileViews = tileViews
-            layers.append(layer)
         }
         return layers
     }
@@ -1957,6 +2365,13 @@ final class WorkspaceRuntime {
 
     func registerLiveBrowser(tileId: UUID) {
         browserRuntimeBudget.registerLive(tileId: tileId)
+    }
+
+    /// QA: who the budget would evict from `liveTileIds` right now, without
+    /// evicting anything.
+    func qaBrowserEvictionCandidates(liveTileIds: [UUID], protectedTileIds: Set<UUID> = []) -> [UUID] {
+        var copy = browserRuntimeBudget
+        return copy.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protectedTileIds)
     }
 
     /// Gather protected tile ids from each live controller's canvas lastActiveTileId.
@@ -2074,6 +2489,7 @@ final class WorkspaceRuntime {
                     let acquired = try registry.acquire(projectId: projectId)
                     if !acquiredProjectIds.contains(projectId) { acquiredProjectIds.append(projectId) }
                     try? acquired.setTier(plannedTier, allowDehydratingFocusedZone: false)
+                    if plannedTier == .live { installZoneLayerIfMissing(zone) }
                 } catch {
                     // Its `.array/` is held by another install (hazard 10), or the
                     // root is gone. Leave it unacquired: creation refuses and asks
@@ -2083,6 +2499,9 @@ final class WorkspaceRuntime {
                 }
                 continue
             }
+            // A second zone of a project another zone already acquired has a
+            // controller and still no layer.
+            if plannedTier == .live { installZoneLayerIfMissing(zone) }
             guard plannedTier != controller.hydrationTier else { continue }
             try? controller.setTier(plannedTier, allowDehydratingFocusedZone: false)
         }
@@ -2150,6 +2569,7 @@ final class WorkspaceRuntime {
            let zoneId = focus.zoneId,
            let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
            let controller = registry.controller(for: projectId),
+           controller.canvasUnavailable == nil,
            var canvas = try controller.projectStore.tryLoadCanvas(),
            canvas.tiles.contains(where: { $0.id == tileId }) {
             canvas.lastActiveTileId = tileId

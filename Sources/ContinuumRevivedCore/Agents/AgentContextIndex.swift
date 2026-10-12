@@ -169,6 +169,20 @@ public enum AgentContextIndex {
             registry.projects.map { ($0.id, $0.name) },
             uniquingKeysWith: { first, _ in first }
         )
+        // A tile-less agent (headless, or one whose tile was closed) still belongs
+        // to its project's ONE workspace. Without this a closed agent had no
+        // workspace at all, so a workspace-scoped list could never show it — not
+        // even in History, which is the only place a closed agent lives.
+        let workspaceNames = Dictionary(
+            registry.workspaces.map { ($0.id, $0.name) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let projectWorkspaceNames = Dictionary(
+            registry.projects.compactMap { project in
+                project.workspaceId.flatMap { workspaceNames[$0] }.flatMap(nonEmpty).map { (project.id, $0) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         var index: [UUID: AgentRowContext] = [:]
         for descriptor in terminalDescriptors {
@@ -195,7 +209,8 @@ public enum AgentContextIndex {
         for record in agents {
             let placement = record.tileId.flatMap { placements[$0] }
             index[record.id.rawValue] = AgentRowContext(
-                workspaceName: placement?.workspaceName,
+                workspaceName: placement?.workspaceName
+                    ?? (record.projectId ?? placement?.projectId).flatMap { projectWorkspaceNames[$0] },
                 zoneName: placement?.zoneName,
                 // The record's own project wins over the one its tile happens to
                 // sit in: a headless agent has only the former, and an agent

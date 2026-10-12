@@ -18,12 +18,28 @@ final class EditorLanguageServiceManager {
     }
 
     private var sessions: [SessionKey: Entry] = [:]
+    /// Every file a tile has asked for, by session, from the moment `open` is
+    /// called — before the server is even running. A session with none left is
+    /// released after `releaseGrace`.
+    private var requestedURIs: [SessionKey: Set<String>] = [:]
+    private var releaseTasks: [SessionKey: Task<Void, Never>] = [:]
     private var pending: [SessionKey: Task<LanguageServiceCoordinator, Error>] = [:]
     private var diagnosticSinks: [String: @MainActor ([LSPDiagnostic]) -> Void] = [:]
     private let installer: PrivateLanguageServerInstaller
     private let searchPath: String
+    /// Checks stand in for a real server; nil = install/detect and spawn one.
+    typealias CoordinatorFactory = @Sendable (URL, LanguageServerRecipe) async throws -> LanguageServiceCoordinator
+    private let coordinatorFactory: CoordinatorFactory?
+    /// How long a server outlives its last open file, so closing one tile and
+    /// opening the next does not pay a cold start.
+    private let releaseGrace: TimeInterval
 
-    init() {
+    /// QA: live language-server sessions.
+    var qaSessionCount: Int { sessions.count }
+
+    init(coordinatorFactory: CoordinatorFactory? = nil, releaseGrace: TimeInterval = 30) {
+        self.coordinatorFactory = coordinatorFactory
+        self.releaseGrace = releaseGrace
         let fileManager = FileManager.default
         let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent(AppChannel.liveApplicationSupportDirectoryName, isDirectory: true)
@@ -78,6 +94,9 @@ final class EditorLanguageServiceManager {
             return
         }
         let key = SessionKey(root: projectRoot.standardizedFileURL.path, recipe: recipe.id)
+        let uri = fileURL.absoluteString
+        requestedURIs[key, default: []].insert(uri)
+        releaseTasks.removeValue(forKey: key)?.cancel()
         status(.starting(recipe.displayName))
         Task { [weak self] in
             guard let self else { return }
@@ -96,8 +115,14 @@ final class EditorLanguageServiceManager {
                     version: Int(clamping: version)
                 )
                 try await coordinator.open(document)
-                var entry = self.sessions[key]!
-                entry.openURIs.insert(fileURL.absoluteString)
+                // The tile may have closed while the server was starting, and
+                // `shutdown()` may have dropped the session meanwhile.
+                guard self.requestedURIs[key]?.contains(uri) == true, var entry = self.sessions[key] else {
+                    try? await coordinator.close(uri: uri)
+                    self.scheduleReleaseIfUnused(key)
+                    return
+                }
+                entry.openURIs.insert(uri)
                 self.sessions[key] = entry
                 status(.ready(recipe.displayName))
             } catch {
@@ -123,10 +148,30 @@ final class EditorLanguageServiceManager {
     func close(fileURL: URL, projectRoot: URL) {
         guard let recipe = LanguageServerCatalog.recipe(forFileURL: fileURL) else { return }
         let key = SessionKey(root: projectRoot.standardizedFileURL.path, recipe: recipe.id)
+        requestedURIs[key]?.remove(fileURL.absoluteString)
+        diagnosticSinks.removeValue(forKey: fileURL.absoluteString)
         guard let coordinator = sessions[key]?.coordinator else { return }
         sessions[key]?.openURIs.remove(fileURL.absoluteString)
-        diagnosticSinks.removeValue(forKey: fileURL.absoluteString)
         Task { try? await coordinator.close(uri: fileURL.absoluteString) }
+        scheduleReleaseIfUnused(key)
+    }
+
+    /// Language servers are large (sourcekit-lsp, tsserver: often hundreds of
+    /// MB) and used to stay resident until quit. Release one once no file tile
+    /// has used it for `releaseGrace`; a reopen inside the grace cancels this.
+    private func scheduleReleaseIfUnused(_ key: SessionKey) {
+        guard requestedURIs[key, default: []].isEmpty, sessions[key] != nil else { return }
+        releaseTasks[key]?.cancel()
+        let grace = releaseGrace
+        releaseTasks[key] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.releaseTasks[key] = nil
+            guard self.requestedURIs[key, default: []].isEmpty,
+                  let entry = self.sessions.removeValue(forKey: key) else { return }
+            self.requestedURIs[key] = nil
+            await entry.coordinator.shutdown()
+        }
     }
 
     func completion(fileURL: URL, projectRoot: URL, position: LSPPosition) async -> [LSPCompletionItem] {
@@ -154,6 +199,7 @@ final class EditorLanguageServiceManager {
     func shutdown() {
         let values = sessions.values.map(\.coordinator)
         sessions.removeAll(); pending.values.forEach { $0.cancel() }; pending.removeAll()
+        releaseTasks.values.forEach { $0.cancel() }; releaseTasks.removeAll(); requestedURIs.removeAll()
         values.forEach { coordinator in Task { await coordinator.shutdown() } }
     }
 
@@ -167,7 +213,9 @@ final class EditorLanguageServiceManager {
         if let task = pending[key] { return try await task.value }
         let installer = self.installer
         let path = searchPath
+        let factory = coordinatorFactory
         let task = Task<LanguageServiceCoordinator, Error> {
+            if let factory { return try await factory(root, recipe) }
             var executable = installer.detect(recipe, path: path)
             if executable == nil, recipe.installer != nil {
                 await installing()

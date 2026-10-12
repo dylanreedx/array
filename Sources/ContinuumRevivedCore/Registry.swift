@@ -256,6 +256,21 @@ public struct Registry: Codable, Equatable, Sendable {
         workspaces[workspaceIndex].updatedAt = now
     }
 
+    /// A project leaves `workspaceId`: its last zone there closed. Both records
+    /// of ownership drop it together, and only the owner it names, so a project
+    /// owned elsewhere is untouched. Without this a project with no zone stayed
+    /// owned, and adding it anywhere else offered to switch to a workspace that
+    /// could not show it.
+    public mutating func releaseProject(_ projectId: UUID, from workspaceId: UUID, now: Date) {
+        if let index = projects.firstIndex(where: { $0.id == projectId }), projects[index].workspaceId == workspaceId {
+            projects[index].workspaceId = nil
+        }
+        for index in workspaces.indices where workspaces[index].id == workspaceId {
+            workspaces[index].projectIds.removeAll { $0 == projectId }
+            workspaces[index].updatedAt = now
+        }
+    }
+
     /// The only operation allowed to transfer ownership. Registry membership is
     /// committed together; callers transfer the workspace zones/documents around
     /// this explicit boundary rather than during an ordinary workspace switch.

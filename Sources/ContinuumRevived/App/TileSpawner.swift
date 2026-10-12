@@ -60,7 +60,7 @@ final class TileSpawner {
     private let tmuxPathResolver: (UserDefaults) -> String?
     private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
-    private var browserProfiles: [BrowserProfile]
+    private(set) var browserProfiles: [BrowserProfile]
     fileprivate var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
     fileprivate var managedAgentCreationScopes: [UUID: CreationScope] = [:]
 
@@ -341,11 +341,17 @@ final class TileSpawner {
             agentDescriptor: agentDescriptor
         )
         do {
+            // Nothing was installed: leave no session descriptor behind either.
+            if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
             try persistProjectCanvas(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
+            // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            try? projectStore.deleteSession(id: runtime.id)
             if let target = wrappedProfile.windowTarget {
                 let reach = project.remoteEnvironment?.reach ?? .localhost
                 if let tmuxPath = tmuxPathResolver(defaults) {
@@ -1092,6 +1098,14 @@ final class TileSpawner {
             )
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
+            // Leave nothing behind: no web view process, no drawn tile nothing
+            // persisted, no browser-state row for a tile that does not exist.
+            runtime.terminate(policy: .force)
+            withdrawFailedSpawn(tile.id, target: target, in: canvasView)
+            if var state = try? projectStore.tryLoadBrowserState(), state.tiles.contains(where: { $0.tileId == tile.id }) {
+                state.tiles.removeAll { $0.tileId == tile.id }
+                try? projectStore.saveBrowserState(state)
+            }
             return .failure(error)
         }
 
@@ -1720,6 +1734,7 @@ final class TileSpawner {
             try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
+            withdrawFailedSpawn(tileId, target: target, in: canvasView)
             return .failure(error)
         }
         managedAgentLaunchSelections[tileId] = resolvedSelection
@@ -2583,6 +2598,15 @@ final class TileSpawner {
         return TileArrangement.dockDestination(seed, direction: .left, against: anchor, gap: anchoredFileGap)
     }
 
+    /// A spawn that installed its tile and then failed to persist it must take
+    /// the tile back off the canvas: left there it is drawn, has no record on
+    /// disk, and comes back as nothing after a relaunch. A refused install
+    /// (`.unplaced`) put nothing on the canvas.
+    private func withdrawFailedSpawn(_ tileId: UUID, target: CanvasNSView.ProjectTileTarget, in canvasView: CanvasNSView) {
+        guard target != .unplaced else { return }
+        canvasView.removeTile(id: tileId)
+    }
+
     /// Persists through the model that actually received the tile. The flat
     /// `canvasState` is only authoritative while the single-zone boot path owns the
     /// active project; once `setZones` has installed layers, the layer's tiles are.
@@ -2593,9 +2617,13 @@ final class TileSpawner {
         switch target {
         case .flatCanvasState:
             try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+        case .unplaced:
+            throw SpawnError.canvasUnavailable
         case let .zoneLayer(zoneId):
             guard let projectId = canvasView.projectId(forZone: zoneId) else { throw SpawnError.canvasUnavailable }
-            let persisted = ((try? projectStore.tryLoadCanvas()) ?? nil) ?? CanvasState(
+            // An unreadable file is not an empty one: merging against "nothing"
+            // and writing would replace it. `saveCanvas` refuses as well.
+            let persisted = try projectStore.tryLoadCanvas() ?? CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [],
                 groups: [],

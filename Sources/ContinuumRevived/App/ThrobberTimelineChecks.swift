@@ -220,7 +220,10 @@ enum ThrobberTimelineChecks {
                    + "of 10 deciles occupied")
     }
 
-    /// The wiring. Two working rows in the real cell must end up on two phases.
+    /// W12 (confidence pass, sidebar stream): the sidebar ROW carries no throbber
+    /// at all — a static glyph and a ticking time. The gyro reset on every reload
+    /// and hover in the list (the reported defect above); the agent's own tile
+    /// keeps its throbber, still on the agent's own phase.
     private static func checkTheSidebarCellHandsItsRowsOffsetToTheGyro() throws {
         func makeCell() -> AgentInbox96CellView {
             AgentInbox96CellView(
@@ -230,47 +233,32 @@ enum ThrobberTimelineChecks {
                     iconPlacement: .leading, showsModelText: false),
                 prefersReducedMotion: { false })
         }
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
         func apply(_ cell: AgentInbox96CellView, id: UUID, state: InboxState) {
-            let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
             cell.apply(
                 AgentInboxRow(id: id, title: "row", state: state, lifecycle: .active,
+                              elapsedStartedAt: now.addingTimeInterval(-30),
                               createdAt: now.addingTimeInterval(-30)),
                 emphasis: .full, indent: 0, disclosure: .none, rollup: nil,
                 isSelected: false, isInteracting: false, now: now)
         }
 
         let idA = UUID(uuidString: "7A000000-0000-4000-8000-000000000001")!
-        let idB = UUID(uuidString: "7A000000-0000-4000-8000-000000000002")!
         let cellA = makeCell()
-        let cellB = makeCell()
+        cellA.frame = NSRect(x: 0, y: 0, width: 280, height: 68)
         apply(cellA, id: idA, state: .working)
-        apply(cellB, id: idB, state: .working)
-
-        // CONTROL. A row that is not working has no gyro at all, so the assertions
-        // below would be vacuously nil-free only if the working rows really made one.
-        let resting = makeCell()
-        apply(resting, id: idA, state: .ready)
-        try expect(resting.qaThrobberPhaseOffset == nil,
-                   "control: a resting row must not carry a throbber")
-
-        guard let offsetA = cellA.qaThrobberPhaseOffset,
-              let offsetB = cellB.qaThrobberPhaseOffset else {
-            throw Failure(message: "control: a working row must carry a throbber")
-        }
-        try expect(offsetA == DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: idA),
-                   "the cell must hand the gyro ITS ROW's offset; got \(offsetA), expected "
-                   + "\(DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: idA))")
-        try expect(offsetA != offsetB,
-                   "two working rows must not share a phase; both are \(offsetA)")
-
-        // Recycling the cell onto a different agent has to move it, and back onto
-        // the first has to return it — the cell is reused, the offset is not.
-        apply(cellA, id: idB, state: .working)
-        try expect(cellA.qaThrobberPhaseOffset == offsetB,
-                   "a recycled cell must take on the offset of the agent it now shows")
-        apply(cellA, id: idA, state: .working)
-        try expect(cellA.qaThrobberPhaseOffset == offsetA,
-                   "returning to an agent must return to its phase")
+        cellA.layoutSubtreeIfNeeded()
+        try expect(cellA.qaGlyph == "circle.dashed",
+                   "a working sidebar row paints the STATIC working glyph — got '\(cellA.qaGlyph)'")
+        try expect(cellA.qaAnimatingViewCount == 0,
+                   "a working sidebar row must hold no animating view (throbber or CAAnimation) — found \(cellA.qaAnimatingViewCount)")
+        // The time is what moves: two clocks, two readings, no rebuild.
+        let first = cellA.qaStateLabel
+        cellA.updateElapsedClock(now: now.addingTimeInterval(61))
+        let second = cellA.qaStateLabel
+        try expect(first.hasPrefix("Working") && second.hasPrefix("Working") && first != second,
+                   "the working row's time must advance on the shared clock — '\(first)' then '\(second)'")
+        let offsetA = DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: idA)
 
         // The agent's OWN tile has to agree with its sidebar row: one mapping, one
         // phase per agent, wherever that agent is drawn.

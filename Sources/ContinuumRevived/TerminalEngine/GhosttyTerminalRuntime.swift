@@ -12,6 +12,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     private let ghostty: GhosttyRuntimeContext
     private let launchProfile: LaunchProfile
     private let displayDefaults: UserDefaults
+    private let clipboard: TerminalClipboard
     private var state = TerminalRuntimeState()
     private weak var hostView: TerminalHostView?
     private var terminalView: GhosttyTerminalView?
@@ -33,7 +34,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         title: String,
         launchProfile: LaunchProfile,
         ghostty: GhosttyRuntimeContext,
-        displayDefaults: UserDefaults = .standard
+        displayDefaults: UserDefaults = .standard,
+        clipboard: TerminalClipboard = .system
     ) {
         self.id = id
         self.tileId = tileId
@@ -41,6 +43,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         self.launchProfile = launchProfile
         self.ghostty = ghostty
         self.displayDefaults = displayDefaults
+        self.clipboard = clipboard
     }
 
     func attach(to hostView: TerminalHostView) {
@@ -51,6 +54,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             ghosttyApp: try! ghostty.app,
             launchProfile: launchProfile,
             displayDefaults: displayDefaults,
+            clipboard: clipboard,
             reservedShortcutHandler: reservedShortcutHandler
         ) { [weak self] status in
             guard let self else { return }
@@ -81,7 +85,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
         terminalView = view
         view.updateSurfaceSize()
-        focus()
     }
 
     func detach() {
@@ -790,11 +793,14 @@ final class GhosttyRuntimeContext {
             supports_selection_clipboard: true,
             wakeup_cb: { userdata in
                 guard let userdata else { return }
-                let context = Unmanaged<GhosttyRuntimeContext>.fromOpaque(userdata).takeUnretainedValue()
-                guard let appPointer = context.appPointer else { return }
-                let appAddress = UInt(bitPattern: appPointer)
+                let contextAddress = UInt(bitPattern: userdata)
                 DispatchQueue.main.async {
-                    guard let app = UnsafeMutableRawPointer(bitPattern: appAddress) else { return }
+                    guard let raw = UnsafeMutableRawPointer(bitPattern: contextAddress) else { return }
+                    let context = Unmanaged<GhosttyRuntimeContext>.fromOpaque(raw).takeUnretainedValue()
+                    // Re-read on main, never captured: a shutdown between the
+                    // wakeup and this block frees the app, and a tick on a freed
+                    // app took the process down with it.
+                    guard let app = context.appPointer else { return }
                     ghostty_app_tick(app)
                 }
             },
@@ -810,9 +816,15 @@ final class GhosttyRuntimeContext {
                 }
                 return false
             },
-            read_clipboard_cb: { _, _, _ in false },
-            confirm_read_clipboard_cb: { _, _, _, _ in },
-            write_clipboard_cb: { _, _, _, _, _ in },
+            read_clipboard_cb: { userdata, location, state in
+                GhosttyClipboardBridge.read(userdata: userdata, location: location, state: state)
+            },
+            confirm_read_clipboard_cb: { userdata, string, state, request in
+                GhosttyClipboardBridge.confirmRead(userdata: userdata, string: string, state: state, request: request)
+            },
+            write_clipboard_cb: { userdata, location, content, count, confirm in
+                GhosttyClipboardBridge.write(userdata: userdata, location: location, content: content, count: count, confirm: confirm)
+            },
             close_surface_cb: { userdata, processAlive in
                 scheduleGhosttyClose(userdata: userdata, processAlive: processAlive)
             }
@@ -847,6 +859,16 @@ final class GhosttyRuntimeContext {
 
     func shutdown() {
         if let appPointer {
+            // `ghostty_app_free` traps on a live surface (ADR-0010). Every
+            // teardown is meant to have freed them; any it missed are freed here,
+            // and if one cannot be reached the app is deliberately leaked —
+            // the process is ending, and a leak is not a crash.
+            nonisolated(unsafe) let app = appPointer
+            let unreachable = MainActor.assumeIsolated { GhosttyTerminalView.freeLiveSurfacesForShutdown(app: app) }
+            guard unreachable == 0 else {
+                fputs("GHOSTTY SHUTDOWN REFUSED: \(unreachable) surface(s) alive with no view to free them; leaking the Ghostty app instead of trapping in ghostty_app_free\n", stderr)
+                return
+            }
             ghostty_app_free(appPointer)
             self.appPointer = nil
         }
