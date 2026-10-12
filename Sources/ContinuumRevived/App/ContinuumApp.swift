@@ -1068,6 +1068,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--transcript-turn-cards-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await TranscriptTurnCardChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("transcript-turn-cards check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--transcript-rhythm-check") {
             do {
                 _ = NSApplication.shared

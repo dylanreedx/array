@@ -993,6 +993,11 @@ run_app_check .build/debug/Array --relationship-geometry-check
 # KNOWN-RED, so an assertion added there would never run.
 run_app_check .build/debug/Array --transcript-rhythm-check
 run_app_check .build/debug/Array --transcript-provider-parity-check
+# Confidence pass S8: direction C turn cards on a REAL tile (two restored turns
+# folded, one live card: Ask, live work strip, answer, outcome chips), one left
+# edge and a 640pt measure, plus the strip never silent from Return to settle on
+# claude, codex and pi fakes. Writes facts.json + PNGs (never compared).
+run_app_check .build/debug/Array --transcript-turn-cards-check
 # TR-01 — the change card's file list and counts. Drives the RESTORE path
 # (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
 # stay two cards, and pins that no card prints a count it did not measure.

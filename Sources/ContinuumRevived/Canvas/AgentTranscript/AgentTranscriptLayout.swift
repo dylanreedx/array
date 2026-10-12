@@ -55,6 +55,19 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     /// Cheap digest of where the turn boundaries currently are.
     var boundarySignature: (() -> Int)?
     var contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+    /// Turn cards (`.plans/70` S8): the reading measure, `min(width - insets,
+    /// maximum)`, left-aligned on the inset so the Ask and the answer share one
+    /// left edge. Nil is the previous full-width column.
+    var maximumColumnWidth: CGFloat?
+
+    /// The width every row is laid out and measured at, for a collection width.
+    /// One function, so the list's re-measure and `prepare()` cannot disagree.
+    func columnWidth(forCollectionWidth collectionWidth: CGFloat) -> CGFloat {
+        let insets = scaledContentInsets
+        let available = max(0, collectionWidth - insets.left - insets.right)
+        guard let maximumColumnWidth else { return available }
+        return min(available, CGFloat(pageZoom.scaled(Double(maximumColumnWidth))))
+    }
 
     private var attributes: [NSCollectionViewLayoutAttributes] = []
     private var contentSize = NSSize.zero
@@ -68,7 +81,7 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
         guard let collectionView else { return }
 
         let insets = scaledContentInsets
-        let width = max(0, collectionView.bounds.width - insets.left - insets.right)
+        let width = columnWidth(forCollectionWidth: collectionView.bounds.width)
         let widthBucket = Int(width.rounded())
         let count = itemCount()
         // The signature is part of the guard, not decoration. Spacing now depends

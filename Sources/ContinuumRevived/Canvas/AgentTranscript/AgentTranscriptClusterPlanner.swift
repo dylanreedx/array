@@ -37,6 +37,17 @@ enum AgentTranscriptClusterPlanner {
         /// equals `flatten(document)` and the block stays in the document, so
         /// nothing is lost — the same contract tool clustering already keeps.
         var isSuperseded: Bool = false
+        /// Turn cards (direction C). The row belongs to a user entry.
+        var isUser: Bool = false
+        /// ...and is prose — the words that become the turn's Ask heading.
+        var isUserProse: Bool = false
+        /// A finished reasoning entry ("Thought 4s") — work, not answer.
+        var isReasoning: Bool = false
+        /// A file-change block: work in the log, a chip in the outcome.
+        var isDiff: Bool = false
+
+        /// What the turn's work strip folds: steps, thoughts and file changes.
+        var isWork: Bool { isToolRow || isReasoning || isDiff }
     }
 
     struct Header: Equatable {
@@ -48,6 +59,25 @@ enum AgentTranscriptClusterPlanner {
         enum Scope: Equatable {
             case toolCluster
             case turn
+            /// Turn cards: the user's prompt as the turn's heading. Always
+            /// covers its rows; `isExpanded` lifts the two-line clamp.
+            case ask
+            /// Turn cards: the one live line that stands for the turn's work.
+            /// Collapsed it covers the work; expanded the work log follows it.
+            case workStrip
+            /// Turn cards: an earlier turn folded to its Ask and one line of
+            /// outcome. Expanded, the whole card replaces it.
+            case foldedTurn
+            /// Turn cards: the changed-file chips that close a turn. Synthetic;
+            /// it covers nothing.
+            case outcome
+
+            var isTurnCard: Bool {
+                switch self {
+                case .ask, .workStrip, .foldedTurn, .outcome: return true
+                case .toolCluster, .turn: return false
+                }
+            }
         }
 
         /// Stable while members append: derived from the FIRST member's ID, so
@@ -68,6 +98,20 @@ enum AgentTranscriptClusterPlanner {
         /// DURATION needs, and every folded member usually belongs to one entry —
         /// so a span measured over members alone is zero.
         var turnRange: Range<Int>?
+
+        /// Whether the header stands in for its members on screen. An Ask is
+        /// its rows however far it is unclamped; an outcome stands for nothing;
+        /// everything else covers exactly while collapsed.
+        var coversMembers: Bool {
+            switch scope {
+            case .ask: return true
+            case .outcome: return false
+            case .toolCluster, .turn, .workStrip, .foldedTurn: return !isExpanded
+            }
+        }
+
+        /// A turn card's heading — the item a turn boundary sits above.
+        var startsTurnCard: Bool { scope == .ask || scope == .foldedTurn }
     }
 
     enum Item: Equatable {
@@ -202,6 +246,145 @@ enum AgentTranscriptClusterPlanner {
                 result.append(contentsOf: middle)
             } else if let terminalItem {
                 result.append(terminalItem)
+            }
+        }
+        result.append(contentsOf: items[itemIndex...])
+        return result
+    }
+
+    static func askID(forTurnFirstMember id: AgentNodeID) -> AgentNodeID {
+        AgentNodeID(rawValue: "__ask__\(id.rawValue)") ?? id
+    }
+
+    static func workStripID(forTurnFirstMember id: AgentNodeID) -> AgentNodeID {
+        AgentNodeID(rawValue: "__strip__\(id.rawValue)") ?? id
+    }
+
+    static func foldedTurnID(forTurnFirstMember id: AgentNodeID) -> AgentNodeID {
+        AgentNodeID(rawValue: "__turncard__\(id.rawValue)") ?? id
+    }
+
+    static func outcomeID(forTurnFirstMember id: AgentNodeID) -> AgentNodeID {
+        AgentNodeID(rawValue: "__outcome__\(id.rawValue)") ?? id
+    }
+
+    /// Direction C, "turn cards with a live head" (`.plans/70` S8). The TURN is
+    /// the unit, and every turn has the same four-part shape:
+    ///
+    /// 1. **Ask** — the user's prose as the turn's heading (covers those rows).
+    /// 2. **Work strip** — one line that stands for every step, thought and file
+    ///    change in the turn. Collapsed it covers them; expanded, they follow it
+    ///    in their original order (the work log).
+    /// 3. **Answer** — everything else, in order: prose, code, plans, requests,
+    ///    errors, subagent chips. Never folded into the strip, so a question the
+    ///    agent asks or an error it hit is never hidden behind a disclosure.
+    /// 4. **Outcome** — a synthetic chip row when the turn changed files.
+    ///
+    /// Turns before the newest fold to ONE item (Ask + one line of outcome)
+    /// until the reader opens them. A second pass over `plan()`'s items, like
+    /// `foldTurns`, and the same contract: `rows` is untouched, and every row is
+    /// displayed or covered exactly once. O(items), run only where the plan is.
+    ///
+    /// A leading range with no user prompt (a restored-session notice, history
+    /// that predates the first prompt) has no heading to hang a card on and is
+    /// left exactly as `plan()` laid it out, unless it is the only turn there is.
+    static func turnCards(
+        items: [Item],
+        facts: [RowFact],
+        turnRanges: [Range<Int>],
+        liveTail: Bool,
+        isExpanded: (AgentNodeID) -> Bool
+    ) -> [Item] {
+        guard !facts.isEmpty, !turnRanges.isEmpty else { return items }
+
+        func representativeRow(_ item: Item) -> Int {
+            switch item {
+            case let .row(index): return index
+            case let .header(header): return header.memberIndexes.first ?? 0
+            }
+        }
+        func rowsOf(_ item: Item) -> [Int] {
+            switch item {
+            case let .row(index): return [index]
+            case let .header(header): return header.memberIndexes
+            }
+        }
+        func isWork(_ item: Item) -> Bool {
+            switch item {
+            case let .row(index): return facts[index].isWork
+            // `plan()` emits tool-run clusters only; a run is work by definition.
+            case let .header(header): return header.scope == .toolCluster
+            }
+        }
+
+        var result: [Item] = []
+        result.reserveCapacity(items.count + turnRanges.count * 3)
+        var itemIndex = 0
+        for (turnIndex, range) in turnRanges.enumerated() {
+            let sliceStart = itemIndex
+            while itemIndex < items.count, range.contains(representativeRow(items[itemIndex])) {
+                itemIndex += 1
+            }
+            let slice = items[sliceStart..<itemIndex]
+            let isNewest = turnIndex == turnRanges.count - 1
+            let firstID = facts[range.lowerBound].id
+
+            var askRows: [Int] = []
+            for item in slice {
+                guard case let .row(index) = item, facts[index].isUserProse,
+                      index == range.lowerBound || !facts[index].startsTurn
+                else { break }
+                askRows.append(index)
+            }
+            let hasAsk = !askRows.isEmpty
+            guard hasAsk || isNewest else {
+                result.append(contentsOf: slice)
+                continue
+            }
+
+            if hasAsk, !isNewest {
+                let foldID = foldedTurnID(forTurnFirstMember: firstID)
+                if !isExpanded(foldID) {
+                    result.append(.header(Header(
+                        id: foldID, memberIndexes: slice.flatMap(rowsOf), isLive: false,
+                        isExpanded: false, scope: .foldedTurn, turnRange: range)))
+                    continue
+                }
+            }
+
+            let rest = slice.dropFirst(askRows.count)
+            // The user's own non-prose rows (an attached image) stay with the
+            // Ask, above the strip, rather than drifting into the answer.
+            let leadingUser = rest.prefix { item in
+                if case let .row(index) = item { return facts[index].isUser }
+                return false
+            }
+            let body = rest.dropFirst(leadingUser.count)
+            let workItems = body.filter(isWork)
+            let answerItems = body.filter { !isWork($0) }
+            let workRows = workItems.flatMap(rowsOf)
+            let live = isNewest && liveTail
+
+            if hasAsk {
+                let id = askID(forTurnFirstMember: firstID)
+                result.append(.header(Header(
+                    id: id, memberIndexes: askRows, isLive: false, isExpanded: isExpanded(id),
+                    scope: .ask, turnRange: range)))
+            }
+            result.append(contentsOf: leadingUser)
+            if hasAsk || live || !workRows.isEmpty {
+                let id = workStripID(forTurnFirstMember: firstID)
+                let expanded = !workRows.isEmpty && isExpanded(id)
+                result.append(.header(Header(
+                    id: id, memberIndexes: workRows, isLive: live, isExpanded: expanded,
+                    scope: .workStrip, turnRange: range)))
+                if expanded { result.append(contentsOf: workItems) }
+            }
+            result.append(contentsOf: answerItems)
+            if workRows.contains(where: { facts[$0].isDiff }) {
+                result.append(.header(Header(
+                    id: outcomeID(forTurnFirstMember: firstID), memberIndexes: [], isLive: false,
+                    isExpanded: false, scope: .outcome, turnRange: range)))
             }
         }
         result.append(contentsOf: items[itemIndex...])

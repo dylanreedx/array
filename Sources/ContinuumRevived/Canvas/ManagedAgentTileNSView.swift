@@ -1809,6 +1809,9 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func refreshCompactStatus(at now: Date = Date(), location: AgentLocationSnapshot? = nil) {
+        // Turn cards: the newest turn's work strip reads the same presence the
+        // row does, on the same tick.
+        transcriptCollectionFixture?.setTurnPresence(currentPresence)
         guard let snapshot = location ?? projectedAgentID.flatMap({
             agentSource?.locationSnapshot(for: $0, at: now)
         }) else {
@@ -2527,6 +2530,7 @@ final class ManagedAgentTileNSView: TileNSView {
 
     private func refreshTranscriptThinkingIndicator() {
         guard let transcriptCollectionFixture else { return }
+        transcriptCollectionFixture.setTurnPresence(currentPresence)
         // `.plans/45` S6 (C4) — the optimistic window. `beginOptimisticSubmission`
         // turns the indicator on the instant the user sends; the next transcript
         // synchronize used to re-derive visibility from `descriptor.status ==
