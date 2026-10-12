@@ -32,6 +32,7 @@ func runAgentPresenceChecks() async throws {
     if wants("refusals") { summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath)) }
     if wants("failures") { summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath)) }
     if wants("silence") { summary.append(try await AgentPresenceChecks.checkSilenceIsModelled(originalPath: originalPath)) }
+    if wants("tools") { summary.append(try await AgentPresenceChecks.checkLongToolsStayHonest(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
@@ -579,5 +580,80 @@ enum AgentPresenceChecks {
         try expect(supervisor.turnPresence(for: id)?.settleCause == .processLost,
                    "N1: the unsolicited turn's end must read as the process leaving, got \(String(describing: supervisor.turnPresence(for: id)?.phase))")
         return "an unsolicited turn after a Stop that ended without a result settled as process-lost instead of Working forever"
+    }
+
+    // MARK: - P1-5 — the status line stays honest through long and failed tools
+
+    static func toolRows(in view: NSView) -> [ToolCallView] {
+        var found: [ToolCallView] = []
+        var stack: [NSView] = [view]
+        while let next = stack.popLast() {
+            if let row = next as? ToolCallView { found.append(row) }
+            stack.append(contentsOf: next.subviews)
+        }
+        return found
+    }
+
+    static func checkLongToolsStayHonest(originalPath: String) async throws -> String {
+        var violations: [String] = []
+        let realClock = ToolRowLiveClock.now
+        defer { ToolRowLiveClock.now = realClock }
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let bench = try Bench(kind, originalPath: originalPath)
+            defer { bench.tearDown() }
+            try await Task.sleep(for: .milliseconds(300))
+
+            // One failed tool mid-turn is a step, not the turn's verdict.
+            var completed = bench.turnCompletedCount
+            try bench.pressReturn("TOOLFAIL then carry on")
+            try await eventually("\(kind): the failed tool never reported") {
+                bench.events.contains { if case .itemCompleted(_, _, _, .failed) = $0 { return true } else { return false } }
+            }
+            var failedReadings: Set<String> = []
+            while bench.turnCompletedCount == completed {
+                bench.tile.qaRefreshLocation(at: Date())
+                if bench.supervisor.turnPresence(for: bench.id)?.isWorking == true,
+                   bench.tile.qaCompactStatusPhase == .failed || bench.tile.qaCompactStatusActivityText.contains("Failed") {
+                    failedReadings.insert("phase \(String(describing: bench.tile.qaCompactStatusPhase)) / '\(bench.tile.qaCompactStatusActivityText)'")
+                }
+                try await Task.sleep(for: .milliseconds(40))
+            }
+            if !failedReadings.isEmpty {
+                violations.append("\(kind) failed tool: the status line read Failed while the turn ran on: \(failedReadings.sorted())")
+            }
+            try await eventually("\(kind): the TOOLFAIL turn never settled") { !bench.supervisor.isRunning(bench.id) }
+
+            // A long quiet tool keeps its verb and its clock.
+            completed = bench.turnCompletedCount
+            try bench.pressReturn("SLOW job")
+            try await eventually("\(kind): the SLOW tool never opened") {
+                if case .tool? = bench.supervisor.turnPresence(for: bench.id)?.phase { return true }
+                return false
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            let later = Date().addingTimeInterval(60)
+            bench.tile.qaRefreshLocation(at: later)
+            let tail = bench.tile.qaTailStatusText
+            if tail.hasPrefix("Responding") || tail.hasPrefix("Thinking") || tail.hasPrefix("No output") || !tail.contains("1m") {
+                violations.append("\(kind) long tool: a minute into an open tool the tail read '\(tail)', phase \(String(describing: bench.tile.qaCompactStatusPhase))")
+            }
+            // The row itself carries a live clock.
+            bench.window.layoutIfNeeded()
+            bench.tile.layoutSubtreeIfNeeded()
+            let running = toolRows(in: bench.tile).filter { !$0.statusLabel.stringValue.contains("✓") }
+            ToolRowLiveClock.now = { realClock().addingTimeInterval(75) }
+            ToolRowLiveClock.shared.tick()
+            let labels = running.map(\.statusLabel.stringValue)
+            if running.isEmpty || !labels.contains(where: { $0.contains("1m 15s") || $0.contains("1m 1") }) {
+                violations.append("\(kind) long tool: the running row shows no live clock: \(labels)")
+            }
+            ToolRowLiveClock.now = realClock
+            _ = await bench.supervisor.accept(.stop, for: bench.id)
+            try await eventually("\(kind): the SLOW turn never stopped") {
+                bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
+            }
+        }
+        try expect(violations.isEmpty, "long tools must stay honest: " + violations.joined(separator: " | "))
+        return "on claude, codex and pi a failed tool mid-turn never turned the status line Failed, a minute into an open tool the tail kept its verb and clock, and the running row carried its own live clock"
     }
 }

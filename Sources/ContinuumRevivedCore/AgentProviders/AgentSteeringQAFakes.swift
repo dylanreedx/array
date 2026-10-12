@@ -32,6 +32,8 @@ import Foundation
 //   VANISH      exits 0 mid-turn without a result and without a word
 //   RETRY       announces a provider retry (attempt 2 of 5), holds 1.5 s,
 //               then replies (pi also announces the retry's end)
+//   TOOLFAIL    a tool call that fails at once, then 1.5 s more of the turn
+//               before a normal reply (the agent works past a failed step)
 //   EXITIDLE    (claude, pi) a normal reply, then the session process exits
 //               on its own 0.3 s after the turn, writing to stderr
 //   APIERROR    the provider's own in-band failure for an expired login
@@ -149,7 +151,7 @@ def delay_start(text):
         time.sleep(1.2)
 
 def shape(text):
-    for word in ("TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE"):
+    for word in ("TOOLFAIL", "TOOL", "SLOW", "HOLD", "BACKGROUND", "PLAIN", "CRASH", "LONG", "APIERROR", "VANISH", "RETRY", "EXITIDLE"):
         if word in text:
             return word
     return "TEXT"
@@ -233,6 +235,10 @@ def run_turn(msg):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_fail", "name": "Bash", "input": {"command": "false"}}]}, "parent_tool_use_id": None, "session_id": SID})
+        out({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_fail", "is_error": True, "content": "exit 1"}]}, "parent_tool_use_id": None, "session_id": SID})
+        time.sleep(1.5)
     if kind == "RETRY":
         out({"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 5, "retry_delay_ms": 3000,
              "error_status": 529, "error": "overloaded_error", "session_id": SID})
@@ -331,6 +337,10 @@ def run_turn(turn_id, text):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fail", "type": "commandExecution", "command": "false"}}})
+        out({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn_id, "item": {"id": "cmd-fail", "type": "commandExecution", "status": "failed", "exitCode": 1}}})
+        time.sleep(1.5)
     if kind == "RETRY":
         out({"method": "error", "params": {"threadId": THREAD, "turnId": turn_id,
              "error": {"message": "Reconnecting... 2/5"}, "willRetry": True}})
@@ -456,6 +466,10 @@ def run_turn(text):
         crash()
     if kind == "VANISH":
         os._exit(0)
+    if kind == "TOOLFAIL":
+        out({"type": "tool_execution_start", "toolCallId": "tc-fail", "toolName": "bash", "args": {"command": "false"}})
+        out({"type": "tool_execution_end", "toolCallId": "tc-fail", "toolName": "bash", "isError": True})
+        time.sleep(1.5)
     if kind == "RETRY":
         out({"type": "auto_retry_start", "attempt": 2, "maxAttempts": 5, "delayMs": 3000, "errorMessage": "overloaded"})
         time.sleep(1.5)

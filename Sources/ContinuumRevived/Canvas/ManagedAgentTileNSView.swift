@@ -1851,12 +1851,36 @@ final class ManagedAgentTileNSView: TileNSView {
             }
             return text
         }
-        if case .tool = presence.phase { return nil }
+        if case let .tool(tool) = presence.phase {
+            // An open tool keeps its verb and its clock even when the
+            // location observation behind the row has nothing specific to say
+            // (it used to fall back to "Thinking" while a command ran).
+            if let phase = compactStatusResolution.phase,
+               [.reading, .searching, .editing, .running].contains(phase) { return nil }
+            let verb = liveToolVerb?.text ?? "Running \(Self.shortToolTitle(tool))"
+            guard let since = presence.currentToolStartedAt else { return verb }
+            return "\(verb) · \(Self.liveElapsedText(now.timeIntervalSince(since)))"
+        }
         guard let quiet = presence.quietInterval(now: now), quiet >= Self.quietThreshold else { return nil }
         return "No output for \(Self.quietDurationText(quiet)) · still running"
     }
 
     static let quietThreshold: TimeInterval = 60
+
+    /// The provider's title for a step, one short line; its kind otherwise.
+    static func shortToolTitle(_ tool: AgentTurnPresence.Tool) -> String {
+        let line = tool.title?.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        guard !line.isEmpty else { return tool.name }
+        return line.count > 40 ? String(line.prefix(40)) + "…" : line
+    }
+
+    /// "12s", "1m", "1m 12s" — a live step's clock.
+    static func liveElapsedText(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval))
+        if seconds < 60 { return "\(seconds)s" }
+        return seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds / 60)m \(seconds % 60)s"
+    }
 
     /// "1m", "12m", "1h 5m" — silence is read in minutes.
     static func quietDurationText(_ interval: TimeInterval) -> String {

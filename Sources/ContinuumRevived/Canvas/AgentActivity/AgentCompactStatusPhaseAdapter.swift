@@ -171,8 +171,13 @@ struct AgentCompactStatusPhaseAdapter {
             }
         }
 
-        // A failed/interrupted tool is terminal evidence in its own right.
-        if let activity = currentActivity,
+        // A failed/interrupted tool is terminal evidence in its own right —
+        // but only once the turn is over. Mid-turn, one failed tool is a step
+        // the agent reads and works past (S3: the row used to say "Failed"
+        // while the turn kept running), so the active turn below speaks.
+        let turnIsActive: Bool
+        if case .active? = facts.turn { turnIsActive = true } else { turnIsActive = false }
+        if let activity = currentActivity, !turnIsActive,
            activity.operation == .failed || activity.operation == .interrupted {
             return activityResult(activity)
         }
