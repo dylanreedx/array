@@ -10650,6 +10650,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Confidence pass: Settled folds behind a counted heading and the shelves
         // sink to the bottom of the list (T3 nightly's layout).
         sidebar.agentInbox.foldsSettledIntoShelf = true
+        // The header's New agent button makes the same agent ⌘K's New Agent does.
+        sidebar.agentInbox.onNewAgent = { [weak self] in
+            _ = self?.spawnManagedAgentFromPalette()
+        }
         sidebar.onSelection = { [weak self] selection in
             self?.handleWorkspaceSidebarSelection(selection)
         }
@@ -31926,8 +31930,12 @@ extension AppDelegate {
             // fixed-height ceiling the constant now merely bounds.
             try expect(height > AgentInboxView.slimRowHeight + 0.5,
                        "'\(row.title)' is a card, so it is visibly taller than a \(AgentInboxView.slimRowHeight)pt slim row — laid out at \(height)pt")
-            try expect(height <= AgentInboxView.rowHeight + 0.5,
-                       "'\(row.title)' is a card, so it never exceeds the \(AgentInboxView.rowHeight)pt ceiling — laid out at \(height)pt")
+            // Confidence pass: the shipped card is T3 nightly's 82pt pitch.
+            let cardCeiling = max(AgentInboxView.rowHeight,
+                                  AgentInbox96CellView.rowHeight(for: .production))
+            // …plus the group-end gap a parent's last child carries.
+            try expect(height <= cardCeiling + Space.s + 0.5,
+                       "'\(row.title)' is a card, so it never exceeds the \(cardCeiling)pt ceiling — laid out at \(height)pt")
         }
         // The packet's named regression, stated as its own assertion so its failure
         // says what it means: `ready` and `failed` are NOT collapsible.
@@ -32693,7 +32701,7 @@ extension AppDelegate {
     // Measured BETWEEN rows, so the table's own intercell spacing cannot be mistaken
     // for the terminator: the claim is that a group's last row keeps more room than a
     // row that ends nothing, and that is a difference.
-    let cardPitch = AgentInbox96CellView.rowHeight(for: .a)
+    let cardPitch = AgentInbox96CellView.rowHeight(for: .production)
     let lastMemberHeight = Double(treeRowRects[siblingRow - 1].height)
     let siblingHeight = Double(siblingRect.height)
     try expect(abs((lastMemberHeight - siblingHeight) - Space.s) <= 0.5,

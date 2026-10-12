@@ -78,6 +78,7 @@ enum SidebarTruthChecks {
         try await closeLifecycle(world)
         try eventPushOpensNoFile(world)
         try unreadableRootIsolation(world)
+        try oneRowHeaderMakesAnAgent(world)
         print("sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
               + "agent's closed tile drew slim as Finishing, kept running, and left for History "
               + "by itself when its turn ended; a closed parent took its subagents with it; a "
@@ -86,7 +87,8 @@ enum SidebarTruthChecks {
               + "event push opened no file; the default scope was the workspace on screen, "
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
               + "reloaded the sidebar once; Settled folded behind a counted heading and the "
-              + "headings sat at the bottom of the list")
+              + "headings sat at the bottom of the list; the header is one row whose New "
+              + "agent button made an agent")
     }
 
     // MARK: - World
@@ -545,5 +547,36 @@ enum SidebarTruthChecks {
         try expect(block(world, settledAgent) == "settled",
                    "…and opening it draws the settled agent — drawn \(String(describing: block(world, settledAgent)))")
         try expect(inbox.clickSettledDisclosureForQA(), "and closes again")
+    }
+
+    // MARK: - Header: one row — search, scope, New agent (T3 nightly)
+
+    static func oneRowHeaderMakesAnAgent(_ world: World) throws {
+        let inbox = world.inbox
+        inbox.layoutForQA()
+        let header = inbox.headerFramesForQA
+        guard let newAgent = header.newAgent else {
+            throw Failure(message: "the header must carry a New agent button")
+        }
+        try expect(abs(header.search.midY - header.scope.midY) <= 2
+                   && abs(header.search.midY - newAgent.midY) <= 2,
+                   "search, scope and New agent share ONE row — mid-Ys \(header.search.midY), \(header.scope.midY), \(newAgent.midY)")
+        try expect(header.search.minX < header.scope.minX && header.scope.maxX <= newAgent.minX,
+                   "in T3's order: search, then scope, then New agent")
+        try expect(newAgent.width == AgentInboxView.headerIconButtonSide
+                   && newAgent.height == AgentInboxView.headerIconButtonSide,
+                   "New agent is a \(AgentInboxView.headerIconButtonSide)pt square — got \(newAgent.size)")
+        try expect(header.listTop <= header.search.minY,
+                   "the list starts under the header row")
+        let before = Set(world.supervisor.records.keys)
+        try expect(inbox.clickNewAgentForQA(), "the New agent button must be clickable")
+        let made = Set(world.supervisor.records.keys).subtracting(before)
+        try expect(made.count == 1,
+                   "New agent makes exactly one agent — made \(made.count)")
+        if let id = made.first {
+            world.app.qaRefreshAgentSurfaces()
+            try expect(block(world, id) == "live",
+                       "…and it is drawn live at once — drawn \(String(describing: block(world, id)))")
+        }
     }
 }

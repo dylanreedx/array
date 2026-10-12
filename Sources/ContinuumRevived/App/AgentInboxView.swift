@@ -318,7 +318,7 @@ struct AgentInboxCardStyleOverride {
     let cardHeight: (AgentInboxRow) -> Double
 
     static var production: Self {
-        let proposal = SidebarDensityProposal.a
+        let proposal = SidebarDensityProposal.production
         let anatomy = SidebarRowAnatomy(
             id: "production", label: "production",
             border: .none, iconPlacement: .leading, showsModelText: false)
@@ -345,6 +345,10 @@ struct AgentInboxCardStyleOverride {
 /// The stacked, boxless search treatment is now the production default. nil is
 /// retained only for the Component Lab's explicit legacy comparison.
 struct AgentInboxHeaderStyleOverride {
+    /// T3 nightly's ONE header row (confidence pass, sidebar stream): search
+    /// (flexible), then the scope control, then a 28pt New agent button. Wins over
+    /// `stacked` when both are set.
+    var oneRow = true
     /// Search takes a full-width row of its own, above the scope control, rather
     /// than sharing one row with it.
     var stacked = true
@@ -450,7 +454,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// A PARKED row's height: one `.title` line in a row inset — 35pt, which is
     /// the "~36pt" the packet approximates. Derived exactly like `rowHeight`, so
     /// a P1.4 size move moves both instead of clipping one.
-    static var slimRowHeight: Double { Metrics.rowHeight(for: .title, insets: Inset.row) }
+    /// 36 pt — T3 nightly's `h-9` slim row (confidence pass, sidebar stream). It
+    /// was the title's line height plus the row insets (~35 pt).
+    static let slimRowHeight: Double = 36
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The `Snoozed (N)` heading's height: the same one line a parked row gets, so
@@ -608,6 +614,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// production and every existing gate see.
     private var defaultHeaderConstraints: [NSLayoutConstraint] = []
     private var stackedHeaderConstraints: [NSLayoutConstraint] = []
+    private var oneRowHeaderConstraints: [NSLayoutConstraint] = []
+    /// The header's New agent button (one-row header only). The host wires it to
+    /// the same spawn ⌘K's New Agent makes.
+    private let newAgentButton = NSButton(frame: .zero)
+    var onNewAgent: (() -> Void)?
+    /// The square the New agent button occupies: T3's `size-7`.
+    static let headerIconButtonSide: CGFloat = 28
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
@@ -1271,6 +1284,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
         addSubview(scopeButton)
         addSubview(searchField)
+        newAgentButton.translatesAutoresizingMaskIntoConstraints = false
+        newAgentButton.isBordered = false
+        newAgentButton.title = ""
+        newAgentButton.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New agent")
+        newAgentButton.imagePosition = .imageOnly
+        newAgentButton.imageScaling = .scaleProportionallyDown
+        newAgentButton.target = self
+        newAgentButton.action = #selector(newAgentPressed)
+        newAgentButton.toolTip = "New agent"
+        newAgentButton.setAccessibilityLabel("New agent")
+        newAgentButton.setAccessibilityIdentifier("ContinuumAgentInboxNewAgent")
+        addSubview(newAgentButton)
         searchIcon.translatesAutoresizingMaskIntoConstraints = false
         searchIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         searchIcon.imageScaling = .scaleProportionallyDown
@@ -1354,6 +1379,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
+        // T3 nightly's one row: [search ………][scope][+]. The scope control yields
+        // width before the search field does not exist at all.
+        let scopeMax = scopeButton.widthAnchor.constraint(lessThanOrEqualToConstant: 104)
+        // …and never more than 30% of the sidebar, so at 220pt the search field
+        // keeps a usable width (T3's scope is an icon; this one names its scope).
+        let scopeShare = scopeButton.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.3)
+        oneRowHeaderConstraints = [
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeButton.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: Space.s),
+            scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            scopeMax,
+            scopeShare,
+            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
+            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+        ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
 
         NSLayoutConstraint.activate([
@@ -1424,6 +1471,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        newAgentButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         searchField.textColor = TextToken.textPrimary.color.nsColor(in: self)
         applySearchFieldChrome()
     }
@@ -1485,9 +1533,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private static let searchIconSide: CGFloat = 14
 
     private func applyHeaderStyle() {
-        let stacked = headerStyleOverride?.stacked == true
-        NSLayoutConstraint.deactivate(stacked ? defaultHeaderConstraints : stackedHeaderConstraints)
-        NSLayoutConstraint.activate(stacked ? stackedHeaderConstraints : defaultHeaderConstraints)
+        let oneRow = headerStyleOverride?.oneRow == true
+        let stacked = !oneRow && headerStyleOverride?.stacked == true
+        let chosen = oneRow ? oneRowHeaderConstraints
+            : stacked ? stackedHeaderConstraints : defaultHeaderConstraints
+        NSLayoutConstraint.deactivate(
+            defaultHeaderConstraints + stackedHeaderConstraints + oneRowHeaderConstraints)
+        NSLayoutConstraint.activate(chosen)
+        newAgentButton.isHidden = !oneRow
+        // In one row the scope control is the part that yields: its label
+        // truncates before the row can force the sidebar wider than it is.
+        scopeButton.setContentCompressionResistancePriority(
+            oneRow ? .defaultLow : .required, for: .horizontal)
+        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // The glyph steals the field's leading edge, so the text has to start
         // after it — otherwise the placeholder sits underneath the magnifier.
         let chrome = headerStyleOverride?.fieldChrome == true
@@ -2356,6 +2414,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Empty the search the way a person does, through the same notification a
     /// keystroke raises, so the filter, the selection reset and the button's own
     /// visibility all take one path.
+    @objc private func newAgentPressed() { onNewAgent?() }
+
     @objc private func clearSearch() {
         guard !searchField.stringValue.isEmpty else { return }
         searchField.stringValue = ""
@@ -4438,6 +4498,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return tableView.rect(ofRow: row)
     }
     var tableViewportHeightForQA: CGFloat { scrollView.contentView.bounds.height }
+    /// The header's three controls, in this view's coordinates.
+    var headerFramesForQA: (search: NSRect, scope: NSRect, newAgent: NSRect?, listTop: CGFloat) {
+        (searchField.frame, scopeButton.frame,
+         // The ALIGNMENT rect: the constraints place it, and NSButton pads its
+         // frame beyond it.
+         newAgentButton.isHidden ? nil : newAgentButton.alignmentRect(forFrame: newAgentButton.frame),
+         scrollView.frame.maxY)
+    }
+    func clickNewAgentForQA() -> Bool {
+        guard !newAgentButton.isHidden, newAgentButton.isEnabled else { return false }
+        newAgentButton.performClick(nil)
+        return true
+    }
     var lastTableRowMaxYForQA: CGFloat? {
         items.isEmpty ? nil : tableView.rect(ofRow: items.count - 1).maxY
     }
