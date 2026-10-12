@@ -158,6 +158,7 @@ public struct ProjectStore: Sendable {
     }
 
     public func loadCanvas() throws -> CanvasState {
+        StoreReadProbe.shared.record()
         let canvas: CanvasState = try writer.read(at: layout.canvasFile, decoder: JSONCodec.makeCanvasDecoder())
         try checkSchema(canvas.schemaVersion, supported: CanvasState.currentSchemaVersion, at: layout.canvasFile)
         return CanvasEngine.sanitizePersistedCanvas(canvas).canvas
@@ -233,6 +234,7 @@ public struct ProjectStore: Sendable {
     }
 
     public func listSessions() throws -> [TerminalSessionDescriptor] {
+        StoreReadProbe.shared.record()
         let dir = layout.sessionsDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
         let entries = try FileManager.default.contentsOfDirectory(

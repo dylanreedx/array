@@ -416,6 +416,9 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+# Confidence pass S4: the record/context/row-builder sections sit after the
+# KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
+run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
@@ -736,6 +739,9 @@ run_app_check .build/debug/Array --browser-inspector-network-lite-check
 run_app_check .build/debug/Array --browser-inspector-link-lifecycle-check
 run_app_check .build/debug/Array --browser-inspector-actions-check
 run_app_check .build/debug/Array --agent-inbox-check
+# Confidence pass S4: closing a tile (idle, busy, parent) and a lost tile, driven
+# through the mounted scene and read off the drawn inbox.
+run_app_check .build/debug/Array --sidebar-truth-check
 # Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
 # 220/280/320 pt in both appearances, materialized before rows are applied.
 run_app_check .build/debug/Array --sidebar-ux-check

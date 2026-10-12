@@ -2104,6 +2104,22 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-truth-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SidebarTruthChecks.run()
+                    print("ContinuumRevivedSidebarTruthChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // Async: supervisor events and the turn-end push are main-queue hops.
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-inbox-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -4704,6 +4720,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
     private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
+    private var sidebarTurnObserverToken: UUID?
+    /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
+    /// switch witness reads the delta across one switch.
+    private(set) var qaStructuralSidebarReloadCount = 0
+    /// A canvas model change is waiting for the next run-loop turn's reload.
+    private var sidebarReloadPending = false
+    /// What the last structural rebuild read from disk (`SidebarModelInputs`).
+    private var sidebarModelInputsFromDisk: SidebarModelInputs?
+    private var sidebarTerminalDescriptors: [TerminalSessionDescriptor] = []
     /// P2B.7: the snapshot as the surfaces last SAW it. `pushAgentSurfaces` diffs
     /// against this to publish `agentActivity.lastChange`, so a push that coalesced
     /// several incremental events reports all of them and not just the last one.
@@ -6821,12 +6846,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // THE PARK IS WHY THE SIDEBAR STOPS FILLING UP (.plans/05-close-to-history.md).
             // Before it, a closed tile left its record in the live list with no tile
             // and no runner — unobservable, so the row froze at "Unconfirmed" and
-            // stayed there forever. `close` refuses a busy agent, so a tile closed
-            // mid-turn still leaves its row where you can see the work finish.
+            // stayed there forever. The close INTENT is always recorded now
+            // (confidence pass): an idle agent parks at once, and a busy one reads
+            // "Finishing" and leaves for History by itself when its turn ends — it
+            // used to be refused, never retried, and sat in Active for days.
             try? owner?.managedSessionStore.delete(tileId: id)
             reconciledManagedSessionSource.invalidateCache()
             if let agentId = agentSupervisor.agent(forTile: id) {
-                agentSupervisor.close(agentID: agentId)
+                agentSupervisor.requestClose(agentID: agentId)
                 agentSupervisor.detachView(agentID: agentId)
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
@@ -6938,8 +6965,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             in: (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
         )
         let discovered = try reconciledManagedSessionSource.records(roots: roots, now: Date())
+        // Per root (confidence pass, R4): the active project's own store failing to
+        // list is that project's problem, not the whole list's — the walk above
+        // already carries its last good listing.
         if let activeStore = workspaceRuntime?.activeController?.managedSessionStore {
-            for record in try activeStore.reconciledRecords(reconciledManagedSessionSource.proof())
+            let proof = try reconciledManagedSessionSource.proof()
+            let activeRecords: [ManagedAgentSessionRecord]
+            do {
+                activeRecords = try activeStore.reconciledRecords(proof)
+            } catch {
+                fputs("agent activity: the active project's managed sessions are unreadable, using its last listing — \(error)\n", stderr)
+                activeRecords = []
+            }
+            for record in activeRecords
             where seenTiles.insert(record.tileId).inserted {
                 records.append(record)
             }
@@ -7194,9 +7232,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     ///   2. the live canvas tile view, for a tile that is rendering;
     ///   3. `observedAgentStatuses`, the runtime observer's map.
     private func rebuildAgentActivitySnapshot(now: Date = Date()) {
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        // THE ONE DISK READ of the sidebar's inputs (confidence pass, R5): a
+        // structural rebuild refreshes them, and every push between two rebuilds
+        // derives from this plus the live canvas — no file is opened for an event.
+        sidebarModelInputsFromDisk = SidebarModelInputs.load(registryStore: registryStore)
+        let inputs = currentSidebarModelInputs()
+        let registry = inputs.registry
+        let projectCanvases = inputs.projectCanvases
         let descriptors = currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases)
+        sidebarTerminalDescriptors = descriptors
 
         var liveStatuses: [UUID: AgentStatus] = [:]
         for descriptor in descriptors {
@@ -7360,7 +7404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// own activity takes the incremental path below instead.
     private func refreshAgentSurfaces(notify: Bool = true) {
         rebuildAgentActivitySnapshot()
-        pushAgentSurfaces(notify: notify)
+        pushAgentSurfaces(notify: notify, reloadsTopBar: true)
         warmCheckedOutBranchesIfNeeded()
     }
 
@@ -7396,14 +7440,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// publish the change-set that got it there. Split out of
     /// `refreshAgentSurfaces` by P2B.7 so the agent-event path can reach the
     /// surfaces without the disk read.
-    private func pushAgentSurfaces(notify: Bool = true) {
+    /// `reloadsTopBar`: only a structural refresh can have changed what the top
+    /// bar shows (it re-reads the registry and the workspace file); an agent's own
+    /// event cannot, so the event path leaves it alone and opens no file.
+    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false) {
         agentActivity.lastChange = AgentsBoardProjection.changeSet(
             from: agentActivityChangeBase, to: agentActivity.snapshot
         )
         agentActivityChangeBase = agentActivity.snapshot
         applyAgentStatusesToCanvas()
         updateAgentAttentionSurface(notify: notify)
-        reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar)
     }
 
     /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
@@ -10585,7 +10632,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         window.titlebarSeparatorStyle = .none
     }
 
+    /// A tile-less agent has no view to ingest its turn ending, so nothing told the
+    /// sidebar: a closed tile's "Finishing" row would have sat there until something
+    /// structural moved. The supervisor's own turn seam tells it instead.
+    private func installSidebarTurnObserver() {
+        if let token = sidebarTurnObserverToken {
+            agentSupervisor.removeTurnCapabilitiesObserver(token)
+        }
+        sidebarTurnObserverToken = agentSupervisor.addTurnCapabilitiesObserver { [weak self] id in
+            guard let self, self.agentSupervisor.records[id]?.tileId == nil else { return }
+            self.scheduleAgentSurfacePush(debounce: 0.05)
+        }
+    }
+
     private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
+        installSidebarTurnObserver()
+        // Confidence pass: Settled folds behind a counted heading and the shelves
+        // sink to the bottom of the list (T3 nightly's layout).
+        sidebar.agentInbox.foldsSettledIntoShelf = true
         sidebar.onSelection = { [weak self] selection in
             self?.handleWorkspaceSidebarSelection(selection)
         }
@@ -10755,24 +10819,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func buildWorkspaceSidebarTree() throws -> SidebarTree {
-        guard let registryStore else { return SidebarTree(workspaces: []) }
-        let registry = try registryStore.loadOrEmpty()
-        let appSupport = registryStore.registryFile.deletingLastPathComponent()
-        var documents: [UUID: WorkspaceDocument] = [:]
-        for workspace in registry.workspaces {
-            let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
-            if let document = try? store.tryLoad() {
-                documents[workspace.id] = document
-            }
-        }
-        if let workspaceRuntime {
-            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
-        }
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        guard registryStore != nil else { return SidebarTree(workspaces: []) }
+        let inputs = currentSidebarModelInputs()
         return SidebarTreeBuilder.build(
-            registry: registry,
-            documents: documents,
-            projectCanvases: projectCanvases,
+            registry: inputs.registry,
+            documents: inputs.documents,
+            projectCanvases: inputs.projectCanvases,
             // P2B.4: from the one snapshot. This used to be its own walk over every
             // project's sessions with the observer map layered on top — a third
             // reading of the same statuses the badges and the dock were computing
@@ -10782,19 +10834,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
-    private func workspaceSidebarProjectCanvasSnapshots(registry: Registry) -> [UUID: CanvasState] {
-        var snapshots: [UUID: CanvasState] = [:]
-        for project in registry.projects {
-            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
-            if let canvas = try? store.tryLoadCanvas() {
-                snapshots[project.id] = canvas
-            }
-        }
-        if let activeProjectId = workspaceRuntime?.activeController?.project.id,
-           let canvasView {
-            snapshots[activeProjectId] = canvasView.canvasState
-        }
-        return snapshots
+    /// The sidebar's inputs as of NOW: the last structural disk read, with the
+    /// mounted document and every installed zone layer's live tiles laid over it
+    /// (`SidebarModelInputs`). Reads disk only when nothing has been read yet.
+    private func currentSidebarModelInputs() -> SidebarModelInputs {
+        let fromDisk = sidebarModelInputsFromDisk ?? {
+            let loaded = SidebarModelInputs.load(registryStore: registryStore)
+            sidebarModelInputsFromDisk = loaded
+            return loaded
+        }()
+        return fromDisk.overlaying(
+            currentWorkspaceId: workspaceRuntime?.workspaceId,
+            currentDocument: workspaceRuntime?.document,
+            activeProjectId: workspaceRuntime?.activeController?.project.id,
+            canvas: canvasView)
     }
 
     /// `rebuildAgentActivity: false` is for `refreshAgentSurfaces`, which has just
@@ -10821,19 +10874,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Read-state is layered on here rather than inside the fold, because
     /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
     private func buildAgentInboxRows(now: Date = Date()) -> [AgentInboxRow] {
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
-        var documents: [UUID: WorkspaceDocument] = [:]
-        if let registryStore {
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            for workspace in registry.workspaces {
-                let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
-                if let document = try? store.tryLoad() { documents[workspace.id] = document }
-            }
-        }
-        if let workspaceRuntime {
-            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
-        }
-        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        // In memory (R5): the inputs the last structural rebuild read, with the
+        // live canvas over them. An agent event never opens a file.
+        let inputs = currentSidebarModelInputs()
+        let registry = inputs.registry
+        let documents = inputs.documents
+        let projectCanvases = inputs.projectCanvases
+        // R3: a record bound to a tile no document holds is a closed window,
+        // derived at every build — not repaired lazily when someone clicks it.
+        let reachableTiles = inputs.reachableTileIds(canvas: canvasView)
         let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
         var checkedOutBranches: [UUID: String] = [:]
         var attention: [UUID: InboxAttention] = [:]
@@ -10848,7 +10897,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             attention[record.id.rawValue] = agentSupervisor.attention(for: record.id, now: now)
             lifecycleFacts[record.id.rawValue] = AgentLifecycleFacts(
-                hasLiveRunner: agentSupervisor.isRunning(record.id))
+                hasLiveRunner: agentSupervisor.isRunning(record.id),
+                tileUnreachable: inputs.tileIsUnreachable(record, reachable: reachableTiles))
             if let snapshot = agentSupervisor.turnSnapshot(for: record.id) {
                 turnSnapshots[record.id.rawValue] = snapshot
             }
@@ -10857,7 +10907,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             registry: registry,
             documents: documents,
             projectCanvases: projectCanvases,
-            terminalDescriptors: currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases),
+            terminalDescriptors: sidebarTerminalDescriptors,
             agents: records,
             checkedOutBranches: checkedOutBranches
         )
@@ -10915,11 +10965,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return agentSupervisor.agent(forTile: tileId)?.rawValue ?? tileId
     }
 
-    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
-        if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
-        defer { reloadWorkspaceTopBar() }
+    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
+        if rebuildAgentActivity {
+            qaStructuralSidebarReloadCount += 1
+            sidebarReloadPending = false
+            rebuildAgentActivitySnapshot()
+        }
+        defer { if reloadsTopBar ?? rebuildAgentActivity { reloadWorkspaceTopBar() } }
         guard let sidebar = workspaceSidebarView else { return }
-        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        let registry = currentSidebarModelInputs().registry
         // P3.6: the inbox is the sidebar's content, so it is fed on the same
         // reload. `applyInbox` and not `reloadInbox` — the change set says which
         // agents moved, and rebuilding every row for one streamed token is what
@@ -10929,6 +10983,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
         sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
+        // R6: the default scope is the workspace on screen.
+        let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
+        sidebar.setInboxCurrentWorkspace(registry.workspaces.first { $0.id == onScreen }?.name)
         sidebar.agentInbox.setProjectIconSources(Dictionary(
             uniqueKeysWithValues: registry.projects.filter { !$0.missing }.map {
                 ($0.id, URL(fileURLWithPath: $0.rootPath, isDirectory: true))
@@ -12709,11 +12766,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 needs you") == true, "zone row should include needs-attention rollup text")
 
         canvas.install(tileView: TileNSView(tile: createdTile), for: createdTile)
+        // Canvas model changes reload the sidebar on the NEXT run-loop turn,
+        // coalesced (confidence pass): drain that turn, as the app's own loop does.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileCreateUpdatedSidebar = sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileCreateUpdatedSidebar, "tile install should update the existing sidebar view")
 
         canvas.removeTile(id: createdTileId)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         sidebar.layoutSubtreeIfNeeded()
         let tileDeleteUpdatedSidebar = !sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
         try expect(tileDeleteUpdatedSidebar, "tile removal should update the existing sidebar view")
@@ -17100,6 +17161,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         self.registryStore = registryStore
     }
 
+    /// `--sidebar-truth-check` (confidence pass): install a sidebar exactly as boot
+    /// does, and run the structural refresh boot and every tile change run.
+    func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
+        workspaceSidebarView = sidebar
+        configureWorkspaceSidebar(sidebar)
+    }
+
+    func qaRefreshAgentSurfaces() { refreshAgentSurfaces(notify: false) }
+    /// The agent-EVENT push (what `scheduleAgentSurfacePush` fires), not a rebuild.
+    func qaPushAgentSurfacesForEvent() { pushAgentSurfaces(notify: false) }
+
     func qaPrepareForOfflineSceneCheck(
         canvas: CanvasNSView,
         browserEngine: BrowserEngineContext,
@@ -18031,8 +18103,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// COALESCED (confidence pass): at most one sidebar reload per run-loop turn.
+    /// Every restored terminal, browser and file-tree tile reports a model change,
+    /// and each used to cost a full structural reload — a workspace switch paid one
+    /// per restored tile, hundreds of file reads on the main thread. Any full
+    /// reload that runs before the deferred one (the switch's own) satisfies it.
     func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {
-        reloadWorkspaceSidebar()
+        guard !sidebarReloadPending else { return }
+        sidebarReloadPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.sidebarReloadPending else { return }
+            self.reloadWorkspaceSidebar()
+        }
     }
 
     private var lastReconciledViewport: CanvasViewport?
@@ -31204,6 +31286,9 @@ extension AppDelegate {
         let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
         WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
         app.configureWorkspaceSidebar(sidebar)
+        // The corpus reads every flow's rendered row, the settled one included,
+        // so the folded Settled shelf is opened (confidence pass).
+        sidebar.inboxForQA.expandSettledShelfForQA()
 
         // A real window, so the offscreen table has a viewport in which to
         // materialize cells — without one, every rendered-cell read is vacuous.
@@ -31626,14 +31711,18 @@ extension AppDelegate {
     let scopeSuite = "continuum.inbox.scope.\(UUID().uuidString)"
     let scopeDefaults = UserDefaults(suiteName: scopeSuite)!
     defer { scopeDefaults.removePersistentDomain(forName: scopeSuite) }
+    // Confidence pass (sidebar stream): the default is the workspace on screen.
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .currentWorkspace,
+               "with no stored scope the inbox shows the workspace on screen")
+    WorkspaceSidebarConfig.setScope(.all, defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "with no stored scope the inbox shows every agent")
+               "an explicitly picked 'All agents' is honoured over the default")
     WorkspaceSidebarConfig.setScope(.workspace("Overnight"), defaults: scopeDefaults)
     try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .workspace("Overnight"),
                "the picked scope comes back after a relaunch — got \(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults))")
     scopeDefaults.set("zone:main", forKey: WorkspaceSidebarConfig.scopeKey)
-    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
-               "an unreadable stored scope opens the list up rather than emptying it")
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == WorkspaceSidebarConfig.defaultScope,
+               "an unreadable stored scope falls back to the default rather than emptying the list")
     // …and the restore path is the one the app uses, with no write-back.
     let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
     var restoreWrites = 0
@@ -32863,11 +32952,19 @@ extension AppDelegate {
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
-    try expect(sidebar.inboxForQA.rowIdsForQA == [tiledId.rawValue],
-               "…and applied: the tiled agent is in workspace 'Default' and the headless one is in no workspace — got \(sidebar.inboxForQA.titlesForQA)")
+    // Confidence pass (sidebar stream): a tile-less agent belongs to its project's
+    // one workspace, so 'Default' holds all three agents — the headless one and its
+    // child included, which a workspace-scoped list could otherwise never show.
+    try expect(Set(sidebar.inboxForQA.rowIdsForQA) == [tiledId.rawValue, headlessId.rawValue, childId.rawValue],
+               "…and applied: every agent of workspace 'Default' — tiled, headless and child — got \(sidebar.inboxForQA.titlesForQA)")
+    // …and the scope BITES: a project with no agent in it shows no row.
+    try expect(sidebar.inboxForQA.pickScopeForQA(.project("Quiet")), "'Quiet' must be pickable")
+    sidebar.inboxForQA.layoutForQA()
+    try expect(sidebar.inboxForQA.rowIdsForQA.isEmpty,
+               "a scope must filter: 'Quiet' has no agent — got \(sidebar.inboxForQA.titlesForQA)")
     // The menu comes from the REGISTRY, not only from the rows: this run's project and
     // workspace are both offered while the list is showing one row.
-    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["All agents", "Continuum", "Quiet", "Default"],
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["This workspace", "All agents", "Continuum", "Quiet", "Default"],
                "the popup offers the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
     // Back to every agent for the assertions below, through the popup, and the pick
     // must have been written to defaults — that is the whole persistence loop.
@@ -34889,6 +34986,9 @@ extension AppDelegate {
     try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
                "setup: adopting a settled agent clears nothing")
     revealApp.refreshAgentSurfaces(notify: false)
+    // The app folds Settled behind a heading (confidence pass); this section reads
+    // and clicks settled rows, so it opens the shelf first.
+    revealSidebar.inboxForQA.expandSettledShelfForQA()
     revealSidebar.inboxForQA.layoutForQA()
 
     // The shipped list is the source of truth for section placement. `refreshAgentSurfaces`

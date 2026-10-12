@@ -67,6 +67,7 @@ public struct WorkspaceStore: Sendable {
     }
 
     public func load() throws -> WorkspaceDocument {
+        StoreReadProbe.shared.record()
         let document: WorkspaceDocument = try writer.read(at: layout.canvasFile)
         try document.validateSchema(at: layout.canvasFile)
         return document

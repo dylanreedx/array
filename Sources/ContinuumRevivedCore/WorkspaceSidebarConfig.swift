@@ -83,7 +83,11 @@ public enum WorkspaceSidebarConfig {
     /// click from fixed and never hides an agent silently, which is the property worth
     /// protecting; the alternative — dropping a scope the moment no row matches it —
     /// would also drop it at launch, before the first push has arrived.
-    public static let defaultScope = InboxScope.all
+    // Confidence pass (sidebar stream): the workspace on screen, not "All".
+    // "All" listed every workspace's agents — rows for tiles you could not see,
+    // the same symptom as a stale row — and kept a deleted workspace's agents in
+    // view. An explicitly stored scope (including "all") is still honoured.
+    public static let defaultScope = InboxScope.currentWorkspace
 
     public static func resolveScope(defaults: UserDefaults = .standard) -> InboxScope {
         guard let raw = defaults.string(forKey: scopeKey),
