@@ -174,10 +174,11 @@ public struct NavKeymap: Equatable, Sendable {
     /// leader (jump/snap). Distinct from `leader` (the legacy `⌃Space` toggle):
     /// this is a held modifier, not a key-down chord. Default `.option`.
     public var leaderHoldModifier: FocusKeyModifiers
-    /// Dwell in milliseconds before the held leader activates. Default 0 (instant):
-    /// `⌥` held alone is inert, so there's nothing to gate. A positive value
-    /// re-introduces the gate (so a quick `⌥`+key tap can slip through to content
-    /// before the leader claims it) for anyone who types `⌥`/Alt combos a lot.
+    /// Dwell in milliseconds before the held leader activates. `⌥` is not inert:
+    /// it is word movement (⌥←/→), ⌥↩ (queue), and half a layout's characters
+    /// (⌥3 = # on a UK keyboard). An instant leader took every one of those, so
+    /// the leader waits `effectiveLeaderDwellMs` and a key pressed meanwhile
+    /// makes it a chord, not a hold.
     public var leaderDwellMs: Int
     /// The label keys offered to visible tiles in the hold-leader jump HUD, in
     /// priority order. Home-row default (`asdfghjkl`); rebindable. Tiles beyond
@@ -200,7 +201,7 @@ public struct NavKeymap: Equatable, Sendable {
     public var focusMode: String
     public var deleteTile: String
 
-    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 0, leaderLabelKeys: String = "asdfghjkl", leaderZoneOrdinalKeys: String = "123456789", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
+    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 250, leaderLabelKeys: String = "asdfghjkl", leaderZoneOrdinalKeys: String = "123456789", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
         self.leader = leader
         self.leaderHoldModifier = leaderHoldModifier
         self.leaderDwellMs = leaderDwellMs
@@ -223,13 +224,21 @@ public struct NavKeymap: Equatable, Sendable {
     public static let `default` = NavKeymap(
         leader: KeyChord(keyCode: 49, modifiers: .control),
         leaderHoldModifier: .option,
-        leaderDwellMs: 0,
+        leaderDwellMs: 250,
         leaderLabelKeys: "asdfghjkl",
         leaderZoneOrdinalKeys: "123456789",
         up: "k", down: "j", left: "h", right: "l",
         nextZone: "n", previousZone: "p", zonePicker: "z", workspacePicker: "w",
         agentCycle: "a", agentNeedsAttention: "A", focusMode: "f", deleteTile: "x"
     )
+
+    /// The shortest hold that can open the leader. A configured value below it
+    /// (including the old default of 0, still persisted for some users) would
+    /// put the leader back in front of every ⌥ chord.
+    public static let minimumLeaderDwellMs = 150
+
+    /// The dwell the app actually waits.
+    public var effectiveLeaderDwellMs: Int { max(Self.minimumLeaderDwellMs, leaderDwellMs) }
 
     /// Canonical UserDefaults keys for the hold-leader config (so Settings binds to
     /// the EXACT keys `resolve`/`persist` read).
@@ -300,7 +309,7 @@ public struct NavKeymap: Equatable, Sendable {
             if let modifier = parseModifierToken(hold) { map.leaderHoldModifier = modifier } else { warn("Invalid continuum.keymap.leaderHold '\(hold)'; using default opt") }
         }
         if let dwell = string("leaderDwellMs") {
-            if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default 0") }
+            if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default \(NavKeymap.default.leaderDwellMs)") }
         }
         if let labelKeys = string("leaderLabelKeys") {
             let cleaned = labelKeys.lowercased()
