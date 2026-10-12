@@ -165,17 +165,12 @@ public struct Registry: Codable, Equatable, Sendable {
     ///  2. otherwise a legacy membership is adopted — the last-active workspace
     ///     if it is one of them, else the first in registry order;
     ///  3. otherwise the project is unowned.
-    /// A declaration naming a workspace that no longer exists is a dangling
-    /// reference (the shape a crash between delete's commit and cleanup leaves)
-    /// and is treated as no declaration.
     private static func resolvedOwner(
         of project: ProjectEntry,
         in workspaces: [WorkspaceEntry],
         lastActiveWorkspaceId: UUID?
     ) -> UUID? {
-        if let declared = project.workspaceId, workspaces.contains(where: { $0.id == declared }) {
-            return declared
-        }
+        if let declared = project.workspaceId { return declared }
         let memberships = workspaces.filter { $0.projectIds.contains(project.id) }.map(\.id)
         if let lastActiveWorkspaceId, memberships.contains(lastActiveWorkspaceId) { return lastActiveWorkspaceId }
         return memberships.first

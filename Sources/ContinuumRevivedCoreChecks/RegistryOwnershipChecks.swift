@@ -138,16 +138,6 @@ func runRegistryOwnershipChecks() {
         }
     }
 
-    // 3. A declaration naming a workspace that no longer exists is no owner.
-    do {
-        let gone = uuid("00000000DEAD")
-        let field = registry([workspace(work, "work", [])], [project(harmony, "harmony", owner: gone)], lastActive: work)
-        if let decoded = roundTrip(field, "dangling") {
-            check(owners(decoded)[harmony] == .some(nil),
-                  "dangling: a project declaring a deleted workspace still reads as owned")
-        }
-    }
-
     // 4. The read itself never throws on a disagreement, even before migration.
     do {
         let unmigrated = registry(
