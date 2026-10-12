@@ -88,7 +88,8 @@ enum SidebarTruthChecks {
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
               + "reloaded the sidebar once; Settled folded behind a counted heading and the "
               + "headings sat at the bottom of the list; the header is one row whose New "
-              + "agent button made an agent")
+              + "agent button made an agent; hovering it offered Snooze and Settle, and "
+              + "Settle settled it")
     }
 
     // MARK: - World
@@ -573,10 +574,29 @@ enum SidebarTruthChecks {
         let made = Set(world.supervisor.records.keys).subtracting(before)
         try expect(made.count == 1,
                    "New agent makes exactly one agent — made \(made.count)")
-        if let id = made.first {
-            world.app.qaRefreshAgentSurfaces()
-            try expect(block(world, id) == "live",
-                       "…and it is drawn live at once — drawn \(String(describing: block(world, id)))")
-        }
+        guard let id = made.first else { return }
+        world.app.qaRefreshAgentSurfaces()
+        try expect(block(world, id) == "live",
+                   "…and it is drawn live at once — drawn \(String(describing: block(world, id)))")
+        try hoverActionsSettle(world, id)
+    }
+
+    // MARK: - Hover: the status slot becomes [Snooze] [Settle]
+
+    static func hoverActionsSettle(_ world: World, _ agent: AgentID) throws {
+        let inbox = world.inbox
+        inbox.layoutForQA()
+        try expect(inbox.hoverActionsForQA(id: agent.rawValue)?.shown == false,
+                   "control: a row nobody is pointing at shows its status, not its actions")
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the new agent's row must be hoverable")
+        let hovered = inbox.hoverActionsForQA(id: agent.rawValue)
+        try expect(hovered?.shown == true && hovered?.titles == ["Snooze", "Settle"],
+                   "hovering an idle card cross-fades its status slot to [Snooze] [Settle] — got \(String(describing: hovered))")
+        try expect(inbox.clickHoverSettleForQA(id: agent.rawValue), "the hover Settle must be clickable")
+        try expect(world.supervisor.records[agent]?.settledOverride == .settled,
+                   "the hover Settle settles the agent — got \(String(describing: world.supervisor.records[agent]?.settledOverride))")
+        try expect(block(world, agent) != "live",
+                   "…and its row leaves the live list — drawn \(String(describing: block(world, agent)))")
+        _ = inbox.hoverRowForQA(id: nil)
     }
 }

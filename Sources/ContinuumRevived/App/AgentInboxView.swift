@@ -2690,6 +2690,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             isInteracting: interacting,
             now: renderNow
         )
+        configureHoverActions(on: cell, for: model)
         if let redesigned = cell as? AgentInbox96CellView {
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
@@ -2720,6 +2721,51 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow[row] = cell
         updateAccessibilityHierarchy()
         return cell
+    }
+
+    /// T3 nightly's hover actions (confidence pass): a card offers [Snooze] [Settle],
+    /// a snoozed slim row Wake, a settled one Un-settle — each only when the row
+    /// may do it and the host performs it, through the same `performRowAction` the
+    /// context menu uses.
+    private func configureHoverActions(on cell: AgentInboxRowCell, for model: AgentInboxRow) {
+        let id = model.id
+        func action(_ kind: InboxRowAction) -> (() -> Void)? {
+            guard isWired(kind), kind.isAvailable(for: model, rollups: rollupsByParent) else { return nil }
+            return { [weak self] in
+                guard let self else { return }
+                self.rowChoiceTargetIds = [id]
+                self.performRowAction(kind)
+            }
+        }
+        if let card = cell as? AgentInbox96CellView {
+            card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
+        } else if let slim = cell as? AgentInboxSlimCellView {
+            switch model.lifecycle {
+            case .snoozed:
+                slim.configureHoverAction(symbol: "alarm", label: "Wake", perform: action(.wake))
+            case .settled:
+                slim.configureHoverAction(
+                    symbol: "arrow.uturn.backward", label: "Un-settle", perform: action(.unsettle))
+            case .active, .archived:
+                slim.configureHoverAction(symbol: "arrow.uturn.backward", label: "Un-settle", perform: nil)
+            }
+        }
+    }
+
+    /// Whether row `id`'s cell is showing its hover actions, and which.
+    func hoverActionsForQA(id: UUID) -> (shown: Bool, titles: [String])? {
+        guard let tableRow = tableRow(forAgentId: id) else { return nil }
+        let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+        if let card = cell as? AgentInbox96CellView { return (card.qaHoverActionsShown, card.qaHoverActionTitles) }
+        if let slim = cell as? AgentInboxSlimCellView { return (slim.qaHoverActionShown, []) }
+        return nil
+    }
+
+    func clickHoverSettleForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        return card.clickHoverSettleForQA()
     }
 
     /// At most one nudge is ever offered, and only while the list has no unread or
@@ -8142,6 +8188,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
+    /// The slim row's hover action (confidence pass): Wake on a snoozed row,
+    /// Un-settle on a settled one, cross-fading over the time.
+    private let hoverAction = InboxRowHoverActionButton(symbol: "arrow.uturn.backward", label: "Un-settle")
+    private var onHoverAction: (() -> Void)?
+    private var hoverActionShown = false
     private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
     private var branchMinimumWidth: NSLayoutConstraint?
@@ -8263,6 +8314,19 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // P3.10: an overlay here too — a parked row is one line, so a pill in the
         // stack would push the whole line sideways rather than merely displace one
         // label.
+        hoverAction.translatesAutoresizingMaskIntoConstraints = false
+        hoverAction.target = self
+        hoverAction.action = #selector(hoverActionClicked)
+        hoverAction.alphaValue = 0
+        hoverAction.isHidden = true
+        card.addSubview(hoverAction)
+        NSLayoutConstraint.activate([
+            hoverAction.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
+            hoverAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            hoverAction.widthAnchor.constraint(equalToConstant: 20),
+            hoverAction.heightAnchor.constraint(equalToConstant: 20),
+        ])
+
         jumpHint.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(jumpHint)
         NSLayoutConstraint.activate([
@@ -8538,7 +8602,30 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
+        let on = interaction.isHovered && onHoverAction != nil
+        hoverActionShown = on
+        hoverAction.isHidden = !on
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || window == nil
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduce ? 0 : 0.15
+            context.allowsImplicitAnimation = !reduce
+            (reduce ? hoverAction : hoverAction.animator()).alphaValue = on ? 1 : 0
+            (reduce ? timeLabel : timeLabel.animator()).alphaValue = on ? 0 : CGFloat(shown?.emphasis.textOpacity ?? 1)
+        }
     }
+
+    @objc private func hoverActionClicked() { onHoverAction?() }
+
+    /// The one action this slim row offers on hover, or nil for none.
+    func configureHoverAction(symbol: String, label: String, perform: (() -> Void)?) {
+        onHoverAction = perform
+        hoverAction.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        hoverAction.toolTip = label
+        hoverAction.setAccessibilityLabel(label)
+        hoverAction.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    var qaHoverActionShown: Bool { hoverActionShown }
 
     func setIncreasedContrast(_ enabled: Bool) {
         card.usesIncreasedContrast = enabled
