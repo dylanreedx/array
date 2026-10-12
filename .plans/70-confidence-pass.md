@@ -105,18 +105,24 @@ Resume here. Staging: `array/confidence-pass` (bench `.worktrees/confidence-pass
 Nothing is on `array/integration`; nothing is pushed; `/Applications/Array.app`
 and Dylan's real state were never touched (read-only copy audit only).
 
-Stream branches still holding unmerged work (merge each into staging, rebuild,
-run its legs, then the full matrix):
-- `array/cp-sidebar` — S4b layout (header row, 82/36pt rows, hover actions,
-  row animation, shelf persistence).
-- `array/cp-workspace` — S5b: zone header on warm re-attach, one global browser
-  budget incl. warm scenes, warm detach-sweep contract.
-- `array/cp-agent-presence` — S3b: ui-geometry failed-tool vs failed-turn,
-  agent-supervisor branch chip.
-- `array/cp-composer` — S6 (⌥ leader, force-send, stranded steers, /compact MCP,
-  quit flush).
-- `array/cp-transcript` — S8 direction C (turn cards + live work strip from
-  `AgentTurnPresence`); behind one switch.
+Merged at wrap: S4b sidebar layout, S5b warm re-attach (headers, parked agent
+tiles detach), S6 hold-⌥ leader only, S8 turn cards (switch OFF:
+`AgentTranscriptPresentationStyle.current = .rows`; witness
+`--transcript-turn-cards-check`).
+
+Left, by bench (uncommitted work stays in the bench):
+- `cp-agent-presence`: uncommitted ui-geometry assertion migration (failed tool
+  ≠ failed turn); real leftover — an unattached agent tile can show the gyro.
+- `cp-workspace`: one global browser budget across warm scenes
+  (`--browser-lru-budget-check` red); eviction-cancels-once assertion.
+- `cp-composer`: uncommitted, non-compiling `--agent-steering-recovery-check`;
+  items 2–7 (force-send drop/replay, stranded steers, queue stall/Resume,
+  /compact MCP, background claude work, quit flush, codex steer, pi bridge).
+- `cp-transcript`: migrate rhythm/page-zoom legs, 14/22 answer, slimmer log
+  rows, send anchoring, sticky strip, then flip the default; Phase 2 LOD.
+- `cp-sidebar-fold-migration-wip`: remove `foldsSettledIntoShelf` (J3 red).
+- `--nav-mode-check` (KNOWN-RED) now fails on a different assertion.
+- Final matrix log: session scratchpad `matrix-final.log` (head before S8).
 
 Gate before Dylan reviews: full `scripts/run-matrix.sh` with
 `CONTINUUM_SKIP_UI_BASELINES=1`, `env -u TMUX -u TMUX_PANE`, and `caffeinate -u`
