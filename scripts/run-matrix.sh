@@ -808,6 +808,17 @@ run_app_check .build/debug/Array --tile-materialize-check
 run_app_check .build/debug/Array --tile-project-scope-check
 # Dispatched since P3 but never registered, so the gate never reported it.
 run_app_check .build/debug/Array --workspace-switch-polish-check
+# .plans/70 S5: a workspace switch is instant, certain and cheap to undo, through
+# mountWorkspaceSceneAtBoot and launch's own project factory. Counted across each
+# switch: A→B→A re-attaches a warm scene (no tile view built, the same terminal
+# runtimes and web view, descriptors untouched), no synchronous tmux round trip
+# on the main thread, one sidebar reload, the camera where it was left, nothing
+# re-planned after the switch returns. A released workspace keeps its terminal
+# descriptors; a nested switch is refused; a held project lock fails with the
+# project's name and no modal; a failed registry commit releases every
+# acquisition and lock; an editor that never answers costs a bounded wait; the
+# titlebar names the target before the work and reverts on failure.
+run_app_check .build/debug/Array --workspace-switch-confidence-check
 # CX-01 (.plans/59): the workspace API drives mountWorkspaceSceneAtBoot and the
 # production dispatch entry. Same-named file in two checkouts, dirty draft
 # preserved, world frames at a non-zero zone origin, partial relationship

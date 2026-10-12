@@ -290,6 +290,36 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// titlebar it replaced did. Controls and labels keep their own hit areas.
     override var mouseDownCanMoveWindow: Bool { true }
 
+    /// The workspace the bar is switching to, while a switch is in flight.
+    private(set) var switchingWorkspaceId: UUID?
+
+    /// Name the target and show progress BEFORE the switch does any work, and
+    /// paint it now: the switch holds the main thread, so a bar that waited for
+    /// the next display cycle would only ever show the result.
+    func beginSwitching(to workspaceId: UUID, name: String) {
+        switchingWorkspaceId = workspaceId
+        nameLabel.stringValue = name
+        if let item = switchWorkspaceButton.itemArray.first(where: { ($0.representedObject as? String) == workspaceId.uuidString }) {
+            switchWorkspaceButton.select(item)
+        }
+        switchWorkspaceButton.isEnabled = false
+        saveStateLabel.stringValue = "Switching…"
+        saveStateLabel.textColor = AccentToken.accentWorking.color.nsColor(in: self)
+        displayIfNeeded()
+    }
+
+    /// The switch ended. The next `reload` puts back the truth — the target on
+    /// success, the workspace still mounted on failure.
+    func endSwitching() {
+        switchingWorkspaceId = nil
+        switchWorkspaceButton.isEnabled = switchWorkspaceButton.numberOfItems > 0
+    }
+
+    var switchProgressVisibleForQA: Bool { switchingWorkspaceId != nil && saveStateLabel.stringValue == "Switching…" }
+    var selectedWorkspaceIdForQA: UUID? {
+        (switchWorkspaceButton.selectedItem?.representedObject as? String).flatMap(UUID.init(uuidString:))
+    }
+
     var managementMessageIsVisibleForQA: Bool { !managementMessageLabel.isHidden && managementMessageLabel.superview != nil }
 
     var workspaceNameForQA: String { nameLabel.stringValue }

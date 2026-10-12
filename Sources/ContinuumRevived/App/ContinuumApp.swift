@@ -3652,6 +3652,23 @@ enum ContinuumApp {
         // A tile's own project, never the armed zone's, owns its saves, close,
         // exit, restart and teardown. Real shells in an off-display window, so it
         // sits below `ghostty_init()` like the leg above.
+        // .plans/70 S5: a workspace switch is instant, certain and cheap to undo.
+        // Counted, never timed: an A→B→A round trip re-attaches a warm scene, no
+        // tmux round trip blocks the main thread, nothing re-plans afterwards; a
+        // held lock or a failed commit leaves nothing acquired; an editor that
+        // never answers costs a bounded wait; the titlebar leads the work.
+        if CommandLine.arguments.contains("--workspace-switch-confidence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceSwitchConfidenceChecks.run()
+                print("ContinuumRevivedWorkspaceSwitchConfidenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-project-scope-check") {
             do {
                 _ = NSApplication.shared
@@ -4280,7 +4297,7 @@ private struct AgentDeleteConfirmationRequest: Equatable {
     let branchesAtStake: [String]
 }
 
-private struct WorkspaceDeleteConfirmationRequest: Equatable {
+struct WorkspaceDeleteConfirmationRequest: Equatable {
     let workspaceId: UUID
     let workspaceName: String
     let projectCount: Int
@@ -4459,7 +4476,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // built is dropped on the floor. Note and browser spawning "succeeded" into
         // that hole, silently, which is why an empty workspace looked broken rather
         // than merely empty.
-        if let runtime = workspaceRuntime, runtime.controller(for: boot.spawnerProjectId) == nil {
+        // `.plans/70` S5: "live" is not enough — a warm workspace's project is
+        // live and hidden, and spawning into it would land a tile nobody sees.
+        if let runtime = workspaceRuntime, !runtime.isProjectMounted(boot.spawnerProjectId) {
             return nil
         }
         return boot
@@ -4843,15 +4862,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     throw NSError(domain: "WorkspaceRuntime", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Array closed while opening a workspace project."])
                 }
-                let liveRegistry = try registryStore.loadOrEmpty()
-                guard let entry = liveRegistry.projects.first(where: { $0.id == projectId && !$0.missing }) else {
-                    throw NSError(domain: "WorkspaceRuntime", code: 2,
-                                  userInfo: [NSLocalizedDescriptionKey: "That workspace's project is no longer registered."])
-                }
-                return try self.presentLockContentionUXIfNeeded(
-                    projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true),
-                    registry: liveRegistry
-                )
+                return try self.makeWorkspaceProjectController(projectId: projectId)
             })
             if let activeWorkspace, bootProjectBelongsToSelectedWorkspace {
                 self.workspaceRuntime = WorkspaceRuntime(
@@ -7309,6 +7320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// call already blocked on — no observable behavior change, just routed
     /// through the injectable seam.
     private static func runTmuxControlOperationSync(_ operation: @escaping @Sendable () async throws -> Void) -> Error? {
+        WorkspaceSwitchCounters.syncTmuxOperationsOnMain += 1
         final class ErrorBox: @unchecked Sendable { var error: Error? }
         let box = ErrorBox()
         let semaphore = DispatchSemaphore(value: 0)
@@ -10755,6 +10767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
+        WorkspaceSwitchCounters.sidebarReloads += 1
         if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
         defer { reloadWorkspaceTopBar() }
         guard let sidebar = workspaceSidebarView else { return }
@@ -10825,16 +10838,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     private func switchWorkspaceFromSidebarIfNeeded(_ workspaceId: UUID) -> Bool {
         if currentWorkspaceIdForSidebar() == workspaceId { return true }
+        return performWorkspaceSwitch(to: workspaceId)
+    }
+
+    /// The one route every workspace switch takes — the titlebar popup, ⌘K, a
+    /// sidebar row, the owning-workspace offer (`.plans/70` S5).
+    ///
+    /// The chrome answers the click BEFORE the work: the titlebar names the
+    /// target and shows progress, painted now, because the switch holds the main
+    /// thread. On success the chrome reloads onto the target; on failure it
+    /// reloads onto the workspace still mounted and says why where the user can
+    /// see it. The popup and ⌘K used to log the failure to stderr and leave the
+    /// popup naming a workspace that was never mounted.
+    @discardableResult
+    private func performWorkspaceSwitch(to workspaceId: UUID) -> Bool {
+        guard let workspaceRuntime else { return false }
+        if workspaceRuntime.workspaceId == workspaceId { return true }
+        let name = workspaceDisplayName(workspaceId: workspaceId)
+        workspaceTopBarView?.beginSwitching(to: workspaceId, name: name)
         do {
-            guard let workspaceRuntime else { return false }
             try workspaceRuntime.switchWorkspace(to: workspaceId)
+            workspaceTopBarView?.endSwitching()
             navSelectedZoneId = nil
             showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
             reloadWorkspaceSidebar()
             return workspaceRuntime.workspaceId == workspaceId
         } catch {
-            fputs("Workspace sidebar switch failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch workspaces: \(error.localizedDescription)", kind: .error)
+            workspaceTopBarView?.endSwitching()
+            fputs("Workspace switch failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage(
+                "Couldn't switch to \u{201C}\(name)\u{201D}: \(error.localizedDescription)", kind: .error)
+            reloadWorkspaceSidebar()
             return false
         }
     }
@@ -13514,17 +13548,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(roundTripFocusRestored, "round trip should restore workspace A's saved focused tile")
 
         try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: deletedTileB))
-        let expectedFallbackViewport = CanvasEngine.fit(
-            worldRect: CGRect(x: 200, y: 100, width: 720, height: 520),
-            viewportSize: canvas.bounds.size
-        )
+        // `.plans/70` S5: the camera stays where B was left. Framing the workspace
+        // here threw the saved viewport away whenever no tile could take focus.
+        let expectedFallbackViewport = mutatedBViewport
         try expect(app.switchWorkspaceFromSidebarIfNeeded(workspaceB), "switch to workspace B with deleted focus should succeed")
         canvas.layoutSubtreeIfNeeded()
         let deletedFocusFallbackWorked = app.focusBroker.activeSurface == .canvas
             && canvas.canvasState.lastActiveTileId != deletedTileB
             && viewportsNearlyEqual(canvas.viewport, expectedFallbackViewport)
         let transitionLabelShown = app.qaWorkspaceSwitchTransitionLabelText == "Switched to Beta Workspace"
-        try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and frame workspace bounds")
+        try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and keep the saved viewport")
         try expect(transitionLabelShown, "workspace switch should show transition label")
 
         // FOREIGN PLACEMENT. Dylan's "personal" document still held zones for two
@@ -13615,7 +13648,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let switchedToWork = foreignApp.switchWorkspaceFromSidebarIfNeeded(work)
             let switchedBack = switchedToWork && foreignApp.switchWorkspaceFromSidebarIfNeeded(personal)
             foreignRuntime.flushPendingHydrationReconcile()
-            let releasedAfterReturn = switchedBack && foreignZoneRegistry.controller(for: projectW) == nil
+            // `.plans/70` S5: work stays warm, holding its own project; what must
+            // not survive is personal's stale hold on it.
+            let releasedAfterReturn = switchedBack && !foreignRuntime.isProjectMounted(projectW)
             return (reconcileAcquiredForeign, switchedToWork, switchedBack, releasedAfterReturn)
         }
 
@@ -16040,14 +16075,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func switchWorkspaceAndRelaunch(workspaceId: UUID) {
-        do {
-            // Switch in-process — no relaunch needed.
-            try workspaceRuntime?.switchWorkspace(to: workspaceId)
-            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
-            reloadWorkspaceSidebar()
-        } catch {
-            fputs("Switch Workspace failed: \(error)\n", stderr)
-        }
+        performWorkspaceSwitch(to: workspaceId)
     }
 
     private func addProjectZone(projectId: UUID) {
@@ -16108,14 +16136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("“\(project.name)” remains in “\(workspace.name)”.")
             return
         }
-        do {
-            try workspaceRuntime?.switchWorkspace(to: workspaceId)
-            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
+        if performWorkspaceSwitch(to: workspaceId) {
             setWorkspaceManagementMessage("Switched to “\(workspace.name)” for “\(project.name)”.", kind: .success)
-            reloadWorkspaceSidebar()
-        } catch {
-            fputs("Switch to owning workspace failed: \(error)\n", stderr)
-            setWorkspaceManagementMessage("Couldn't switch to “\(workspace.name)”: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -16677,10 +16699,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     var qaProfilePalette: LaunchProfilePalette? { profilePalette }
     /// QA (M1.11): `openProfilePalette` is private; a leg drives the real one.
     func qaOpenProfilePalette() { openProfilePalette() }
-    /// QA (M1.11): the spoken refusal, so "it refused audibly" is assertable.
-    var qaWorkspaceManagementMessage: String? { workspaceManagementMessage }
-    /// QA (M1.11): reach the broken state through the real "+" route.
+    /// QA (M1.11): the spoken refusal, so "it refused audibly" is assertable.    /// QA (M1.11): reach the broken state through the real "+" route.
     func qaCreateWorkspaceFromChrome() { createWorkspaceFromChrome() }
+    func qaSetWorkspaceRenamePrompt(_ provider: ((String) -> String?)?) { workspaceRenamePromptProvider = provider }
+    func qaSetWorkspaceDeleteConfirmation(_ provider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?) {
+        workspaceDeleteConfirmationProvider = provider
+    }
+    func qaDeleteWorkspace(_ workspaceId: UUID) -> Bool { deleteWorkspaceAndRelaunch(workspaceId: workspaceId) }
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
@@ -16744,6 +16769,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaSwitchWorkspaceFromSidebar(_ workspaceId: UUID) -> Bool {
         switchWorkspaceFromSidebarIfNeeded(workspaceId)
     }
+
+    /// QA: install a real top bar, wired exactly as the window's is.
+    func qaAttachWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
+        workspaceTopBarView = topBar
+        configureWorkspaceTopBar(topBar)
+        reloadWorkspaceTopBar()
+    }
+
+    var qaWorkspaceManagementMessage: String? { workspaceManagementMessage }
 
     /// QA (WS9): the project whose spawner a filesystem-backed creation would
     /// actually use. The creation SCOPE and the SPAWNER are resolved separately
@@ -17177,6 +17211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             case .afterInstall:
                 hydrateRuntimeBackedTiles(in: layer, controller: controller, canvas: canvas)
+            case .afterRemount:
+                hydrateRuntimeBackedTiles(in: layer, controller: controller, canvas: canvas, wiresAgents: false)
             }
         }
     }
@@ -17283,7 +17319,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func hydrateRuntimeBackedTiles(
         in layer: CanvasNSView.ZoneLayer,
         controller: ZoneRuntimeController,
-        canvas: CanvasNSView
+        canvas: CanvasNSView,
+        wiresAgents: Bool = true
     ) {
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
@@ -17291,7 +17328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // An unbound or unavailable tile is wired too: `wireManagedAgentTile` gives
         // it its explicit state and never mints for a tile this process did not
         // create (hazard 10).
-        for tile in layer.tiles where tile.kind == .managedAgent {
+        for tile in layer.tiles where wiresAgents && tile.kind == .managedAgent {
             wireManagedAgentTile(tile.id)
         }
 
@@ -17313,11 +17350,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // the two workspaces, which `switchWorkspace` is explicitly
                 // written for. Retire it first; see `retireOrphanedRuntimes`.
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
-                if case let .restarted(runtime) = spawner.restartTerminalTile(tileId: tile.id) {
-                    // Wired like a boot or a spawned terminal: without it a shell's
-                    // `exit` left a dead tile with no Restart and no `lastExit`.
-                    wireRuntimeExitHandler(runtime)
+                // Wired like a boot or a spawned terminal: without it a shell's
+                // `exit` left a dead tile with no Restart and no `lastExit`.
+                let adopt: @MainActor (TileSpawner.RestartOutcome) -> Void = { [weak self, weak controller] outcome in
+                    guard case let .restarted(runtime) = outcome, let controller else { return }
+                    self?.wireRuntimeExitHandler(runtime)
                     controller.runtimes.append(runtime)
+                }
+                if workspaceRuntime?.isSwitching == true {
+                    // `.plans/70` S5: on a switch the tmux round trips run off the
+                    // main thread and the terminal comes live a moment later. The
+                    // restore is dropped if its scene has been left by then.
+                    let epoch = workspaceRuntime?.mountEpoch
+                    spawner.restartTerminalTileDeferringTmux(
+                        tileId: tile.id,
+                        stillWanted: { [weak self] in self?.workspaceRuntime?.mountEpoch == epoch },
+                        completion: adopt)
+                } else {
+                    adopt(spawner.restartTerminalTile(tileId: tile.id))
                 }
             case .browser:
                 retireOrphanedRuntimes(forTile: tile.id, controller: controller)
@@ -17721,6 +17771,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return registry.projects.first(where: { $0.id == projectId })
     }
 
+    /// The zone-runtime factory: one project's controller, its `.array/` lock
+    /// taken. Launch builds its `ZoneRuntimeRegistry` with this, and so does the
+    /// workspace fixture, so a witness drives the same acquisition a switch does.
+    func makeWorkspaceProjectController(projectId: UUID) throws -> ZoneRuntimeController {
+        guard let registryStore else {
+            throw NSError(domain: "WorkspaceRuntime", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Array closed while opening a workspace project."])
+        }
+        let liveRegistry = try registryStore.loadOrEmpty()
+        guard let entry = liveRegistry.projects.first(where: { $0.id == projectId && !$0.missing }) else {
+            throw NSError(domain: "WorkspaceRuntime", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "That workspace's project is no longer registered."])
+        }
+        // Never the boot lock alert: this runs mid-session (a switch, an arming,
+        // a reconcile), where its choices were to quit the app from inside the
+        // switch, open the project unlocked (hazard 10), or open a DIFFERENT root
+        // under this project's id. A held lock is a named failure instead.
+        do {
+            return try ZoneRuntimeController(root: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
+        } catch {
+            throw WorkspaceProjectAcquisitionError.from(error, projectName: entry.name)
+        }
+    }
+
+    /// QA: answers the project-lock alert instead of a person, and records that
+    /// it was asked. Nil in production.
+    var qaProjectLockAlertResponder: ((URL) -> ProjectLockAlertChoice)?
+
     private func presentLockContentionUXIfNeeded(projectRoot: URL, registry: Registry) throws -> ZoneRuntimeController {
         var candidate = projectRoot
         while true {
@@ -17749,13 +17827,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private enum ProjectLockAlertChoice {
+    enum ProjectLockAlertChoice {
         case chooseAnotherProject
         case openAnyway
         case quit
     }
 
     private func presentProjectLockAlert(lockFile: URL) -> ProjectLockAlertChoice {
+        if let qaProjectLockAlertResponder { return qaProjectLockAlertResponder(lockFile) }
         let config = ProjectLockPolicy.alertConfiguration(lockFile: lockFile)
         let alert = NSAlert()
         alert.messageText = config.message
@@ -19237,6 +19316,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // switchWorkspace persists the departing viewport before loading the target.
         let mutatedWAViewport = CanvasViewport(x: 77, y: 88, zoom: 1)
         canvas.setViewport(mutatedWAViewport)
+        // `.plans/70` S5: a left workspace is kept warm by default. inv4 is about
+        // the RELEASE path (ref-counts at zero, controllers closed), so this leg
+        // keeps nothing warm; `--workspace-switch-confidence-check` owns warm.
+        runtime.warmSceneCapacity = 0
         try expect(canvas.viewport.x == 77, "pre-switch: WA viewport must be 77 after in-memory mutation")
 
         // Wire no-relaunch spy.
@@ -22611,8 +22694,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         releaseRuntime.closeAll()
         try expect(releaseTmuxControl.log.isEmpty, "project release must detach only and issue no tmux kill command; got \(releaseTmuxControl.log)")
         try expect(releaseRuntime.controller(for: releaseProjectId) == nil, "project release should drop the registry controller")
+        // `.plans/70` S5: release is a detach (D16), not an exit. A stamp here made
+        // the next controller prune the descriptor, so the terminal came back at
+        // the project root with its agent status reset.
         let releaseLastExitStamped = try releaseStore.loadSession(id: releaseRuntimeId).lastExit != nil
-        try expect(releaseLastExitStamped, "project release should stamp lastExit on at least one live runtime descriptor")
+        try expect(!releaseLastExitStamped, "project release must not stamp lastExit on a live runtime's descriptor")
 
         let sentinelTmuxControl = InMemoryTmuxControl()
         try expect(Self.runTmuxControlOperationSync({

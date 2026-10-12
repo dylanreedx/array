@@ -138,6 +138,10 @@ final class WorkspaceInvariantsFixture {
     /// terminals sets a real context (headless: runtimes spawn nothing until a
     /// surface attaches) before mounting.
     var ghostty: GhosttyRuntimeContext?
+    /// Applied to the delegate and runtime after they are built and before the
+    /// scene mounts: a leg's seams (tmux, the lock alert, the warm set) must be
+    /// in place for the boot hydration too.
+    var configureMount: ((AppDelegate, WorkspaceRuntime) -> Void)?
     private(set) var actionLog: [String] = []
 
     init(label: String) throws {
@@ -253,14 +257,11 @@ final class WorkspaceInvariantsFixture {
             throw Failure(message: "mount: the active workspace has no project zone to boot")
         }
         let bootController = try ZoneRuntimeController(root: bootRoot)
-        let registryStore = self.registryStore
-        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
-            // Launch's factory, minus the lock-contention alert.
-            let live = try registryStore.loadOrEmpty()
-            guard let entry = live.projects.first(where: { $0.id == projectId && !$0.missing }) else {
-                throw Failure(message: "factory: project \(projectId) is not registered")
-            }
-            return try ZoneRuntimeController(root: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
+        let delegate = AppDelegate()
+        // Launch's own factory, so an acquisition here is the one a switch makes.
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { [weak delegate] projectId in
+            guard let delegate else { throw Failure(message: "factory: the delegate is gone") }
+            return try delegate.makeWorkspaceProjectController(projectId: projectId)
         })
 
         let zoneRenderModels = AppDelegate.zoneRenderModels(from: active.document, registry: registry)
@@ -273,7 +274,6 @@ final class WorkspaceInvariantsFixture {
             selectedViewport: active.document.viewport,
             registry: registry)
 
-        let delegate = AppDelegate()
         let canvas = CanvasNSView(canvasState: bootCanvas, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
         canvas.frame = CGRect(x: 0, y: 0, width: 2600, height: 1400)
         delegate.wireCanvasCallbacks(canvas)
@@ -294,6 +294,7 @@ final class WorkspaceInvariantsFixture {
         }
         delegate.qaPrepareForBootMountCheck(
             canvas: canvas, browserEngine: browserEngine, runtime: runtime, registryStore: registryStore)
+        configureMount?(delegate, runtime)
         let spawner = TileSpawner(
             canvasView: canvas, ghostty: ghostty, browserEngine: browserEngine,
             projectStore: bootController.projectStore, project: bootController.project)

@@ -169,6 +169,12 @@ enum TileProjectScopeChecks {
         for (label, body) in scenarios {
             let fixture = try Fixture(label: "project-scope-\(label)")
             fixture.ghostty = ghostty
+            if label == "switch-away-frees-departed-surfaces" {
+                // `.plans/70` S5: a left workspace is kept warm by default, its
+                // surfaces alive on purpose. This scenario is about the RELEASE
+                // path, so nothing is kept warm here.
+                fixture.configureMount = { _, runtime in runtime.warmSceneCapacity = 0 }
+            }
             do {
                 try seedScene(fixture)
                 try fixture.mount()
