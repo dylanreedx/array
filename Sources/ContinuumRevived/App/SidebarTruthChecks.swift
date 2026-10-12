@@ -325,6 +325,8 @@ enum SidebarTruthChecks {
 
     static func closeLifecycle(_ world: World) async throws {
         let inbox = world.inbox
+        // Motion is under test below; the host's own setting must not decide it.
+        inbox.prefersReducedMotion = { false }
         try expect(!DeleteConfirmPolicy.current.requiresConfirmation(for: .managedAgent),
                    "setup: this machine's delete-confirm policy would put a modal in front of deleteTile")
         try expect(world.canvas.tileView(for: idleTile) is ManagedAgentTileNSView,
@@ -348,6 +350,11 @@ enum SidebarTruthChecks {
         // W1 · the control: an idle agent's tile, closed through the canvas.
         let historyBefore = inbox.historyHeaderTitleForQA
         world.canvas.onTileCloseRequested?(idleTile)
+        // The row LEAVES visibly: a 150ms fade from where it was.
+        try expect(inbox.qaLastRowMotion.exiting.contains(idleAgent.rawValue) && inbox.qaLiveExitGhostCount > 0,
+                   "W1: the closed tile's row must fade out from its place — motion \(inbox.qaLastRowMotion), ghosts \(inbox.qaLiveExitGhostCount)")
+        let ghostsGone = await waitUntil(timeout: 2, pollInterval: 0.05, { inbox.qaLiveExitGhostCount == 0 })
+        try expect(ghostsGone, "W1: the exit ghost is gone once its 150ms fade ends")
         try expect(!world.sidebar.treeTileIdsForQA.contains(idleTile),
                    "a closed tile must leave the sidebar's tree — the active project's tiles came from a snapshot frozen at boot")
         try expect(block(world, idleAgent) == nil || block(world, idleAgent) == "history",
@@ -402,7 +409,16 @@ enum SidebarTruthChecks {
             try expect(block(world, child) == "live",
                        "setup: a live parent's child is drawn under it — got \(String(describing: block(world, child)))")
         }
+        // Under Reduce Motion the same departure does not animate at all. (Earlier
+        // fades are allowed to finish first, so a count of zero is this close's.)
+        _ = await waitUntil(timeout: 2, pollInterval: 0.05, { inbox.qaLiveExitGhostCount == 0 })
+        inbox.prefersReducedMotion = { true }
+        let motionBefore = inbox.qaLastRowMotion
         world.canvas.onTileCloseRequested?(parentTile)
+        try expect(inbox.qaLiveExitGhostCount == 0
+                   && inbox.qaLastRowMotion.exiting == motionBefore.exiting,
+                   "Reduce Motion: a row leaves without a fade — ghosts \(inbox.qaLiveExitGhostCount)")
+        inbox.prefersReducedMotion = { false }
         for child in [childOne, childTwo] {
             let drawn = block(world, child)
             try expect(drawn == "history",

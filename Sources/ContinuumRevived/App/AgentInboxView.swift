@@ -1824,6 +1824,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// takes the unfiltered set, and handing it an already-filtered list would make
     /// the scope narrow itself with every call.
     private func render(_ visible: [InboxListItem]) {
+        // Row motion (confidence pass): rows that leave fade out from where they
+        // were, rows that arrive fade in — 150ms, skipped above 40 rows and under
+        // Reduce Motion. A closed tile's row visibly leaving IS the confirmation.
+        let previousIds = Set(rows.map(\.id))
+        let nextIds = Set(visible.compactMap { $0.agentRow?.id })
+        let animatesRows = !previousIds.isEmpty && previousIds != nextIds
+            && visible.count <= Self.rowMotionRowLimit && !prefersReducedMotion()
+        let exitGhosts = animatesRows ? liftExitGhosts(leaving: previousIds.subtracting(nextIds)) : []
+        defer {
+            if animatesRows { startRowMotion(exits: exitGhosts, entering: nextIds.subtracting(previousIds)) }
+        }
         // P3.13: a full reload moves every row, so a field left floating would be over
         // a different agent. Committing is the same answer clicking away gives — the
         // rename is finished, not thrown away, and this is also the path the host's
@@ -3741,6 +3752,64 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let touched = IndexSet(indexes.filter { items.indices.contains($0) })
         guard !touched.isEmpty else { return }
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
+    }
+
+    // MARK: - Row enter / exit motion (confidence pass, sidebar stream)
+
+    static let rowMotionDuration: TimeInterval = 0.15
+    static let rowMotionRowLimit = 40
+    /// What the most recent animated render moved, for the witness.
+    private(set) var qaLastRowMotion: (exiting: Set<UUID>, entering: Set<UUID>) = ([], [])
+    private var exitGhostViews: [NSView] = []
+    var qaLiveExitGhostCount: Int { exitGhostViews.count }
+
+    /// Snapshots of the leaving rows' cells, at the rects they occupied, taken
+    /// BEFORE the table reloads and loses them.
+    private func liftExitGhosts(leaving: Set<UUID>) -> [(id: UUID, view: NSView)] {
+        guard !leaving.isEmpty else { return [] }
+        var ghosts: [(id: UUID, view: NSView)] = []
+        for (index, row) in rows.enumerated() where leaving.contains(row.id) {
+            guard let tableRow = tableRow(forRowIndex: index),
+                  let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false),
+                  cell.bounds.width > 0, cell.bounds.height > 0,
+                  let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) else { continue }
+            cell.cacheDisplay(in: cell.bounds, to: rep)
+            let image = NSImage(size: cell.bounds.size)
+            image.addRepresentation(rep)
+            let ghost = NSImageView(frame: tableView.rect(ofRow: tableRow))
+            ghost.image = image
+            ghost.imageScaling = .scaleNone
+            ghost.setAccessibilityElement(false)
+            ghosts.append((row.id, ghost))
+        }
+        return ghosts
+    }
+
+    private func startRowMotion(exits: [(id: UUID, view: NSView)], entering: Set<UUID>) {
+        qaLastRowMotion = (Set(exits.map(\.id)), entering)
+        for ghost in exits {
+            tableView.addSubview(ghost.view)
+            exitGhostViews.append(ghost.view)
+        }
+        tableView.layoutSubtreeIfNeeded()
+        let arriving = entering.compactMap { id in
+            tableRow(forAgentId: id).flatMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) }
+        }
+        for view in arriving { view.alphaValue = 0 }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.rowMotionDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            for ghost in exits { ghost.view.animator().alphaValue = 0 }
+            for view in arriving { view.animator().alphaValue = 1 }
+        }
+        // Teardown is SCHEDULED, for the reason the lifecycle crossfade records: a
+        // completion handler that never fires would leave a ghost painted forever.
+        let ghostViews = exits.map(\.view)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rowMotionDuration) { [weak self] in
+            for view in arriving { view.alphaValue = 1 }
+            for view in ghostViews { view.removeFromSuperview() }
+            self?.exitGhostViews.removeAll { ghost in ghostViews.contains { $0 === ghost } }
+        }
     }
 
     // MARK: - Crossfading a lifecycle move (P4.12)
