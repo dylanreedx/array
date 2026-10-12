@@ -60,7 +60,7 @@ final class TileSpawner {
     private let tmuxPathResolver: (UserDefaults) -> String?
     private let environmentProvider: () -> [String: String]
     private let tmuxControlFactory: @Sendable (String, RemoteReach, UserDefaults) -> any TmuxControl
-    private var browserProfiles: [BrowserProfile]
+    private(set) var browserProfiles: [BrowserProfile]
     fileprivate var managedAgentLaunchSelections: [UUID: AgentLaunchSelection] = [:]
     fileprivate var managedAgentCreationScopes: [UUID: CreationScope] = [:]
 

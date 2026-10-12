@@ -793,11 +793,14 @@ final class GhosttyRuntimeContext {
             supports_selection_clipboard: true,
             wakeup_cb: { userdata in
                 guard let userdata else { return }
-                let context = Unmanaged<GhosttyRuntimeContext>.fromOpaque(userdata).takeUnretainedValue()
-                guard let appPointer = context.appPointer else { return }
-                let appAddress = UInt(bitPattern: appPointer)
+                let contextAddress = UInt(bitPattern: userdata)
                 DispatchQueue.main.async {
-                    guard let app = UnsafeMutableRawPointer(bitPattern: appAddress) else { return }
+                    guard let raw = UnsafeMutableRawPointer(bitPattern: contextAddress) else { return }
+                    let context = Unmanaged<GhosttyRuntimeContext>.fromOpaque(raw).takeUnretainedValue()
+                    // Re-read on main, never captured: a shutdown between the
+                    // wakeup and this block frees the app, and a tick on a freed
+                    // app took the process down with it.
+                    guard let app = context.appPointer else { return }
                     ghostty_app_tick(app)
                 }
             },
@@ -856,6 +859,16 @@ final class GhosttyRuntimeContext {
 
     func shutdown() {
         if let appPointer {
+            // `ghostty_app_free` traps on a live surface (ADR-0010). Every
+            // teardown is meant to have freed them; any it missed are freed here,
+            // and if one cannot be reached the app is deliberately leaked —
+            // the process is ending, and a leak is not a crash.
+            nonisolated(unsafe) let app = appPointer
+            let unreachable = MainActor.assumeIsolated { GhosttyTerminalView.freeLiveSurfacesForShutdown(app: app) }
+            guard unreachable == 0 else {
+                fputs("GHOSTTY SHUTDOWN REFUSED: \(unreachable) surface(s) alive with no view to free them; leaking the Ghostty app instead of trapping in ghostty_app_free\n", stderr)
+                return
+            }
             ghostty_app_free(appPointer)
             self.appPointer = nil
         }

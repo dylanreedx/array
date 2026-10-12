@@ -23,7 +23,14 @@ import Foundation
 ///  - switching away frees the departed projects' Ghostty surfaces, and no
 ///    surface of any mounted project is alive when the quit teardown reaches
 ///    `ghostty_app_free`;
-///  - an agent-status write and a web link opened beside A2's tile land in A2.
+///  - an agent-status write and a web link opened beside A2's tile land in A2;
+///  - a view's spawner callbacks (Save as Markdown, a file tree's open-file)
+///    survive arming another project, because a project keeps one spawner;
+///  - a tile record change, a browser profile deletion, the quit's
+///    managed-session sweep, a ticket dispatch, focus-mode pairing and a review
+///    flyback each act in A2;
+///  - `GhosttyRuntimeContext.shutdown` frees a surface a teardown missed
+///    instead of trapping in `ghostty_app_free`.
 ///
 /// Terminals run a real shell in a real (off-display) window, with tmux and the
 /// delete confirmation turned off through the volatile argument domain only —
@@ -45,6 +52,17 @@ enum TileProjectScopeChecks {
     static let terminalA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2701")!
     static let browserA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2B01")!
     static let treeA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2E01")!
+    static let diffA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2D01")!
+    static let reviewA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2D02")!
+    static let queueA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2C01")!
+    /// A browser profile that exists before the mount, so every project's
+    /// spawner is built offering it.
+    static let profileScope = BrowserProfile(
+        id: UUID(uuidString: "00000000-0000-0000-0000-0000051AB901")!, name: "Scope",
+        dataStoreIdentifier: "00000000-0000-0000-0000-0000051AB902", createdAt: Date(timeIntervalSince1970: 1_900_000_000))
+    /// A browser of A2's that is not on the canvas (a zone not hydrated), whose
+    /// saved state only a rewrite of A2's own store can reach.
+    static let offCanvasBrowserA2 = UUID(uuidString: "00000000-0000-0000-0000-0000051A2B09")!
 
     /// Zone A1 (600,200 900x700, project A1, armed) and zone A2 (1700,260 900x700,
     /// project A2) — both fully in the seeded camera, so both hydrate live.
@@ -79,8 +97,16 @@ enum TileProjectScopeChecks {
             },
             tile(treeA2, .fileTree, TileFrame(x: 2200, y: 600, width: 240, height: 300), rank: 12, zone: Fixture.zoneA2) {
                 $0.filePath = rootA2.path
-            }
+            },
+            tile(diffA2, .diffReview, TileFrame(x: 1760, y: 840, width: 400, height: 100), rank: 13, zone: Fixture.zoneA2) {
+                $0.reviewId = reviewA2
+            },
+            tile(queueA2, .ticketQueue, TileFrame(x: 2360, y: 340, width: 220, height: 200), rank: 14, zone: Fixture.zoneA2) { _ in }
         ])
+        try ProjectStore(projectRoot: rootA2).saveReviewCommentState(ReviewCommentState(reviewId: reviewA2, comments: []))
+        var registry = try fixture.registryStore.loadOrEmpty()
+        _ = registry.settings.upsertBrowserProfile(profileScope)
+        try fixture.registryStore.save(registry)
         // The fixture seeds note bodies only. Without an index entry every flush
         // of A2's notes fails and leaves A2 dirty, which would let an edit routed
         // to the wrong project ride along on A2's retry and look saved.
@@ -164,7 +190,12 @@ enum TileProjectScopeChecks {
             ("exit-and-restart-in-unarmed-zone", exitAndRestartInUnarmedZone),
             ("switch-away-frees-departed-surfaces", switchAwayFreesDepartedSurfaces),
             ("quit-frees-every-surface", quitFreesEverySurface),
-            ("status-and-link-in-unarmed-zone", statusAndLinkInUnarmedZone)
+            ("status-and-link-in-unarmed-zone", statusAndLinkInUnarmedZone),
+            ("spawner-callbacks-survive-arming", spawnerCallbacksSurviveArming),
+            ("tile-record-profiles-sweep-queue-pairing", tileRecordProfilesSweepQueuePairing),
+            ("review-flyback-in-unarmed-zone", reviewFlybackInUnarmedZone),
+            // Last: it frees the leg's Ghostty app.
+            ("shutdown-frees-missed-surfaces", shutdownFreesMissedSurfaces)
         ]
         for (label, body) in scenarios {
             let fixture = try Fixture(label: "project-scope-\(label)")
@@ -443,5 +474,178 @@ enum TileProjectScopeChecks {
         let a2 = try controller(fixture, Fixture.projectA2, "link")
         try expect(a2.browserRuntimes.contains { a2New.contains($0.tileId) }, "the opened browser's runtime is not held by project A2's controller")
         return ["opened": a2New.first?.uuidString ?? ""]
+    }
+
+    /// Views a spawner built keep working after a click arms another project:
+    /// the project's spawner is the one that built them.
+    private static func spawnerCallbacksSurviveArming(_ fixture: Fixture) throws -> [String: Any] {
+        let m = try fixture.requireMounted("spawner")
+        let a2 = try controller(fixture, Fixture.projectA2, "spawner")
+        let rootA2 = fixture.projectRoots[Fixture.projectA2]!
+        try fixture.armByClick(Fixture.zoneA2)
+        let before = Set(m.canvas.allWorkspaceTiles().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newNote)
+        guard let spawned = m.canvas.allWorkspaceTiles().first(where: { !before.contains($0.id) && $0.kind == .note }) else {
+            throw Failure(message: "precondition: the palette spawned no note into zone A2")
+        }
+        let spawnerBefore = a2.tileSpawner
+        try fixture.armByClick(Fixture.zoneA1)
+        try expect(m.runtime.activeController?.project.id == Fixture.projectA1, "precondition: project A1 is not active")
+        try expect(a2.tileSpawner === spawnerBefore, "arming project A1 replaced project A2's spawner")
+
+        // Save as Markdown, from the note's own menu callback.
+        guard let note = m.canvas.tileView(for: spawned.id) as? NoteTileNSView else {
+            throw Failure(message: "precondition: the spawned note is not a live note view")
+        }
+        let destination = rootA2.appendingPathComponent("saved-after-arming.md")
+        note.onSaveAsMarkdownRequested?(destination)
+        try expect(m.canvas.tileView(for: spawned.id) is FileTileNSView,
+                   "Save as Markdown on the spawned note did nothing after arming another project")
+        try expect(FileManager.default.fileExists(atPath: destination.path), "Save as Markdown wrote no file")
+
+        // A file tree's open-file, from its own callback.
+        let target = rootA2.appendingPathComponent("opened-from-tree.md")
+        try "# opened\n".write(to: target, atomically: true, encoding: .utf8)
+        guard let tree = m.canvas.tileView(for: treeA2) as? FileTreeTileNSView else {
+            throw Failure(message: "precondition: file tree A2 is not live")
+        }
+        let tilesBefore = Set(m.canvas.allWorkspaceTiles().map(\.id))
+        tree.onSpawnFile?(target.path)
+        fixture.drain(0.3)
+        let opened = m.canvas.allWorkspaceTiles().filter { !tilesBefore.contains($0.id) && $0.kind == .file }
+        try expect(opened.count == 1, "the file tree's open-file opened \(opened.count) tile(s) after arming another project")
+        return ["converted": spawned.id.uuidString]
+    }
+
+    /// Five project-scoped acts on A2 with A1 armed.
+    private static func tileRecordProfilesSweepQueuePairing(_ fixture: Fixture) throws -> [String: Any] {
+        let m = try fixture.requireMounted("acts")
+        let a2Store = store(fixture, Fixture.projectA2)
+
+        // 1. A tile record change (a retitle, as a diff review's source change or
+        //    an inspector's title does) saves A2's canvas.
+        guard var record = m.canvas.tileRecord(for: Fixture.noteA2a) else {
+            throw Failure(message: "precondition: note A2a has no record")
+        }
+        record.title = "retitled in A2"
+        m.canvas.updateTile(record, recalculateZoneBounds: false)
+        fixture.drain()
+        let persistedTitle = fixture.readProjectFile(Fixture.projectA2).canvas?.tiles.first { $0.id == Fixture.noteA2a }?.title
+        try expect(persistedTitle == "retitled in A2",
+                   "a retitled A2 tile was never saved: A2's canvas.json says \(persistedTitle.map { "\"\($0)\"" } ?? "nothing")")
+
+        // 2. Deleting a browser profile rewrites A2's browser state and spawner.
+        let profile = profileScope
+        let a2Spawner = try controller(fixture, Fixture.projectA2, "profiles").tileSpawner
+        try expect(a2Spawner?.browserProfiles.contains { $0.id == profile.id } == true,
+                   "precondition: project A2's spawner was not built offering the seeded profile")
+        guard var browserState = try a2Store.tryLoadBrowserState(),
+              let live = browserState.tiles.first(where: { $0.tileId == browserA2 }) else {
+            throw Failure(message: "precondition: project A2 has no browser state for its browser")
+        }
+        browserState.tiles.append(BrowserTile(
+            id: UUID(), tileId: offCanvasBrowserA2, url: live.url, title: live.title,
+            storageGroupId: profile.dataStoreIdentifier, profileId: profile.id, createdAt: live.createdAt,
+            updatedAt: live.updatedAt, interactionState: nil, tabs: live.tabs, activeTabId: live.activeTabId))
+        try a2Store.saveBrowserState(browserState)
+        m.delegate.qaDeleteBrowserProfile(tileId: browserA2, profileId: profile.id)
+        fixture.drain(0.3)
+        let stillUsing = (try a2Store.tryLoadBrowserState())?.tiles.filter { $0.profileId == profile.id }.map(\.tileId) ?? []
+        try expect(stillUsing.isEmpty, "project A2's browser state still points at the deleted profile")
+        let a2Profiles = try controller(fixture, Fixture.projectA2, "profiles").tileSpawner?.browserProfiles.map(\.id) ?? []
+        try expect(!a2Profiles.contains(profile.id), "project A2's spawner still offers the deleted profile")
+
+        // 3. The quit's managed-session sweep reaches A2's store.
+        let a2 = try controller(fixture, Fixture.projectA2, "sweep")
+        let liveRecordTile = UUID()
+        try a2.managedSessionStore.upsert(ManagedAgentSessionRecord(
+            tileId: liveRecordTile, agentKind: .claude, status: .starting, lastSeenAt: Date()))
+        m.delegate.qaSweepManagedSessionsAtQuit()
+        let swept = try a2.managedSessionStore.load(tileId: liveRecordTile)
+        try expect(swept?.endedReason == .continuumQuit,
+                   "the quit sweep left project A2's live session record at \(String(describing: swept?.status))")
+
+        // 4. Focus mode pairs a tile with an agent in its OWN zone.
+        guard var session = try a2Store.listSessions().first(where: { $0.tileId == terminalA2 }) else {
+            throw Failure(message: "precondition: project A2 has no session for terminal A2")
+        }
+        session.agentDescriptor = AgentDescriptor(agentKind: .claude, worktreePath: nil, status: .idle, statusUpdatedAt: Date())
+        try a2Store.saveSession(session)
+        let companion = m.delegate.qaFocusModeCompanion(for: Fixture.noteA2a)
+        try expect(companion == terminalA2,
+                   "focus mode paired A2's note with \(companion.map { String($0.uuidString.suffix(4)) } ?? "nothing"), not A2's agent terminal")
+        // 5. A ticket dispatched from A2's queue lands beside the queue, in A2.
+        let fakeBin = fixture.root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
+        let fakeClaude = fakeBin.appendingPathComponent("claude")
+        try "#!/bin/sh\nexit 0\n".write(to: fakeClaude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeClaude.path)
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("PATH", fakeBin.path + ":" + originalPath, 1)
+        defer { setenv("PATH", originalPath, 1) }
+        let a1Before = canvasTileIds(fixture, Fixture.projectA1)
+        let a2Before = canvasTileIds(fixture, Fixture.projectA2)
+        m.delegate.qaDispatchTicket(
+            LinearTicketQueueRow(identifier: "SCOPE-1", title: "Scope", state: "Todo", stateType: nil, priority: .none, labels: []),
+            fromQueueTile: queueA2)
+        fixture.drain(0.3)
+        let a1New = canvasTileIds(fixture, Fixture.projectA1).subtracting(a1Before)
+        let a2New = canvasTileIds(fixture, Fixture.projectA2).subtracting(a2Before)
+        try expect(a1New.isEmpty, "a ticket dispatched from A2's queue put \(a1New.count) tile(s) in project A1")
+        try expect(a2New.count == 1, "a ticket dispatched from A2's queue added \(a2New.count) tile(s) to project A2, not 1")
+        try expect(m.canvas.zoneId(containing: a2New.first!) == Fixture.zoneA2, "the dispatched terminal is not in the queue's zone")
+
+        return ["dispatched": a2New.first?.uuidString ?? ""]
+    }
+
+    /// Review comments from A2's diff review reach A2's agent terminal.
+    private static func reviewFlybackInUnarmedZone(_ fixture: Fixture) throws -> [String: Any] {
+        let window = try attachWindow(fixture)
+        defer { window.close() }
+        let m = try fixture.requireMounted("review")
+        _ = try liveTerminalRuntimes(fixture, "precondition")
+        let a2Store = store(fixture, Fixture.projectA2)
+        guard var session = try a2Store.listSessions().first(where: { $0.tileId == terminalA2 }) else {
+            throw Failure(message: "precondition: project A2 has no session for terminal A2")
+        }
+        session.agentDescriptor = AgentDescriptor(agentKind: .claude, worktreePath: nil, status: .idle, statusUpdatedAt: Date())
+        try a2Store.saveSession(session)
+        m.canvas.tileView(for: terminalA2)?.agentStatus = .idle
+        let prompt: ReviewFlybackPrompt
+        do {
+            prompt = try m.delegate.sendReviewCommentsToAgent(
+                reviewTileId: diffA2, targetAgentTileId: terminalA2, diffSourceDescription: "scope")
+        } catch {
+            throw Failure(message: "review flyback from A2's diff review failed: \(error)")
+        }
+        try expect(prompt.text.contains(reviewA2.uuidString), "the flyback prompt does not name A2's review")
+        return ["sent": true]
+    }
+
+    /// A surface a teardown missed is freed by the shutdown itself, which then
+    /// frees the Ghostty app instead of trapping on the live surface.
+    /// It frees the leg's own Ghostty app — production has exactly one, and a
+    /// second app freed in-process takes shared Ghostty state with it — so it
+    /// must run last.
+    private static func shutdownFreesMissedSurfaces(_ fixture: Fixture) throws -> [String: Any] {
+        guard let context = fixture.ghostty else { throw Failure(message: "precondition: the leg has no Ghostty app") }
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontOffscreenForChecks()
+        defer { window.close() }
+        let runtime = GhosttyTerminalRuntime(
+            title: "missed",
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: fixture.root.path, title: "missed"),
+            ghostty: context)
+        host.attach(runtime: runtime)
+        host.layoutSubtreeIfNeeded()
+        try expect(pump(until: 5) { runtime.qaTerminalView?.surface != nil }, "precondition: the terminal got no surface")
+        let before = GhosttyTerminalView.liveSurfaceCount
+        context.shutdown()
+        try expect(runtime.qaTerminalView?.surface == nil, "shutdown left the missed surface alive")
+        try expect(GhosttyTerminalView.liveSurfaceCount == before - 1, "the live-surface count did not drop by the one freed")
+        return ["freed": 1]
     }
 }

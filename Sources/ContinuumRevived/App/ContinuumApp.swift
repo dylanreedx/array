@@ -6629,7 +6629,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 NSSound.beep()
                 return
             }
-            let sourceDescription = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId }).map { DiffReviewSource(metadata: $0.metadata).displayName } ?? "working tree vs HEAD"
+            let sourceDescription = canvasView?.tileRecord(for: reviewTileId).map { DiffReviewSource(metadata: $0.metadata).displayName } ?? "working tree vs HEAD"
             _ = try sendReviewCommentsToAgent(reviewTileId: reviewTileId, targetAgentTileId: target, diffSourceDescription: sourceDescription)
         } catch {
             fputs("sendReviewCommentsFromMenu failed: \(error)\n", stderr)
@@ -6653,7 +6653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func sendReviewCommentsToAgent(reviewTileId: UUID, targetAgentTileId: UUID, diffSourceDescription: String) throws -> ReviewFlybackPrompt {
         guard let owner = controller(owningTile: reviewTileId) else { throw ReviewFlybackError.missingProjectStore }
         let projectStore = owner.projectStore
-        guard let reviewTile = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId && $0.kind == .diffReview }) else { throw ReviewFlybackError.missingReviewTile }
+        guard let reviewTile = canvasView?.tileRecord(for: reviewTileId), reviewTile.kind == .diffReview else { throw ReviewFlybackError.missingReviewTile }
         guard let reviewId = reviewTile.metadata.reviewId else { throw ReviewFlybackError.reviewTileHasNoReviewId }
         guard let session = try projectStore.listSessions().first(where: { $0.tileId == targetAgentTileId && $0.agentDescriptor != nil }) else { throw ReviewFlybackError.missingTargetAgentSession }
         guard let runtime = owner.runtimes.first(where: { $0.tileId == targetAgentTileId }) else { throw ReviewFlybackError.missingLiveAgentEndpoint }
@@ -7799,7 +7799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialTicketQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
-            self?.dispatchAgent(for: row)
+            self?.dispatchAgent(for: row, fromQueueTile: tile.id)
         }, fanOutHandler: { [weak self] rows in
             self?.fanOutAgents(for: rows, from: tile.id)
         })
@@ -7840,10 +7840,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         wireManagedAgentTile(tile.id)
     }
 
-    private func dispatchAgent(for row: LinearTicketQueueRow) {
-        guard let spawner = tileSpawner else { return }
-        let activeProject = workspaceRuntime?.activeController?.project
-        let prompt = AgentKickoffPrompt.make(row: row, repoPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: activeProject?.name)
+    /// The queue tile's OWN project and zone: the agent's terminal lands beside
+    /// the queue and works in its repository, whichever zone is armed.
+    private func dispatchAgent(for row: LinearTicketQueueRow, fromQueueTile queueTileId: UUID) {
+        guard let (spawner, scope) = spawnerAndScope(forTile: queueTileId) else { return }
+        explicitCreationScopeOverride = scope
+        defer { explicitCreationScopeOverride = nil }
+        let project = controller(owning: spawner)?.project
+        let prompt = AgentKickoffPrompt.make(row: row, repoPath: project?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: project?.name)
         switch spawner.spawnTerminal(profileId: "claude") {
         case let .spawned(runtime):
             installSpawnedTerminal(runtime, from: spawner)
@@ -7869,7 +7873,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// optional here — N agents fanned out over one checkout is exactly the
     /// clobbering P2C exists to prevent.
     private func fanOutAgents(for rows: [LinearTicketQueueRow], from tileId: UUID) {
-        let project = activeProject
+        // The queue tile's own project, not the armed one's.
+        let project = controller(owningTile: tileId)?.project
         let repoPath = project?.rootPath ?? FileManager.default.currentDirectoryPath
         let model = AgentModelConfig.resolvedFromDefaults()
         let items = rows.map {
@@ -9165,13 +9170,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView?.isHidden = false
     }
 
+    /// The companion is chosen from the primary tile's OWN zone and project —
+    /// the installed scene — never from the flat boot list or the armed project.
     private func focusModeCompanionAgent(for primaryTileId: UUID) -> UUID? {
         guard let canvasView else { return nil }
-        let primaryZoneId = canvasView.activeZone?.zoneId ?? canvasView.navZoneRenderModels.first?.placement.zoneId ?? UUID()
-        let currentTerminalTileIds = Set(canvasView.canvasState.tiles.filter { $0.kind == .terminal }.map(\.id))
-        let sessions = (try? projectStore?.listSessions()) ?? []
+        let primaryZoneId = canvasView.zoneId(containing: primaryTileId)
+            ?? canvasView.activeZone?.zoneId ?? canvasView.navZoneRenderModels.first?.placement.zoneId ?? UUID()
+        let zoneTiles = canvasView.tiles(inZone: primaryZoneId) ?? canvasView.allWorkspaceTiles()
+        let currentTerminalTileIds = Set(zoneTiles.filter { $0.kind == .terminal }.map(\.id))
+        let sessions = (try? controller(owningTile: primaryTileId)?.projectStore.listSessions()) ?? []
         let agentTileIds = Set(sessions.filter { currentTerminalTileIds.contains($0.tileId) && $0.agentDescriptor != nil }.map(\.tileId))
-        let candidates = canvasView.canvasState.tiles.map { tile in
+        let candidates = zoneTiles.map { tile in
             FocusModePairingCandidate(
                 tileId: tile.id,
                 zoneId: primaryZoneId,
@@ -14979,7 +14988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var registry = try registryStore.loadOrEmpty()
             guard let profile = BrowserProfilePersistenceActions.createProfile(named: name, in: &registry) else { return }
             try registryStore.save(registry)
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
             switchBrowserTileProfile(tileId: tileId, profileId: profile.id)
         } catch {
             fputs("Create Browser Profile failed: \(error)\n", stderr)
@@ -14994,7 +15003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let name = promptForBrowserProfileName(title: "Rename Browser Profile", defaultValue: existing.name) else { return }
             guard BrowserProfilePersistenceActions.renameProfile(id: profileId, to: name, in: &registry) else { return }
             try registryStore.save(registry)
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
         } catch {
             fputs("Rename Browser Profile failed: \(error)\n", stderr)
         }
@@ -15008,9 +15017,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performBrowserProfileDeletion(tileId: tileId, profileId: profileId)
+    }
+
+    /// The deletion the confirmed alert runs: the registry, then EVERY mounted
+    /// project's browser state and tiles — a profile is app-wide, and rewriting
+    /// only the armed project's left the others pointing at a deleted profile.
+    private func performBrowserProfileDeletion(tileId: UUID, profileId: UUID) {
+        guard let registryStore else { return }
         do {
             var registry = try registryStore.loadOrEmpty()
-            var browserState = try projectStore?.loadBrowserState()
+            let registryBefore = registry
+            var noBrowserState: BrowserState?
             // While the boot-only flat scene is live it is the model; once retired
             // it is a stale boot snapshot, so rewrite the mounted tiles instead
             // and let each project's controller persist its own file.
@@ -15018,10 +15036,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var canvasState: CanvasState? = flatState ?? canvasView.map {
                 CanvasState(viewport: $0.viewport, tiles: $0.allWorkspaceTiles(), groups: [], lastActiveTileId: nil)
             }
-            let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &browserState, canvasState: &canvasState)
+            let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &noBrowserState, canvasState: &canvasState)
             guard rewrite.registryDeleted else { return }
             try registryStore.save(registry)
-            if let browserState { try projectStore?.saveBrowserState(browserState) }
+            let stores: [any ProjectStoring] = workspaceRuntime == nil
+                ? [projectStore].compactMap { $0 }
+                : liveControllers.map(\.projectStore)
+            var browserTileIds: [UUID] = []
+            for store in stores {
+                var scratchRegistry = registryBefore
+                var browserState = try store.tryLoadBrowserState()
+                var noCanvas: CanvasState?
+                let rewritten = BrowserProfilePersistenceActions.deleteProfile(
+                    id: profileId, in: &scratchRegistry, browserState: &browserState, canvasState: &noCanvas)
+                guard !rewritten.browserTileIdsRewritten.isEmpty, let browserState else { continue }
+                try store.saveBrowserState(browserState)
+                browserTileIds += rewritten.browserTileIdsRewritten
+            }
             if let canvasState {
                 if flatState != nil {
                     for tile in canvasState.tiles { canvasView?.updateTile(tile) }
@@ -15032,8 +15063,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     workspaceRuntime?.scheduleCanvasSaveForMountedProjects()
                 }
             }
-            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
-            let idsToSwitch = rewrite.affectedTileIds.isEmpty ? [tileId] : rewrite.affectedTileIds
+            broadcastBrowserProfiles(registry.settings.browserProfiles)
+            let affected = Array(Set(rewrite.canvasTileIdsRewritten + browserTileIds))
+            let idsToSwitch = affected.isEmpty ? [tileId] : affected
             for affectedTileId in idsToSwitch {
                 switchBrowserTileProfile(tileId: affectedTileId, profileId: BrowserProfile.defaultProfileId)
             }
@@ -15042,6 +15074,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+
+    /// Every mounted project's spawner, not only the armed one's: each restores
+    /// and switches its own browsers against this list.
+    private func broadcastBrowserProfiles(_ profiles: [BrowserProfile]) {
+        for controller in liveControllers { controller.tileSpawner?.updateBrowserProfiles(profiles) }
+        bootTileSpawner?.updateBrowserProfiles(profiles)
+    }
 
     private func promptForBrowserProfileName(title: String, defaultValue: String) -> String? {
         let alert = NSAlert()
@@ -16988,6 +17027,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// store while leaving the active zone in place would install the tile into one
     /// project's layer and persist it into another's — a mismatch worse than the
     /// one being fixed.
+    /// The spawner of `tileId`'s own project, scoped to `tileId`'s own zone: for
+    /// a spawn a tile asks for, wherever the armed zone is.
+    private func spawnerAndScope(forTile tileId: UUID) -> (TileSpawner, CreationScope)? {
+        guard let zoneId = canvasView?.zoneId(containing: tileId),
+              let placement = canvasView?.installedZonePlacement(for: zoneId),
+              let projectId = placement.projectId,
+              let (spawner, projectScope) = spawnerAndScope(forProject: projectId) else { return nil }
+        return (spawner, CreationScope(
+            projectId: projectId,
+            projectRoot: projectScope.projectRoot,
+            homeRelativePath: placement.homeRelativePath,
+            source: .zone,
+            zoneId: zoneId
+        ))
+    }
+
     private func spawnerAndScope(forProject projectId: UUID) -> (TileSpawner, CreationScope)? {
         guard let spawner = workspaceRuntime?.controller(for: projectId)?.tileSpawner,
               let zone = workspaceRuntime?.document.zones.first(where: { $0.projectId == projectId }),
@@ -17025,6 +17080,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
     /// QA: the agent-status write a stopped harness run lands through.
     func qaUpdateAgentStatus(_ tileId: UUID, _ status: AgentStatus) { updateAgentStatus(tileId: tileId, status: status) }
+    /// QA: the quit's managed-session sweep, minus the rest of termination.
+    func qaSweepManagedSessionsAtQuit() { sweepManagedSessionsAtQuit() }
+    /// QA: the deletion a confirmed "Delete Browser Profile" alert runs.
+    func qaDeleteBrowserProfile(tileId: UUID, profileId: UUID) { performBrowserProfileDeletion(tileId: tileId, profileId: profileId) }
+    /// QA: a ticket-queue tile's Dispatch button, for a row.
+    func qaDispatchTicket(_ row: LinearTicketQueueRow, fromQueueTile tileId: UUID) { dispatchAgent(for: row, fromQueueTile: tileId) }
+    /// QA: the companion focus mode pairs with `primaryTileId`.
+    func qaFocusModeCompanion(for primaryTileId: UUID) -> UUID? { focusModeCompanionAgent(for: primaryTileId) }
     /// QA: Ghostty surfaces still alive when `windowWillClose` reached the
     /// `ghostty_app_free` step. Anything above zero traps there (ADR-0010).
     private(set) var qaLiveTerminalSurfacesAtGhosttyShutdown: Int?
@@ -17651,7 +17714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         case .ticketQueue:
             let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
-                self?.dispatchAgent(for: row)
+                self?.dispatchAgent(for: row, fromQueueTile: tile.id)
             }, fanOutHandler: { [weak self] rows in
                 self?.fanOutAgents(for: rows, from: tile.id)
             })
@@ -17931,17 +17994,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func applicationWillTerminate(_ notification: Notification) {
         agentSupervisor.stopAll()
         editorLanguageServices.shutdown()
-        // P3.1: the identical sweep the launch runs, with the reason a clean quit
-        // deserves. Best-effort — a quit can be a kill we never see, which is why
-        // the launch sweep is the load-bearing one.
-        if let store = workspaceRuntime?.activeController?.managedSessionStore {
+        sweepManagedSessionsAtQuit()
+        Task { await agentComposerDraftStore.flushAll() }
+    }
+
+    /// P3.1: the identical sweep the launch runs, with the reason a clean quit
+    /// deserves — over EVERY mounted project's store, not the armed one's.
+    /// Best-effort — a quit can be a kill we never see, which is why the launch
+    /// sweep is the load-bearing one.
+    private func sweepManagedSessionsAtQuit() {
+        for controller in liveControllers {
             do {
-                try ManagedSessionReconciliation.reconcile(store: store, reason: .continuumQuit, now: Date())
+                try ManagedSessionReconciliation.reconcile(
+                    store: controller.managedSessionStore, reason: .continuumQuit, now: Date())
             } catch {
-                fputs("managed-session reconcile: quit sweep failed: \(error)\n", stderr)
+                fputs("managed-session reconcile: quit sweep failed for \(controller.project.name): \(error)\n", stderr)
             }
         }
-        Task { await agentComposerDraftStore.flushAll() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -18100,6 +18169,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if currentViewport != lastReconciledViewport {
             lastReconciledViewport = currentViewport
             workspaceRuntime?.onViewportChanged()
+        }
+    }
+
+    /// A change to one tile's record saves through the tile's OWN project.
+    /// `canvasDidChange` schedules the armed project only, so a retitle, an
+    /// activation or a raise of a tile in another zone was never written.
+    func canvasDidChange(_ canvas: CanvasNSView, tileId: UUID) {
+        canvasDidChange(canvas)
+        if let owner = controller(owningTile: tileId), owner !== workspaceRuntime?.activeController {
+            owner.scheduleCanvasSave()
         }
     }
 

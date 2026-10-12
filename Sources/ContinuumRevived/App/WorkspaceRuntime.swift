@@ -1525,6 +1525,15 @@ final class WorkspaceRuntime {
     }
 
     private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
+        // One spawner per project for as long as its controller lives on this
+        // canvas. This used to mint a fresh one for every live controller on every
+        // project-changing arm, and every view a spawner builds reaches it through
+        // a weak reference — so the first click into another zone silently killed
+        // Save as Markdown, the browser profile and inspector menus and a file
+        // tree's open-file on every tile built before it.
+        if let existing = controller.tileSpawner, existing.canvasView === canvasView {
+            return existing
+        }
         let previous = controller.tileSpawner
         let spawner = TileSpawner(
             canvasView: canvasView,
@@ -1539,8 +1548,7 @@ final class WorkspaceRuntime {
             managedSessionStore: controller.managedSessionStore
         )
         // T4 (`.plans/47`): a tile's managed-agent memos outlive the spawner that
-        // recorded them. This method runs for every live controller each time the
-        // active project changes, which is now as often as the user clicks a zone.
+        // recorded them, when a controller moves to a new canvas.
         if let previous, previous !== spawner { spawner.adoptManagedAgentMemos(from: previous) }
         onSpawnerCreated?(spawner)
         return spawner
