@@ -210,6 +210,16 @@ final class ToolCallView: NSView {
         let presentation = payload.status.agentToolStatusPresentation
         statusLabel.stringValue = Self.statusText(
             status: payload.status, duration: payload.presentedTrailingDetailText)
+        // S3: a running row carries its own live clock ("◐ 1m 12s"), on one
+        // shared 1 Hz tick for every running row, so a long bash visibly lives.
+        if payload.status.agentToolIsTerminal {
+            Self.runningSince[blockID] = nil
+            ToolRowLiveClock.shared.remove(self)
+        } else {
+            if Self.runningSince[blockID] == nil { Self.runningSince[blockID] = ToolRowLiveClock.now() }
+            ToolRowLiveClock.shared.add(self)
+            tickLiveClock(at: ToolRowLiveClock.now())
+        }
         // A row resolving under the reader — in progress becoming "2.1s ✓" —
         // settles rather than swapping. Two conditions, both learned from the
         // witness: the SAME block (a recycled view arriving with different
@@ -504,6 +514,33 @@ final class ToolCallView: NSView {
         return "\(duration) \(presentation.glyph)"
     }
 
+    /// When each running row was first seen running, by block — rows are
+    /// recycled, the clock is the block's. Entries leave when the row settles.
+    static var runningSince: [AgentNodeID: Date] = [:]
+
+    /// "◐ 12s" for a running row; the plain "◐ In progress" for its first second.
+    static func runningStatusText(status: AgentItemStatus, elapsed: TimeInterval) -> String {
+        let presentation = status.agentToolStatusPresentation
+        guard elapsed >= 1 else { return "\(presentation.glyph) \(presentation.label)" }
+        let seconds = Int(elapsed)
+        let text = seconds < 60 ? "\(seconds)s"
+            : (seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds / 60)m \(seconds % 60)s")
+        return "\(presentation.glyph) \(text)"
+    }
+
+    /// One tick of the shared live clock. False when this row no longer runs.
+    @discardableResult
+    func tickLiveClock(at now: Date) -> Bool {
+        guard let blockID, !status.agentToolIsTerminal,
+              let since = Self.runningSince[blockID] else { return false }
+        let text = Self.runningStatusText(status: status, elapsed: now.timeIntervalSince(since))
+        if statusLabel.stringValue != text {
+            statusLabel.stringValue = text
+            needsLayout = true
+        }
+        return true
+    }
+
     static let maximumOutputHeight: CGFloat = 240
     static func maximumOutputHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
 
@@ -638,5 +675,49 @@ final class AgentDisclosureButton: NSButton {
         toolTip = expanded ? "Collapse \(itemTitle)" : "Expand \(itemTitle)"
         setAccessibilityLabel(toolTip)
         setAccessibilityValue(expanded ? "Expanded" : "Collapsed")
+    }
+}
+
+/// S3 — the one 1 Hz tick behind every running tool row's clock. Holds its
+/// rows weakly, runs in `.common` modes (a canvas drag must not freeze it),
+/// and stops when no row is running, so a settled transcript schedules nothing.
+@MainActor
+final class ToolRowLiveClock {
+    static let shared = ToolRowLiveClock()
+    /// The clock's time source; checks advance it instead of waiting.
+    static var now: () -> Date = { Date() }
+
+    private let rows = NSHashTable<ToolCallView>.weakObjects()
+    private var timer: Timer?
+
+    func add(_ row: ToolCallView) {
+        rows.add(row)
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated { ToolRowLiveClock.shared.tick() }
+        }
+        timer.tolerance = 0.25
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func remove(_ row: ToolCallView) {
+        rows.remove(row)
+        if rows.count == 0 { stop() }
+    }
+
+    func tick() {
+        let now = Self.now()
+        for row in rows.allObjects where !row.tickLiveClock(at: now) {
+            rows.remove(row)
+        }
+        if rows.count == 0 { stop() }
+    }
+
+    var qaRunningRowCount: Int { rows.allObjects.count }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 }

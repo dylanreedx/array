@@ -171,8 +171,13 @@ struct AgentCompactStatusPhaseAdapter {
             }
         }
 
-        // A failed/interrupted tool is terminal evidence in its own right.
-        if let activity = currentActivity,
+        // A failed/interrupted tool is terminal evidence in its own right —
+        // but only once the turn is over. Mid-turn, one failed tool is a step
+        // the agent reads and works past (S3: the row used to say "Failed"
+        // while the turn kept running), so the active turn below speaks.
+        let turnIsActive: Bool
+        if case .active? = facts.turn { turnIsActive = true } else { turnIsActive = false }
+        if let activity = currentActivity, !turnIsActive,
            activity.operation == .failed || activity.operation == .interrupted {
             return activityResult(activity)
         }
@@ -221,6 +226,14 @@ struct AgentCompactStatusPhaseAdapter {
                 // `activityInput(status:)` already uses for `.working`).
                 return result(.thinking, startedAt: startedAt, evidence: "Turn is active; the harness has not (yet) streamed content.")
             }
+        }
+
+        // A submission that has not started its turn yet is Starting, whatever
+        // generic lifecycle observation (a session-ready "waiting", a process
+        // "thinking") the provider's boot produced. Those described the
+        // process, not the user's prompt, and painted it idle-ish.
+        if let session = facts.session, session.state == .starting {
+            return result(.starting, startedAt: session.startedAt, evidence: "A submission is starting; the provider has not started its turn.")
         }
 
         if let activity = currentActivity {

@@ -197,13 +197,15 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
     }
 
-    public enum RunError: Error, CustomStringConvertible {
+    public enum RunError: Error, CustomStringConvertible, AgentRunFailureDescribing {
         case launchFailed(String)
         case codexFailed(exitCode: Int32, stderr: String)
         /// app-server path only: a JSON-RPC request failed for a reason other
-        /// than the resume self-heal (`isUnknownSessionFailure`), or a turn
-        /// ended without ever observing its own `turn/completed`.
+        /// than the resume self-heal (`isUnknownSessionFailure`).
         case appServerFailed(String)
+        /// app-server path only: the process went away before its own
+        /// `turn/completed`. Carries what it wrote to stderr.
+        case exitedMidTurn(stderr: String)
 
         public var description: String {
             switch self {
@@ -213,6 +215,30 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 return "codexFailed(exitCode: \(exitCode), stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
             case .appServerFailed(let message):
                 return "appServerFailed(\(SecretRedactor.redactLocalDiagnostics(message)))"
+            case .exitedMidTurn(let stderr):
+                return "exitedMidTurn(stderr: \(SecretRedactor.redactLocalDiagnostics(stderr)))"
+            }
+        }
+
+        public var userFacingDescription: String {
+            switch self {
+            case .launchFailed(let message):
+                return "Codex could not start: \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .codexFailed(let exitCode, let stderr):
+                let head = "Codex exited (code \(exitCode)) without finishing the turn"
+                return AgentFailureText.stderrTail(stderr).map { "\(head): \($0)" } ?? "\(head)."
+            case .appServerFailed(let message):
+                return "Codex: \(SecretRedactor.redactLocalDiagnostics(message))"
+            case .exitedMidTurn(let stderr):
+                let head = "Codex exited without finishing the turn"
+                return AgentFailureText.stderrTail(stderr).map { "\(head): \($0)" } ?? "\(head)."
+            }
+        }
+
+        public var isProcessLoss: Bool {
+            switch self {
+            case .codexFailed, .exitedMidTurn: return true
+            case .launchFailed, .appServerFailed: return false
             }
         }
     }
@@ -553,6 +579,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
             throw RunError.launchFailed(String(describing: error))
         }
         queue.sync { self.child = spawned }
+        // S3: drained into a bounded tail. Never read before, so a crash said
+        // nothing, and a chatty app-server could fill the pipe and block.
+        let stderrTail = AgentStderrTail()
+        spawned.standardError.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil } else { stderrTail.append(chunk) }
+        }
 
         let transport = CodexAppServerTransport(child: spawned) { [weak self] line in
             guard let self else { return }
@@ -591,6 +624,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         defer {
             transport.shutdown()
             spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+            spawned.standardError.readabilityHandler = nil
             queue.sync {
                 self.child = nil
                 self.appServerTransport = nil
@@ -712,7 +746,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         try throwStoppedIfRequested(stderr: "")
         let outcome = queue.sync { self.appServerTurnOutcome }
         guard case .turnCompleted(_, _, let turnOutcome, let errorMessage) = outcome else {
-            throw RunError.appServerFailed("turn/completed not observed")
+            // Let the pipe's last bytes land before reading the tail.
+            Thread.sleep(forTimeInterval: 0.05)
+            throw RunError.exitedMidTurn(stderr: stderrTail.text)
         }
         if turnOutcome == .failed {
             throw RunError.appServerFailed(errorMessage ?? "turn failed")

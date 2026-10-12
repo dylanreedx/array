@@ -698,6 +698,12 @@ run_app_check .build/debug/Array --agent-tile-click-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# Confidence pass S3: one owner for turn presence (`AgentTurnPresence`). Drives
+# the production claude, codex and pi runners against their reactive fakes with
+# a real tile attached, and asserts every surface reads Starting from Return to
+# the provider's own turn start — through codex's resume prefix and pi's session
+# header, which used to paint Idle with Send disabled.
+run_app_check .build/debug/Array --agent-presence-check
 # TR-06: responding to a request the provider is HOLDING. Drives the real
 # `wireManagedAgentTile` and asserts the response transport is bound by
 # production — the seam sat declared-and-unbound through every release of the

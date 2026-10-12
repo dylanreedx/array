@@ -87,6 +87,11 @@ public enum AgentRuntimeObservation: Equatable, Sendable {
     /// The supervisor stores it keyed by HARNESS, never on an `AgentRecord`.
     /// Not a location fact: the projector ignores it.
     case accountQuota(AgentAccountQuotaSnapshot)
+    /// S3 — the provider is retrying a failed request (claude `api_retry`,
+    /// codex `error` with `willRetry`, pi `auto_retry_start`); nil when it says
+    /// the retry is over (pi `auto_retry_end`). Turn presence, not location:
+    /// the projector ignores it.
+    case providerRetry(AgentTurnPresence.Retry?)
 }
 
 /// The single host-local privacy boundary for strings that can become file
@@ -396,6 +401,10 @@ public struct AgentLocationProjector: Sendable {
     private var currentActivity: AgentObservedActivity?
     private var lastWhereObservedAt: Date?
     private var locallyObservedItemIds: Set<String> = []
+    /// S3: tools the provider has opened and not closed. While one is open the
+    /// current What does not expire — a quiet `bash` that runs for minutes is
+    /// still running, and expiring its verb made the row read "Responding".
+    private var openToolItemIds: Set<String> = []
 
     public init(
         home: AgentHome,
@@ -454,6 +463,10 @@ public struct AgentLocationProjector: Sendable {
             // and it is not this agent's state at all — the supervisor files it
             // by harness. Same shape as `.threadId`.
             break
+
+        case .providerRetry:
+            // Turn presence (`AgentTurnPresence.noteRetry`), not location.
+            break
         }
     }
 
@@ -468,6 +481,7 @@ public struct AgentLocationProjector: Sendable {
             case .ready, .waiting:
                 setLifecycle(.waiting, at: now)
             case .stopped:
+                openToolItemIds.removeAll(keepingCapacity: true)
                 setLifecycle(.interrupted, at: now)
             case .error:
                 setLifecycle(.failed, at: now)
@@ -475,10 +489,12 @@ public struct AgentLocationProjector: Sendable {
 
         case .turnStarted:
             locallyObservedItemIds.removeAll(keepingCapacity: true)
+            openToolItemIds.removeAll(keepingCapacity: true)
             setLifecycle(.thinking, at: now)
 
         case .turnCompleted(_, _, let outcome, _):
             locallyObservedItemIds.removeAll(keepingCapacity: true)
+            openToolItemIds.removeAll(keepingCapacity: true)
             switch outcome {
             case .completed:
                 setLifecycle(.completed, at: now)
@@ -489,6 +505,7 @@ public struct AgentLocationProjector: Sendable {
             }
 
         case .itemStarted(_, let itemId, let kind, let title):
+            if kind.isPresenceTool { openToolItemIds.insert(itemId) }
             // Pi's private observation is emitted first on the same serial queue.
             // Do not immediately overwrite its path-bearing activity with the
             // generic normalized event for the same item.
@@ -502,6 +519,7 @@ public struct AgentLocationProjector: Sendable {
 
         case .itemCompleted(_, let itemId, _, let status):
             locallyObservedItemIds.remove(itemId)
+            openToolItemIds.remove(itemId)
             switch status {
             case .failed, .declined:
                 setLifecycle(.failed, at: now)
@@ -528,6 +546,7 @@ public struct AgentLocationProjector: Sendable {
             setLifecycle(.thinking, at: now)
 
         case .runtimeError:
+            openToolItemIds.removeAll(keepingCapacity: true)
             setLifecycle(.failed, at: now)
 
         case .compactionChanged(_, let event):
@@ -552,8 +571,9 @@ public struct AgentLocationProjector: Sendable {
     /// remain independently owned facts.
     public func snapshot(at now: Date) -> AgentLocationSnapshot {
         let visible: AgentObservedActivity?
+        let toolOpen = !openToolItemIds.isEmpty
         if let currentActivity,
-           now.timeIntervalSince(currentActivity.updatedAt) < configuration.staleAfter {
+           toolOpen || now.timeIntervalSince(currentActivity.updatedAt) < configuration.staleAfter {
             visible = currentActivity
         } else {
             visible = nil
@@ -562,7 +582,8 @@ public struct AgentLocationProjector: Sendable {
             home: home,
             whereDirectory: whereDirectory,
             what: visible,
-            whatExpiresAt: visible.map {
+            // An open tool's What holds until the tool closes.
+            whatExpiresAt: toolOpen ? nil : visible.map {
                 $0.updatedAt.addingTimeInterval(configuration.staleAfter)
             },
             lastUsefulWhat: lastUsefulActivity)

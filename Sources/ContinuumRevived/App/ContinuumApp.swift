@@ -1707,6 +1707,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-presence-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentPresenceChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-spawn-limit-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -7003,7 +7017,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // once at spawn and never transitions, so reading `working` off it left
             // every row stuck on "working" for the life of the session.
             let hasLiveRunner = supervisedId.map { agentSupervisor.isRunning($0) } ?? false
-            let status = Self.agentRowStatus(liveStatus: liveStatus, hasLiveRunner: hasLiveRunner, persisted: record.status)
+            // S3: a supervised agent's turn state is its presence owner's — the
+            // same one its tile paints — never "a runner is bound" (true for the
+            // drain window after a turn ended, false for nothing else).
+            let presenceStatus = supervisedId.flatMap { agentSupervisor.presenceRowStatus(for: $0) }
+            let status = Self.agentRowStatus(
+                liveStatus: liveStatus ?? presenceStatus,
+                hasLiveRunner: supervisedId == nil && hasLiveRunner,
+                persisted: record.status)
             // P2B.8's rule, unchanged and now applied consistently: observed means
             // the status above came from something LIVE. A runner in flight is such
             // a source (it is what produces `working` here), so it counts exactly as
@@ -7052,7 +7073,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // fall back to and `persisted` is nil — which the derivation reads as
             // "alive, not mid-turn", i.e. idle. That was already this branch's
             // behaviour; it now shares the function so the two cannot drift.
-            let status = Self.agentRowStatus(liveStatus: liveStatus, hasLiveRunner: isRunning, persisted: nil)
+            let status = Self.agentRowStatus(
+                liveStatus: liveStatus ?? agentSupervisor.presenceRowStatus(for: record.id),
+                hasLiveRunner: false, persisted: nil)
             // P2B.8: a RESTORED record the supervisor merely holds is not observed —
             // `restore()` (P2A.7) adopts records without a runner, so the supervisor
             // knows the agent exists and hears nothing from it. Observed means a live
