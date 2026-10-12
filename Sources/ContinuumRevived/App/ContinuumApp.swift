@@ -2566,6 +2566,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--composer-key-routing-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try AppDelegate.runComposerKeyRoutingSelfCheck()
+                print("ContinuumRevivedComposerKeyRoutingChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-jump-check") || CommandLine.arguments.contains("--leader-jump-framing-check") {
             do {
                 _ = NSApplication.shared
@@ -4845,7 +4857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var relayTokenSyncTask: Task<Void, Never>?
     private var companionPublishDebounceWorkItem: DispatchWorkItem?
     private var navKeymap: NavKeymap = .default {
-        didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
+        didSet { leaderDwell = TimeInterval(navKeymap.effectiveLeaderDwellMs) / 1000 }
     }
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
@@ -4858,7 +4870,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Hold-leader dwell in seconds (mirrors `navKeymap.leaderDwellMs`). Seeded from
     /// the default keymap so it matches before `navKeymap` is assigned. Overridable
     /// so the self-check can arm synchronously (0) — the `dragGhostDelay` pattern.
-    var leaderDwell: TimeInterval = TimeInterval(NavKeymap.default.leaderDwellMs) / 1000
+    var leaderDwell: TimeInterval = TimeInterval(NavKeymap.default.effectiveLeaderDwellMs) / 1000
     /// Live ⌥+arrow keyboard-dock session (Phase D). The focused tile's frame when
     /// the session began (restored on Esc), the tile being moved, and the current
     /// leapfrog direction + index. nil between sessions; committed (kept) on ⌥ release.
@@ -8004,7 +8016,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile, so the ⌘ that came up after a jump was never the inbox's event.
         updateInboxJumpHints(modifiers: modifiers)
         let leaderModifier = navKeymap.leaderHoldModifier
-        if !leaderModifier.isEmpty, modifiers == leaderModifier {
+        // Text input owns ⌥: word movement, ⌥↩ (queue) and ⌥-characters.
+        if !leaderModifier.isEmpty, modifiers == leaderModifier, !focusedResponderIsTextInput() {
             scheduleLeaderActivation()
         } else {
             disarmLeader()
@@ -8156,6 +8169,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         pointTargetsScrollableTileContent(event.locationInWindow, in: window)
     }
 
+    /// An editable text view (the agent composer, a note, any field editor) or
+    /// the code editor. The hold-⌥ leader never opens over one.
+    private func focusedResponderIsTextInput() -> Bool {
+        guard let responder = window?.firstResponder else { return false }
+        if let text = responder as? NSTextView { return text.isEditable }
+        if let tileId = TileNSView.enclosingTileId(of: responder),
+           let editor = canvasView?.tileView(for: tileId) as? FileTileNSView {
+            return editor.isCodeEditorFocused
+        }
+        return false
+    }
+
     private func focusedResponderIsTerminalSurface() -> Bool {
         guard let view = window?.firstResponder as? NSView else { return false }
         return view.hasAncestor(ofType: GhosttyTerminalView.self)
@@ -8175,6 +8200,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func handleHotkey(_ event: NSEvent) -> Bool {
+        // A key while the hold-leader dwell is pending makes ⌥ a chord, not a
+        // hold: the leader must not open under it, now or when the dwell ends.
+        if let pending = leaderDwellWorkItem {
+            pending.cancel()
+            leaderDwellWorkItem = nil
+        }
         if BoardTaskDetailController.isPresented(in: event.window ?? window) {
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                event.charactersIgnoringModifiers == "w" {
@@ -8208,11 +8239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         // Hold-`⌥` leader: while active, keys route to the leader handler BEFORE the
-        // reserved/onlyCommand path, and unmatched keys are swallowed so nothing leaks
-        // to terminal/text content. Release of the leader modifier exits via
+        // reserved/onlyCommand path. A key it does not own closes it and continues
+        // as an ordinary key. Release of the leader modifier exits via
         // `handleFlagsChanged`.
-        if focusBroker.activeSurface == .modal(.leader) {
-            return handleLeaderKey(event)
+        if focusBroker.activeSurface == .modal(.leader), handleLeaderKey(event) {
+            return true
         }
 
         if profilePalette?.handleKeyEvent(event) == true {
@@ -8372,7 +8403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func activateLeader() {
-        guard focusBroker.activeSurface != .modal(.leader) else { return }
+        guard focusBroker.activeSurface != .modal(.leader), !focusedResponderIsTextInput() else { return }
         focusBroker.openModal(.leader)
         canvasView?.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
         canvasView?.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
@@ -8395,8 +8426,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// Keys while the leader is held. Esc exits (restoring an in-flight dock); an
     /// arrow key docks/leapfrogs the focused tile (Phase D); a label key jumps to +
-    /// centers the labeled tile (Phase C). Everything is swallowed so nothing leaks
-    /// to content.
+    /// centers the labeled tile (Phase C). Any other key is not the leader's: it
+    /// closes the leader and reaches content, so an ⌥-character still types.
     private func handleLeaderKey(_ event: NSEvent) -> Bool {
         if event.keyCode == 53 { // Esc
             cancelLeaderSnap() // restore the tile if a dock is in flight (no-op otherwise)
@@ -8442,7 +8473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             demonstrateOnboarding(.quickJumpUsed)
             return true
         }
-        return true
+        disarmLeader()
+        return false
     }
 
     private func leaderArrowDirection(_ keyCode: UInt16) -> TileArrangement.Direction? {
@@ -23694,9 +23726,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58)) // 58 = left Option
         try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held alone should activate the leader; got \(String(describing: app.focusBroker.activeSurface))")
 
-        // 2) Keys while the leader is held are swallowed (no leak to content).
+        // 2) A key the leader does not own (no tile carries label "a": the only
+        //    tile is current and fully visible) is not swallowed: it closes the
+        //    leader and reaches content, so an ⌥-character still types.
         let swallowed = app.handleHotkey(try keyDown("a", 0, mods: [.option]))
-        try expect(swallowed == true, "leader must swallow keys while held")
+        try expect(swallowed == false, "a key the leader does not own must pass through")
+        try expect(app.focusBroker.activeSurface == .canvas, "a key the leader does not own must close it; got \(String(describing: app.focusBroker.activeSurface))")
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held again should re-open the leader")
 
         // 3) Releasing the modifier exits the leader, restoring the prior scope.
         app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
@@ -23717,9 +23754,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // 6) A REBOUND leader modifier (⌃) + custom dwell ms is honored end-to-end.
         var rebound = NavKeymap.default
         rebound.leaderHoldModifier = .control
-        rebound.leaderDwellMs = 120
+        rebound.leaderDwellMs = 320
         app.navKeymap = rebound // didSet syncs leaderDwell
-        try expect(abs(app.leaderDwell - 0.12) < 0.0001, "custom dwell ms should drive leaderDwell; got \(app.leaderDwell)")
+        try expect(abs(app.leaderDwell - 0.32) < 0.0001, "custom dwell ms should drive leaderDwell; got \(app.leaderDwell)")
+        rebound.leaderDwellMs = 0
+        app.navKeymap = rebound
+        try expect(abs(app.leaderDwell - Double(NavKeymap.minimumLeaderDwellMs) / 1000) < 0.0001,
+                   "a configured 0 ms dwell must be raised to the floor; got \(app.leaderDwell)")
         app.leaderDwell = 0
         app.handleFlagsChanged(try flagsEvent([.control], keyCode: 59)) // 59 = Control
         try expect(app.focusBroker.activeSurface == .modal(.leader), "rebound leader modifier (⌃) should activate")
@@ -23735,7 +23776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "defaultLeaderModifier": NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier),
             "defaultDwellMs": NavKeymap.default.leaderDwellMs,
             "reboundModifier": "ctrl",
-            "reboundDwellMs": 120,
+            "reboundDwellMs": 320,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -23808,11 +23849,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held should open the leader; got \(String(describing: app.focusBroker.activeSurface))")
         try expect(canvas.navModeOverlayQASnapshot().isInstalled, "the jump HUD overlay should install while the leader is held")
 
-        // 2) An unlabeled key is swallowed: no jump, no leak, HUD stays.
+        // 2) An unlabeled key is not the leader's: no jump, the viewport stays,
+        //    the leader closes and the key passes through to content.
         let swallowed = app.handleHotkey(try keyDown("z", 6, mods: [.option]))
-        try expect(swallowed == true, "an unmatched leader key must be swallowed")
-        try expect(app.focusBroker.activeSurface == .modal(.leader), "an unmatched key must not exit the leader")
+        try expect(swallowed == false, "an unmatched leader key must pass through to content")
+        try expect(app.focusBroker.activeSurface != .modal(.leader), "an unmatched key must close the leader")
         try expect(vpEqual(canvas.viewport, initialViewport), "an unmatched key must not move the viewport")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held again should re-open the leader")
 
         // 3) A label key jumps: focus the labeled tile and apply the shared T07 framing policy.
         _ = app.handleHotkey(try keyDown("s", 1, mods: [.option]))
@@ -23843,9 +23888,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let labels6 = canvas.leaderJumpAssignments()
         try expect(!labels6.contains { $0.tileId == bId }, "the focused, fully-visible tile must not get a jump label")
         try expect(labels6.contains { $0.tileId == aId }, "a partially-visible, unfocused tile must still get a jump label")
-        // B's former label key ('s') now matches no remaining label → swallowed.
+        // B's former label key ('s') now matches no remaining label → it passes
+        // through and closes the leader instead of jumping.
         _ = app.handleHotkey(try keyDown("s", 1, mods: [.option]))
-        try expect(app.focusBroker.activeSurface == .modal(.leader), "a key matching no remaining label must not jump (focused tile excluded); got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(app.focusBroker.activeSurface == .tile(bId), "a key matching no remaining label must not jump (focused tile excluded); got \(String(describing: app.focusBroker.activeSurface))")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
         // The partially-visible tile A remains reachable.
         _ = app.handleHotkey(try keyDown("a", 0, mods: [.option]))
         try expect(app.focusBroker.activeSurface == .tile(aId), "the partially-visible unfocused tile must remain jumpable; got \(String(describing: app.focusBroker.activeSurface))")
@@ -24588,13 +24636,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(vpEqual(canvas5.viewport, expectedD),
                    "assertion 5: 'a' must fit-jump to zoneD (configured navKey wins over tile label 'a'); got (\(canvas5.viewport.x),\(canvas5.viewport.y)) want (\(expectedD.x),\(expectedD.y))")
 
-        // 6. Unmatched key is swallowed; leader stays open; viewport unchanged.
+        // 6. An unmatched key is not the leader's: it passes through to content,
+        //    closes the leader, and leaves the viewport where it was.
         app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58)) // re-open on original canvas
         let vpBeforeUnmatched = canvas.viewport
         let swallowed = app.handleHotkey(try keyDown("Z", 6, mods: [.option]))
-        try expect(swallowed == true, "assertion 6: unmatched key must be swallowed")
-        try expect(app.focusBroker.activeSurface == .modal(.leader),
-                   "assertion 6: leader must stay open on unmatched key")
+        try expect(swallowed == false, "assertion 6: an unmatched key must pass through to content")
+        try expect(app.focusBroker.activeSurface != .modal(.leader),
+                   "assertion 6: an unmatched key must close the leader")
         try expect(vpEqual(canvas.viewport, vpBeforeUnmatched),
                    "assertion 6: viewport must not change on unmatched key")
 

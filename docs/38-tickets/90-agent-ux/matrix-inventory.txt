@@ -65,6 +65,7 @@ check --companion-sync-health-check
 check --completion-awareness-check
 check --component-lab-check
 check --composer-image-components-check
+check --composer-key-routing-check
 check --conductor-queue-tile-check
 check --cross-project-agents-check
 check --diff-review-off-main-check
@@ -318,6 +319,7 @@ leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --completion-awareness-check
 leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check
+leg run_app_check .build/debug/Array --composer-key-routing-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-review-off-main-check

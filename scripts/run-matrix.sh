@@ -597,6 +597,10 @@ run_app_check .build/debug/Array --nav-mode-check
 run_app_check .build/debug/Array --leader-activation-check
 run_app_check .build/debug/Array --leader-jump-check
 run_app_check .build/debug/Array --leader-zone-jump-check
+# Confidence pass S6: the hold-⌥ leader against keys it does not own, through
+# NSApp.sendEvent with the production monitors — ⌥↩ queues in a working
+# composer, ⌥→ and ⌥3 (#) edit text, a quick ⌥-chord never opens the leader.
+run_app_check .build/debug/Array --composer-key-routing-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
 # M1.11 (.plans/46): the toolbar "+" creates an EMPTY workspace and switches into

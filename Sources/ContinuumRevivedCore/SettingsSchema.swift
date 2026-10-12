@@ -35,7 +35,7 @@ public enum SettingsSchema {
             ]),
             SettingsSection(id: "navigation", title: "Navigation", iconSystemName: "arrow.up.arrow.down", fields: [
                 .choice(key: NavKeymap.leaderHoldDefaultsKey, label: "Hold-to-Navigate Key", options: NavKeymap.leaderHoldModifierOptions, default: NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier)),
-                .number(key: NavKeymap.leaderDwellDefaultsKey, label: "Hold Activation Delay", range: 0...2_000, default: Double(NavKeymap.default.leaderDwellMs), unit: "ms", step: 25),
+                .number(key: NavKeymap.leaderDwellDefaultsKey, label: "Hold Activation Delay", range: Double(NavKeymap.minimumLeaderDwellMs)...2_000, default: Double(NavKeymap.default.leaderDwellMs), unit: "ms", step: 25),
                 .text(key: NavKeymap.leaderLabelKeysDefaultsKey, label: "Jump Label Keys", default: NavKeymap.default.leaderLabelKeys),
                 .text(key: NavKeymap.leaderZoneOrdinalKeysDefaultsKey, label: "Zone Number Keys", default: NavKeymap.default.leaderZoneOrdinalKeys),
             ]),
