@@ -171,8 +171,14 @@ extension UIProbeGeometry {
         try require(cancelledActivityResult.phase == .interrupted && cancelledActivityResult.phaseStartedAt == cancelledStart,
                     "cancelled activity must map to Interrupted with its observed anchor")
 
-        // A fresh terminal failure/interruption still wins over contradictory
-        // active assistant/reasoning streams.
+        // Confidence pass S3 (`.plans/70`, report C P1-5) — the contract changed
+        // on purpose. These activities are TOOL events (one failed or declined
+        // step). While the turn is still active the agent reads that step and
+        // works past it, so the turn's own stream speaks; the row used to read
+        // "Failed" for the rest of a turn that went on to succeed. A failed or
+        // interrupted TURN still outranks everything (asserted below: "failed
+        // turn maps to Failed", and the stopped session), and the same failed
+        // tool outranks a turn that is no longer active.
         let activityFailedStart = t3.addingTimeInterval(9)
         let activityInterruptedStart = t3.addingTimeInterval(10)
         let failedActivity = AgentObservedActivity(
@@ -193,16 +199,23 @@ extension UIProbeGeometry {
                 currentActivity: failedActivity,
                 currentActivityExpiresAt: t3.addingTimeInterval(30)),
             now: t3.addingTimeInterval(11))
-        try require(failedWithActiveStream.phase == .failed && failedWithActiveStream.phaseStartedAt == activityFailedStart,
-                    "fresh failed activity must outrank a contradictory assistant stream")
+        try require(failedWithActiveStream.phase == .responding,
+                    "a failed tool mid-turn must not override the turn's live assistant stream (got \(String(describing: failedWithActiveStream.phase)))")
         let interruptedWithActiveStream = completedActivityAdapter.update(
             .init(
                 turn: .active(startedAt: t3, stream: .reasoning, streamStartedAt: t3),
                 currentActivity: interruptedActivity,
                 currentActivityExpiresAt: t3.addingTimeInterval(30)),
             now: t3.addingTimeInterval(12))
-        try require(interruptedWithActiveStream.phase == .interrupted && interruptedWithActiveStream.phaseStartedAt == activityInterruptedStart,
-                    "fresh interrupted activity must outrank a contradictory reasoning stream")
+        try require(interruptedWithActiveStream.phase == .thinking,
+                    "an interrupted tool mid-turn must not override the turn's live reasoning stream (got \(String(describing: interruptedWithActiveStream.phase)))")
+        // Positive control: with no active turn the same fresh failed tool is
+        // still terminal evidence, with its own anchor.
+        let failedAfterTurn = completedActivityAdapter.update(
+            .init(currentActivity: failedActivity, currentActivityExpiresAt: t3.addingTimeInterval(30)),
+            now: t3.addingTimeInterval(13))
+        try require(failedAfterTurn.phase == .failed && failedAfterTurn.phaseStartedAt == activityFailedStart,
+                    "a fresh failed tool outside an active turn must still map to Failed with its observed anchor")
 
         // A real phase change replaces the anchor, even when both phases are
         // active. No old elapsed time leaks across the transition.
