@@ -80,13 +80,26 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
     private var replyOptions: [AgentReplyOption] = []
-    /// B4 — Array's own follow-up queue, rendered as chips above the composer.
+    /// B4 → T5b — Array's steering and follow-up queue, at the top of the shell.
     private let queuedMessageRail: ComposerQueuedMessageRailView
     private let queuedMessageRailHeightConstraint: NSLayoutConstraint
+    /// T5b (D1) — the chords a working turn offers, under the draft; also where
+    /// a refused rail edit says why.
+    private let keyHintLabel = NSTextField(labelWithString: "")
+    private var keyHintHeightConstraint: NSLayoutConstraint!
+    private var keyHintGapConstraint: NSLayoutConstraint!
+    private var transientHint: String?
+    private var transientHintToken = 0
     /// Callbacks the tile wires to `AgentSupervisor`. Direct manipulation of
-    /// Array's queue, never the turn in flight.
+    /// Array's queue; only send-now on a follow-up touches the turn in flight
+    /// (D2's force send).
     var onCancelQueuedMessage: ((UUID) -> Void)?
     var onClearQueuedMessages: (() -> Void)?
+    var onResumeQueue: (() -> Void)?
+    var onSendQueuedMessageNow: ((UUID) -> Void)?
+    var onMoveQueuedMessage: ((UUID, Int) -> Void)?
+    /// Removes one item from the queue and hands it back for editing.
+    var onTakeQueuedMessageForEditing: ((UUID) async -> AgentComposerQueuedMessage?)?
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
@@ -230,6 +243,18 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         queuedMessageRail.onClearAll = { [weak self] in
             self?.onClearQueuedMessages?()
         }
+        queuedMessageRail.onResume = { [weak self] in
+            self?.onResumeQueue?()
+        }
+        queuedMessageRail.onSendNow = { [weak self] messageID in
+            self?.onSendQueuedMessageNow?(messageID)
+        }
+        queuedMessageRail.onMove = { [weak self] messageID, index in
+            self?.onMoveQueuedMessage?(messageID, index)
+        }
+        queuedMessageRail.onEdit = { [weak self] messageID in
+            self?.editQueuedMessage(messageID)
+        }
         taskContextButton.translatesAutoresizingMaskIntoConstraints = false
         taskContextButton.isBordered = false
         taskContextButton.alignment = .left
@@ -247,6 +272,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         addSubview(attachmentRail)
         addSubview(queuedMessageRail)
         addSubview(scrollView)
+        keyHintLabel.font = .token(.caption, zoom: pageZoom)
+        keyHintLabel.lineBreakMode = .byTruncatingTail
+        keyHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        keyHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        keyHintLabel.isHidden = true
+        addSubview(keyHintLabel)
 
         placeholderLabel.stringValue = variant.placeholder
         placeholderLabel.font = .token(.body, zoom: pageZoom)
@@ -262,7 +293,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             queuedMessageRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
-            scrollView.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor, constant: padding),
+            scrollView.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor, constant: padding),
+            keyHintLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
         ]
         trailingPaddingConstraints = [
             replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
@@ -270,17 +302,23 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             queuedMessageRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
+            keyHintLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
         ]
+        keyHintHeightConstraint = keyHintLabel.heightAnchor.constraint(equalToConstant: 0)
+        keyHintGapConstraint = keyHintLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 0)
         NSLayoutConstraint.activate([
+            // The queue sits above everything that belongs to the draft.
+            queuedMessageRailHeightConstraint,
+            queuedMessageRail.topAnchor.constraint(equalTo: taskContextButton.bottomAnchor),
             replyOptionRailHeightConstraint,
-            replyOptionRail.topAnchor.constraint(equalTo: taskContextButton.bottomAnchor),
+            replyOptionRail.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor),
             fileReferenceRailHeightConstraint,
             fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
             attachmentRail.topAnchor.constraint(equalTo: fileReferenceRail.bottomAnchor),
-            queuedMessageRailHeightConstraint,
-            queuedMessageRail.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor),
+            keyHintHeightConstraint,
+            keyHintGapConstraint,
+            keyHintLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -padding),
             placeholderLabel.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: scrollView.trailingAnchor),
             placeholderLabel.topAnchor.constraint(equalTo: scrollView.topAnchor),
@@ -327,10 +365,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight(zoom: pageZoom) + internalPadding
         let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
         let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
-        let queuedRailHeight = queuedMessageRail.isHidden ? 0 : ComposerQueuedMessageRailView.railHeight(zoom: pageZoom)
+        let queuedRailHeight = queuedMessageRailHeightConstraint.constant
+        let hintHeight = (keyHintHeightConstraint?.constant ?? 0) + (keyHintGapConstraint?.constant ?? 0)
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight
+            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight + hintHeight
         )
     }
 
@@ -492,20 +531,108 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         actionSink = sink
         draftAgentID = agentID
         turnSnapshot = snapshot
+        updateKeyHint()
     }
 
     func updateTurnSnapshot(_ snapshot: AgentTileTurnSnapshot) {
         turnSnapshot = snapshot
+        updateKeyHint()
     }
 
-    /// B4 — pending chips for Array's own follow-up queue. `paused` mirrors
-    /// `AgentSupervisor.isQueuePaused(for:)`: held after an interrupted turn so
-    /// the chips do not imply they are about to run.
-    func updateQueuedMessages(_ messages: [AgentComposerQueuedMessage], paused: Bool) {
-        queuedMessageRail.setMessages(messages, paused: paused)
-        queuedMessageRailHeightConstraint.constant = messages.isEmpty ? 0 : ComposerQueuedMessageRailView.railHeight(zoom: pageZoom)
+    /// T5b — the steering/queue rail, from `AgentSupervisor.queueRailState(for:)`.
+    func updateQueueRail(_ state: ComposerQueueRailState) {
+        queuedMessageRail.setState(state)
+        let height = ComposerQueuedMessageRailView.railHeight(for: state, zoom: pageZoom)
+        guard queuedMessageRailHeightConstraint.constant != height else { return }
+        queuedMessageRailHeightConstraint.constant = height
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    /// T5b (D1) — while a turn works, the chords under the draft say what each
+    /// Return does; idle shows nothing, as before. ⇧↩ stays a newline unsaid.
+    private func updateKeyHint() {
+        var hint = transientHint
+        if hint == nil, let snapshot = turnSnapshot, snapshot.executionState == .working, !snapshot.isMirrored {
+            let capabilities = snapshot.capabilities
+            var parts: [String] = []
+            if capabilities.canSteer { parts.append("\u{21A9} steer") }
+            if capabilities.canQueue { parts.append((capabilities.canSteer ? "\u{2325}\u{21A9}" : "\u{21A9}") + " queue") }
+            if capabilities.canStop { parts.append("\u{2318}\u{21A9} force send") }
+            if !parts.isEmpty { hint = parts.joined(separator: "   ") }
+        }
+        keyHintLabel.stringValue = hint ?? ""
+        keyHintLabel.toolTip = hint
+        keyHintLabel.isHidden = hint == nil
+        let lineHeight = ceil(keyHintLabel.font.map { $0.ascender - $0.descender + $0.leading } ?? 0)
+        let height = hint == nil ? 0 : lineHeight
+        let gap = hint == nil ? 0 : CGFloat(pageZoom.scaled(Space.s))
+        guard keyHintHeightConstraint.constant != height || keyHintGapConstraint.constant != gap else { return }
+        keyHintHeightConstraint.constant = height
+        keyHintGapConstraint.constant = gap
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// A short-lived line in the hint's place, read out to VoiceOver too.
+    private func showTransientHint(_ text: String) {
+        transientHint = text
+        transientHintToken &+= 1
+        let token = transientHintToken
+        updateKeyHint()
+        NSAccessibility.post(
+            element: keyHintLabel, notification: .announcementRequested,
+            userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, self.transientHintToken == token else { return }
+            self.transientHint = nil
+            self.updateKeyHint()
+        }
+    }
+
+    /// ✎ / ↑ — pull a held steer or queued follow-up back into the draft. A draft
+    /// the user is already writing is never replaced or merged: the item stays
+    /// queued and the hint line says how to edit it.
+    func editQueuedMessage(_ messageID: UUID) {
+        guard !hasDraftContent else {
+            showTransientHint("Send or clear your draft to edit a queued message")
+            return
+        }
+        guard let take = onTakeQueuedMessageForEditing, let agentID = draftAgentID else { return }
+        let generation = bindingGeneration
+        Task { @MainActor [weak self] in
+            guard let message = await take(messageID), let self,
+                  self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+            var images: [AgentPromptImageAttachment] = []
+            for attachment in message.imageAttachments {
+                if let stored = try? await self.attachmentStore?.storedAttachment(for: attachment.attachmentID) {
+                    images.append(stored.promptAttachment)
+                }
+            }
+            // Typed into meanwhile: keep both rather than lose either.
+            let current = self.textView.string
+            let text = current.isEmpty ? message.text : current + "\n\n" + message.text
+            self.apply(AgentComposerDraft(
+                text: text, selection: NSRange(location: (text as NSString).length, length: 0),
+                revision: self.draft.revision &+ 1,
+                imageAttachments: self.importedAttachments + images,
+                fileReferences: self.importedFileReferences + self.resolvedFileReferences(from: message.fileReferences),
+                taskContext: self.draft.taskContext))
+            self.publishDraftChange()
+            self.window?.makeFirstResponder(self.textView)
+        }
+    }
+
+    /// The refused-edit hint has done its job once the draft it was about is gone.
+    private func withdrawTransientHintIfDraftCleared() {
+        guard transientHint != nil, !hasDraftContent else { return }
+        transientHint = nil
+        updateKeyHint()
+    }
+
+    private var hasDraftContent: Bool {
+        !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil
     }
 
     func unbindActionSink() {
@@ -514,7 +641,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         selectedDraftCommand = nil
         actionSink = nil
         turnSnapshot = nil
-        updateQueuedMessages([], paused: false)
+        updateQueueRail(.empty)
+        updateKeyHint()
     }
 
     private func cancelActionTaskForRebind() {
@@ -565,6 +693,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         isApplyingDraft = false
         updatePlaceholder()
         updateReplyOptionRail()
+        withdrawTransientHintIfDraftCleared()
         editorContentsChanged()
     }
 
@@ -587,7 +716,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         rescaleRail(replyOptionRailHeightConstraint, to: ComposerReplyOptionRailView.railHeight(zoom: pageZoom))
         rescaleRail(fileReferenceRailHeightConstraint, to: ComposerFileReferenceRailView.railHeight(zoom: pageZoom))
         rescaleRail(attachmentRailHeightConstraint, to: ComposerImageAttachmentRailView.railHeight(zoom: pageZoom))
-        rescaleRail(queuedMessageRailHeightConstraint, to: ComposerQueuedMessageRailView.railHeight(zoom: pageZoom))
+        rescaleRail(queuedMessageRailHeightConstraint, to: ComposerQueuedMessageRailView.railHeight(
+            for: queuedMessageRail.state, zoom: pageZoom))
+        keyHintLabel.font = .token(.caption, zoom: pageZoom)
+        updateKeyHint()
         // The completion popover's content view lives in its own window, so the
         // tile's subtree walk never reaches it. The composer owns the controller,
         // so the composer is where the rung is handed over.
@@ -612,6 +744,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         layer?.borderWidth = isEditorFocused ? Self.focusedBorderWidth : Self.idleBorderWidth
         placeholderLabel.font = .token(.body, zoom: pageZoom)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+        keyHintLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         // Update existing draft attributes as well as typing attributes so
         // TextKit line metrics follow token/readability changes immediately.
         let editorFont = NSFont.token(.body, zoom: pageZoom)
@@ -645,6 +778,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         // The chips withdraw as soon as there is a draft, and come back if the
         // user clears it again.
         updateReplyOptionRail()
+        withdrawTransientHintIfDraftCleared()
         editorContentsChanged()
         refreshCompletionSuggestions()
     }
@@ -738,11 +872,24 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         }
     }
 
+    /// T5b — ↑ on an empty draft edits the last queued item, as Codex does;
+    /// with nothing editable queued, ↑ stays prompt history.
+    func composerRequestedEditLastQueued(_ textView: ComposerTextView) -> Bool {
+        guard !hasDraftContent, onTakeQueuedMessageForEditing != nil,
+              let last = queuedMessageRail.lastEditableItemID else { return false }
+        editQueuedMessage(last)
+        return true
+    }
+
     func composerHasSendableAttachments(_ textView: ComposerTextView) -> Bool {
         !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
+        composerRequestedSend(textView, modifier: .plain)
+    }
+
+    func composerRequestedSend(_ textView: ComposerTextView, modifier: AgentComposerSubmitModifier) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
@@ -786,11 +933,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                     // be refused, rather than blindly retrying `.sendPrompt` while
                     // a turn is running (which the supervisor refuses as
                     // `.turnNotReady`, rolling back the optimistic bubble).
-                    intent = resolver.workingDraftIntent(prompt: attachedPrompt)
+                    intent = resolver.workingDraftIntent(prompt: attachedPrompt, modifier: modifier)
                 }
             } else {
                 intent = snapshot.executionState == .working
-                    ? resolver.workingDraftIntent(draft: prompt)
+                    ? resolver.workingDraftIntent(prompt: AgentPrompt(prompt), modifier: modifier)
                     : resolver.primaryIntent(draft: prompt)
             }
             guard let intent else { return }
@@ -1136,6 +1283,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         switch intent {
         case let .send(text): previewPrompt = AgentPrompt(text)
         case let .sendPrompt(prompt): previewPrompt = prompt
+        // D2 — a force send runs now, so it is painted now like a send.
+        case let .forceSend(prompt): previewPrompt = prompt
         case let .providerCommand(invocation): previewPrompt = AgentPrompt(invocation.nativeSlashText)
         case .compact: previewPrompt = nil
         default: previewPrompt = nil
@@ -1583,6 +1732,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
     var qaReplyOptionChipAccessibilityLabels: [String] { replyOptionRail.qaChipAccessibilityLabels }
     var qaDraftText: String { draft.text }
+    var qaQueueRail: ComposerQueuedMessageRailView { queuedMessageRail }
+    var qaKeyHint: String? { keyHintLabel.isHidden ? nil : keyHintLabel.stringValue }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {
         replyOptionRail.qaPressChip(titled: title)

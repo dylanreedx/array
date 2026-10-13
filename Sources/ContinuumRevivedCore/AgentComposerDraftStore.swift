@@ -142,19 +142,50 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     public var imageAttachments: [AgentComposerDraftImageAttachment]
     public var fileReferences: [AgentComposerDraftFileReference]
     public var queuedAt: Date
+    /// T5 — a HELD steer rather than a queued follow-up. Held steers sit at the
+    /// front of the queue, oldest first, until the running turn reaches a tool
+    /// boundary and the supervisor hands them to the provider; a turn that ends
+    /// first runs them next, ahead of every follow-up, by ordinary draining.
+    public var isSteer: Bool
 
     public init(
         id: UUID = UUID(),
         text: String,
         imageAttachments: [AgentComposerDraftImageAttachment] = [],
         fileReferences: [AgentComposerDraftFileReference] = [],
-        queuedAt: Date
+        queuedAt: Date,
+        isSteer: Bool = false
     ) {
         self.id = id
         self.text = text
         self.imageAttachments = imageAttachments
         self.fileReferences = fileReferences
         self.queuedAt = queuedAt
+        self.isSteer = isSteer
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, text, imageAttachments, fileReferences, queuedAt, isSteer
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        text = try values.decode(String.self, forKey: .text)
+        imageAttachments = try values.decode([AgentComposerDraftImageAttachment].self, forKey: .imageAttachments)
+        fileReferences = try values.decode([AgentComposerDraftFileReference].self, forKey: .fileReferences)
+        queuedAt = try values.decode(Date.self, forKey: .queuedAt)
+        isSteer = try values.decodeIfPresent(Bool.self, forKey: .isSteer) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(text, forKey: .text)
+        try values.encode(imageAttachments, forKey: .imageAttachments)
+        try values.encode(fileReferences, forKey: .fileReferences)
+        try values.encode(queuedAt, forKey: .queuedAt)
+        if isSteer { try values.encode(isSteer, forKey: .isSteer) }
     }
 }
 
@@ -307,7 +338,7 @@ public struct AgentComposerSubmissionSnapshot: Codable, Equatable, Sendable {
 /// one AtomicWriter write per agent per debounce window. `flush` is exposed for
 /// orderly shutdown and deterministic checks; normal editing must use `save`.
 public actor AgentComposerDraftStore {
-    public let layout: AgentComposerDraftStoreLayout
+    nonisolated public let layout: AgentComposerDraftStoreLayout
 
     private let writer: AtomicWriter
     private let debounceNanoseconds: UInt64
@@ -836,6 +867,90 @@ public actor AgentComposerDraftStore {
         guard current.count != before else { return false }
         persistQueue(current, for: agentID)
         return true
+    }
+
+    // MARK: - T5 held steers and queue editing
+
+    /// Holds a steer behind any steers already held and ahead of every
+    /// follow-up, so held steers keep their own order and always drain first.
+    @discardableResult
+    public func enqueueSteer(
+        text: String,
+        imageAttachments: [AgentComposerDraftImageAttachment] = [],
+        fileReferences: [AgentComposerDraftFileReference] = [],
+        for agentID: AgentID,
+        queuedAt: Date? = nil
+    ) -> AgentComposerQueuedMessage {
+        let message = AgentComposerQueuedMessage(
+            text: text,
+            imageAttachments: imageAttachments,
+            fileReferences: fileReferences,
+            queuedAt: queuedAt ?? clock.now(),
+            isSteer: true
+        )
+        var current = loadQueue(for: agentID)
+        current.insert(.prompt(message), at: Self.leadingSteerCount(current))
+        persistQueue(current, for: agentID)
+        return message
+    }
+
+    /// Removes and returns every held steer, oldest first — the hand-over to
+    /// the provider, after which they are no longer Array's to edit.
+    public func takeHeldSteers(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
+        var current = loadQueue(for: agentID)
+        let count = Self.leadingSteerCount(current)
+        guard count > 0 else { return [] }
+        let taken = current.prefix(count).compactMap { item -> AgentComposerQueuedMessage? in
+            guard case .prompt(let message) = item else { return nil }
+            return message
+        }
+        current.removeFirst(count)
+        persistQueue(current, for: agentID)
+        return taken
+    }
+
+    /// Puts steers the provider never took back in front of the steers still
+    /// held, in their original order.
+    public func requeueHeldSteersAtFront(_ messages: [AgentComposerQueuedMessage], for agentID: AgentID) {
+        guard !messages.isEmpty else { return }
+        var current = loadQueue(for: agentID)
+        current.insert(contentsOf: messages.map {
+            var steer = $0
+            steer.isSteer = true
+            return .prompt(steer)
+        }, at: 0)
+        persistQueue(current, for: agentID)
+    }
+
+    /// Removes and returns one item, for edit (back into the composer) or
+    /// send-now. nil when it is already gone.
+    public func takeQueuedWorkItem(id: UUID, for agentID: AgentID) -> AgentComposerQueuedWorkItem? {
+        var current = loadQueue(for: agentID)
+        guard let index = current.firstIndex(where: { $0.id == id }) else { return nil }
+        let item = current.remove(at: index)
+        persistQueue(current, for: agentID)
+        return item
+    }
+
+    /// Moves one follow-up to `index` among the follow-ups. Held steers are a
+    /// separate section and keep their place at the front.
+    @discardableResult
+    public func moveQueuedWorkItem(id: UUID, toFollowUpIndex index: Int, for agentID: AgentID) -> Bool {
+        var current = loadQueue(for: agentID)
+        let steers = Self.leadingSteerCount(current)
+        guard let from = current.firstIndex(where: { $0.id == id }), from >= steers else { return false }
+        let item = current.remove(at: from)
+        let target = steers + min(max(index, 0), current.count - steers)
+        current.insert(item, at: target)
+        persistQueue(current, for: agentID)
+        return true
+    }
+
+    private static func leadingSteerCount(_ items: [AgentComposerQueuedWorkItem]) -> Int {
+        items.prefix { item in
+            if case .prompt(let message) = item { return message.isSteer }
+            return false
+        }.count
     }
 
     /// "Clear queued" — every chip at once, still without touching the turn

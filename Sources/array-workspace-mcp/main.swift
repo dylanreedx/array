@@ -25,6 +25,17 @@ private enum MCPError: Error, CustomStringConvertible {
     }
 }
 
+/// Serializes stdout: requests are handled concurrently (a `wait_agents` call
+/// or a pending approval must not hold every other call behind it), so two
+/// replies must never interleave on the one stream.
+private actor ResponseWriter {
+    func write(_ data: Data) {
+        guard !data.isEmpty else { return }
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+}
+
 @main
 struct ArrayWorkspaceMCP {
     static func main() async {
@@ -37,10 +48,12 @@ struct ArrayWorkspaceMCP {
         }
     }
 
-    private struct Server {
+    private struct Server: Sendable {
         let endpoint: URL
         let agentID: String
         let token: String
+        let session: URLSession
+        let writer = ResponseWriter()
 
         init(arguments: [String]) throws {
             let environment = ProcessInfo.processInfo.environment
@@ -49,17 +62,31 @@ struct ArrayWorkspaceMCP {
                 throw MCPError.usage("ARRAY_WORKSPACE_MCP_ENDPOINT is required")
             }
             guard let agentID = environment["ARRAY_WORKSPACE_AGENT_ID"], !agentID.isEmpty,
-                  let token = environment["ARRAY_WORKSPACE_MCP_TOKEN"], !token.isEmpty else {
-                throw MCPError.usage("ARRAY_WORKSPACE_AGENT_ID and ARRAY_WORKSPACE_MCP_TOKEN are required")
+                  let tokenPath = environment["ARRAY_WORKSPACE_MCP_TOKEN_FILE"],
+                  let tokenData = FileManager.default.contents(atPath: tokenPath),
+                  case let token = String(decoding: tokenData, as: UTF8.self), !token.isEmpty else {
+                throw MCPError.usage("ARRAY_WORKSPACE_AGENT_ID and ARRAY_WORKSPACE_MCP_TOKEN_FILE are required")
             }
             self.endpoint = endpoint; self.agentID = agentID; self.token = token
+            // URLSession's default request timeout is 60 s. The host answers a
+            // delegation only after the user answers its approval alert, so a
+            // slow answer used to read "bridge unavailable" here while the
+            // operation went on in Array.
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)
+            configuration.timeoutIntervalForResource = TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)
+            self.session = URLSession(configuration: configuration)
         }
 
         func run() async throws {
-            while let line = readLine(strippingNewline: true) {
-                guard let data = line.data(using: .utf8) else { continue }
-                let response = await handle(data)
-                try write(response)
+            await withTaskGroup(of: Void.self) { group in
+                while let line = readLine(strippingNewline: true) {
+                    guard let data = line.data(using: .utf8) else { continue }
+                    group.addTask {
+                        let response = await handle(data)
+                        await writer.write(response)
+                    }
+                }
             }
         }
 
@@ -69,19 +96,24 @@ struct ArrayWorkspaceMCP {
                 return encode(.object(["jsonrpc": .string("2.0"), "id": .null,
                                       "error": .object(["code": .int(-32600), "message": .string("Invalid Request")])]))
             }
+            // A notification carries no id and is never answered.
+            if request.id == nil, request.method.hasPrefix("notifications/") { return Data() }
             switch request.method {
             case "initialize":
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object([
                     "protocolVersion": .string("2024-11-05"),
                     "capabilities": .object(["tools": .object([:])]),
-                    "serverInfo": .object(["name": .string("array-workspace"), "version": .string("0.1")])
+                    "serverInfo": .object(["name": .string("array-workspace"), "version": .string("0.1")]),
+                    "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions)
                 ])]))
-            case "notifications/initialized":
-                return Data()
             case "tools/list":
-                let tools = WorkspaceMCPToolCatalog.tools.map { tool in
-                    WorkspaceMCPJSON.object(["name": .string(tool.name), "description": .string(tool.description), "inputSchema": .object(tool.inputSchema)])
+                var tools = WorkspaceMCPToolCatalog.tools.map { tool in
+                    WorkspaceMCPJSON.object(["name": .string(tool.name), "description": .string(tool.mcpDescription),
+                                             "inputSchema": .object(tool.inputSchema)])
                 }
+                tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
+                                      "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
+                                      "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "result": .object(["tools": .array(tools)])]))
             case "tools/call":
@@ -96,57 +128,154 @@ struct ArrayWorkspaceMCP {
 
         func call(_ request: JSONRPCRequest) async -> Data {
             guard case .object(let params) = request.params,
-                  case .string(let name)? = params["name"],
-                  let tool = WorkspaceMCPToolCatalog.tool(named: name) else {
+                  case .string(let name)? = params["name"] else {
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "error": .object(["code": .int(-32602), "message": .string("Unknown workspace tool")])]))
             }
-            let arguments: WorkspaceMCPJSON
-            if case .object(let value)? = params["arguments"] { arguments = .object(value) } else { arguments = .object([:]) }
-            let payload: [String: WorkspaceMCPJSON] = [
-                "schema": .string(WorkspaceAPISchema.v1),
-                "kind": .string("request"),
-                "requestId": .string(UUID().uuidString),
-                "agentId": .string(agentID),
-                "token": .string(token),
-                "op": .string(tool.operation.rawValue),
-                "payload": arguments
-            ]
-            do {
-                let reply = try await post(.object(payload))
+            let arguments: [String: WorkspaceMCPJSON]
+            if case .object(let value)? = params["arguments"] { arguments = value } else { arguments = [:] }
+            let reply: WorkspaceMCPJSON
+            if name == WorkspaceMCPToolCatalog.waitAgentsName {
+                reply = await waitAgents(arguments)
+            } else if let tool = WorkspaceMCPToolCatalog.tool(named: name) {
+                do {
+                    reply = try await post(op: tool.operation.rawValue, payload: .object(arguments),
+                                           requestId: Self.providerCallID(params))
+                } catch {
+                    reply = Self.errorReply(code: "outcome_unknown", message: "\(error). Do not repeat the effect blindly; call array_workspace_context and read recentOperations.")
+                }
+            } else {
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
-                                       "result": .object([
-                                           "content": .array([.object(["type": .string("text"), "text": .string(reply.jsonString)])]),
-                                           "structuredContent": reply
-                                       ])]))
-            } catch {
-                let message = String(describing: error)
-                return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
-                                       "result": .object([
-                                           "isError": .bool(true),
-                                           "content": .array([.object(["type": .string("text"), "text": .string(message)])])
-                                       ])]))
+                                       "error": .object(["code": .int(-32602), "message": .string("Unknown workspace tool")])]))
             }
+            // Array's structured refusals are tool ERRORS: an MCP client that
+            // sees no `isError` reports them to the model as successes.
+            var result: [String: WorkspaceMCPJSON] = [
+                "content": .array([.object(["type": .string("text"), "text": .string(reply.jsonString)])]),
+                "structuredContent": reply
+            ]
+            if case .object(let fields) = reply, fields["status"] == .string("error") { result["isError"] = .bool(true) }
+            return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object(result)]))
         }
 
-        func post(_ body: WorkspaceMCPJSON) async throws -> WorkspaceMCPJSON {
+        /// The client's own id for this tool call, from the request's `_meta`:
+        /// claude sends `claudecode/toolUseId` (its tool_use id), codex sends
+        /// `callId` (its `mcpToolCall` item id) — both measured, claude 2.1.291
+        /// and codex 0.159.3. It becomes the request id, exactly as pi's bridge
+        /// sends its toolCallId, so a delegation's operationId and its chip's
+        /// `sourceItemID` name the provider's call and the transcript can fold
+        /// that call's row into the chip (T4b). nil leaves a fresh UUID.
+        static func providerCallID(_ params: [String: WorkspaceMCPJSON]) -> String? {
+            guard case .object(let meta)? = params["_meta"] else { return nil }
+            for key in ["claudecode/toolUseId", "callId"] {
+                if case .string(let id)? = meta[key], SpawnResultFile.validatedHandle(id) == id { return id }
+            }
+            return nil
+        }
+
+        func post(op: String, payload: WorkspaceMCPJSON, requestId: String? = nil) async throws -> WorkspaceMCPJSON {
+            let body: [String: WorkspaceMCPJSON] = [
+                "schema": .string(WorkspaceAPISchema.v1),
+                "kind": .string("request"),
+                "requestId": .string(requestId ?? UUID().uuidString),
+                "agentId": .string(agentID),
+                "token": .string(token),
+                "op": .string(op),
+                "payload": payload
+            ]
             var request = URLRequest(url: endpoint)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = Data(body.jsonString.utf8)
-            let (data, response) = try await URLSession.shared.data(for: request)
+            request.httpBody = Data(WorkspaceMCPJSON.object(body).jsonString.utf8)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw MCPError.unavailable("Array workspace bridge unavailable") }
             return try JSONDecoder().decode(WorkspaceMCPJSON.self, from: data)
         }
 
-        func encode(_ object: WorkspaceMCPJSON) -> Data {
-            Data(object.jsonString.utf8)
+        // MARK: wait_agents
+
+        /// Polls `operation.get` for each handle until its child is idle with a
+        /// settled turn, its operation failed, or the deadline passes. Every
+        /// poll is one ordinary host request, so the app never blocks on a wait.
+        func waitAgents(_ arguments: [String: WorkspaceMCPJSON]) async -> WorkspaceMCPJSON {
+            var handles: [String] = []
+            if case .array(let values)? = arguments["handles"] {
+                for case .string(let handle) in values where !handle.isEmpty && !handles.contains(handle) { handles.append(handle) }
+            }
+            guard !handles.isEmpty, handles.count <= WorkspaceMCPToolCatalog.waitAgentsMaxHandles else {
+                return Self.errorReply(code: "invalid_request", message: "handles must list 1 to \(WorkspaceMCPToolCatalog.waitAgentsMaxHandles) operationId values from array_delegate.")
+            }
+            var requested = Double(WorkspaceMCPToolCatalog.waitAgentsDefaultTimeoutSeconds)
+            switch arguments["timeoutSeconds"] {
+            case .int(let value)?: requested = Double(value)
+            case .double(let value)?: requested = value
+            default: break
+            }
+            let range = WorkspaceMCPToolCatalog.waitAgentsTimeoutRange
+            let timeout = min(max(requested, Double(range.lowerBound)), Double(range.upperBound))
+            let deadline = Date().addingTimeInterval(timeout)
+            var settled: [String: WorkspaceMCPJSON] = [:]
+            var latest: [String: WorkspaceMCPJSON] = [:]
+            while true {
+                for handle in handles where settled[handle] == nil {
+                    let reply: WorkspaceMCPJSON
+                    do {
+                        reply = try await post(op: WorkspaceAPIOp.operationGet.rawValue, payload: .object(["operationId": .string(handle)]))
+                    } catch {
+                        return Self.errorReply(code: "outcome_unknown", message: "\(error)")
+                    }
+                    guard case .object(let fields) = reply else { continue }
+                    if fields["status"] == .string("error") {
+                        settled[handle] = .object(["handle": .string(handle), "status": .string("error"), "error": fields["error"] ?? .null])
+                        continue
+                    }
+                    guard case .object(let operation)? = fields["result"] else { continue }
+                    latest[handle] = .object(operation)
+                    if let entry = Self.settledEntry(handle: handle, operation: operation) { settled[handle] = entry }
+                }
+                if settled.count == handles.count || Date() >= deadline || Task.isCancelled { break }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            let agents: [WorkspaceMCPJSON] = handles.map { handle in
+                if let entry = settled[handle] { return entry }
+                var entry: [String: WorkspaceMCPJSON] = ["handle": .string(handle), "status": .string("running")]
+                if case .object(let operation)? = latest[handle], let child = operation["childAgentId"] { entry["childAgentId"] = child }
+                return .object(entry)
+            }
+            return .object([
+                "schema": .string(WorkspaceAPISchema.v1),
+                "status": .string("ok"),
+                "result": .object(["agents": .array(agents), "timedOut": .bool(settled.count < handles.count)])
+            ])
         }
 
-        func write(_ data: Data) throws {
-            guard !data.isEmpty else { return }
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
+        /// A child has settled when Array says it is idle AND reports the turn
+        /// it settled with; a failed or expired operation is settled too.
+        static func settledEntry(handle: String, operation: [String: WorkspaceMCPJSON]) -> WorkspaceMCPJSON? {
+            var entry: [String: WorkspaceMCPJSON] = ["handle": .string(handle)]
+            if let child = operation["childAgentId"] { entry["childAgentId"] = child }
+            if case .string(let status)? = operation["status"], status == "failed" || status == "expired" {
+                entry["status"] = .string(status)
+                if let message = operation["failureMessage"] { entry["reason"] = message }
+                return .object(entry)
+            }
+            guard operation["childRunning"] == .bool(false),
+                  case .object(let result)? = operation["childResult"],
+                  case .string(let status)? = result["status"], status != "spawned" else { return nil }
+            entry["status"] = .string(status)
+            for key in ["finalText", "finalTextTruncated", "reason", "endedAt"] {
+                if let value = result[key] { entry[key] = value }
+            }
+            return .object(entry)
+        }
+
+        static func errorReply(code: String, message: String) -> WorkspaceMCPJSON {
+            .object(["schema": .string(WorkspaceAPISchema.v1), "status": .string("error"),
+                     "error": .object(["code": .string(code), "message": .string(message)])])
+        }
+
+        func encode(_ object: WorkspaceMCPJSON) -> Data {
+            Data(object.jsonString.utf8)
         }
     }
 }

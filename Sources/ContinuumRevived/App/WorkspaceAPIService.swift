@@ -182,6 +182,26 @@ final class WorkspaceAPIService {
         call.respond(Self.transportResponse(for: reply))
     }
 
+    /// The native-provider MCP entry (`WorkspaceMCPHost` → here). The host has
+    /// already matched the per-agent token; identity is the supervisor's record
+    /// for that agent, exactly as on the pi bridge.
+    func handleMCPRequest(_ request: [String: Any]) -> [String: Any] {
+        guard let agentText = request["agentId"] as? String,
+              let agentUUID = UUID(uuidString: agentText),
+              let record = supervisor.records[AgentID(rawValue: agentUUID)],
+              let op = request["op"] as? String,
+              let requestID = request["requestId"] as? String,
+              let payload = request["payload"] as? [String: Any] else {
+            return ["schema": WorkspaceAPISchema.v1, "status": "error",
+                    "error": ["code": "invalid_request", "message": "Malformed workspace request"]]
+        }
+        let reply = dispatch(agentId: record.id, requestId: requestID, op: op, payload: payload)
+        let encoded = Self.transportResponse(for: reply).encodedValue(requestId: requestID)
+        return (try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??
+            ["schema": WorkspaceAPISchema.v1, "status": "error",
+             "error": ["code": "outcome_unknown", "message": "Array produced an unreadable reply"]]
+    }
+
     static func transportResponse(for reply: Reply) -> PiHostToolResponse {
         switch reply {
         case let .result(object):
@@ -283,11 +303,18 @@ final class WorkspaceAPIService {
         let coverage = WorkspaceCoverage(
             installedZoneIds: projectZones.filter { installed.contains($0.zoneId) }.map(\.zoneId),
             unhydratedZoneIds: projectZones.filter { !installed.contains($0.zoneId) }.map(\.zoneId))
-        let capabilities = WorkspaceAPIOp.allCases.filter { op in
+        // Only operations a tool reaches: pi and the MCP server both register
+        // `WorkspaceMCPToolCatalog`'s tools, so an op outside it is not callable
+        // and must not be advertised as if it were.
+        let exposed = WorkspaceAPIOp.allCases.filter(WorkspaceMCPToolCatalog.exposedOperations.contains)
+        let capabilities = exposed.filter { op in
             if case .allowed = WorkspaceToolGrantEvaluator.evaluate(
                 agentId: agentId, op: op, checkout: ownHandle, requested: .preserveAll,
                 grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) { return true }
             return false
+        }
+        let approvalRequired = exposed.filter {
+            WorkspaceAPIOp.approvalGatedOperations.contains($0) && !capabilities.contains($0)
         }
         var response = WorkspaceContextResponse(
             agentId: agentId,
@@ -300,6 +327,7 @@ final class WorkspaceAPIService {
             interactionGeneration: runtime.interactionGeneration,
             coverage: coverage,
             capabilities: capabilities,
+            approvalRequired: approvalRequired,
             recentOperations: recentOperations[agentId] ?? [],
             observedAt: Date())
         // Enforce the byte ceiling by shedding history, newest kept, never by

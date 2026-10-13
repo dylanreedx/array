@@ -133,6 +133,37 @@ extension AgentRunning {
     var commandCapabilities: AgentSessionCommandCapabilities { .oneShotProse }
 }
 
+/// T5 (`.plans/69`) — steering and a turn-only interrupt, on EVERY harness.
+///
+/// A refinement for the same reason `AgentSessionRunning` is one: the scripted
+/// runners the checks use compile untouched and keep the queue-only floor. The
+/// three production runners conform below. Capabilities still come from the
+/// BOUND runner, never from `record.harness`.
+protocol AgentSteeringRunning: AgentRunning {
+    /// A turn is live and a steer written now lands in it.
+    var acceptsSteerNow: Bool { get }
+    /// Hands one message to the provider for the turn in flight. Irrevocable
+    /// once it returns; `AgentSteerNotAccepted` means it was not taken.
+    func steer(_ prompt: AgentPrompt, id: UUID) throws
+    /// Ends the turn and keeps the process/session. Stop's first resort; a kill
+    /// (`stop()`) is only the fallback.
+    func interrupt() throws
+    /// The provider's receipt for each accepted steer, on the runner's queue.
+    func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void)
+    /// Work the provider runs between turns (claude background jobs and
+    /// subagents). The idle reaper leaves such a session alone.
+    var hasBackgroundWork: Bool { get }
+}
+
+/// T5 — a session that can start a turn Array did not send (claude promoting a
+/// steer to its own turn, or reacting to a finished background task). The
+/// supervisor binds such a turn exactly like one it started.
+protocol AgentUnsolicitedTurnReporting: AgentRunning {
+    var hasUnsolicitedTurn: Bool { get }
+    func observeUnsolicitedTurns(_ handler: @escaping @Sendable () -> Void)
+    func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
+}
+
 /// TR-06 — the response transport for a request a provider OPENED and is
 /// holding. A REFINEMENT of `AgentRunning`, for the same reason
 /// `AgentSessionRunning` is one: only some transports can carry a response back.
@@ -173,9 +204,18 @@ extension PiRpcAgentRunner {
             advertisedNames: advertisedCommandNames)
     }
 }
+extension PiRpcAgentRunner: AgentSteeringRunning {
+    var hasBackgroundWork: Bool { false }
+}
 extension ClaudeAgentRunner: AgentRunning {}
 extension ClaudeAgentRunner: AgentCompactionRunning {}
+extension ClaudeAgentRunner: AgentSteeringRunning {}
+extension ClaudeAgentRunner: AgentUnsolicitedTurnReporting {}
 extension ClaudeAgentRunner {
+    /// D3 — one stream-json process per agent, kept between turns and reaped
+    /// by the idle reaper.
+    var keepsSessionAliveBetweenTurns: Bool { true }
+    var canAcceptAnotherTurn: Bool { isSessionRunning }
     /// Measured 2026-08-24: `claude -p` answers `/help`, `/status` and
     /// `/compact` itself with `model: "<synthetic>"`, zero tokens and zero cost,
     /// and "Unknown command: …" for one it does not have.
@@ -183,6 +223,9 @@ extension ClaudeAgentRunner {
 }
 extension CodexAgentRunner: AgentRunning {}
 extension CodexAgentRunner: AgentCompactionRunning {}
+extension CodexAgentRunner: AgentSteeringRunning {
+    var hasBackgroundWork: Bool { false }
+}
 
 private final class RefusingAgentRunner: AgentRunning,  Sendable {
     struct Refusal: Error, CustomStringConvertible { let description: String }
@@ -194,184 +237,72 @@ private final class RefusingAgentRunner: AgentRunning,  Sendable {
     func observeRuntimeObservations(_ handler:   (AgentRuntimeObservation) -> Void) {}
 }
 
-// MARK: - P4.5 generated-name one-shot
+// MARK: - Session titler (each harness titles with its own CLI)
 
-/// The capability needed by the explicit generated-name action. It is resolved
-/// without launching the provider: the login shell supplies the executable PATH,
-/// and Pi's provider config supplies the authentication fact. A missing capability
-/// is therefore a hidden affordance, not a dead menu item.
-struct AgentNameGenerationCapability: Equatable, Sendable {
-    static let cheapModel = "openai-codex/gpt-5.4-mini"
-
-    let executable: String
-    let configDirectory: URL
-    let loginShellPath: String
+/// Which CLI names an agent, and with which model. Each harness titles its own
+/// sessions with its own CLI and its own login: the command comes from the SAME
+/// resolution the agent's runner uses (`liveResolvedCommand()`), and the model
+/// is the agent's own catalogue id, mapped exactly as its runner maps it. There
+/// is no cross-CLI route — a claude-only machine titles Claude agents with
+/// claude, and a harness whose CLI does not resolve simply stays untitled.
+///
+/// This replaced a pi-only titler with a hard-coded model whose capability came
+/// from a login-shell PATH probe with a 1s timeout. Shells slower than that
+/// (1.6–2.1s on Dylan's) read as "unavailable" for the app's life, so no
+/// generated name was ever written by any harness.
+struct AgentNameTitler: Equatable, Sendable {
+    let harness: AgentHarness
+    let command: PiAgentRunner.ResolvedCommand
+    /// The CLI's own model argument: claude/codex take the bare name, pi takes
+    /// the full `provider/model` id — the runners' own mappings.
     let model: String
 
-    init(
-        executable: String,
-        configDirectory: URL,
-        loginShellPath: String,
-        model: String = AgentNameGenerationCapability.cheapModel
-    ) {
-        self.executable = executable
-        self.configDirectory = configDirectory
-        self.loginShellPath = loginShellPath
-        self.model = model
-    }
-
-    /// The login-shell PATH resolver is kept pure at the path-selection seam so
-    /// deterministic checks can use a fake executable without invoking Pi.
-    static func resolvedExecutable(
-        loginShellPath: String,
-        fileExists: (String) -> Bool
-    ) -> String? {
-        for component in loginShellPath.split(separator: ":", omittingEmptySubsequences: true) {
-            let directory = String(component)
-            let candidate = directory.hasSuffix("/")
-                ? directory + "pi"
-                : directory + "/pi"
-            if fileExists(candidate) { return candidate }
+    static func resolve(
+        for record: AgentRecord,
+        command: (AgentHarness) -> PiAgentRunner.ResolvedCommand?
+    ) -> AgentNameTitler? {
+        guard let harness = record.harness, !record.model.isEmpty,
+              let resolved = command(harness) else { return nil }
+        let model: String
+        switch harness {
+        case .claudeCode: model = ClaudeCLIBackend.modelArgument(forCatalogId: record.model)
+        case .codex: model = CodexCLIBackend.modelArgument(forCatalogId: record.model)
+        case .pi: model = record.model
         }
-        return nil
+        return AgentNameTitler(harness: harness, command: resolved, model: model)
     }
 
-    /// Resolve the live capability. This reads auth/config state only; notably it
-    /// never runs `pi --list-models` or another provider probe, so an absent
-    /// capability cannot spawn a process as a side effect of hiding the action.
-    static func live(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        now: Date = Date()
-    ) -> AgentNameGenerationCapability? {
-        let home = environment["HOME"] ?? NSHomeDirectory()
-        let configuredDirectory = environment["PI_CODING_AGENT_DIR"]
-            ?? URL(fileURLWithPath: home, isDirectory: true)
-                .appendingPathComponent(".pi/agent", isDirectory: true).path
-        let configDirectory = URL(fileURLWithPath: configuredDirectory, isDirectory: true)
-        guard hasAuthentication(
-            in: configDirectory,
-            now: now
-        ) else { return nil }
-        guard let loginShellPath = loginShellPath(environment: environment),
-              let executable = resolvedExecutable(
-                loginShellPath: loginShellPath,
-                fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
-              ) else {
-            return nil
+    /// The runner's own resolution. Absolute paths only, the rule
+    /// `liveCLIAvailable()` already uses: the `/usr/bin/env` fallback proves
+    /// nothing about a GUI launch. File stats, never a process.
+    static func liveCommand(for harness: AgentHarness) -> PiAgentRunner.ResolvedCommand? {
+        guard AgentNameTitlerLiveGate.shared.isEnabled else { return nil }
+        let command: PiAgentRunner.ResolvedCommand
+        switch harness {
+        case .claudeCode: command = ClaudeAgentRunner.liveResolvedCommand()
+        case .codex: command = CodexAgentRunner.liveResolvedCommand()
+        case .pi: command = PiAgentRunner.liveResolvedCommand()
         }
-        return AgentNameGenerationCapability(
-            executable: executable,
-            configDirectory: configDirectory,
-            loginShellPath: loginShellPath
-        )
-    }
-
-    /// Pure auth/config gate used by the live resolver and the deterministic
-    /// checks. A refresh credential is sufficient for Pi to refresh an expired
-    /// access token; an expired access-only credential is not.
-    static func hasAuthentication(
-        in configDirectory: URL,
-        now: Date,
-        data: Data? = nil
-    ) -> Bool {
-        let authData = data ?? (try? Data(contentsOf: configDirectory.appendingPathComponent("auth.json")))
-        guard let authData,
-              let object = try? JSONSerialization.jsonObject(with: authData),
-              let providers = object as? [String: Any],
-              let provider = providers["openai-codex"] as? [String: Any] else {
-            return false
-        }
-        let access = (provider["access"] as? String)?.isEmpty == false
-        let refresh = (provider["refresh"] as? String)?.isEmpty == false
-        guard access || refresh else { return false }
-        if refresh { return true }
-        guard let expires = provider["expires"] as? NSNumber else { return true }
-        return expires.doubleValue > now.timeIntervalSince1970 * 1000
-    }
-
-    /// Ask the user's login shell for PATH. The actual process work is owned by
-    /// `AgentNameOneShot` and always runs off-main with a timeout and bounded pipe
-    /// readers. Keeping this call synchronous is safe only for the resolver task;
-    /// no menu/query path calls `live()` directly.
-    private static func loginShellPath(environment: [String: String]) -> String? {
-        AgentNameOneShot.loginShellPath(environment: environment)
+        return command.prefixArgs.isEmpty ? command : nil
     }
 }
 
-
-/// The menu's capability query is deliberately a snapshot. It never resolves a
-/// shell, reads auth, or launches a process. Resolution is started by a view and
-/// completed on the main actor only after the bounded utility task finishes.
-private final class AgentNameGenerationCapabilityCache: @unchecked Sendable {
-    enum State: Sendable {
-        case unknown
-        case unavailable
-        case available(AgentNameGenerationCapability)
-
-        var capability: AgentNameGenerationCapability? {
-            if case let .available(capability) = self { return capability }
-            return nil
-        }
-
-        var isAvailable: Bool { capability != nil }
-    }
-
-    static let shared = AgentNameGenerationCapabilityCache()
-
+/// Live titling is opt-in, and only the real app opts in at startup — the
+/// pattern `AgentModelCatalog.enableLiveRefresh()` set. A supervisor built by a
+/// check without an injected command can therefore never spend a real provider
+/// call on a fixture agent.
+final class AgentNameTitlerLiveGate: @unchecked Sendable {
+    static let shared = AgentNameTitlerLiveGate()
     private let lock = NSLock()
-    private var state: State = .unknown
-    private var inFlight: Task<AgentNameGenerationCapability?, Never>?
-
-    func snapshot() -> State { lock.withLock { state } }
-
-    /// Starts at most one detached resolution. Returning an already-completed
-    /// task for a cached result keeps callers uniformly asynchronous without
-    /// making the main actor wait for even a lock or a shell startup.
-    func startResolution(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        now: Date = Date()
-    ) -> Task<AgentNameGenerationCapability?, Never> {
-        lock.withLock {
-            switch state {
-            case .available, .unavailable:
-                let cached = state.capability
-                return Task.detached { cached }
-            case .unknown:
-                break
-            }
-            if let inFlight { return inFlight }
-            let task = Task.detached(priority: .utility) { [weak self] in
-                let capability = AgentNameGenerationCapability.live(environment: environment, now: now)
-                self?.finish(capability)
-                return capability
-            }
-            inFlight = task
-            return task
-        }
-    }
-
-    /// Test-only reset. Production code never needs to forget a resolved
-    /// capability; the next app launch creates a fresh cache.
-    func resetForQA() {
-        lock.withLock {
-            state = .unknown
-            inFlight?.cancel()
-            inFlight = nil
-        }
-    }
-
-    private func finish(_ capability: AgentNameGenerationCapability?) {
-        lock.withLock {
-            state = capability.map(State.available) ?? .unavailable
-            inFlight = nil
-        }
-    }
+    private var enabled = false
+    func enable() { lock.withLock { enabled = true } }
+    var isEnabled: Bool { lock.withLock { enabled } }
 }
 
 private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
     case launchFailed
     case processGroupUnavailable
-    case failed(Int32)
+    case failed(Int32, String)
     case timedOut
     case inputFailed
 
@@ -379,83 +310,151 @@ private enum AgentNameOneShotError: Error, CustomStringConvertible, Sendable {
         switch self {
         case .launchFailed: return "launch failed"
         case .processGroupUnavailable: return "process group unavailable"
-        case .failed(let code): return "provider exited with code \(code)"
+        case .failed(let code, let stderr):
+            return "provider exited with code \(code)" + (stderr.isEmpty ? "" : ": \(stderr)")
         case .timedOut: return "timed out"
         case .inputFailed: return "prompt input failed"
         }
     }
 }
 
-/// A provider-independent, print-mode Pi invocation. The source prompt is
+/// One print-mode titler invocation on the agent's own CLI. The source text is
 /// written to stdin only; it is never an argv element, a session, or an event.
 // Internal (not private): ToolEnvironment reuses the bounded login-shell
-// PATH probe for the app-wide PATH upgrade (go-live Phase 4).
+// PATH probe for the app-wide PATH upgrade (go-live Phase 4). Naming itself no
+// longer runs a login shell at all.
 enum AgentNameOneShot {
-    static let timeout: TimeInterval = 8
+    /// A cold `claude -p` measured 2.6s end to end on 2.1.291 (sonnet, effort
+    /// low); a larger model or codex starting the user's MCP servers takes
+    /// longer. The work is off-main and capped at two concurrent runs, so a
+    /// generous bound costs nothing but a slot.
+    static let timeout: TimeInterval = 30
     static let processGroupGrace: TimeInterval = 0.15
     static let maximumPromptLength = 8_000
-    static let systemPrompt = "Return exactly one JSON object with exactly one string field named name. The name value is short and human-readable, 1 to 8 words. Output one line only. No explanation, extra fields, markdown, punctuation, identifiers, model ids, roles, or UUIDs."
+    static let titleRules = "You name coding sessions for a sidebar. Reply with exactly one JSON object with one string field, name. The name is 3 to 6 words in sentence case (capitalize only the first word and proper nouns) and says what task the session is doing, for example \"Fix zone drag snapping\". Summarize what the work is about; do not restate the opening words of the request. No trailing punctuation, no quotes, and no file paths, ids, model names or UUIDs."
+    /// The shape every harness returns. claude and codex enforce it (`--json-schema`,
+    /// `--output-schema`); pi has no schema flag and is held to it by `rawName`.
+    static let nameSchema = #"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
 
-    static func arguments(model: String) -> [String] {
-        [
-            "--no-session",
-            "--print",
-            "--mode", "text",
-            "--model", model,
-            "--thinking", "low",
-            "--no-tools",
-            "--no-extensions",
-            "--no-skills",
-            "--no-context-files",
-            "--no-approve",
-            "--system-prompt", systemPrompt,
-        ]
+    /// The argv after the executable, per harness. Every flag here was checked
+    /// against the CLI's own help (claude 2.1.291, codex 0.159.3). Two rules
+    /// hold for all three: no session is persisted, and nothing can act — no
+    /// tools, no MCP servers, no hooks, a read-only sandbox, an empty cwd.
+    /// `--bare` is deliberately absent: it skips OAuth and reads an API key,
+    /// and a CLI's own login is the only auth Array uses.
+    static func arguments(for titler: AgentNameTitler, schemaFile: URL, lastMessageFile: URL) -> [String] {
+        switch titler.harness {
+        case .claudeCode:
+            return ["-p", "--no-session-persistence",
+                    "--output-format", "json", "--json-schema", nameSchema,
+                    "--model", titler.model]
+                + (ClaudeCLIBackend.effortArgument(forThinking: "low").map { ["--effort", $0] } ?? [])
+                + ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                   "--settings", #"{"disableAllHooks":true}"#,
+                   "--system-prompt", titleRules]
+        case .codex:
+            return ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+                    "--output-schema", schemaFile.path, "-o", lastMessageFile.path,
+                    "-m", titler.model]
+                + (CodexCLIBackend.effortArgument(forThinking: "low").map { ["-c", "model_reasoning_effort=\($0)"] } ?? [])
+        case .pi:
+            return ["--no-session", "--print", "--mode", "text",
+                    "--model", titler.model, "--thinking", "low",
+                    "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
+                    "--system-prompt", titleRules]
+        }
     }
 
-    /// Accept only the exact one-field JSON shape requested by `systemPrompt`.
-    /// Provider chatter is not a recoverable prefix: a warning, label, fence,
-    /// extra field, plain prose line, or multi-line explanation fails closed
-    /// before the existing AgentName policy can turn it into a title.
-    /// Identifiers are rejected with the same metadata-aware rule as P4.3.
-    static func candidate(
-        from stdout: String,
-        model: String?,
-        role: String?,
-        id: UUID?
-    ) -> String? {
-        let nonEmptyLines = stdout
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard nonEmptyLines.count == 1 else { return nil }
-        let line = nonEmptyLines[0]
-        guard !line.hasPrefix("```") && !line.contains("```") && line != "---",
-              !line.hasPrefix("- ") && !line.hasPrefix("* "),
-              let data = line.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object.count == 1,
-              let rawName = object["name"] as? String else {
+    /// codex exec has no system-prompt flag, so its rules ride in the prompt.
+    static func standardInput(for harness: AgentHarness, prompt: String) -> String {
+        harness == .codex ? titleRules + "\n\n" + prompt : prompt
+    }
+
+    /// The model's `name` value out of one harness's output, or nil.
+    ///
+    /// claude `--output-format json` prints one result object; the
+    /// schema-validated value is `structured_output`, and an error result is
+    /// never mined for text. codex's `-o` file and pi's stdout must BE the
+    /// one-field object: a label, fence, extra field or trailing prose fails
+    /// closed rather than being trimmed into a title.
+    static func rawName(harness: AgentHarness, output: String) -> String? {
+        let text = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        let name = stripWrappingQuotes(from: rawName)
+        let named: [String: Any]
+        if harness == .claudeCode {
+            guard object["type"] as? String == "result",
+                  object["subtype"] as? String == "success",
+                  object["is_error"] as? Bool == false,
+                  let structured = object["structured_output"] as? [String: Any] else { return nil }
+            named = structured
+        } else {
+            named = object
+        }
+        guard named.count == 1, let name = named["name"] as? String else { return nil }
+        return name
+    }
+
+    /// Provider failure text that can still arrive as a well-formed name — an
+    /// error surfaced as the "answer". Phrases, not words: with the shape now
+    /// schema-validated, ordinary words like "error" or "model" are legitimate
+    /// in a title ("Fix model picker error"), and banning them threw good names
+    /// away.
+    static let providerFailurePhrases = [
+        "api error", "invalid api key", "not logged in", "/login",
+        "credit balance", "rate limit reached", "usage limit reached", "quota exceeded",
+        "overloaded_error", "internal server error", "service unavailable",
+        "request failed", "authentication failed",
+    ]
+    /// Whole-title placeholders a model emits when it has nothing to say.
+    static let placeholderTitles: Set<String> = [
+        "error", "untitled", "unknown", "name", "title", "session", "new session", "none", "n/a",
+    ]
+
+    /// The title rules, enforced: sentence case, no wrapping quotes, no trailing
+    /// punctuation, no identifiers. The prompt asks for 3–6 words; 2–8 are
+    /// accepted so a near-miss still names the agent, and anything longer is
+    /// prose, not a title.
+    static func sanitizedTitle(_ raw: String, model: String?, role: String?, id: UUID?) -> String? {
+        var name = stripWrappingQuotes(from: raw)
+        while let last = name.last, ".,;:!?…".contains(last) {
+            name.removeLast()
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        name = stripWrappingQuotes(from: name)
         guard !name.isEmpty,
-              !name.contains(where: { ":;!?{}[]()<>#*`".contains($0) }) else {
-            return nil
-        }
+              !name.contains(where: { "\n\r\t:;!?{}[]()<>#*`\"".contains($0) }) else { return nil }
+        let words = name.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let lower = name.lowercased()
-        let words = lower.split(whereSeparator: { $0.isWhitespace })
-        let providerNoise = [
-            "warning", "fallback", "error", "progress", "assistant", "role", "user",
-            "system", "model", "title", "name", "generated", "output", "result",
-            "thinking", "note", "here", "sure", "okay", "suggest", "proposed"
-        ]
-        guard words.count <= 8,
-              !words.contains(where: { providerNoise.contains(String($0)) }),
-              !AgentName.isIdentifier(name, model: model, role: role, id: id),
-              AgentName.normalizedLabel(name) != nil else {
-            return nil
+        guard (2...8).contains(words.count),
+              !placeholderTitles.contains(lower),
+              !providerFailurePhrases.contains(where: { lower.contains($0) }),
+              !AgentName.isIdentifier(name, model: model, role: role, id: id) else { return nil }
+        return AgentName.normalizedLabel(sentenceCased(words))
+    }
+
+    /// Title Case → sentence case. Only a title where EVERY word is plainly
+    /// capitalized is rewritten, and only those plain words are lowered, so an
+    /// acronym or identifier-shaped word (`API`, `iOS`, `AgentSupervisor`)
+    /// keeps its case. The first letter is always upper.
+    private static func sentenceCased(_ words: [String]) -> String {
+        func isPlainCapitalized(_ word: String) -> Bool {
+            guard let first = word.first, first.isUppercase else { return false }
+            return word.dropFirst().allSatisfy { !$0.isUppercase }
         }
-        return AgentName.normalizedLabel(name)
+        let titleCase = words.count > 1 && words.allSatisfy { word in
+            guard let first = word.first, first.isLetter else { return true }
+            return first.isUppercase
+        }
+        var out = words.enumerated().map { index, word in
+            index > 0 && titleCase && isPlainCapitalized(word) ? word.lowercased() : word
+        }
+        if let first = out.first?.first, first.isLowercase {
+            out[0] = first.uppercased() + out[0].dropFirst()
+        }
+        return out.joined(separator: " ")
     }
 
     private static func stripWrappingQuotes(from raw: String) -> String {
@@ -510,27 +509,50 @@ enum AgentNameOneShot {
         }
     }
 
+    /// Run one titler and return its raw output: stdout for claude and pi, the
+    /// `-o` last-message file for codex. `rawName` + `sanitizedTitle` decide
+    /// whether any of it is a name.
+    ///
+    /// The process runs in an EMPTY private directory (claude would otherwise
+    /// read the agent's CLAUDE.md, codex its AGENTS.md) with the runners' own
+    /// child environment. HOME is inherited, so each CLI uses its own login;
+    /// `environmentOverrides` exists for the fake-CLI fixtures.
     static func run(
-        capability: AgentNameGenerationCapability,
+        titler: AgentNameTitler,
         prompt: String,
-        cwd: URL,
         timeout: TimeInterval = AgentNameOneShot.timeout,
         environmentOverrides: [String: String] = [:],
-        configDirectoryOverride: URL? = nil,
+        workDirectoryOverride: URL? = nil,
         inputWriteDelay: TimeInterval = 0
     ) throws -> String {
-        let configDirectory = try temporaryConfigDirectory(
-            for: capability,
-            at: configDirectoryOverride)
-        defer { try? FileManager.default.removeItem(at: configDirectory) }
+        let fileManager = FileManager.default
+        let base = workDirectoryOverride ?? fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-title-\(UUID().uuidString)", isDirectory: true)
+        let cwd = base.appendingPathComponent("cwd", isDirectory: true)
+        let io = base.appendingPathComponent("io", isDirectory: true)
+        for directory in [base, cwd, io] {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
+        }
+        defer { try? fileManager.removeItem(at: base) }
+        let schemaFile = io.appendingPathComponent("name-schema.json")
+        let lastMessageFile = io.appendingPathComponent("last-message.txt")
+        try nameSchema.write(to: schemaFile, atomically: true, encoding: .utf8)
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = capability.loginShellPath
-        environment["PI_CODING_AGENT_DIR"] = configDirectory.path
+        var environment = PiAgentRunner.childEnvironment()
         environment.merge(environmentOverrides) { _, override in override }
-        // HOME is deliberately inherited untouched in production. The optional
-        // override exists only for the controlled fake-Pi fixture, which proves
-        // that --no-session creates no session/transcript artifact in a known home.
+        if titler.harness == .pi {
+            // Unchanged pi handling: a private copy of the user's pi config, so
+            // retries are off and an OAuth refresh during the run cannot mutate
+            // the durable credential file.
+            let home = environment["HOME"] ?? NSHomeDirectory()
+            let source = environment["PI_CODING_AGENT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? URL(fileURLWithPath: home, isDirectory: true)
+                    .appendingPathComponent(".pi/agent", isDirectory: true)
+            let configDirectory = base.appendingPathComponent("pi-config", isDirectory: true)
+            try populatePiConfigDirectory(configDirectory, from: source)
+            environment["PI_CODING_AGENT_DIR"] = configDirectory.path
+        }
 
         // Foundation's Process does not expose a pre-exec hook, and attempting
         // setpgid(pid, pid) after Process.run() races the child's exec on macOS
@@ -538,17 +560,23 @@ enum AgentNameOneShot {
         // /bin/sh starts, so every descendant inherits it and timeout cleanup can
         // kill the group without risking the app's own group.
         let script = "cd -- \(shellQuote(cwd.path)) || exit 126; exec \"$@\""
-        let rawArguments = ["sh", "-c", script, "continuum-name-one-shot", capability.executable]
-            + arguments(model: capability.model)
+        let rawArguments = ["sh", "-c", script, "continuum-name-one-shot", titler.command.executable]
+            + titler.command.prefixArgs
+            + arguments(for: titler, schemaFile: schemaFile, lastMessageFile: lastMessageFile)
         let result = try runProcess(
             executable: "/bin/sh",
             arguments: rawArguments,
-            input: Data(prompt.utf8),
+            input: Data(standardInput(for: titler.harness, prompt: prompt).utf8),
             environment: environment,
             timeout: timeout,
             inputWriteDelay: inputWriteDelay)
         guard processExitCode(result.status) == 0 else {
-            throw AgentNameOneShotError.failed(processExitCode(result.status))
+            throw AgentNameOneShotError.failed(
+                processExitCode(result.status),
+                SecretRedactor.redactLocalDiagnostics(String(result.stderr.suffix(300))))
+        }
+        if titler.harness == .codex {
+            return (try? String(contentsOf: lastMessageFile, encoding: .utf8)) ?? ""
         }
         return result.stdout
     }
@@ -893,17 +921,12 @@ enum AgentNameOneShot {
         return status
     }
 
-    private static func temporaryConfigDirectory(
-        for capability: AgentNameGenerationCapability,
-        at override: URL? = nil
-    ) throws -> URL {
-        let directory = override ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("continuum-name-config-\(UUID().uuidString)", isDirectory: true)
+    private static func populatePiConfigDirectory(_ directory: URL, from source: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let settings = #"{"retry":{"maxRetries":0,"baseDelayMs":0}}"#
         try settings.write(to: directory.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
-        let auth = capability.configDirectory.appendingPathComponent("auth.json")
+        let auth = source.appendingPathComponent("auth.json")
         if FileManager.default.fileExists(atPath: auth.path) {
             // Copy rather than symlink: Pi may refresh OAuth state during a run,
             // but a best-effort name action must never mutate the user's durable
@@ -915,7 +938,7 @@ enum AgentNameOneShot {
                 ofItemAtPath: destination.path)
         }
         for name in ["models.json", "models-store.json"] {
-            let source = capability.configDirectory.appendingPathComponent(name)
+            let source = source.appendingPathComponent(name)
             let destination = directory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: source.path),
                let data = try? Data(contentsOf: source) {
@@ -925,7 +948,6 @@ enum AgentNameOneShot {
                     ofItemAtPath: destination.path)
             }
         }
-        return directory
     }
 
     private static func killProcessGroup(_ pid: Int32, signal: Int32) {
@@ -1002,10 +1024,14 @@ final class AgentSupervisor {
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
     private let checkedOutBranches = CheckedOutBranchCache()
-    /// A provider seam is retained for deterministic checks. Production uses the
-    /// process-free cache snapshot; it never invokes a shell from this actor.
-    private let nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)?
+    /// Which executable titles each harness. Checks inject fake CLIs here;
+    /// production (nil) resolves through the runners' own command resolution,
+    /// file stats only, and only once the app has opened the live gate.
+    private let nameTitlerCommand: (@Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand?)?
     private let nameGenerationTimeout: TimeInterval
+    /// claude's own `ai-title` for one session (cwd, session id). Injected so
+    /// the naming checks never read the user's real `~/.claude` store.
+    private let claudeSessionTitle: @Sendable (String, String) -> String?
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
     /// ST-01 — ACCOUNT quota, keyed by HARNESS rather than by agent.
@@ -1087,6 +1113,12 @@ final class AgentSupervisor {
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
+    /// The opening of the agent's first reply, the titler's second input. Same
+    /// memory-only rule as `firstPromptByAgent`; `firstReplyClosed` stops the
+    /// capture at the first completed turn.
+    private var firstReplyByAgent: [AgentID: String] = [:]
+    private var firstReplyClosed: Set<AgentID> = []
+    private static let firstReplyCaptureLength = 600
     /// Read-watermark persistence is deliberately less frequent than the visual
     /// focus path. An unread-clearing visit is the exception: delaying that write
     /// would let a relaunch resurrect the mark the person just cleared.
@@ -1138,7 +1170,6 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
 
         let threadId = Self.threadId(for: id)
-        let operationEpoch = record.contextEpoch
         deliver(.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
             operationID: request.operationID,
             phase: .requested,
@@ -1159,7 +1190,7 @@ final class AgentSupervisor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try compacting.compact(request) { event in
-                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                    let bound = event.withThreadId(threadId)
                     DispatchQueue.main.async {
                         if case .compactionChanged(_, let lifecycle) = bound,
                            [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
@@ -1221,6 +1252,7 @@ final class AgentSupervisor {
         compactingAgents.remove(id)
         if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
             idleSessionRunners[id] = runner
+            scheduleIdleReap(for: id, runner: runner)
         }
         let phase = terminal?.phase ?? .indeterminate
         if var record = records[id] {
@@ -1259,7 +1291,7 @@ final class AgentSupervisor {
         if phase == .succeeded {
             if !pausedQueues.contains(id) { drainQueue(for: id) }
         } else {
-            pausedQueues.insert(id)
+            pauseQueue(id, .afterCompaction)
         }
         notifyTurnCapabilitiesChanged(id)
     }
@@ -1282,6 +1314,13 @@ final class AgentSupervisor {
     /// the held queue is not auto-drained into a turn they did not ask for.
     /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
     private var pausedQueues: Set<AgentID> = []
+    /// T5b — why each paused queue is held, for the rail's "Paused after …".
+    private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
+
+    private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
+        pausedQueues.insert(id)
+        queuePauseReasons[id] = reason
+    }
     /// The outcome of the turn that just freed a runner slot, read by
     /// `clearRunner` — the one moment the slot is actually free to accept the
     /// next send. Set in `deliver`'s `.turnCompleted` handling, same as the
@@ -1352,22 +1391,29 @@ final class AgentSupervisor {
         makeRunner: @escaping (AgentRunnerLaunch) -> AgentRunning = AgentSupervisor.productionRunner,
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) },
         upsertRecord: ((AgentRecord) throws -> Void)? = nil,
-        nameGenerationCapabilityProvider: (@Sendable () -> AgentNameGenerationCapability?)? = nil,
+        nameTitlerCommand: (@Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand?)? = nil,
         nameGenerationTimeout: TimeInterval = AgentNameOneShot.timeout,
+        claudeSessionTitle: @escaping @Sendable (String, String) -> String? = { cwd, sessionId in
+            ClaudeSessionTitleReader.title(
+                homeURL: FileManager.default.homeDirectoryForCurrentUser, cwd: cwd, sessionId: sessionId)
+        },
         attachmentStore: AgentComposerAttachmentStore? = nil,
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
         codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
         transcriptStore: AgentTranscriptStore? = nil,
         maximumActiveManagedChildren: @escaping () -> Int? = {
             AgentSpawnLimitConfig.maximumActiveChildren()
-        }
+        },
+        idleRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout
     ) {
+        self.idleRunnerTimeout = idleRunnerTimeout
         self.store = store
         self.makeRunner = makeRunner
         self.warn = warn
         self.upsertRecord = upsertRecord ?? { record in try store.upsert(record) }
-        self.nameGenerationCapabilityProvider = nameGenerationCapabilityProvider
+        self.nameTitlerCommand = nameTitlerCommand
         self.nameGenerationTimeout = nameGenerationTimeout
+        self.claudeSessionTitle = claudeSessionTitle
         self.attachmentStore = attachmentStore ?? AgentComposerAttachmentStore(
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
@@ -1380,25 +1426,18 @@ final class AgentSupervisor {
         }
     }
 
-    /// The explicit action's cached capability gate. This is a snapshot only:
-    /// missing/unknown capability is hidden, and no login shell can run while a
-    /// menu is being built.
+    /// Whether the explicit Generate Name action is offered at all. Resolving
+    /// a titler is per agent and file stats only, so the only app-wide fact is
+    /// whether live titling is on; an agent whose own CLI does not resolve is
+    /// refused (and logged) by `requestGeneratedName`.
     static var nameGenerationCapabilityAvailable: Bool {
-        AgentNameGenerationCapabilityCache.shared.snapshot().isAvailable
+        AgentNameTitlerLiveGate.shared.isEnabled
     }
 
-    /// Start capability resolution without making the caller wait on a shell.
-    /// The returned task does its auth read and bounded login-shell probe on a
-    /// utility executor; callers can await it from a UI task and repaint safely.
-    static func resolveNameGenerationCapability() async -> AgentNameGenerationCapability? {
-        let task = AgentNameGenerationCapabilityCache.shared.startResolution()
-        return await task.value
-    }
-
-    /// The cached capability consumed by the already-gated row action. It is a
-    /// process-free read; a stale/unavailable cache simply refuses the action.
-    static func cachedNameGenerationCapability() -> AgentNameGenerationCapability? {
-        AgentNameGenerationCapabilityCache.shared.snapshot().capability
+    /// Called once from the real app's startup, beside the catalogue's live
+    /// refresh. Checks never call it.
+    static func enableLiveNameTitling() {
+        AgentNameTitlerLiveGate.shared.enable()
     }
 
     static let maximumConcurrentNameGenerations = 2
@@ -1750,13 +1789,6 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
-    /// The concrete `provider/model` the harness resolved this agent's model to,
-    /// as the harness reported it. The context meter's denominator key. It
-    /// mattered most while the Claude harness offered aliases (`anthropic/opus`)
-    /// that were not catalogue keys; the catalogue is explicit ids now, but a
-    /// harness-reported id still beats the record's stored one.
-    func resolvedModelId(for id: AgentID) -> String? { records[id]?.resolvedModelId }
-
     /// The account quota for THIS agent's harness, or nil when the provider has
     /// reported none. Pi reports no account windows at all, so nil there is
     /// "unsupported" rather than "not yet observed" — the presenter says so
@@ -1986,13 +2018,19 @@ final class AgentSupervisor {
             if record.inFlightCompaction?.phase == .indeterminate
                 || record.inFlightCompaction?.phase == .failed
                 || record.inFlightCompaction?.phase == .cancelled {
-                pausedQueues.insert(record.id)
+                pauseQueue(record.id, .afterCompaction)
             }
             // A root that came back stops being stale. Without this an agent marked
             // on an earlier sweep would read as both stale and live to the Phase 3
             // inbox (from the cross-review).
             staleIDs.remove(record.id)
             staleAgentsByTile = staleAgentsByTile.filter { $0.value != record.id }
+            // T5 — a queue (or held steer) a previous launch left behind waits for
+            // the user: it never auto-resumes into a turn nobody is watching.
+            if let queueFile = submissionRecoveryStore?.layout.queuedMessagesFile(for: record.id),
+               ((try? Data(contentsOf: queueFile))?.count ?? 0) > 2 {
+                pauseQueue(record.id, .afterRelaunch)
+            }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
         }
@@ -2709,6 +2747,23 @@ final class AgentSupervisor {
         } else {
             runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
         }
+        // T5 — steers still marked delivering belong to an earlier turn of a
+        // session that has gone idle since; a new turn means they were taken.
+        settleStaleDeliveringSteers(for: id)
+        startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
+        return true
+    }
+
+    /// T5 — binds `runner` to the agent's live slot and drives `operation` off
+    /// the main thread with every side channel and safety net a turn owes:
+    /// either a prompt's `run`, or the adoption of a turn the provider started
+    /// on its own (`AgentUnsolicitedTurnReporting`).
+    private func startTurn(
+        on runner: AgentRunning,
+        for id: AgentID,
+        operation: @escaping @Sendable (@escaping @Sendable (AgentRuntimeEvent) -> Void) throws -> Void
+    ) {
+        guard let record = records[id] else { return }
         let runnerGeneration = RunnerGenerationToken()
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
@@ -2807,7 +2862,6 @@ final class AgentSupervisor {
             }
         }
         let threadId = Self.threadId(for: id)
-        let operationEpoch = record.contextEpoch
         // The translators mint `.turnCompleted` only from a provider result line.
         // A CLI that dies without one (crash mid-line, init never parsed, silent
         // exit 0) must not leave the turn open forever — the supervisor watches
@@ -2821,10 +2875,27 @@ final class AgentSupervisor {
         // emitted immediately before Stop is misreported as a discarded session.
         let crossedPiPersistenceWatermark = TerminalDeliveryLatch()
         let harnessName = record.harness?.rawValue ?? "agent"
+        // T5 — the provider's receipt for each steer this session took, and the
+        // turns it starts on its own. Accepted while this runner is the agent's,
+        // bound or idle: a promoted steer is confirmed after its turn ended.
+        if let steering = runner as? AgentSteeringRunning {
+            steering.observeSteerDispositions { [weak self] steerID, disposition in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
+                    self.settleDeliveringSteer(steerID, disposition: disposition, for: id)
+                }
+            }
+        }
+        if let reporting = runner as? AgentUnsolicitedTurnReporting {
+            reporting.observeUnsolicitedTurns { [weak self] in
+                DispatchQueue.main.async { self?.adoptUnsolicitedTurn(from: reporting, for: id) }
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                try runner.run(prompt: prompt) { event in
-                    let bound = event.withThreadId(threadId).withContextEpochIfMissing(operationEpoch)
+                try operation { event in
+                    let bound = event.withThreadId(threadId)
                     switch bound {
                     case let .itemStarted(_, _, kind, _) where kind == .assistantMessage:
                         crossedPiPersistenceWatermark.set()
@@ -2936,7 +3007,6 @@ final class AgentSupervisor {
                 self?.clearRunner(runner, generation: runnerGeneration, for: id)
             }
         }
-        return true
     }
 
     /// Agents whose provider has produced enough output that pi would have written
@@ -3077,11 +3147,36 @@ final class AgentSupervisor {
     /// Terminates the in-flight runner and records the stop on the agent's stream.
     /// `.sessionStateChanged(.stopped)` is what the tile's status derivation reads,
     /// and it is persist-worthy, so the stored record's `lastActivityAt` moves too.
+    ///
+    /// This is the TEARDOWN stop — quit, archive, a closed tile, every
+    /// programmatic caller — and it kills. The composer's Stop goes through
+    /// `accept(.stop)`, which interrupts first (T5).
     func stop(_ id: AgentID) {
         guard records[id] != nil else {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
+        killRunner(id)
+    }
+
+    /// T5 — the user's Stop is an INTERRUPT first: the turn ends, the process
+    /// and its background work live on. A kill is the fallback, when the
+    /// interrupt fails or never lands, and a second Stop while one is pending.
+    private func stopFromComposer(_ id: AgentID) {
+        if !activeCompactionOperations.contains(id),
+           !interruptingAgents.contains(id),
+           let steering = runners[id] as? AgentSteeringRunning {
+            stopRequestedAgents.insert(id)
+            interruptTurn(steering, for: id)
+            return
+        }
+        killRunner(id)
+    }
+
+    /// Kills the bound runner's process group and closes the turn synchronously.
+    private func killRunner(_ id: AgentID) {
+        interruptingAgents.remove(id)
+        deferredForceSends[id] = nil
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
@@ -3164,13 +3259,6 @@ final class AgentSupervisor {
         /// not defined in this project" reads as a typo when the truth is that the
         /// project has no `.pi/agents` directory. Observed live on 2026-08-25.
         case projectDeclaresNoRoles(directory: String)
-        /// C12 — the parent runs codex. `codex exec --json` (measured, `.plans/46`)
-        /// emits no wire representation for subagent activity at all: even with
-        /// `features.multi_agent_v2=true` set and delegation genuinely happening,
-        /// Array receives nothing about the child on the transport it runs. The
-        /// honest refusal is about OBSERVABILITY, not capability — codex itself can
-        /// spawn; Array cannot see it happen, so it will not pretend to run it.
-        case codexSubagentsUnobservable
         /// C12 — the parent is a claude `Agent` subagent Array only mirrors
         /// (`AgentCapabilities.observedReadOnly`): read-only transcript, not
         /// locally managed, no runner. There is nothing for a spawn to go through.
@@ -3199,8 +3287,6 @@ final class AgentSupervisor {
                 return "its isolated checkout could not be created"
             case .roleUnresolved:
                 return "the requested role is not defined in this project"
-            case .codexSubagentsUnobservable:
-                return "Array cannot observe codex subagents on the transport it runs"
             case .observedParentCannotSpawn:
                 return "this agent is mirrored, not run, and has no runner to spawn through"
             }
@@ -3772,15 +3858,9 @@ final class AgentSupervisor {
                 .roleUnresolved, for: parentId,
                 handle: request.sourceItemID, requestedRole: request.role)
         }
-        // C12 — codex delegation may genuinely be happening; Array's transport
-        // (`codex exec --json`) has no wire representation for it, so refuse
-        // honestly about observability rather than silently producing nothing or
-        // claiming codex itself cannot spawn.
-        guard parentHarness != .codex else {
-            return refuseSpawn(
-                .codexSubagentsUnobservable, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
-        }
+        // A codex parent is no longer refused here (T4b): a non-observed request
+        // from one is its `array_delegate` over MCP, a child Array runs itself.
+        // Codex-RUN subagents arrive `observedOnly` and were adopted above.
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
             return refuseSpawn(
@@ -4656,9 +4736,14 @@ final class AgentSupervisor {
     ///
     /// The ladder is authority-ordered and stops at the first rung that can
     /// speak: a person's rename ends it outright; otherwise claude's own
-    /// conversation title wins when the harness has one; and only a harness with
-    /// no native title at all reaches the provider one-shot, which costs a
-    /// process and so runs once per agent.
+    /// `ai-title` is read first, because it is free; and when there is none —
+    /// claude ≥ 2.1.278 no longer writes it in headless sessions, and codex/pi
+    /// never did — the agent's OWN CLI is asked for a title, at most three
+    /// times per agent per app session.
+    ///
+    /// A generated title is final for the automatic path: it outranks a harness
+    /// title (`AgentDisplayNameSource.authority`), so a late `ai-title` cannot
+    /// churn it, and no later turn re-asks the titler. Generate Name still can.
     ///
     /// Everything here is best-effort and silent. A naming path that can make a
     /// turn fail, block, or warn at the user is worse than a bad name.
@@ -4694,14 +4779,13 @@ final class AgentSupervisor {
     private func refreshClaudeHarnessTitle(for id: AgentID, record: AgentRecord) {
         guard record.acceptsAutomaticName(from: .harness) else { return }
         guard harnessTitleTasks.insert(id).inserted else { return }
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let readTitle = claudeSessionTitle
         // The SAME derivation the runner used to spawn this conversation. See
         // `claudeSessionLocation` for why reading `record.cwd` here is a silent
         // no-op rather than an error.
         let (cwd, sessionId) = Self.claudeSessionLocation(for: record)
         Task.detached(priority: .utility) { [weak self] in
-            let title = ClaudeSessionTitleReader.title(
-                homeURL: home, cwd: cwd, sessionId: sessionId)
+            let title = readTitle(cwd, sessionId)
             await MainActor.run {
                 self?.finishHarnessTitle(title, for: id)
             }
@@ -4710,23 +4794,34 @@ final class AgentSupervisor {
 
     private func finishHarnessTitle(_ title: String?, for id: AgentID) {
         harnessTitleTasks.remove(id)
-        guard let title, var record = records[id] else { return }
+        // Re-fetched after the read: a rename or an explicit request can land
+        // while the file read is in flight.
+        guard var record = records[id] else { return }
+        guard let title else {
+            // No `ai-title` — the normal case for a headless claude session now.
+            // Fall through to claude's own titler, unless a request was armed
+            // while the read was in flight: superseding it would strand it.
+            guard record.namingRequest == nil else { return }
+            requestAutomaticGeneratedName(for: id, record: record)
+            return
+        }
         guard record.adoptAutomaticName(title, source: .harness) else { return }
         records[id] = record
         persist(record)
     }
 
-    /// The fallback for a harness that does not name its own conversations —
-    /// codex and pi. One attempt per agent per app session, and only while the
-    /// existing title is still no better than a truncated prompt.
+    /// Ask the agent's own CLI for a title, automatically. Only while the
+    /// current title is still automatic and not already generated — a generated
+    /// title stays put rather than churning every turn.
     private func requestAutomaticGeneratedName(for id: AgentID, record: AgentRecord) {
         guard Self.automaticGeneratedNamingEnabled else { return }
-        guard record.acceptsAutomaticName(from: .generated) else { return }
+        guard record.acceptsAutomaticName(from: .generated),
+              record.displayNameSource != .generated else { return }
         // A BOUNDED number of attempts, not one.
         //
         // `requestGeneratedName` refuses for two very different reasons and
-        // returns the same `false` for both: a permanent one (no pi capability
-        // on this machine) and a transient one (the concurrency cap, which a
+        // returns the same `false` for both: a permanent one (this harness's CLI
+        // does not resolve) and a transient one (the concurrency cap, which a
         // restore storm makes likely precisely when many agents finish at once).
         // Marking the agent done on the first refusal loses every capped agent's
         // only chance; never marking it retries a missing binary on every turn
@@ -4735,8 +4830,9 @@ final class AgentSupervisor {
         guard attempts < Self.maximumAutomaticNamingAttempts else { return }
         automaticNamingAttempts[id] = attempts + 1
         // `requestGeneratedName` owns every remaining guard: the manual check,
-        // the concurrency cap, capability resolution, and the CAS. A refusal
-        // here is silent on purpose — this path was not asked for by anyone.
+        // the concurrency cap, titler resolution, and the CAS. A refusal never
+        // reaches the person — this path was not asked for by anyone — but it
+        // is logged to agent-diagnostics.log.
         _ = requestGeneratedName(agentID: id)
     }
 
@@ -4873,21 +4969,16 @@ final class AgentSupervisor {
             warn("AgentSupervisor.requestGeneratedName: manual name owns agent \(id.rawValue.uuidString); refusing generated overwrite")
             return false
         }
-        // This admission check is on the main actor, before capability lookup or
-        // CAS mutation. A refused burst member therefore remains unchanged and
-        // cannot make a synchronous login-shell probe part of the burst.
+        // This admission check is on the main actor, before titler resolution or
+        // CAS mutation. A refused burst member therefore remains unchanged.
         guard activeNameGenerations < Self.maximumConcurrentNameGenerations else {
-            warn("AgentSupervisor.requestGeneratedName: concurrency cap \(Self.maximumConcurrentNameGenerations) reached; refusing burst member")
+            logNamingRefusal("concurrency cap \(Self.maximumConcurrentNameGenerations) reached", agentID: id)
             return false
         }
-        let capability: AgentNameGenerationCapability?
-        if let nameGenerationCapabilityProvider {
-            capability = nameGenerationCapabilityProvider()
-        } else {
-            capability = Self.cachedNameGenerationCapability()
-        }
-        guard let capability else {
-            warn("AgentSupervisor.requestGeneratedName: Pi capability/auth unavailable; no process spawned")
+        let resolveCommand = nameTitlerCommand ?? { AgentNameTitler.liveCommand(for: $0) }
+        guard let titler = AgentNameTitler.resolve(for: record, command: resolveCommand) else {
+            let harness = record.harness?.rawValue ?? "unresolved"
+            logNamingRefusal("harness=\(harness) titler unavailable (CLI not resolved or no model); no process spawned", agentID: id)
             return false
         }
         // A second explicit click supersedes the old request. Cancellation is a
@@ -4901,25 +4992,21 @@ final class AgentSupervisor {
         // storage/display split those were the same string, which meant a
         // relaunched agent was asking a model to summarize a summary.
         let source = firstPromptByAgent[id] ?? record.storedDisplayName
-        let prompt = Self.generatedNamePrompt(source)
-        let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
+        let prompt = Self.generatedNamePrompt(source, reply: firstReplyByAgent[id])
         let timeout = nameGenerationTimeout
         activeNameGenerations += 1
         nameGenerationRequestIDs[id] = request.id
-        let task = Task.detached(priority: .utility) { [weak self, capability, request, prompt, cwd, timeout, onCompletion, record] in
+        let task = Task.detached(priority: .utility) { [weak self, titler, request, prompt, timeout, onCompletion, record] in
             var candidate: String?
             var failure: String?
             do {
-                let stdout = try AgentNameOneShot.run(
-                    capability: capability,
+                let output = try AgentNameOneShot.run(
+                    titler: titler,
                     prompt: prompt,
-                    cwd: cwd,
                     timeout: timeout)
-                candidate = AgentNameOneShot.candidate(
-                    from: stdout,
-                    model: record.model,
-                    role: record.role,
-                    id: record.id.rawValue)
+                candidate = AgentNameOneShot.rawName(harness: titler.harness, output: output)
+                    .flatMap { AgentNameOneShot.sanitizedTitle(
+                        $0, model: record.model, role: record.role, id: record.id.rawValue) }
                 if candidate == nil { failure = "invalid provider output" }
             } catch let error as AgentNameOneShotError {
                 failure = error.description
@@ -4929,7 +5016,7 @@ final class AgentSupervisor {
             await MainActor.run {
                 self?.finishGeneratedName(
                     candidate: candidate,
-                    failure: failure,
+                    failure: failure.map { "harness=\(titler.harness.rawValue) \($0)" },
                     request: request,
                     agentID: id,
                     onCompletion: onCompletion)
@@ -4939,23 +5026,34 @@ final class AgentSupervisor {
         return true
     }
 
+    /// A refusal or failure on the naming path. stderr alone was invisible for a
+    /// GUI launch, which is how "no generated name has ever landed" went unseen;
+    /// the diagnostics log is the runner-failure trail people already read.
+    private func logNamingRefusal(_ reason: String, agentID id: AgentID) {
+        warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) \(reason)")
+        appendAgentDiagnostics("naming: \(reason)", agentID: id)
+    }
+
     /// QA-only observability for the concurrency witness. It is not a second
     /// capability or provider state owner.
     var qaActiveNameGenerationCount: Int { activeNameGenerations }
+    var qaActiveHarnessTitleCount: Int { harnessTitleTasks.count }
 
-    private static func generatedNamePrompt(_ source: String) -> String {
+    /// The first request and the start of the first reply: the reply is what
+    /// says what the work turned out to be. The rules live with the CLI call
+    /// (`AgentNameOneShot.titleRules`); this is only the material.
+    private static func generatedNamePrompt(_ source: String, reply: String?) -> String {
         let bounded = String(source.prefix(AgentNameOneShot.maximumPromptLength))
-        // "Summarize, do not restate" is the entire instruction that matters.
-        // Without it a model hands back the opening clause of the request, which
-        // is the truncation this whole path exists to replace.
-        return """
-        Name the agent from this user request. Summarize what the request is \
-        ABOUT; do not restate its opening words. Return one short name only, \
-        with no explanation or metadata.
+        var prompt = """
+        Title this coding session.
 
-        User request:
+        First user request:
         \(bounded)
         """
+        if let reply = reply?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty {
+            prompt += "\n\nStart of the first reply:\n" + String(reply.prefix(firstReplyCaptureLength))
+        }
+        return prompt
     }
 
     private func finishGeneratedName(
@@ -4980,7 +5078,7 @@ final class AgentSupervisor {
             landed = applyGeneratedName("", for: request, agentID: id)
         }
         if let failure {
-            warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) \(failure); keeping its existing name")
+            logNamingRefusal("\(failure); keeping its existing name", agentID: id)
         } else if !landed {
             warn("AgentSupervisor.requestGeneratedName: agent \(id.rawValue.uuidString) lost the naming CAS; keeping its existing name")
         }
@@ -5104,6 +5202,39 @@ final class AgentSupervisor {
         return contextWindowSnapshots[id] ?? record.lastContextWindow
     }
 
+    /// The context meter's denominator, resolved here and nowhere else. A
+    /// window the provider states wins and is remembered on the record for the
+    /// model it belongs to, so the next turn's first request has it; then pi's
+    /// models-store. Never guessed from a family name: `claude-opus-4-5` is 200k
+    /// and `claude-opus-5` 1M, so a wrong guess misreports occupancy by 5x.
+    private func contextWindow(for id: AgentID, stated: Int?) -> Int? {
+        guard var record = records[id] else { return nil }
+        let model = record.resolvedModelId ?? record.model
+        if let stated, stated > 0 {
+            if record.providerContextWindows[model] != stated {
+                record.providerContextWindows[model] = stated
+                records[id] = record
+                persist(record)
+            }
+            return stated
+        }
+        if let remembered = record.providerContextWindows[model] { return remembered }
+        if let resolved = record.resolvedModelId,
+           let window = AgentModelCatalog.shared.contextWindow(for: resolved) {
+            return window
+        }
+        return AgentModelCatalog.shared.contextWindow(for: record.model)
+    }
+
+    private static func endsInTurnCompaction(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .turnCompleted, .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            return true
+        default:
+            return false
+        }
+    }
+
     func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
         guard let record = records[id] else { return nil }
         let facts = turnFacts[id] ?? TurnFacts()
@@ -5145,8 +5276,9 @@ final class AgentSupervisor {
         // session runner is actually bound: it is real mid-turn delivery into
         // that runner's own process, so a harness mid-migration never advertises
         // a verb the process behind it cannot perform.
-        let session = mirrored ? nil : (runners[id] as? AgentSessionRunning)
-        let steerable = session?.sessionCapabilities.supportedCommands.contains("steer") ?? false
+        // T5 — every production runner steers now; the scripted check runners
+        // do not, and keep the queue-only floor.
+        let steerable = !mirrored && runners[id] is AgentSteeringRunning
         // B4 — queue is Array's own capability, not the harness's. Queueing never
         // asks the bound runner to do anything while it is busy; Array holds the
         // text and sends it as an ORDINARY prompt once `turnCompleted` frees the
@@ -5277,7 +5409,7 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canStop, runners[agentID] != nil else {
                 return .refused(.noTurnInProgress)
             }
-            stop(agentID)
+            stopFromComposer(agentID)
             return .accepted
         case .providerCommand(let invocation):
             // ONE set for the picker and for dispatch. This used to look the
@@ -5434,9 +5566,55 @@ final class AgentSupervisor {
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             return .accepted
-        case .steer, .command:
-            // Today's compiled runner exercises neither of these. Never simulate
-            // one by replaying send.
+        case .steer(let draft):
+            // T5 — HELD by Array, not written to the provider: until the turn
+            // reaches a tool boundary the steer stays editable and cancellable,
+            // and a turn that ends first runs it next, ahead of the queue.
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSteer, let store = submissionRecoveryStore else {
+                return .refused(.unsupported)
+            }
+            let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+            do {
+                _ = try await attachmentStore.preparePromptAttachments(for: agentID, draftAttachments: draftImageAttachments)
+            } catch {
+                warn("AgentSupervisor.accept: attachment preparation refused for a steer, agent \(agentID.rawValue.uuidString)")
+                return .refused(.invalidAttachment)
+            }
+            _ = await store.enqueueSteer(
+                text: prompt.text,
+                imageAttachments: draftImageAttachments,
+                fileReferences: prompt.fileReferences.map {
+                    AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+                },
+                for: agentID)
+            queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
+            notifyTurnCapabilitiesChanged(agentID)
+            handOverHeldSteers(for: agentID)
+            return .accepted
+        case .forceSend(let draft):
+            var prompt = draft
+            prompt.text = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend || snapshot.capabilities.canStop else {
+                return .refused(.turnNotReady)
+            }
+            let prepared: [AgentPromptImageAttachment]
+            do {
+                prepared = try await attachmentStore.preparePromptAttachments(
+                    for: agentID,
+                    draftAttachments: prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) })
+            } catch {
+                return .refused(.invalidAttachment)
+            }
+            let forced = PreparedAgentPrompt(
+                prompt: AgentPrompt(text: prompt.text, imageAttachments: prepared, fileReferences: prompt.fileReferences),
+                expectedAgentID: agentID)
+            return forceSend(forced, to: agentID) ? .accepted : .refused(.turnNotReady)
+        case .command:
+            // Never simulated by replaying send.
             return .refused(.unsupported)
         }
     }
@@ -6080,6 +6258,9 @@ final class AgentSupervisor {
         //    `system/init` reports it.
         if record.harness == .claudeCode {
             record.pendingSessionForkFrom = record.providerSessionId ?? Self.claudeSessionId(for: id)
+            // T5 — the idle session process is still the OLD conversation; the
+            // next send must spawn the fork.
+            idleSessionRunners.removeValue(forKey: id)?.stop()
         }
 
         // 2. The stale-but-numeric context meter must not re-seed from a
@@ -6336,13 +6517,19 @@ final class AgentSupervisor {
         runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
     }
 
-    /// "Clear queued" — every chip at once, still without touching the turn in
-    /// flight.
+    /// "Clear" — every queued follow-up at once, still without touching the turn
+    /// in flight. T5b: held steers are their own rail section and stay.
     func clearQueuedMessages(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
-        queuedWorkItemsCache[id] = []
+        let followUps = (queuedWorkItemsCache[id] ?? []).filter {
+            if case .prompt(let message) = $0 { return !message.isSteer }
+            return true
+        }.map(\.id)
+        queuedWorkItemsCache[id]?.removeAll { followUps.contains($0.id) }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) { await store.clearQueue(for: id) }
+        runQueueOp(for: id) {
+            for itemID in followUps { _ = await store.removeQueuedMessage(id: itemID, for: id) }
+        }
     }
 
     /// Explicit resume after an interrupt, distinct from the next Send: this
@@ -6374,7 +6561,7 @@ final class AgentSupervisor {
     private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
         guard submissionRecoveryStore != nil else { return }
         if outcome == .interrupted {
-            pausedQueues.insert(id)
+            pauseQueue(id, .afterStop)
             notifyTurnCapabilitiesChanged(id)
             return
         }
@@ -6404,7 +6591,7 @@ final class AgentSupervisor {
                     self.records[id] = record
                     self.persist(record)
                 }
-                self.pausedQueues.insert(id)
+                self.pauseQueue(id, .held)
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
@@ -6416,29 +6603,16 @@ final class AgentSupervisor {
                     for: id) else {
                     await store.requeueWorkItemAtFront(workItem, for: id)
                     self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
-                    self.pausedQueues.insert(id)
+                    self.pauseQueue(id, .afterCompaction)
                     self.notifyTurnCapabilitiesChanged(id)
                     return
                 }
                 return
             }
             guard case .prompt(let message) = workItem else { return }
-            let prompt: AgentPrompt
-            do {
-                let prepared = try await self.attachmentStore.preparePromptAttachments(
-                    for: id,
-                    draftAttachments: message.imageAttachments
-                )
-                let fileReferences = message.fileReferences.map {
-                    AgentPromptFileReference(
-                        displayName: $0.displayName,
-                        contentType: $0.contentType,
-                        fileURL: URL(fileURLWithPath: $0.path)
-                    )
-                }
-                prompt = AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
-            } catch {
-                self.warn("AgentSupervisor: dropping queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+            guard let prompt = await self.preparedQueuedPrompt(message, for: id) else {
+                // Said out loud, never dropped silently; the next item waits for
+                // the next turn like any other.
                 return
             }
             guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
@@ -6450,6 +6624,391 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
+            // No composer painted this one; the tile learns of it here.
+            self.echoPrompt(prompt, for: id)
+        }
+    }
+
+    // MARK: - T5 steering, force send, interrupt, idle reaping
+
+    /// How long an idle provider session may sit before it is reaped (D3).
+    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = 600
+    private let idleRunnerTimeout: TimeInterval
+    private var idleReapTokens: [AgentID: UUID] = [:]
+    /// How long an acknowledged interrupt may take to end the turn before
+    /// Stop falls back to killing the process. Shortened by the checks.
+    var interruptGrace: TimeInterval = 5
+    /// Tool items open in the bound runner's turn — the boundary a held steer
+    /// waits for.
+    private var openToolItems: [AgentID: Set<String>] = [:]
+    /// Steers handed to the provider and not yet confirmed. In memory only:
+    /// once handed over they are the provider's, no longer Array's to edit.
+    private var deliveringSteers: [AgentID: [(id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt)]] = [:]
+    private var steerHandoffsInFlight: Set<AgentID> = []
+    private var interruptingAgents: Set<AgentID> = []
+    /// `echo`: no composer painted this prompt (a rail send-now), so the tile
+    /// is told when it runs.
+    private var pendingForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
+    private var deferredQueueOutcomes: [AgentID: TurnOutcome] = [:]
+    /// A force send whose interrupt ended the turn, waiting for the receipts
+    /// of the steers that turn still had in delivery (T5c).
+    /// `token` ties each grace timer to the force send it was armed for, so a
+    /// timer left over from an earlier one cannot release a later one early.
+    private var deferredForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool, token: UUID)] = [:]
+    private var promptEchoObservers: [AgentID: [UUID: (AgentPrompt) -> Void]] = [:]
+
+    /// One pending steer for the rail: still HELD (editable, cancellable) or
+    /// DELIVERING (handed over, awaiting the provider's receipt).
+    struct PendingSteer: Equatable {
+        enum State: Equatable { case held, delivering }
+        let id: UUID
+        let text: String
+        let state: State
+    }
+
+    /// Held steers (front of the durable queue) then delivering ones.
+    func pendingSteers(for id: AgentID) -> [PendingSteer] {
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        let held = (queuedWorkItemsCache[id] ?? []).compactMap { item -> PendingSteer? in
+            guard case .prompt(let message) = item, message.isSteer else { return nil }
+            return PendingSteer(id: message.id, text: message.text, state: .held)
+        }
+        let delivering = (deliveringSteers[id] ?? []).map {
+            PendingSteer(id: $0.id, text: $0.message.text, state: .delivering)
+        }
+        return held + delivering
+    }
+
+    /// T5b — the steering/queue rail: held then delivering steers, then the
+    /// follow-ups in drain order, and why the queue is paused if it is.
+    func queueRailState(for id: AgentID) -> ComposerQueueRailState {
+        if queuedWorkItemsCache[id] == nil { hydrateQueueCache(for: id) }
+        var state = ComposerQueueRailState()
+        for item in queuedWorkItemsCache[id] ?? [] {
+            switch item {
+            case .prompt(let message):
+                let entry = ComposerQueueRailState.Item(
+                    id: message.id, text: message.text,
+                    attachmentCount: message.imageAttachments.count + message.fileReferences.count,
+                    kind: message.isSteer ? .heldSteer : .queued)
+                if message.isSteer { state.steers.append(entry) } else { state.queued.append(entry) }
+            case .compaction(let compaction):
+                state.queued.append(ComposerQueueRailState.Item(
+                    id: compaction.id,
+                    text: compaction.focus?.isEmpty == false ? "Compact context with focus" : "Compact context",
+                    attachmentCount: 0, kind: .compaction))
+            }
+        }
+        state.steers += (deliveringSteers[id] ?? []).map {
+            ComposerQueueRailState.Item(
+                id: $0.id, text: $0.message.text,
+                attachmentCount: $0.message.imageAttachments.count + $0.message.fileReferences.count,
+                kind: .deliveringSteer)
+        }
+        if pausedQueues.contains(id) { state.pause = queuePauseReasons[id] ?? .held }
+        return state
+    }
+
+    /// A supervisor-started prompt no composer painted (a drained follow-up, a
+    /// delivered steer), so an attached tile can show it.
+    @discardableResult
+    func addPromptEchoObserver(for id: AgentID, _ observe: @escaping (AgentPrompt) -> Void) -> UUID {
+        let token = UUID()
+        promptEchoObservers[id, default: [:]][token] = observe
+        return token
+    }
+
+    func removePromptEchoObserver(_ token: UUID, for id: AgentID) {
+        promptEchoObservers[id]?[token] = nil
+    }
+
+    private func echoPrompt(_ prompt: AgentPrompt, for id: AgentID) {
+        for observe in (promptEchoObservers[id] ?? [:]).values { observe(prompt) }
+    }
+
+    /// Pulls one held steer or queued follow-up back out for editing: it leaves
+    /// the queue, and the caller loads it into the composer.
+    func takeQueuedItemForEditing(_ itemID: UUID, for id: AgentID) async -> AgentComposerQueuedMessage? {
+        guard let store = submissionRecoveryStore else { return nil }
+        let item = await store.takeQueuedWorkItem(id: itemID, for: id)
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+        guard case .prompt(let message) = item else { return nil }
+        return message
+    }
+
+    /// Reorders the follow-up section; held steers keep the front.
+    func moveQueuedItem(_ itemID: UUID, toFollowUpIndex index: Int, for id: AgentID) {
+        guard let store = submissionRecoveryStore else { return }
+        runQueueOp(for: id) { _ = await store.moveQueuedWorkItem(id: itemID, toFollowUpIndex: index, for: id) }
+    }
+
+    /// Send now. A held steer while a turn is live is handed over at once,
+    /// without waiting for a tool boundary; anything else leaves the queue and
+    /// runs now — a force send when a turn is in flight.
+    @discardableResult
+    func sendQueuedItemNow(_ itemID: UUID, for id: AgentID) async -> Bool {
+        guard let store = submissionRecoveryStore else { return false }
+        let cached = (queuedWorkItemsCache[id] ?? []).first { $0.id == itemID }
+        if case .prompt(let message) = cached, message.isSteer,
+           let steering = runners[id] as? AgentSteeringRunning, steering.acceptsSteerNow {
+            handOverHeldSteers(for: id, only: itemID)
+            return true
+        }
+        guard let item = await store.takeQueuedWorkItem(id: itemID, for: id) else { return false }
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+        guard case .prompt(let message) = item,
+              let prompt = await preparedQueuedPrompt(message, for: id) else {
+            if case .compaction = item {
+                await store.requeueWorkItemAtFront(item, for: id)
+                queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            }
+            return false
+        }
+        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, echo: true) else {
+            await store.requeueWorkItemAtFront(item, for: id)
+            queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            notifyTurnCapabilitiesChanged(id)
+            return false
+        }
+        return true
+    }
+
+    /// D2 — interrupt the turn in flight WITHOUT killing its process, then run
+    /// `prepared` immediately. It bypasses a paused queue without releasing it,
+    /// and the interrupt it causes does not pause the queue either: everything
+    /// queued stays held behind the forced message.
+    private func forceSend(_ prepared: PreparedAgentPrompt, to id: AgentID, echo: Bool = false) -> Bool {
+        guard records[id]?.capabilities.locallyManaged == true else { return false }
+        guard let runner = runners[id] else {
+            guard sendPrepared(prepared, to: id) else { return false }
+            if echo { echoPrompt(prepared.prompt, for: id) }
+            return true
+        }
+        guard !activeCompactionOperations.contains(id) else { return false }
+        pendingForceSends[id] = (prepared, echo)
+        stopRequestedAgents.insert(id)
+        if interruptingAgents.contains(id) { return true }
+        if let steering = runner as? AgentSteeringRunning {
+            interruptTurn(steering, for: id)
+        } else {
+            escalateToKill(id)
+        }
+        return true
+    }
+
+    /// Asks the bound runner to end its turn and keep its process; falls back to
+    /// a kill when the interrupt fails, or is acknowledged but the turn never
+    /// ends within `interruptGrace`.
+    private func interruptTurn(_ runner: AgentSteeringRunning, for id: AgentID) {
+        guard let generation = runnerGenerationTokens[id] else {
+            escalateToKill(id)
+            return
+        }
+        interruptingAgents.insert(id)
+        notifyTurnCapabilitiesChanged(id)
+        let grace = interruptGrace
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // A Stop pressed while the session is still starting (the prompt
+            // not yet in the provider's hands) waits for the turn to go live:
+            // an interrupt sent before it would interrupt nothing.
+            let deadline = Date().addingTimeInterval(grace)
+            while !runner.acceptsSteerNow, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            let acknowledged = (try? runner.interrupt()) != nil
+            DispatchQueue.main.async {
+                guard let self, self.runnerGenerationTokens[id] == generation, self.runners[id] === runner else { return }
+                guard acknowledged else {
+                    self.escalateToKill(id)
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+                    guard let self, self.runnerGenerationTokens[id] == generation,
+                          self.runners[id] === runner else { return }
+                    self.appendAgentDiagnostics(
+                        "interrupt acknowledged but the turn did not end within \(grace)s; killing", agentID: id)
+                    self.escalateToKill(id)
+                }
+            }
+        }
+    }
+
+    private func escalateToKill(_ id: AgentID) {
+        let forced = pendingForceSends.removeValue(forKey: id)
+        killRunner(id)
+        if let forced, sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+    }
+
+    /// Hands every held steer (or just `only`) to the bound runner, once its
+    /// turn has reached a tool boundary — or at once for `only`. Serialized with
+    /// every other queue operation, so a turn that ends meanwhile drains the
+    /// steers the provider did not take, ahead of the follow-ups.
+    private func handOverHeldSteers(for id: AgentID, only: UUID? = nil) {
+        guard let store = submissionRecoveryStore,
+              let runner = runners[id] as? AgentSteeringRunning,
+              !activeCompactionOperations.contains(id),
+              !interruptingAgents.contains(id),
+              pendingForceSends[id] == nil,
+              only != nil || !(openToolItems[id]?.isEmpty ?? true),
+              !steerHandoffsInFlight.contains(id) else { return }
+        let generation = runnerGenerationTokens[id]
+        steerHandoffsInFlight.insert(id)
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            defer { self.steerHandoffsInFlight.remove(id) }
+            guard self.runners[id] === runner, runner.acceptsSteerNow else { return }
+            let steers: [AgentComposerQueuedMessage]
+            if let only {
+                guard case .prompt(let message) = await store.takeQueuedWorkItem(id: only, for: id) else { return }
+                steers = [message]
+            } else {
+                steers = await store.takeHeldSteers(for: id)
+            }
+            var notTaken: [AgentComposerQueuedMessage] = []
+            for message in steers {
+                guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation else {
+                    notTaken.append(message)
+                    continue
+                }
+                guard let prompt = await self.preparedQueuedPrompt(message, for: id) else { continue }
+                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+                self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                self.notifyTurnCapabilitiesChanged(id)
+                let accepted = await Task.detached(priority: .userInitiated) {
+                    (try? runner.steer(prompt, id: message.id)) != nil
+                }.value
+                if !accepted, self.deliveringSteers[id]?.contains(where: { $0.id == message.id }) == true {
+                    self.deliveringSteers[id]?.removeAll { $0.id == message.id }
+                    notTaken.append(message)
+                }
+            }
+            if !notTaken.isEmpty { await store.requeueHeldSteersAtFront(notTaken, for: id) }
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// The provider's receipt for one handed-over steer.
+    private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
+        guard let index = deliveringSteers[id]?.firstIndex(where: { $0.id == steerID }),
+              let entry = deliveringSteers[id]?.remove(at: index) else { return }
+        switch disposition {
+        case .consumed:
+            recordTranscriptUserPrompt(entry.prompt, for: id)
+            echoPrompt(entry.prompt, for: id)
+        case .returned:
+            if let store = submissionRecoveryStore {
+                runQueueOp(for: id) { await store.requeueHeldSteersAtFront([entry.message], for: id) }
+            }
+            // T5c — a provider hands a steer back only when a Stop or a force
+            // send interrupted the turn. It waits, held, ahead of the queue
+            // until the user acts; after a force send it must not run as soon
+            // as the forced message finishes.
+            if !pausedQueues.contains(id) { pauseQueue(id, .afterStop) }
+        }
+        notifyTurnCapabilitiesChanged(id)
+        if deliveringSteers[id]?.isEmpty ?? true, runners[id] == nil,
+           let outcome = deferredQueueOutcomes.removeValue(forKey: id) {
+            handleQueueOnTurnCompleted(outcome: outcome, for: id)
+        }
+        if deliveringSteers[id]?.isEmpty ?? true { sendDeferredForceSend(for: id) }
+    }
+
+    private func sendDeferredForceSend(for id: AgentID, token: UUID? = nil) {
+        guard let pending = deferredForceSends[id], token == nil || pending.token == token else { return }
+        guard let forced = deferredForceSends.removeValue(forKey: id) else { return }
+        if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+    }
+
+    /// Steers a session that died never confirmed go back to being held.
+    private func returnDeliveringSteers(for id: AgentID) {
+        guard let entries = deliveringSteers.removeValue(forKey: id), !entries.isEmpty,
+              let store = submissionRecoveryStore else { return }
+        runQueueOp(for: id) { await store.requeueHeldSteersAtFront(entries.map(\.message), for: id) }
+    }
+
+    /// Steers still delivering when Array starts a new turn of the same session
+    /// were taken in a turn that has already closed.
+    private func settleStaleDeliveringSteers(for id: AgentID) {
+        deferredQueueOutcomes[id] = nil
+        for entry in deliveringSteers.removeValue(forKey: id) ?? [] {
+            recordTranscriptUserPrompt(entry.prompt, for: id)
+            echoPrompt(entry.prompt, for: id)
+        }
+    }
+
+    /// claude will run a steer it received after its last tool boundary as its
+    /// own next turn. Hold the queue for that turn; if it never shows, the
+    /// steers are settled as delivered and the queue moves on.
+    private func deferQueueBehindDeliveringSteers(
+        _ outcome: TurnOutcome, runner: AgentUnsolicitedTurnReporting, for id: AgentID
+    ) {
+        deferredQueueOutcomes[id] = outcome
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.runners[id] == nil, self.idleSessionRunners[id] === runner,
+                  let outcome = self.deferredQueueOutcomes.removeValue(forKey: id) else { return }
+            self.settleStaleDeliveringSteers(for: id)
+            self.handleQueueOnTurnCompleted(outcome: outcome, for: id)
+        }
+    }
+
+    /// Binds a turn the provider started on its own to the agent, exactly like
+    /// a turn Array started. While the runner still holds the slot, the slot's
+    /// own release (`clearRunner`) adopts it instead.
+    private func adoptUnsolicitedTurn(from runner: AgentUnsolicitedTurnReporting, for id: AgentID) {
+        guard runners[id] == nil, idleSessionRunners[id] === runner, runner.hasUnsolicitedTurn else { return }
+        idleSessionRunners[id] = nil
+        idleReapTokens[id] = nil
+        deferredQueueOutcomes[id] = nil
+        turnFacts[id, default: TurnFacts()].submittedAt = Date()
+        startTurn(on: runner, for: id) { onEvent in try runner.continueUnsolicitedTurn(onEvent: onEvent) }
+    }
+
+    /// D3 — an idle provider session is reaped after `idleRunnerTimeout`,
+    /// unless it reports background work still running.
+    private func scheduleIdleReap(for id: AgentID, runner: AgentRunning) {
+        let token = UUID()
+        idleReapTokens[id] = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
+            guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
+            if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
+                self.scheduleIdleReap(for: id, runner: runner)
+                return
+            }
+            self.idleReapTokens[id] = nil
+            self.idleSessionRunners[id] = nil
+            runner.stop()
+            self.returnDeliveringSteers(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+        }
+    }
+
+    /// A queued message's prompt, its managed attachments re-validated. A
+    /// message whose attachment is gone is not sent and not silently dropped:
+    /// the transcript says so.
+    private func preparedQueuedPrompt(_ message: AgentComposerQueuedMessage, for id: AgentID) async -> AgentPrompt? {
+        do {
+            let prepared = try await attachmentStore.preparePromptAttachments(
+                for: id, draftAttachments: message.imageAttachments)
+            let fileReferences = message.fileReferences.map {
+                AgentPromptFileReference(
+                    displayName: $0.displayName, contentType: $0.contentType,
+                    fileURL: URL(fileURLWithPath: $0.path))
+            }
+            return AgentPrompt(text: message.text, imageAttachments: prepared, fileReferences: fileReferences)
+        } catch {
+            warn("AgentSupervisor: not sending queued message for agent \(id.rawValue.uuidString): attachment no longer valid")
+            let threadId = Self.threadId(for: id)
+            let itemID = "queued-attachment-invalid:\(message.id.uuidString)"
+            let preview = String(message.text.prefix(60))
+            deliver(.itemStarted(
+                threadId: threadId, itemId: itemID, kind: .error,
+                title: "A queued message was not sent because its attachment is no longer available: \u{201C}\(preview)\u{201D}"
+            ), to: id)
+            deliver(.itemCompleted(threadId: threadId, itemId: itemID, kind: .error, status: .failed), to: id)
+            return nil
         }
     }
 
@@ -6507,17 +7066,50 @@ final class AgentSupervisor {
             guard runners[id] == nil, event.isRunnerTerminal else { return }
         }
         deliver(event, to: id, now: now)
+        // T5 — the bound runner's own stream says where the tool boundaries are.
+        switch event {
+        case let .itemStarted(_, itemID, kind, _) where kind.isToolBoundary:
+            openToolItems[id, default: []].insert(itemID)
+            handOverHeldSteers(for: id)
+        case let .itemCompleted(_, itemID, _, _):
+            openToolItems[id]?.remove(itemID)
+        case .turnCompleted:
+            openToolItems[id] = nil
+            // A claude session outlives its turns now, so its mirrored children
+            // are closed at the parent's `result` rather than at process exit.
+            interruptWorkingClaudeMirroredChildren(of: id)
+        default:
+            break
+        }
     }
 
-    private func deliver(_ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
+    /// `meterPublished` marks the supervisor's own context-meter reading (after
+    /// a compaction event) so it is delivered as-is rather than folded again.
+    private func deliver(
+        _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
+    ) {
         var event = incomingEvent
-        if case .contextWindowUpdated(let threadId, var snapshot) = event,
-           let epoch = records[id]?.contextEpoch {
-            if let observedEpoch = snapshot.contextEpoch, observedEpoch != epoch { return }
-            snapshot.contextEpoch = epoch
-            event = .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
+        // T1 — the context meter has ONE owner. Every provider snapshot folds
+        // into the agent's current reading (`AgentContextMeter`) and the tile is
+        // handed the result, so a settings-only snapshot cannot blank the ring
+        // and a usage snapshot cannot drop the policy tick.
+        //
+        // Staleness is the runner generation's job, not an epoch's: `deliver(_:
+        // from:generation:to:)` rejects every non-terminal event from a runner
+        // that no longer owns the agent. The old operation-start epoch stamp also
+        // dropped the CURRENT operation's own post-compaction readings — claude's
+        // compact_boundary snapshot, and every request after an in-turn
+        // compaction — so the ring froze on the pre-compaction number.
+        if case .contextWindowUpdated(let threadId, let snapshot) = event, let record = records[id] {
+            var reading = meterPublished ? snapshot : AgentContextMeter.reading(
+                after: snapshot,
+                current: contextWindowSnapshot(for: id),
+                window: contextWindow(for: id, stated: snapshot.maxTokens))
+            reading.contextEpoch = record.contextEpoch
+            event = .contextWindowUpdated(threadId: threadId, snapshot: reading)
         }
-        if case .compactionChanged(_, let lifecycle) = event {
+        var publishedMeter: (threadId: String, snapshot: AgentContextWindowSnapshot)?
+        if case .compactionChanged(let threadId, let lifecycle) = event {
             if lifecycle.phase == .running {
                 compactingAgents.insert(id)
                 notifyTurnCapabilitiesChanged(id)
@@ -6529,31 +7121,19 @@ final class AgentSupervisor {
                 guard seen.insert(boundaryID).inserted else { return }
                 seenCompactionBoundaryIDs[id] = seen
             }
+            // The meter follows the lifecycle: dimmed while running, the
+            // boundary's `after` once it succeeds (exact or estimated), undimmed
+            // on failure. Published as its own `.contextWindowUpdated` after
+            // this event — the tile renders nothing else.
+            if let meter = AgentContextMeter.reading(
+                after: lifecycle,
+                current: contextWindowSnapshot(for: id),
+                window: contextWindow(for: id, stated: nil)) {
+                publishedMeter = (threadId, meter)
+            }
             if var record = records[id] {
                 if lifecycle.phase == .succeeded {
                     record.contextEpoch &+= 1
-                    if let after = lifecycle.afterTokens, after.precision == .exact {
-                        let previous = record.lastContextWindow
-                        let automatic: Bool?
-                        switch lifecycle.trigger {
-                        case .manual: automatic = false
-                        case .providerAutomatic, .threshold, .overflowRecovery: automatic = true
-                        case .unknown: automatic = nil
-                        }
-                        record.lastContextWindow = AgentContextWindowSnapshot(
-                            usedTokens: after.value,
-                            maxTokens: previous?.maxTokens,
-                            automaticCompaction: automatic,
-                            contextEpoch: record.contextEpoch,
-                            automaticCompactionPolicy: previous?.automaticCompactionPolicy,
-                            observedAt: lifecycle.observedAt,
-                            source: previous?.source ?? .unknown("compaction-boundary"),
-                            freshness: .live)
-                        contextWindowSnapshots[id] = record.lastContextWindow
-                    } else {
-                        record.lastContextWindow = nil
-                        contextWindowSnapshots[id] = nil
-                    }
                     record.inFlightCompaction = nil
                 } else if lifecycle.phase == .requested || lifecycle.phase == .running {
                     record.inFlightCompaction = AgentCompactionJournal(
@@ -6638,10 +7218,14 @@ final class AgentSupervisor {
             // only an actual change forces the write, so this adds at most one
             // AtomicWriter write per turn — never one per token.
             var contextTelemetryChanged = false
-            if case let .contextWindowUpdated(_, snapshot) = event,
-               record.lastContextWindow != snapshot {
-                record.lastContextWindow = snapshot
-                contextTelemetryChanged = true
+            if case var .contextWindowUpdated(_, snapshot) = event {
+                // A running compaction is a live fact, not telemetry: persisted,
+                // it would dim a relaunched meter that no event ever undims.
+                snapshot.compacting = nil
+                if record.lastContextWindow != snapshot {
+                    record.lastContextWindow = snapshot
+                    contextTelemetryChanged = true
+                }
             }
             // WS4 · A terminal event that lands while a human is ACTIVELY LOOKING
             // at this agent is a visit at the moment it lands: it counts as read
@@ -6726,6 +7310,32 @@ final class AgentSupervisor {
             continuation.yield(event)
         }
 
+        // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
+        // `compaction_start`) has no operation of its own to finish it; only a
+        // terminal lifecycle event did, and a provider that never sends one left
+        // the agent "compacting" until relaunch, which then paused its queue as
+        // an indeterminate operation. The turn (or the runner) ending ends it. A
+        // manual operation is `finishCompaction`'s, never this.
+        if Self.endsInTurnCompaction(event), compactingAgents.contains(id),
+           !activeCompactionOperations.contains(id) {
+            compactingAgents.remove(id)
+            if var record = records[id], record.inFlightCompaction?.phase == .running {
+                record.inFlightCompaction = nil
+                records[id] = record
+                persist(record)
+            }
+            if publishedMeter == nil, var meter = contextWindowSnapshot(for: id), meter.compacting == true {
+                meter.compacting = nil
+                publishedMeter = (Self.threadId(for: id), meter)
+            }
+            notifyTurnCapabilitiesChanged(id)
+        }
+        if let publishedMeter {
+            deliver(
+                .contextWindowUpdated(threadId: publishedMeter.threadId, snapshot: publishedMeter.snapshot),
+                to: id, now: now, meterPublished: true)
+        }
+
         // A spawned child's turn ending is the moment its result becomes
         // collectable: rewrite the parent's `spawn-results/<handle>.json` from
         // `spawned` to a terminal status, carrying the child's final assistant
@@ -6751,7 +7361,15 @@ final class AgentSupervisor {
         // improved: claude has had a chance to write its own title for the
         // conversation, and the transcript now says what the work turned out to
         // be. Last, after the record and every subscriber are consistent.
-        if case .turnCompleted = event { refreshDerivedName(for: id) }
+        if case let .contentDelta(_, _, .assistant, delta) = event,
+           !firstReplyClosed.contains(id),
+           (firstReplyByAgent[id]?.count ?? 0) < Self.firstReplyCaptureLength {
+            firstReplyByAgent[id, default: ""] += delta
+        }
+        if case .turnCompleted = event {
+            firstReplyClosed.insert(id)
+            refreshDerivedName(for: id)
+        }
     }
 
     /// The child half of the `spawn_agent` result-file channel. No-op for any
@@ -6948,21 +7566,61 @@ final class AgentSupervisor {
         // Identity-checked: a `send` that started while the previous prompt was
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
-            // Claude owns mirrored children inside this process. If it exits or
-            // crashes before their matching tool_result, no later transport can
-            // close them. Codex is deliberately excluded: its provider children
-            // can drain after the parent turn completes.
-            interruptWorkingClaudeMirroredChildren(of: id)
             runners[id] = nil
-            if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
+            interruptingAgents.remove(id)
+            openToolItems[id] = nil
+            let retained = runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn
+            if retained {
                 idleSessionRunners[id] = runner
+                scheduleIdleReap(for: id, runner: runner)
+            } else {
+                // Claude owns mirrored children inside this process. If it exits
+                // or crashes before their matching tool_result, no later transport
+                // can close them (the live-process case closes at `result`, in
+                // `deliver`). Codex is deliberately excluded: its provider
+                // children can drain after the parent turn completes.
+                interruptWorkingClaudeMirroredChildren(of: id)
+                // A steer the dead process never confirmed was never read.
+                returnDeliveringSteers(for: id)
             }
             notifyTurnCapabilitiesChanged(id)
             // B4: this is the actual moment the runner slot frees, not the
             // `.turnCompleted` event itself — that event still fires while
             // `runners[id]` holds this very runner, so draining there would
             // refuse against an occupied slot every time.
-            if let outcome = pendingQueueOutcome.removeValue(forKey: id) {
+            let outcome = pendingQueueOutcome.removeValue(forKey: id)
+            // T5 (D2) — a force send's interrupt does not pause the queue: the
+            // forced message runs now, and everything queued stays held behind it
+            // (unless the interrupt handed a steer back — `settleDeliveringSteer`).
+            if let forced = pendingForceSends.removeValue(forKey: id) {
+                // T5c — pi hands an unread steer back only after `abort` has
+                // already ended the turn. Starting the forced turn first would
+                // settle that steer as consumed, so the forced message waits for
+                // every receipt (bounded by `interruptGrace`).
+                if deliveringSteers[id]?.isEmpty ?? true {
+                    if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+                } else {
+                    let token = UUID()
+                    deferredForceSends[id] = (forced.prompt, forced.echo, token)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + interruptGrace) { [weak self] in
+                        self?.sendDeferredForceSend(for: id, token: token)
+                    }
+                }
+                return
+            }
+            if retained, let reporting = runner as? AgentUnsolicitedTurnReporting {
+                if reporting.hasUnsolicitedTurn {
+                    adoptUnsolicitedTurn(from: reporting, for: id)
+                    return
+                }
+                // claude runs a steer it took after its last tool boundary as
+                // its own next turn; that turn, not the queue, comes next.
+                if !(deliveringSteers[id]?.isEmpty ?? true) {
+                    deferQueueBehindDeliveringSteers(outcome ?? .completed, runner: reporting, for: id)
+                    return
+                }
+            }
+            if let outcome {
                 handleQueueOnTurnCompleted(outcome: outcome, for: id)
             }
         }
@@ -7062,6 +7720,19 @@ private extension AgentRuntimeEvent {
     }
 }
 
+private extension ItemKind {
+    /// T5 — a tool the provider runs; a held steer is handed over while one is
+    /// open, so the provider takes it at that tool's boundary.
+    var isToolBoundary: Bool {
+        switch self {
+        case .commandExecution, .fileChange, .mcpToolCall, .webSearch, .subagent, .unknown:
+            return true
+        case .assistantMessage, .reasoning, .plan, .error, .compaction:
+            return false
+        }
+    }
+}
+
 private extension AgentTileOperationalState {
     var acceptsNewTurn: Bool {
         switch self {
@@ -7119,6 +7790,11 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     /// were all green while a Stop was being recorded as a failure.
     private let stopError: Error?
     private let persistentBetweenTurns: Bool
+    /// Held at the top of `run`, before the live handler exists. The supervisor
+    /// builds the runner on the main actor but calls `run` from a global queue,
+    /// so "the runner exists" never meant "the runner is running"; a gate lets a
+    /// check make that window as wide as a loaded machine does.
+    private let startGate: DispatchSemaphore?
     private let released = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var stopCountStorage = 0
@@ -7137,9 +7813,11 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         releaseOnStop: Bool = true,
         runError: Error? = nil,
         stopError: Error? = nil,
-        persistentBetweenTurns: Bool = false
+        persistentBetweenTurns: Bool = false,
+        startGate: DispatchSemaphore? = nil
     ) {
         self.script = script
+        self.startGate = startGate
         self.runtimeObservations = runtimeObservations
         self.holdUntilStopped = holdUntilStopped
         self.releaseOnStop = releaseOnStop
@@ -7164,6 +7842,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     var agentPrompts: [AgentPrompt] { lock.withLock { agentPromptsStorage } }
 
     func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        startGate?.wait()
         lock.withLock {
             runCountStorage += 1
             promptsStorage.append(prompt.text)
@@ -7315,20 +7994,25 @@ private func runComposerKeyContractChecks() throws -> Int {
         throw fail("Shift+Return did not stay on the native newline path")
     }
 
+    // T5 (D1): ⌘↩ force-sends and ⌥↩ queues while a turn works; on a composer
+    // with no working turn both are a send. Neither edits the draft.
     let beforeModifiedReturn = textView.string
     dispatch(try key(36, "\r", .command))
-    guard sendCount == 1, textView.string == beforeModifiedReturn else {
-        throw fail("Command+Return was repurposed or did not preserve native text behavior")
+    guard sendCount == 2, textView.string == beforeModifiedReturn else {
+        throw fail("Command+Return with content must submit (D1 force send) without editing; sends \(sendCount), got '\(textView.string)'")
     }
     dispatch(try key(36, "\r", .option))
-    guard sendCount == 1, textView.string == beforeModifiedReturn + "\n" else {
-        throw fail("Option+Return was repurposed or did not preserve native newline behavior; got '\(textView.string)'")
+    guard sendCount == 3, textView.string == beforeModifiedReturn else {
+        throw fail("Option+Return with content must submit (D1 queue) without editing; sends \(sendCount), got '\(textView.string)'")
     }
-
+    dispatch(try key(36, "\r", [.command, .shift]))
+    guard sendCount == 3, textView.string == beforeModifiedReturn + "\n" || textView.string == beforeModifiedReturn else {
+        throw fail("a Return chord outside D1 must stay native; got '\(textView.string)'")
+    }
     textView.string = "   "
     textView.setSelectedRange(NSRange(location: 3, length: 0))
     dispatch(try key(36, "\r"))
-    guard sendCount == 1, textView.string == "   \n" else {
+    guard sendCount == 3, textView.string == "   \n" else {
         throw fail("whitespace-only Return sent instead of remaining native editing")
     }
 
@@ -7348,7 +8032,7 @@ private func runComposerKeyContractChecks() throws -> Int {
             hasTrimmedContent: true,
             suggestionsVisible: false
           ) == .nativeTextSystem,
-          sendCount == 1,
+          sendCount == 3,
           !textView.hasMarkedText(),
           textView.string == "compose \n",
           textView.selectedRange() == NSRange(location: 9, length: 0) else {
@@ -7357,7 +8041,7 @@ private func runComposerKeyContractChecks() throws -> Int {
 
     textView.suggestionsAreVisible = true
     dispatch(try key(53, "\u{1b}"))
-    guard dismissCount == 1, sendCount == 1, !textView.suggestionsAreVisible else {
+    guard dismissCount == 1, sendCount == 3, !textView.suggestionsAreVisible else {
         throw fail("Escape did not dismiss suggestions first, or unexpectedly emitted send/stop-like work")
     }
     dispatch(try key(53, "\u{1b}"))
@@ -9742,102 +10426,89 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         throw fail("generated-name orchestration still lives in ContinuumApp.swift instead of the supervisor owner")
     }
 
-    // This is a real executable child, not a fake Process object. It records the
-    // argument vector and stdin separately, can hold a request open, and forks a
-    // child for the timeout witness. It never reaches the network.
-    let executable = root.appendingPathComponent("fake-pi", isDirectory: false)
-    let fakePi = """
+    // A real executable child, not a fake Process object, resolved as the pi
+    // titler. The one-shot runs it in a private EMPTY cwd, so every marker it
+    // reads or writes is an absolute path under `root`. Its behaviour is keyed
+    // by the `--model` it was given — the agent's own model id is the one input
+    // that differs per agent and reaches argv. It never reaches the network.
+    let executable = root.appendingPathComponent("pi", isDirectory: false)
+    let fakePi = #"""
     #!/bin/sh
     set -eu
-    printf '%s\\n' "$@" > .p45-args
+    R='\#(root.path)'
+    model=""
+    prev=""
     has_no_session=false
     for arg in "$@"; do
+      if [ "$prev" = "--model" ]; then model="$arg"; fi
       if [ "$arg" = "--no-session" ]; then has_no_session=true; fi
+      prev="$arg"
     done
     if [ "$has_no_session" = false ]; then
       mkdir -p "$HOME/.pi/agent/sessions" "$HOME/.pi/agent/transcripts"
       : > "$HOME/.pi/agent/sessions/fake-session.jsonl"
       : > "$HOME/.pi/agent/transcripts/fake-transcript.jsonl"
     fi
-    if [ -e .p45-input-failure ]; then
-      exec 0<&-
-      : > .p45-input-closed
-      (sleep 0.7; : > .p45-input-child-survived) &
-      printf '%s' "$!" > .p45-input-child-pid
-      sleep 30
+    case "$model" in
+      *input-failure*)
+        exec 0<&-
+        : > "$R/.p45-input-closed"
+        (sleep 0.7; : > "$R/.p45-input-child-survived") &
+        printf '%s' "$!" > "$R/.p45-input-child-pid"
+        sleep 30
+        exit 0
+        ;;
+    esac
+    cat > "$R/.p45-stdin"
+    case "$model" in
+      *normal-descendant*)
+        (sleep 0.7; : > "$R/.p45-normal-child-survived") &
+        printf '%s' "$!" > "$R/.p45-normal-child-pid"
+        printf '%s\n' '{"name":"Normal Child"}'
+        exit 0
+        ;;
+      *timeout*)
+        (sleep 0.7; : > "$R/.p45-child-survived") &
+        printf '%s' "$!" > "$R/.p45-child-pid"
+        sleep 30
+        exit 0
+        ;;
+    esac
+    printf '%s\n' "$@" > "$R/.p45-args"
+    ls -A > "$R/.p45-cwd-listing"
+    ls "$PI_CODING_AGENT_DIR" > "$R/.p45-config-listing"
+    while [ -e "$R/.p45-hold" ]; do sleep 0.01; done
+    if [ -e "$R/.p45-provider-output" ]; then
+      cat "$R/.p45-provider-output"
       exit 0
     fi
-    cat > .p45-stdin
-    if [ -e .p45-normal-descendant ]; then
-      (sleep 0.7; : > .p45-normal-child-survived) &
-      printf '%s' "$!" > .p45-normal-child-pid
-      printf '%s\n' '{"name":"Normal Child"}'
-      exit 0
-    fi
-    if [ -e .p45-timeout ]; then
-      (sleep 0.7; : > .p45-child-survived) &
-      printf '%s' "$!" > .p45-child-pid
-      sleep 30
-      exit 0
-    fi
-    while [ -e .p45-hold ]; do sleep 0.01; done
-    if [ -e .p45-provider-output ]; then
-      cat .p45-provider-output
-      exit 0
-    fi
-    if [ -e .p45-invalid ]; then
-      printf '%s\\n' '{"name":"openai-codex/gpt-5.4-mini"}'
-      exit 0
-    fi
-    printf '%s\\n' '{"name":"\\"  Ship   It  \\""}'
-    """
+    printf '%s\n' '{"name":"\"  Ship   It  \""}'
+    """#
     try fakePi.write(to: executable, atomically: true, encoding: .utf8)
     try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let fakeCommand = PiAgentRunner.ResolvedCommand(executable: executable.path, prefixArgs: [])
+    let piModel = "fixture-provider/fixture-pi-model"
+    let titler: @Sendable (String) -> AgentNameTitler = { model in
+        AgentNameTitler(harness: .pi, command: fakeCommand, model: model)
+    }
 
     let configDirectory = root.appendingPathComponent("pi-config", isDirectory: true)
     let controlledHome = root.appendingPathComponent("controlled-home", isDirectory: true)
-    let ephemeralConfig = root.appendingPathComponent("one-shot-config", isDirectory: true)
+    let workDirectory = root.appendingPathComponent("one-shot-work", isDirectory: true)
     try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
     try fileManager.createDirectory(at: controlledHome, withIntermediateDirectories: true)
-    let authData = Data(#"{"openai-codex":{"access":"fixture-access","expires":4102444800000}}"#.utf8)
-    try authData.write(to: configDirectory.appendingPathComponent("auth.json"))
-    let capability = AgentNameGenerationCapability(
-        executable: executable.path,
-        configDirectory: configDirectory,
-        loginShellPath: "/bin:/usr/bin",
-        model: AgentNameGenerationCapability.cheapModel)
+    try Data(#"{"fixture-provider":{"access":"fixture-access"}}"#.utf8)
+        .write(to: configDirectory.appendingPathComponent("auth.json"))
+    let fixtureEnvironment = [
+        "HOME": controlledHome.path,
+        "PI_CODING_AGENT_DIR": configDirectory.path,
+    ]
 
-    // Capability and login-shell resolution are pure enough to exercise without
-    // invoking a provider. The negative auth witness is intentionally expired.
+    // The menu query is process-free and, in QA, hidden: live titling is only
+    // ever enabled by the real app's startup.
     let now = Date(timeIntervalSince1970: 1_000)
-    let validAuth = Data(#"{"openai-codex":{"access":"fixture-access"}}"#.utf8)
-    let refreshAuth = Data(#"{"openai-codex":{"refresh":"fixture-refresh","expires":0}}"#.utf8)
-    let expiredAuth = Data(#"{"openai-codex":{"access":"fixture-access","expires":999000}}"#.utf8)
-    guard AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: validAuth),
-          AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: refreshAuth),
-          !AgentNameGenerationCapability.hasAuthentication(
-            in: configDirectory, now: now, data: expiredAuth) else {
-        throw fail("auth gate accepted expired access or rejected a usable fixture credential")
-    }
-    guard AgentNameGenerationCapability.resolvedExecutable(
-            loginShellPath: "/missing:/bin", fileExists: { $0 == "/bin/pi" }) == "/bin/pi",
-          AgentNameGenerationCapability.resolvedExecutable(
-            loginShellPath: "/missing:/also-missing", fileExists: { _ in false }) == nil else {
-        throw fail("login-shell executable resolution did not select the first executable or refuse an absent one")
-    }
-
-    // The UI query is a snapshot, not a resolver. This records the initial
-    // unknown state as hidden and proves that a hanging/noisy login shell cannot
-    // make a main-actor menu query wait. The actual resolver is then exercised
-    // on a detached task with both stdout and stderr over the pipe cap.
-    AgentNameGenerationCapabilityCache.shared.resetForQA()
-    let queryStarted = Date()
-    let initialCapabilityQuery = AgentSupervisor.nameGenerationCapabilityAvailable
-    guard !initialCapabilityQuery,
-          Date().timeIntervalSince(queryStarted) < 0.05 else {
-        throw fail("the initial capability query was not immediately hidden: available=\(initialCapabilityQuery)")
+    guard !AgentSupervisor.nameGenerationCapabilityAvailable else {
+        throw fail("live titling was enabled inside a check process")
     }
     let menuProbe = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 280, height: 240))
     let menuProbeID = UUID()
@@ -9853,42 +10524,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     guard menuProbe.openRowMenuForQA(clickedRowId: menuProbeID),
           !menuProbe.rowMenuTitlesForQA.contains(InboxRowAction.generateName.title(forCount: 1)),
           Date().timeIntervalSince(menuQueryStarted) < 0.05 else {
-        throw fail("the initial row-menu capability query was not immediately hidden")
+        throw fail("the row menu offered Generate Name with live titling off, or the query was not immediate")
     }
-    let loginShell = root.appendingPathComponent("noisy-hanging-login-shell", isDirectory: false)
-    let noisyShell = """
-    #!/bin/sh
-    i=0
-    while [ "$i" -lt 4096 ]; do
-      printf 'login-shell-noise-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' "$i"
-      printf 'login-shell-stderr-%s-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\\n' "$i" >&2
-      i=$((i + 1))
-    done
-    sleep 30
-    """
-    try noisyShell.write(to: loginShell, atomically: true, encoding: .utf8)
-    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: loginShell.path)
-    let loginProbeStarted = Date()
-    let loginCapability = await Task.detached(priority: .utility) {
-        AgentNameGenerationCapability.live(
-            environment: [
-                "HOME": controlledHome.path,
-                "PI_CODING_AGENT_DIR": configDirectory.path,
-                "PATH": "/bin:/usr/bin",
-                "SHELL": loginShell.path,
-            ],
-            now: now)
-    }.value
-    guard loginCapability == nil,
-          Date().timeIntervalSince(loginProbeStarted) < 2 else {
-        throw fail("a noisy/hanging login shell was not bounded: result=\(String(describing: loginCapability))")
-    }
-    // The cache remains a hidden/unavailable answer until its own resolver has
-    // completed; this query is still process-free after the failed probe.
-    let postProbeQueryStarted = Date()
-    _ = AgentSupervisor.nameGenerationCapabilityAvailable
-    guard Date().timeIntervalSince(postProbeQueryStarted) < 0.05 else {
-        throw fail("the cached capability query performed synchronous shell work after resolution")
+    // With no injected command and the live gate closed, resolution yields no
+    // command at all — a check-built supervisor can never reach a real CLI.
+    guard AgentNameTitler.liveCommand(for: .pi) == nil,
+          AgentNameTitler.liveCommand(for: .claudeCode) == nil,
+          AgentNameTitler.liveCommand(for: .codex) == nil else {
+        throw fail("a live CLI resolved for titling while the live gate was closed")
     }
 
     func fixtureManifest(in roots: [URL]) -> Set<String> {
@@ -9913,80 +10556,83 @@ private func checkGeneratedNameOneShot<Failure: Error>(
             return lower.contains("session") || lower.contains("transcript")
         }
     }
+    func candidate(_ output: String) -> String? {
+        AgentNameOneShot.rawName(harness: .pi, output: output).flatMap {
+            AgentNameOneShot.sanitizedTitle($0, model: piModel, role: "reviewer", id: UUID())
+        }
+    }
 
-    // The actual one-shot proves stdin, --no-session, no user prompt in argv,
-    // no session/transcript artifact in a controlled HOME/config fixture, and
-    // the shared sanitizer on a quoted candidate line.
+    // The actual one-shot proves stdin, --no-session, the agent's own model,
+    // no user prompt in argv, an empty private cwd, a private pi config copy,
+    // no session/transcript artifact, cleanup of the work directory, and the
+    // shared sanitizer on a quoted Title Case candidate.
     let fixtureRoots = [controlledHome, configDirectory]
     let fixtureBefore = fixtureManifest(in: fixtureRoots)
     let privatePrompt = "PRIVATE prompt that must never become argv metadata"
     let output = try await Task.detached(priority: .utility) {
         try AgentNameOneShot.run(
-            capability: capability,
+            titler: titler(piModel),
             prompt: privatePrompt,
-            cwd: root,
             timeout: 2,
-            environmentOverrides: ["HOME": controlledHome.path],
-            configDirectoryOverride: ephemeralConfig)
+            environmentOverrides: fixtureEnvironment,
+            workDirectoryOverride: workDirectory)
     }.value
-    guard AgentNameOneShot.candidate(
-            from: output,
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == "Ship It" else {
-        throw fail("the fake Pi output did not sanitize to the expected one-line name")
+    guard candidate(output) == "Ship it" else {
+        throw fail("the fake Pi output did not sanitize to the expected sentence-case name: \(output.debugDescription) → \(String(describing: candidate(output)))")
     }
     let args = try String(contentsOf: root.appendingPathComponent(".p45-args"), encoding: .utf8)
     let receivedPrompt = try String(contentsOf: root.appendingPathComponent(".p45-stdin"), encoding: .utf8)
+    let cwdListing = try String(contentsOf: root.appendingPathComponent(".p45-cwd-listing"), encoding: .utf8)
+    let configListing = try String(contentsOf: root.appendingPathComponent(".p45-config-listing"), encoding: .utf8)
     let fixtureAfter = fixtureManifest(in: fixtureRoots)
-    guard args.contains("--no-session"), args.contains("--print"),
+    let expectedArgs = [
+        "--no-session", "--print", "--mode", "text",
+        "--model", piModel, "--thinking", "low",
+        "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
+        "--system-prompt", AgentNameOneShot.titleRules,
+    ].joined(separator: "\n") + "\n"
+    guard args == expectedArgs,
           !args.contains(privatePrompt), !args.contains("Ship It"),
           receivedPrompt == privatePrompt,
+          cwdListing.isEmpty,
+          configListing.split(separator: "\n").contains("auth.json"),
           fixtureBefore == fixtureAfter,
           !containsSessionOrTranscriptArtifact(fixtureAfter),
-          !fileManager.fileExists(atPath: ephemeralConfig.path) else {
-        throw fail("--no-session did not keep the prompt on stdin only or left a session/transcript artifact: args=\(args.debugDescription), stdin=\(receivedPrompt.debugDescription), fixture=\(fixtureAfter.sorted())")
+          !fileManager.fileExists(atPath: workDirectory.path) else {
+        throw fail("the pi titler argv/stdin/cwd/config contract broke: args=\(args.debugDescription), stdin=\(receivedPrompt.debugDescription), cwd=\(cwdListing.debugDescription), config=\(configListing.debugDescription), fixture=\(fixtureAfter.sorted())")
     }
-    guard AgentNameOneShot.candidate(
-            from: "```\\nName: \"  \(config.model)  \"\\n```",
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == nil else {
+    guard candidate("```\n{\"name\":\"  \(piModel)  \"}\n```") == nil,
+          candidate("{\"name\":\"\(piModel)\"}") == nil else {
         throw fail("identifier-shaped one-shot output was accepted as a display name")
     }
 
-    // These are real fake-Pi stdout cases, not only direct parser calls. Every
-    // wrapper/noise shape is refused as a whole; none is trimmed into a title.
+    // Real fake-Pi stdout cases. Every wrapper shape and genuine provider
+    // failure text is refused as a whole; none is trimmed into a title.
     let providerNoiseCases: [(String, String)] = [
         ("warning", "{\"name\":\"Warning: using fallback model\"}\n"),
-        ("fallback", "{\"name\":\"fallback model selected\"}\n"),
-        ("error", "{\"name\":\"Error: provider unavailable\"}\n"),
-        ("progress", "{\"name\":\"Progress 40%\"}\n"),
+        ("error-label", "{\"name\":\"Error: provider unavailable\"}\n"),
+        ("provider-error", "{\"name\":\"API Error 529 overloaded_error\"}\n"),
+        ("auth-error", "{\"name\":\"Not logged in, please run /login\"}\n"),
         ("role", "{\"name\":\"assistant: Ship It\"}\n"),
         ("title-field", "{\"title\":\"Ship It\"}\n"),
         ("extra-field", "{\"name\":\"Ship It\",\"status\":\"done\"}\n"),
         ("fence", "```\n{\"name\":\"Ship It\"}\n```\n"),
         ("prose", "Here is the name you requested: Ship It\n"),
-        ("multi-line", "{\"name\":\"Ship It\"}\nI hope this helps.\n")
+        ("multi-line", "{\"name\":\"Ship It\"}\nI hope this helps.\n"),
+        ("too-long", "{\"name\":\"This title keeps going well past any sidebar length\"}\n"),
     ]
     for (kind, noise) in providerNoiseCases {
         let outputFile = root.appendingPathComponent(".p45-provider-output")
         try noise.write(to: outputFile, atomically: true, encoding: .utf8)
         let noiseOutput = try await Task.detached(priority: .utility) {
             try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler(piModel),
                 prompt: privatePrompt,
-                cwd: root,
                 timeout: 2,
-                environmentOverrides: ["HOME": controlledHome.path],
-                configDirectoryOverride: ephemeralConfig)
+                environmentOverrides: fixtureEnvironment)
         }.value
         try? fileManager.removeItem(at: outputFile)
-        guard AgentNameOneShot.candidate(
-                from: noiseOutput,
-                model: config.model,
-                role: "reviewer",
-                id: UUID()) == nil else {
+        guard candidate(noiseOutput) == nil else {
             throw fail("provider noise case \(kind) was converted into a candidate: \(noiseOutput.debugDescription)")
         }
     }
@@ -9998,32 +10644,33 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     let supervisor = AgentSupervisor(
         store: store,
         makeRunner: { _ in runner },
-        nameGenerationCapabilityProvider: { capability },
+        nameTitlerCommand: { $0 == .pi ? fakeCommand : nil },
         nameGenerationTimeout: 2)
     let generatedID = supervisor.spawn(
         role: "reviewer",
         prompt: privatePrompt,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        !supervisor.isRunning(generatedID)
+        !supervisor.isRunning(generatedID) && supervisor.qaActiveNameGenerationCount == 0
     }) else {
         throw fail("the fixture prompt did not finish before the generated-name action")
     }
     guard supervisor.requestGeneratedName(agentID: generatedID) else {
-        throw fail("an authenticated fake Pi capability did not start the explicit action")
+        throw fail("a resolvable fake pi titler did not start the explicit action")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }), let generated = supervisor.records[generatedID],
-          generated.displayName == "Ship It",
+          generated.displayName == "Ship it",
           // `.generated`, not `.prompt`: a model wrote this text, and the source
           // has to say so both for the sync boundary and for the authority
           // ladder that keeps the next harness poll from undoing it.
           generated.displayNameSource == .generated,
           generated.namingRequest == nil,
-          try store.load(id: generatedID)?.displayName == "Ship It" else {
+          try store.load(id: generatedID)?.displayName == "Ship it" else {
         throw fail("the production request did not land the sanitized name through its CAS path")
     }
     let snapshot = AgentInventory.snapshot(
@@ -10046,40 +10693,42 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         as: UTF8.self)
     guard companionPayload.contains(AgentRecord.defaultAgentName),
           !companionPayload.contains(privatePrompt),
-          !companionPayload.contains("Ship It") else {
+          !companionPayload.contains("Ship it") else {
         throw fail("the actual companion payload carried the source prompt or generated name: \(companionPayload)")
     }
 
-    // A missing capability refuses before any Process launch. This is the required
-    // negative witness for the hidden/absent-auth path.
+    // A harness whose CLI does not resolve refuses before any Process launch.
     let absentRoot = root.appendingPathComponent("absent", isDirectory: true)
     let absentStore = AgentStore(applicationSupportDirectory: absentRoot)
     let absentSupervisor = AgentSupervisor(
         store: absentStore,
         makeRunner: { _ in ScriptedAgentRunner(script: []) },
-        nameGenerationCapabilityProvider: { nil })
+        nameTitlerCommand: { _ in nil })
     let absentID = absentSupervisor.spawn(
         role: nil,
         prompt: nil,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard !absentSupervisor.requestGeneratedName(agentID: absentID),
           absentSupervisor.qaActiveNameGenerationCount == 0,
           absentSupervisor.records[absentID]?.namingRequest == nil else {
-        throw fail("an absent capability started naming work or armed a durable request")
+        throw fail("an unresolvable titler started naming work or armed a durable request")
     }
 
     // A human rename while the real fake process is held must win the request CAS
     // after the child returns. This is production mutation evidence, not a direct
     // AgentRecord-only test.
     let hold = root.appendingPathComponent(".p45-hold")
+    try? fileManager.removeItem(at: root.appendingPathComponent(".p45-stdin"))
     try Data().write(to: hold)
     let raceID = supervisor.spawn(
         role: nil,
         prompt: nil,
         cwd: root,
-        model: config.model,
+        harness: .pi,
+        model: piModel,
         thinking: config.thinking)
     guard supervisor.requestGeneratedName(agentID: raceID),
           await waitUntil(timeout: 5, pollInterval: 0.02, {
@@ -10096,19 +10745,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         throw fail("a human rename lost to a late generated-name completion")
     }
 
-    // Three held requests prove the main-actor admission cap is race-safe: the
-    // first two use distinct fixture working directories so their fake providers
-    // cannot contend over one marker or stdin file, while the refused member is
-    // never armed. Releasing both accepted holds must release both slots.
-    let burstRoots = (0..<3).map { root.appendingPathComponent("burst-\($0)", isDirectory: true) }
-    for burstRoot in burstRoots {
-        try fileManager.createDirectory(at: burstRoot, withIntermediateDirectories: true)
-    }
-    for burstRoot in burstRoots.prefix(2) {
-        try Data().write(to: burstRoot.appendingPathComponent(".p45-hold"))
-    }
-    let burstIDs = burstRoots.map { burstRoot in
-        supervisor.spawn(role: nil, prompt: nil, cwd: burstRoot, model: config.model, thinking: config.thinking)
+    // Three requests against a held titler prove the main-actor admission cap is
+    // race-safe: two run, the third is refused and never armed, and releasing
+    // the hold releases both slots.
+    try Data().write(to: hold)
+    let burstIDs = (0..<3).map { _ in
+        supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi, model: piModel, thinking: config.thinking)
     }
     let burst = supervisor.requestGeneratedNames(agentIDs: burstIDs)
     guard burst.accepted == Array(burstIDs.prefix(2)),
@@ -10118,14 +10760,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
           supervisor.records[burstIDs[2]]?.namingRequest == nil else {
         throw fail("the generated-name burst exceeded the concurrency cap or armed the refused member")
     }
-    for burstRoot in burstRoots.prefix(2) {
-        try fileManager.removeItem(at: burstRoot.appendingPathComponent(".p45-hold"))
-    }
+    try fileManager.removeItem(at: hold)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }),
-          supervisor.records[burstIDs[0]]?.displayName == "Ship It",
-          supervisor.records[burstIDs[1]]?.displayName == "Ship It",
+          supervisor.records[burstIDs[0]]?.displayName == "Ship it",
+          supervisor.records[burstIDs[1]]?.displayName == "Ship it",
           supervisor.records[burstIDs[2]]?.displayName == AgentRecord.defaultAgentName,
           supervisor.records[burstIDs[2]]?.namingRequest == nil else {
         throw fail("the capped burst did not release both accepted names while keeping the refused member unchanged")
@@ -10133,15 +10773,12 @@ private func checkGeneratedNameOneShot<Failure: Error>(
 
     // Timeout: the fake forks a child that would leave a marker after the leader
     // exits. A process-group kill must prevent that marker from ever appearing.
-    let timeoutMarker = root.appendingPathComponent(".p45-timeout")
-    try Data().write(to: timeoutMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-child-survived"))
     let timeoutResult = await Task.detached(priority: .utility) {
         do {
             _ = try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler("fixture-provider/timeout"),
                 prompt: "timeout prompt",
-                cwd: root,
                 timeout: 0.12)
             return false
         } catch AgentNameOneShotError.timedOut {
@@ -10150,7 +10787,6 @@ private func checkGeneratedNameOneShot<Failure: Error>(
             return false
         }
     }.value
-    try? fileManager.removeItem(at: timeoutMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     guard timeoutResult,
           !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-child-survived").path) else {
@@ -10168,26 +10804,18 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     // writes a valid result and exits immediately, while its child keeps both
     // output descriptors open. The return must stay bounded and the child must
     // not get a chance to leave its survival marker.
-    let normalDescendantMarker = root.appendingPathComponent(".p45-normal-descendant")
-    try Data().write(to: normalDescendantMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-survived"))
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-normal-child-pid"))
     let normalStarted = Date()
     let normalResult = await Task.detached(priority: .utility) {
         try? AgentNameOneShot.run(
-            capability: capability,
+            titler: titler("fixture-provider/normal-descendant"),
             prompt: "normal descendant prompt",
-            cwd: root,
             timeout: 1)
     }.value
     let normalElapsed = Date().timeIntervalSince(normalStarted)
-    try? fileManager.removeItem(at: normalDescendantMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
-    guard normalResult.map({ AgentNameOneShot.candidate(
-            from: $0,
-            model: config.model,
-            role: "reviewer",
-            id: UUID()) == "Normal Child" }) == true,
+    guard normalResult.map({ candidate($0) == "Normal child" }) == true,
           normalElapsed < 2,
           !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-normal-child-survived").path),
           !descendantIsAlive(pidFile: root.appendingPathComponent(".p45-normal-child-pid")) else {
@@ -10197,17 +10825,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     // Input failure is the other cleanup path. The fake closes stdin before
     // the write and leaves a descendant holding stdout/stderr; no unbounded
     // post-SIGTERM wait or pipe read may retain the request slot.
-    let inputFailureMarker = root.appendingPathComponent(".p45-input-failure")
-    try Data().write(to: inputFailureMarker)
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-survived"))
     _ = try? fileManager.removeItem(at: root.appendingPathComponent(".p45-input-child-pid"))
     let inputFailureStarted = Date()
     let inputFailureResult = await Task.detached(priority: .utility) {
         do {
             _ = try AgentNameOneShot.run(
-                capability: capability,
+                titler: titler("fixture-provider/input-failure"),
                 prompt: privatePrompt,
-                cwd: root,
                 timeout: 1,
                 inputWriteDelay: 0.2)
             return "success"
@@ -10218,7 +10843,6 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         }
     }.value
     let inputFailureElapsed = Date().timeIntervalSince(inputFailureStarted)
-    try? fileManager.removeItem(at: inputFailureMarker)
     try? await Task.sleep(nanoseconds: 1_000_000_000)
     guard inputFailureResult == "input-failed",
           inputFailureElapsed < 2,
@@ -10228,27 +10852,27 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     }
 
     // The same two paths must release the supervisor's concurrency slot. The
-    // input-failure agent starts with a real prompt-derived name so failure is
-    // also proven not to clobber the prior title.
-    let normalSupervisorRoot = root.appendingPathComponent("normal-supervisor", isDirectory: true)
-    let inputSupervisorRoot = root.appendingPathComponent("input-supervisor", isDirectory: true)
-    try fileManager.createDirectory(at: normalSupervisorRoot, withIntermediateDirectories: true)
-    try fileManager.createDirectory(at: inputSupervisorRoot, withIntermediateDirectories: true)
-    try Data().write(to: normalSupervisorRoot.appendingPathComponent(".p45-normal-descendant"))
-    try Data().write(to: inputSupervisorRoot.appendingPathComponent(".p45-input-failure"))
+    // input-failure agent starts with a prior name so failure is also proven
+    // not to clobber it. Neither spawn runs a turn, so no automatic attempt
+    // competes for a slot.
     let normalSupervisorID = supervisor.spawn(
         role: nil,
         prompt: nil,
-        cwd: normalSupervisorRoot,
-        model: config.model,
+        cwd: root,
+        harness: .pi,
+        model: "fixture-provider/normal-descendant",
         thinking: config.thinking)
     let inputSupervisorID = supervisor.spawn(
         role: nil,
-        prompt: "Prior stable name",
-        cwd: inputSupervisorRoot,
-        model: config.model,
+        prompt: nil,
+        cwd: root,
+        harness: .pi,
+        model: "fixture-provider/input-failure",
         thinking: config.thinking)
-    guard let priorName = supervisor.records[inputSupervisorID]?.displayName else {
+    // An automatic (non-manual) prior title, so the explicit request may run.
+    guard let priorRequest = supervisor.beginNameGeneration(agentID: inputSupervisorID),
+          supervisor.applyGeneratedName("Prior stable name", for: priorRequest, agentID: inputSupervisorID),
+          let priorName = supervisor.records[inputSupervisorID]?.displayName else {
         throw fail("input-failure setup did not create a prior display name")
     }
     guard supervisor.requestGeneratedNames(agentIDs: [normalSupervisorID, inputSupervisorID]).accepted.count == 2 else {
@@ -10256,13 +10880,13 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
-    }), supervisor.records[normalSupervisorID]?.displayName == "Normal Child",
+    }), supervisor.records[normalSupervisorID]?.displayName == "Normal child",
           supervisor.records[inputSupervisorID]?.displayName == priorName,
           supervisor.records[inputSupervisorID]?.namingRequest == nil else {
         throw fail("normal/input-failure supervisor paths did not release their slots or preserve the prior name")
     }
 
-    return "P4.5 async cached capability gate with bounded noisy/hanging login-shell witness; fake-pi stdin/--no-session with controlled HOME/config artifact absence, strict one-field JSON/noise rejection, auth/executable gates, exact companion-envelope prompt/generated scrub, production CAS, supervisor-owned burst cap/release, normal-exit/input-failure/timeout process-group cleanup, bounded pipe drains, and prior-name preservation"
+    return "P4.5 pi titler: QA-closed live gate hides the action and resolves no CLI; fake-pi exact argv (agent's own model) / stdin-only prompt / empty private cwd / private config copy / no session artifact / work-dir cleanup; strict one-field JSON with provider-failure rejection; exact companion-envelope prompt/generated scrub; production CAS; supervisor-owned burst cap/release; normal-exit/input-failure/timeout process-group cleanup; prior-name preservation"
 }
 
 /// Focused witness for record-backed names reaching an already-attached tile.
@@ -10330,6 +10954,9 @@ func runAgentDisplayNameChecks() async throws {
     }
 
     print("agent display names: first-prompt, manual, and generated names refresh attached tile headers")
+    print(try await checkPerHarnessSessionTitles(fail: fail))
+    print(try await checkClaudeTitleLadderRaces(fail: fail))
+    print(try await checkAutomaticNameRefresh(fail: fail))
 }
 
 @MainActor
@@ -11252,10 +11879,11 @@ private func checkClaudeHarnessTitleReader<Failure: Error>(
 /// Witnesses the SUPERVISOR wiring that `checkAgentNameContract`'s pure
 /// AgentRecord/reader assertions cannot reach: `refreshDerivedName` actually
 /// fires from a real `.turnCompleted` event rather than only from the
-/// explicit "Generate Name" menu action, codex/pi's automatic fallback is
-/// bounded per agent rather than retried forever, claude's own harness never
-/// falls through to the pi one-shot, and a manual rename shuts every
-/// automatic path off before the next turn arrives.
+/// explicit "Generate Name" menu action; a generated title is final for the
+/// automatic path (no churn on later turns); the automatic path is bounded per
+/// agent for every harness; a manual rename shuts every automatic path off
+/// before the next turn; and a claude session with no title reaches CLAUDE's
+/// titler, never pi's.
 @MainActor
 private func checkAutomaticNameRefresh<Failure: Error>(
     fail: (String) -> Failure
@@ -11265,163 +11893,657 @@ private func checkAutomaticNameRefresh<Failure: Error>(
         .appendingPathComponent("continuum-automatic-name-refresh-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: root) }
     try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let models: [AgentHarness: String] = [
+        .claudeCode: "anthropic/claude-fixture-opus",
+        .codex: "openai-codex/gpt-fixture-codex",
+        // Pi only sends on a model its (QA fixture) catalogue lists.
+        .pi: AgentCatalogQAFixture.pi[0],
+    ]
 
-    // A fake pi that appends one line per invocation to a counter file, so a
-    // test can count how many times the provider actually ran. `succeed`
-    // picks between a usable name (encoding which invocation it was, so a
-    // second turn's title can be told apart from the first) and output that
-    // never sanitises to a candidate at all.
-    func makeCapability(name: String, counter: URL, succeed: Bool) throws -> AgentNameGenerationCapability {
-        let executable = root.appendingPathComponent("fake-pi-\(name)", isDirectory: false)
-        let tally = """
-        count=0
-        if [ -f "\(counter.path)" ]; then count=$(wc -l < "\(counter.path)" | tr -d ' '); fi
-        n=$((count + 1))
-        echo "$n" >> "\(counter.path)"
-        """
-        let body = succeed
-            ? "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf '{\"name\":\"Attempt %s\"}\\n' \"$n\"\n"
-            : "#!/bin/sh\nset -eu\ncat > /dev/null\n\(tally)\nprintf 'not a json name at all\\n'\n"
-        try body.write(to: executable, atomically: true, encoding: .utf8)
-        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let configDirectory = root.appendingPathComponent("config-\(name)", isDirectory: true)
-        try fileManager.createDirectory(at: configDirectory, withIntermediateDirectories: true)
-        return AgentNameGenerationCapability(
-            executable: executable.path, configDirectory: configDirectory, loginShellPath: "/bin:/usr/bin")
-    }
-
-    func lineCount(_ url: URL) -> Int {
-        (try? String(contentsOf: url, encoding: .utf8)).map {
-            $0.split(separator: "\n", omittingEmptySubsequences: true).count
-        } ?? 0
+    func completeTurn(
+        _ supervisor: AgentSupervisor, _ runner: ScriptedAgentRunner, _ id: AgentID, _ turn: String
+    ) async throws {
+        let sequence = supervisor.records[id]?.latestTerminalEvent?.sequence
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: turn, outcome: .completed, errorMessage: nil)) else {
+            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+        }
+        guard await waitUntil(timeout: 12, pollInterval: 0.02, {
+            supervisor.records[id]?.latestTerminalEvent?.sequence != sequence
+                && supervisor.qaActiveHarnessTitleCount == 0
+                && supervisor.qaActiveNameGenerationCount == 0
+        }) else { throw fail("turn \(turn) did not drain its naming work") }
     }
 
     // -- 1 & 2. codex: refreshDerivedName fires from .turnCompleted alone (no
-    // explicit "Generate Name" call anywhere in this test), and a SECOND
-    // turn's title supersedes the first — equal authority replaces, now
-    // proven through the live wiring rather than the record in isolation. --
-    let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
-    let fireCounter = root.appendingPathComponent("fire-counter.txt")
-    let fireCapability = try makeCapability(name: "fire", counter: fireCounter, succeed: true)
+    // explicit "Generate Name" call anywhere in this test), and the generated
+    // title is FINAL for the automatic path: a second turn neither re-asks the
+    // titler nor changes the name. --
+    let fire = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("fire-bin", isDirectory: true), harness: .codex,
+        log: root.appendingPathComponent("fire-log", isDirectory: true), behavior: .succeed("Attempt $n"))
     let fireStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("fire-support", isDirectory: true))
     let fireRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let fireSupervisor = AgentSupervisor(
         store: fireStore, makeRunner: { _ in fireRunner },
-        nameGenerationCapabilityProvider: { fireCapability }, nameGenerationTimeout: 2)
+        nameTitlerCommand: { $0 == .codex ? fire.command : nil }, nameGenerationTimeout: 10)
     let fireID = fireSupervisor.spawn(
         role: nil, prompt: "investigate the flaky build", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
+        model: models[.codex]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { fireRunner.runCount > 0 }) else {
         throw fail("the codex fixture agent's runner never started")
     }
-    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the scripted runner had no live handler to accept a turnCompleted event")
+    try await completeTurn(fireSupervisor, fireRunner, fireID, "t1")
+    guard fireSupervisor.records[fireID]?.displayNameSource == .generated,
+          fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
+        throw fail("a codex agent's turnCompleted did not land its own titler's name: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
     }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        fireSupervisor.records[fireID]?.displayNameSource == .generated
-    }) else {
-        throw fail("a codex agent's turnCompleted did not trigger the automatic generated-name fallback: source=\(String(describing: fireSupervisor.records[fireID]?.displayNameSource)) name=\(String(describing: fireSupervisor.records[fireID]?.displayName))")
-    }
-    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1" else {
-        throw fail("the automatic fallback did not land the provider's own name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
-    }
-    guard fireRunner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the scripted runner refused a second turnCompleted event")
-    }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
-        fireSupervisor.records[fireID]?.displayName == "Attempt 2"
-    }) else {
-        throw fail("a second harness turn did not replace the first automatic name: \(String(describing: fireSupervisor.records[fireID]?.displayName))")
+    try await completeTurn(fireSupervisor, fireRunner, fireID, "t2")
+    guard fireSupervisor.records[fireID]?.displayName == "Attempt 1", fire.invocationCount == 1 else {
+        throw fail("a second turn churned the generated name: name=\(String(describing: fireSupervisor.records[fireID]?.displayName)) titlerCalls=\(fire.invocationCount)")
     }
     fireRunner.releaseRunAfterStop()
 
-    // -- 3. codex: the automatic path is BOUNDED. A provider that never
-    // produces a usable name must not be retried forever — three attempts,
-    // then silence, across five completed turns. --
-    let boundCounter = root.appendingPathComponent("bound-counter.txt")
-    let boundCapability = try makeCapability(name: "bound", counter: boundCounter, succeed: false)
-    let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support", isDirectory: true))
-    let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
-    let boundSupervisor = AgentSupervisor(
-        store: boundStore, makeRunner: { _ in boundRunner },
-        nameGenerationCapabilityProvider: { boundCapability }, nameGenerationTimeout: 2)
-    let boundID = boundSupervisor.spawn(
-        role: nil, prompt: "a prompt that never gets named", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
-        throw fail("the bounded-retry fixture agent's runner never started")
-    }
-    for turn in 1...5 {
-        guard boundRunner.emit(.turnCompleted(threadId: "t", turnId: "t\(turn)", outcome: .completed, errorMessage: nil)) else {
-            throw fail("turn \(turn) had no live handler to accept a turnCompleted event")
+    // -- 3. every harness: the automatic path is BOUNDED. A titler that never
+    // produces a usable name runs three times across five completed turns,
+    // then never again. Claude's ai-title read misses every turn here, so its
+    // fall-through is what is being bounded. --
+    for harness in [AgentHarness.codex, .claudeCode, .pi] {
+        let bound = try FakeTitlerCLI(
+            binDirectory: root.appendingPathComponent("bound-bin-\(harness)", isDirectory: true), harness: harness,
+            log: root.appendingPathComponent("bound-log-\(harness)", isDirectory: true), behavior: .fail)
+        let boundStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("bound-support-\(harness)", isDirectory: true))
+        let boundRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let boundSupervisor = AgentSupervisor(
+            store: boundStore, makeRunner: { _ in boundRunner },
+            nameTitlerCommand: { $0 == harness ? bound.command : nil }, nameGenerationTimeout: 10,
+            claudeSessionTitle: { _, _ in nil })
+        let boundID = boundSupervisor.spawn(
+            role: nil, prompt: "a prompt that never gets named", cwd: root, harness: harness,
+            model: models[harness]!, thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { boundRunner.runCount > 0 }) else {
+            throw fail("the bounded-retry fixture agent's runner never started")
         }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        let nameBefore = boundSupervisor.records[boundID]?.displayName
+        for turn in 1...5 {
+            try await completeTurn(boundSupervisor, boundRunner, boundID, "t\(turn)")
+        }
+        guard bound.invocationCount == 3,
+              boundSupervisor.records[boundID]?.displayName == nameBefore else {
+            throw fail("\(harness): a titler that never produces a name ran \(bound.invocationCount) time(s) across 5 turns (want 3), name=\(String(describing: boundSupervisor.records[boundID]?.displayName))")
+        }
+        boundRunner.releaseRunAfterStop()
     }
-    guard lineCount(boundCounter) == 3 else {
-        throw fail("a provider that never produces a name was invoked \(lineCount(boundCounter)) time(s) across 5 completed turns, not bounded to 3")
-    }
-    boundRunner.releaseRunAfterStop()
 
     // -- 4. codex: a MANUAL rename shuts the automatic path off before the
     // next turn — the automatic fallback must never even ask the provider. --
-    let manualCounter = root.appendingPathComponent("manual-counter.txt")
-    let manualCapability = try makeCapability(name: "manual", counter: manualCounter, succeed: true)
+    let manual = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("manual-bin", isDirectory: true), harness: .codex,
+        log: root.appendingPathComponent("manual-log", isDirectory: true), behavior: .succeed("Should never land"))
     let manualStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("manual-support", isDirectory: true))
     let manualRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let manualSupervisor = AgentSupervisor(
         store: manualStore, makeRunner: { _ in manualRunner },
-        nameGenerationCapabilityProvider: { manualCapability }, nameGenerationTimeout: 2)
+        nameTitlerCommand: { $0 == .codex ? manual.command : nil }, nameGenerationTimeout: 10)
     let manualID = manualSupervisor.spawn(
         role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
-        model: codexConfig.model, thinking: codexConfig.thinking)
+        model: models[.codex]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
         throw fail("the manual-rename fixture agent's runner never started")
     }
     guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
         throw fail("the manual rename fixture call itself was refused")
     }
-    guard manualRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the manual-rename fixture runner had no live handler")
-    }
-    try await Task.sleep(nanoseconds: 300_000_000)
+    try await completeTurn(manualSupervisor, manualRunner, manualID, "t1")
     guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
           manualSupervisor.records[manualID]?.displayNameSource == .manual,
-          lineCount(manualCounter) == 0 else {
-        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(lineCount(manualCounter))")
+          manual.invocationCount == 0 else {
+        throw fail("a manual rename did not block the automatic fallback: name=\(String(describing: manualSupervisor.records[manualID]?.displayName)) source=\(String(describing: manualSupervisor.records[manualID]?.displayNameSource)) providerCalls=\(manual.invocationCount)")
     }
     manualRunner.releaseRunAfterStop()
 
-    // -- 5. claude: the harness that DOES name its own conversations must
-    // never fall through to the pi one-shot, and a turn with no session file
-    // on disk yet must not crash or invent a title. --
-    let claudeConfig = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode)
-    let claudeCalled = LockedFlag()
+    // -- 5. claude with no session file at all: the read finds nothing, and
+    // the fall-through goes to CLAUDE's titler. A pi on the same machine is
+    // never asked — there is no cross-CLI route. --
+    let claudeBin = root.appendingPathComponent("claude-bin", isDirectory: true)
+    let claudeTitler = try FakeTitlerCLI(
+        binDirectory: claudeBin, harness: .claudeCode,
+        log: root.appendingPathComponent("claude-log", isDirectory: true), behavior: .succeed("Inspect missing session file"))
+    let piBeside = try FakeTitlerCLI(
+        binDirectory: claudeBin, harness: .pi,
+        log: root.appendingPathComponent("claude-pi-log", isDirectory: true), behavior: .succeed("Pi must not title claude"))
     let claudeStore = AgentStore(applicationSupportDirectory: root.appendingPathComponent("claude-support", isDirectory: true))
     let claudeRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
     let claudeSupervisor = AgentSupervisor(
         store: claudeStore, makeRunner: { _ in claudeRunner },
-        nameGenerationCapabilityProvider: { claudeCalled.set(); return nil },
-        nameGenerationTimeout: 2)
+        nameTitlerCommand: titlerCommands(in: claudeBin),
+        nameGenerationTimeout: 10,
+        claudeSessionTitle: { cwd, sessionId in
+            ClaudeSessionTitleReader.title(homeURL: root, cwd: cwd, sessionId: sessionId)
+        })
     let claudeID = claudeSupervisor.spawn(
         role: nil, prompt: "a claude agent with no session file on disk", cwd: root, harness: .claudeCode,
-        model: claudeConfig.model, thinking: claudeConfig.thinking)
+        model: models[.claudeCode]!, thinking: "medium")
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { claudeRunner.runCount > 0 }) else {
         throw fail("the claude fixture agent's runner never started")
     }
-    let claudeNameBefore = claudeSupervisor.records[claudeID]?.displayName
-    guard claudeRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
-        throw fail("the claude fixture runner had no live handler")
-    }
-    // No session file exists at this cwd, so there is nothing to read; this
-    // must resolve to "no title yet", not a crash and not an invented one.
-    try await Task.sleep(nanoseconds: 300_000_000)
-    guard claudeSupervisor.records[claudeID]?.displayName == claudeNameBefore,
-          !claudeCalled.wasSet else {
-        throw fail("a claude agent with no session file fell through to the pi one-shot fallback (called=\(claudeCalled.wasSet)) or changed its name without a title to read")
+    try await completeTurn(claudeSupervisor, claudeRunner, claudeID, "t1")
+    guard claudeSupervisor.records[claudeID]?.displayName == "Inspect missing session file",
+          claudeSupervisor.records[claudeID]?.displayNameSource == .generated,
+          claudeTitler.invocationCount == 1,
+          piBeside.invocationCount == 0 else {
+        throw fail("a session-less claude turn did not reach claude's own titler (claude=\(claudeTitler.invocationCount), pi=\(piBeside.invocationCount), name=\(String(describing: claudeSupervisor.records[claudeID]?.displayName)))")
     }
     claudeRunner.releaseRunAfterStop()
 
-    return "automatic name refresh: codex/pi fallback fires from turnCompleted with no explicit action, a later harness turn supersedes an earlier automatic name, the automatic path is bounded to 3 attempts against a provider that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and claude's own harness never falls through to the pi one-shot on a session-less turn"
+    return "automatic name refresh: the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
+}
+
+/// A fake claude / codex / pi on disk, for the session-titler witnesses. It is
+/// a real executable the production one-shot spawns, so everything the app
+/// does to reach it — command resolution, argv, cwd, stdin, environment, the
+/// output channel — is the production path. Each invocation N records
+/// `args-N` (one argument per line), `cwd-N` / `cwd-listing-N`, `stdin-N`, and
+/// for codex the `--output-schema` file as `schema-N`, under `log`. While
+/// `log/hold` exists it waits (after touching `started-N`), so a check can
+/// interleave a rename with a live titler. The name may contain `$n`.
+private struct FakeTitlerCLI {
+    enum Behavior { case succeed(String), fail }
+    let executable: URL
+    let log: URL
+
+    var command: PiAgentRunner.ResolvedCommand {
+        PiAgentRunner.ResolvedCommand(executable: executable.path, prefixArgs: [])
+    }
+
+    init(binDirectory: URL, harness: AgentHarness, log: URL, behavior: Behavior) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: binDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: log, withIntermediateDirectories: true)
+        let name: String
+        switch harness {
+        case .claudeCode: name = "claude"
+        case .codex: name = "codex"
+        case .pi: name = "pi"
+        }
+        executable = binDirectory.appendingPathComponent(name, isDirectory: false)
+        self.log = log
+        let emit: String
+        switch (harness, behavior) {
+        case (.claudeCode, .succeed(let title)):
+            emit = #"printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"name":"%s"}}\n' "\#(title)""#
+        case (.claudeCode, .fail):
+            emit = #"printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded"}'"#
+        case (.codex, .succeed(let title)):
+            emit = #"printf '%s\n' '{"type":"thread.started"}'; printf '{"name":"%s"}' "\#(title)" > "$out""#
+        case (.codex, .fail):
+            emit = #"printf 'not json at all' > "$out""#
+        case (.pi, .succeed(let title)):
+            emit = #"printf '{"name":"%s"}\n' "\#(title)""#
+        case (.pi, .fail):
+            emit = #"printf 'not a json name at all\n'"#
+        }
+        let script = #"""
+        #!/bin/sh
+        set -eu
+        LOG='\#(log.path)'
+        count=0
+        if [ -f "$LOG/count" ]; then count=$(wc -l < "$LOG/count" | tr -d ' '); fi
+        n=$((count + 1))
+        echo "$n" >> "$LOG/count"
+        printf '%s\n' "$@" > "$LOG/args-$n"
+        pwd -P > "$LOG/cwd-$n"
+        ls -A > "$LOG/cwd-listing-$n"
+        out=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "-o" ]; then out="$arg"; fi
+          if [ "$prev" = "--output-schema" ]; then cat "$arg" > "$LOG/schema-$n"; fi
+          prev="$arg"
+        done
+        cat > "$LOG/stdin-$n"
+        : > "$LOG/started-$n"
+        while [ -e "$LOG/hold" ]; do sleep 0.02; done
+        \#(emit)
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    }
+
+    var invocationCount: Int {
+        (try? String(contentsOf: log.appendingPathComponent("count"), encoding: .utf8)).map {
+            $0.split(separator: "\n", omittingEmptySubsequences: true).count
+        } ?? 0
+    }
+
+    func recorded(_ name: String, _ invocation: Int) -> String? {
+        try? String(contentsOf: log.appendingPathComponent("\(name)-\(invocation)"), encoding: .utf8)
+    }
+
+    func hold() throws { try Data().write(to: log.appendingPathComponent("hold")) }
+    func release() { try? FileManager.default.removeItem(at: log.appendingPathComponent("hold")) }
+}
+
+/// The runners' OWN resolution over one directory, exactly as production feeds
+/// it the process PATH: `resolvedCommand(pathDirs:extraDirs:fileExists:)` per
+/// harness, absolute hits only. A directory without `pi` therefore models a
+/// machine without pi.
+private func titlerCommands(in directory: URL) -> @Sendable (AgentHarness) -> PiAgentRunner.ResolvedCommand? {
+    let path = directory.path
+    return { harness in
+        let fileExists: @Sendable (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+        let command: PiAgentRunner.ResolvedCommand
+        switch harness {
+        case .claudeCode:
+            command = ClaudeAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        case .codex:
+            command = CodexAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        case .pi:
+            command = PiAgentRunner.resolvedCommand(pathDirs: [path], extraDirs: [], fileExists: fileExists)
+        }
+        return command.prefixArgs.isEmpty ? command : nil
+    }
+}
+
+/// T2 (0.7.26): every harness titles with its OWN CLI, end to end through the
+/// production supervisor — the runners' command resolution, the one-shot's argv,
+/// cwd, stdin and output channel, the sanitizer, the CAS, the store and an
+/// attached tile header. The argv is asserted literally (fixture argv must match
+/// production), and each fake records what it was really given.
+@MainActor
+private func checkPerHarnessSessionTitles<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-session-titles-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let schema = #"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+    let request = "fix the zone drag snapping when tiles are released near an edge"
+    // Pi refuses to SEND on a model its catalogue does not list; checks serve
+    // the QA catalogue fixture, so a pi agent that must run a turn uses one of
+    // its ids. claude/codex keep persisted provider-compatible ids.
+    let piModel = AgentCatalogQAFixture.pi[0]
+    let reply = "I will look at the drag handler and the snap threshold first."
+
+    // One machine with all three CLIs. Each harness's title is chosen to need
+    // the sanitizer: claude's is Title Case with a trailing period, and pi's
+    // holds "model" and "error", which the old word filter threw away.
+    let allBin = root.appendingPathComponent("bin-all", isDirectory: true)
+    let claude = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-claude", isDirectory: true), behavior: .succeed("Fix Zone Drag Snapping."))
+    let codex = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .codex,
+        log: root.appendingPathComponent("log-codex", isDirectory: true), behavior: .succeed("Wire codex session titles"))
+    let pi = try FakeTitlerCLI(
+        binDirectory: allBin, harness: .pi,
+        log: root.appendingPathComponent("log-pi", isDirectory: true), behavior: .succeed("Model picker error handling"))
+    let fakes: [AgentHarness: FakeTitlerCLI] = [.claudeCode: claude, .codex: codex, .pi: pi]
+
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    var runners: [ScriptedAgentRunner] = []
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in
+            // `run` may not begin until the main queue turns over: the slow
+            // global-queue start under load, made certain.
+            let started = DispatchSemaphore(value: 0)
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true, startGate: started)
+            DispatchQueue.main.async { started.signal() }
+            runners.append(runner)
+            return runner
+        },
+        nameTitlerCommand: titlerCommands(in: allBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { cwd, sessionId in
+            ClaudeSessionTitleReader.title(homeURL: home, cwd: cwd, sessionId: sessionId)
+        })
+    defer { runners.forEach { $0.releaseRunAfterStop() } }
+
+    let cases: [(AgentHarness, String, String, [String])] = [
+        (.claudeCode, "anthropic/claude-fixture-opus", "Fix zone drag snapping", [
+            "-p", "--no-session-persistence", "--output-format", "json", "--json-schema", schema,
+            "--model", "claude-fixture-opus", "--effort", "low", "--tools", "", "--strict-mcp-config",
+            "--disable-slash-commands", "--settings", #"{"disableAllHooks":true}"#,
+            "--system-prompt", AgentNameOneShot.titleRules,
+        ]),
+        (.codex, "openai-codex/gpt-fixture-codex", "Wire codex session titles", [
+            "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            "--output-schema", "<schema>", "-o", "<last-message>",
+            "-m", "gpt-fixture-codex", "-c", "model_reasoning_effort=low",
+        ]),
+        (.pi, piModel, "Model picker error handling", [
+            "--no-session", "--print", "--mode", "text", "--model", piModel,
+            "--thinking", "low", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files",
+            "--no-approve", "--system-prompt", AgentNameOneShot.titleRules,
+        ]),
+    ]
+    var expectedCalls: [AgentHarness: Int] = [:]
+    for (harness, model, expected, expectedArgs) in cases {
+        let id = supervisor.spawn(
+            role: nil, prompt: request, cwd: root, harness: harness, model: model, thinking: "medium")
+        // A runner that EXISTS is not yet running: `makeRunner` returns on the
+        // main actor and `run` starts later on a global queue. Only `runCount`
+        // says the live handler is there for `emit`.
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+                  runners.count == supervisor.records.count && (runners.last?.runCount ?? 0) > 0
+              }),
+              let runner = runners.last, let record = supervisor.records[id] else {
+            throw fail("\(harness): the fixture runner never started")
+        }
+        if harness == .claudeCode {
+            // A real session file with assistant frames and NO ai-title — what
+            // claude ≥ 2.1.278 writes headless. The reader must miss and the
+            // ladder must fall through to claude's own titler.
+            let location = AgentSupervisor.claudeSessionLocation(for: record)
+            let file = ClaudeSessionTranscriptReader.sessionFileURL(
+                homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+            try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let tile = Tile(id: UUID(), kind: .managedAgent, title: "Agent",
+                        frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
+                        zPosition: .fromLegacyRank(0), runtimeRef: nil,
+                        metadata: TileMetadata(launchProfileId: "managed-agent"))
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.attach(agentID: id, supervisor: supervisor)
+        defer { view.detach() }
+        guard runner.emit(.contentDelta(threadId: "t", turnId: "t1", streamKind: .assistant, delta: reply)),
+              runner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+            throw fail("\(harness): the fixture runner had no live handler")
+        }
+        guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+            supervisor.records[id]?.displayNameSource == .generated
+        }) else {
+            throw fail("RED \(harness): the first completed turn did not produce a generated title; name=\(String(describing: supervisor.records[id]?.displayName)) source=\(String(describing: supervisor.records[id]?.displayNameSource)) calls=\(fakes.mapValues(\.invocationCount))")
+        }
+        guard supervisor.records[id]?.displayName == expected,
+              view.qaAgentHeaderName == expected,
+              try store.load(id: id)?.displayName == expected,
+              try store.load(id: id)?.displayNameSource == .generated else {
+            throw fail("\(harness): the title did not reach record, store and attached header as \(expected.debugDescription): record=\(String(describing: supervisor.records[id]?.displayName)) header=\(view.qaAgentHeaderName)")
+        }
+        // Each harness asked its own CLI, once, and nobody else's.
+        expectedCalls[harness] = 1
+        for (other, fake) in fakes {
+            let want = expectedCalls[other] ?? 0
+            guard fake.invocationCount == want else {
+                throw fail("\(harness): \(other)'s CLI ran \(fake.invocationCount) time(s), want \(want)")
+            }
+        }
+        guard let fake = fakes[harness],
+              let argsText = fake.recorded("args", 1),
+              let stdin = fake.recorded("stdin", 1),
+              let cwd = fake.recorded("cwd", 1)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let listing = fake.recorded("cwd-listing", 1) else {
+            throw fail("\(harness): the fake CLI recorded nothing")
+        }
+        var args = argsText.components(separatedBy: "\n")
+        if args.last == "" { args.removeLast() }
+        if harness == .codex, args.count == expectedArgs.count {
+            // The two file arguments are per-run temp paths: assert their shape
+            // and the schema's bytes, then compare the rest literally.
+            guard args[6].hasPrefix("/"), args[8].hasPrefix("/"),
+                  !args[6].hasPrefix(cwd), !args[8].hasPrefix(cwd),
+                  fake.recorded("schema", 1) == schema else {
+                throw fail("codex: --output-schema/-o were not private files holding the name schema: \(args)")
+            }
+            args[6] = "<schema>"
+            args[8] = "<last-message>"
+        }
+        guard args == expectedArgs else {
+            throw fail("\(harness): argv differs from production's contract:\n got \(args)\nwant \(expectedArgs)")
+        }
+        guard !argsText.contains(request), !argsText.contains(reply),
+              stdin.contains(request), stdin.contains(reply),
+              harness != .codex || stdin.hasPrefix(AgentNameOneShot.titleRules) else {
+            throw fail("\(harness): the request/reply did not travel on stdin only: stdin=\(stdin.debugDescription)")
+        }
+        guard listing.isEmpty, cwd != root.resolvingSymlinksInPath().path,
+              !fileManager.fileExists(atPath: cwd) else {
+            throw fail("\(harness): the titler did not run in an empty private cwd that was removed afterwards: cwd=\(cwd) listing=\(listing.debugDescription)")
+        }
+
+        // No churn: a later turn re-asks nobody, and for claude a late ai-title
+        // does not replace the generated name (generated outranks harness).
+        if harness == .claudeCode, let record = supervisor.records[id] {
+            let location = AgentSupervisor.claudeSessionLocation(for: record)
+            let file = ClaudeSessionTranscriptReader.sessionFileURL(
+                homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+            try "{\"type\":\"ai-title\",\"aiTitle\":\"Later native title\"}\n".write(to: file, atomically: true, encoding: .utf8)
+        }
+        let sequence = supervisor.records[id]?.latestTerminalEvent?.sequence
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: "t2", outcome: .completed, errorMessage: nil)),
+              await waitUntil(timeout: 5, pollInterval: 0.02, {
+                  supervisor.records[id]?.latestTerminalEvent?.sequence != sequence
+                      && supervisor.qaActiveHarnessTitleCount == 0
+                      && supervisor.qaActiveNameGenerationCount == 0
+              }),
+              supervisor.records[id]?.displayName == expected,
+              fakes[harness]?.invocationCount == 1 else {
+            throw fail("\(harness): a second turn churned the generated title: \(String(describing: supervisor.records[id]?.displayName)), calls=\(fakes[harness]?.invocationCount ?? -1)")
+        }
+    }
+
+    // A claude-ONLY machine: no pi, no codex anywhere on the resolved path.
+    // Claude still gets a title from claude; a pi agent on that machine is
+    // refused without a process, and the refusal is in agent-diagnostics.log.
+    let onlyBin = root.appendingPathComponent("bin-claude-only", isDirectory: true)
+    let onlyClaude = try FakeTitlerCLI(
+        binDirectory: onlyBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-only-claude", isDirectory: true), behavior: .succeed("Title without pi installed"))
+    guard titlerCommands(in: onlyBin)(.pi) == nil, titlerCommands(in: onlyBin)(.codex) == nil else {
+        throw fail("the claude-only fixture resolved a pi or codex")
+    }
+    let onlySupport = root.appendingPathComponent("support-claude-only", isDirectory: true)
+    var onlyRunners: [ScriptedAgentRunner] = []
+    let onlySupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: onlySupport),
+        makeRunner: { _ in
+            let started = DispatchSemaphore(value: 0)
+            let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true, startGate: started)
+            DispatchQueue.main.async { started.signal() }
+            onlyRunners.append(runner)
+            return runner
+        },
+        nameTitlerCommand: titlerCommands(in: onlyBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { _, _ in nil })
+    defer { onlyRunners.forEach { $0.releaseRunAfterStop() } }
+    let onlyClaudeID = onlySupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .claudeCode,
+        model: "anthropic/claude-fixture-opus", thinking: "medium")
+    let onlyPiID = onlySupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .pi,
+        model: piModel, thinking: "medium")
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        onlyRunners.count == 2 && onlyRunners.allSatisfy { $0.runCount > 0 }
+    }) else {
+        throw fail("claude-only: fixture runners never started")
+    }
+    for runner in onlyRunners {
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+            throw fail("claude-only: a fixture runner had no live handler")
+        }
+    }
+    let diagnosticsLog = onlySupport.appendingPathComponent("agent-diagnostics.log")
+    guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+        onlySupervisor.records[onlyClaudeID]?.displayNameSource == .generated
+            && onlySupervisor.qaActiveNameGenerationCount == 0
+    }), onlySupervisor.records[onlyClaudeID]?.displayName == "Title without pi installed",
+          onlyClaude.invocationCount == 1 else {
+        throw fail("RED claude-only: a machine with claude and no pi did not title the Claude agent: name=\(String(describing: onlySupervisor.records[onlyClaudeID]?.displayName)) calls=\(onlyClaude.invocationCount)")
+    }
+    let diagnostics = (try? String(contentsOf: diagnosticsLog, encoding: .utf8)) ?? ""
+    guard onlySupervisor.records[onlyPiID]?.displayNameSource != .generated,
+          onlySupervisor.records[onlyPiID]?.namingRequest == nil,
+          diagnostics.contains("agent=\(onlyPiID.rawValue.uuidString) naming: harness=Pi titler unavailable") else {
+        throw fail("claude-only: the pi agent was not refused-and-logged: source=\(String(describing: onlySupervisor.records[onlyPiID]?.displayNameSource)) log=\(diagnostics.debugDescription)")
+    }
+
+    // A titler FAILURE is logged too, with the harness and the reason — not
+    // the prompt.
+    let failBin = root.appendingPathComponent("bin-fail", isDirectory: true)
+    _ = try FakeTitlerCLI(
+        binDirectory: failBin, harness: .claudeCode,
+        log: root.appendingPathComponent("log-fail", isDirectory: true), behavior: .fail)
+    let failSupport = root.appendingPathComponent("support-fail", isDirectory: true)
+    let failRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let failSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: failSupport),
+        makeRunner: { _ in failRunner },
+        nameTitlerCommand: titlerCommands(in: failBin),
+        nameGenerationTimeout: 5,
+        claudeSessionTitle: { _, _ in nil })
+    defer { failRunner.releaseRunAfterStop() }
+    let failID = failSupervisor.spawn(
+        role: nil, prompt: request, cwd: root, harness: .claudeCode,
+        model: "anthropic/claude-fixture-opus", thinking: "medium")
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { failRunner.runCount > 0 }),
+          failRunner.emit(.turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil)) else {
+        throw fail("failure logging: the fixture runner never started")
+    }
+    let failLog = failSupport.appendingPathComponent("agent-diagnostics.log")
+    guard await waitUntil(timeout: 8, pollInterval: 0.02, {
+        ((try? String(contentsOf: failLog, encoding: .utf8)) ?? "")
+            .contains("agent=\(failID.rawValue.uuidString) naming: harness=Claude Code invalid provider output")
+    }), !((try? String(contentsOf: failLog, encoding: .utf8)) ?? "").contains(request) else {
+        throw fail("a failed titler run was not logged to agent-diagnostics.log (or the log carried the prompt): \(String(describing: try? String(contentsOf: failLog, encoding: .utf8)))")
+    }
+
+    return "per-harness session titles: claude (ai-title missing → claude titler), codex and pi each titled by their OWN fake CLI with the literal production argv, the agent's own model, stdin-only request+reply, an empty private cwd removed afterwards; sanitized titles reached record, store and attached header; no churn on a later turn or a late ai-title; a claude-only machine titles Claude and refuses+logs Pi; a failed titler is logged without the prompt"
+}
+
+/// The claude ladder's races, salvaged from the unlanded 0.7.21 bench and
+/// re-pointed at claude's own titler: a native ai-title still wins for free;
+/// a manual rename during the file read or during the titler process wins; a
+/// request armed while the read was in flight is not superseded.
+@MainActor
+private func checkClaudeTitleLadderRaces<Failure: Error>(
+    fail: (String) -> Failure
+) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-claude-title-ladder-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+    let bin = root.appendingPathComponent("bin", isDirectory: true)
+    let titler = try FakeTitlerCLI(
+        binDirectory: bin, harness: .claudeCode,
+        log: root.appendingPathComponent("log", isDirectory: true), behavior: .succeed("Session investigation"))
+
+    func fixture(
+        _ name: String, blockRead: DispatchSemaphore? = nil, readEntered: LockedFlag = LockedFlag()
+    ) async throws -> (AgentSupervisor, ScriptedAgentRunner, AgentID, URL) {
+        let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent(name))
+        let supervisor = AgentSupervisor(
+            store: store, makeRunner: { _ in runner },
+            nameTitlerCommand: titlerCommands(in: bin),
+            nameGenerationTimeout: 5,
+            claudeSessionTitle: { cwd, sessionId in
+                readEntered.set()
+                if let blockRead { _ = blockRead.wait(timeout: .now() + 5) }
+                return ClaudeSessionTitleReader.title(homeURL: home, cwd: cwd, sessionId: sessionId)
+            })
+        let id = supervisor.spawn(
+            role: nil, prompt: "investigate a Claude session without a title", cwd: root,
+            harness: .claudeCode, model: "anthropic/claude-fixture-opus", thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount > 0 }),
+              let record = supervisor.records[id] else { throw fail("\(name): runner did not start") }
+        let location = AgentSupervisor.claudeSessionLocation(for: record)
+        let file = ClaudeSessionTranscriptReader.sessionFileURL(
+            homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
+        try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        return (supervisor, runner, id, file)
+    }
+    func emit(_ runner: ScriptedAgentRunner) throws {
+        guard runner.emit(.turnCompleted(threadId: "t", turnId: UUID().uuidString,
+                                        outcome: .completed, errorMessage: nil)) else {
+            throw fail("claude ladder fixture had no live event handler")
+        }
+    }
+
+    // A native title is still the free first rung: adopted, revised, and the
+    // titler is never spawned.
+    let (native, nativeRunner, nativeID, nativeFile) = try await fixture("native-title")
+    defer { nativeRunner.releaseRunAfterStop() }
+    for title in ["Native summary", "Native summary", "Revised summary"] {
+        try "{\"type\":\"ai-title\",\"aiTitle\":\"\(title)\"}\n".write(to: nativeFile, atomically: true, encoding: .utf8)
+        let sequence = native.records[nativeID]?.latestTerminalEvent?.sequence
+        try emit(nativeRunner)
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+            native.records[nativeID]?.latestTerminalEvent?.sequence != sequence
+                && native.qaActiveHarnessTitleCount == 0 && native.records[nativeID]?.displayName == title
+        }), native.records[nativeID]?.displayNameSource == .harness, titler.invocationCount == 0 else {
+            throw fail("a native ai-title (including unchanged/revised) fell through to the titler or failed to land")
+        }
+    }
+
+    // A rename while the ai-title read is in flight: the nil read must not
+    // launch a titler over the person's name.
+    let readGate = DispatchSemaphore(value: 0)
+    defer { readGate.signal() }
+    let entered = LockedFlag()
+    let (manual, manualRunner, manualID, _) = try await fixture(
+        "rename-during-read", blockRead: readGate, readEntered: entered)
+    defer { manualRunner.releaseRunAfterStop() }
+    try emit(manualRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { entered.wasSet }),
+          manual.rename(agentID: manualID, to: "Human during read") else {
+        throw fail("could not interleave a rename with the claude title read")
+    }
+    readGate.signal()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manual.qaActiveHarnessTitleCount == 0 }),
+          manual.qaActiveNameGenerationCount == 0,
+          manual.records[manualID]?.displayName == "Human during read",
+          titler.invocationCount == 0 else {
+        throw fail("a nil title read used a stale record and launched the titler over a manual rename")
+    }
+
+    // A request armed while the read is in flight survives the nil read.
+    let pendingGate = DispatchSemaphore(value: 0)
+    defer { pendingGate.signal() }
+    let pendingEntered = LockedFlag()
+    let (pending, pendingRunner, pendingID, _) = try await fixture(
+        "request-during-read", blockRead: pendingGate, readEntered: pendingEntered)
+    defer { pendingRunner.releaseRunAfterStop() }
+    try emit(pendingRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { pendingEntered.wasSet }),
+          let pendingRequest = pending.beginNameGeneration(agentID: pendingID) else {
+        throw fail("could not interleave a naming request with the claude title read")
+    }
+    pendingGate.signal()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { pending.qaActiveHarnessTitleCount == 0 }),
+          pending.records[pendingID]?.namingRequest == pendingRequest,
+          titler.invocationCount == 0,
+          pending.applyGeneratedName("Explicit proposal", for: pendingRequest, agentID: pendingID) else {
+        throw fail("a nil title read superseded an already-armed naming request")
+    }
+
+    // A rename while claude's titler PROCESS is running wins the CAS.
+    try titler.hold()
+    defer { titler.release() }
+    let (late, lateRunner, lateID, _) = try await fixture("rename-during-titler")
+    defer { lateRunner.releaseRunAfterStop() }
+    try emit(lateRunner)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        fileManager.fileExists(atPath: titler.log.appendingPathComponent("started-1").path)
+    }), late.records[lateID]?.namingRequest != nil,
+          late.rename(agentID: lateID, to: "Human during titler") else {
+        throw fail("the missing-title fall-through did not reach a live claude titler to race")
+    }
+    titler.release()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { late.qaActiveNameGenerationCount == 0 }),
+          late.records[lateID]?.displayName == "Human during titler",
+          late.records[lateID]?.displayNameSource == .manual,
+          late.records[lateID]?.namingRequest == nil else {
+        throw fail("a late titler completion overwrote a manual rename")
+    }
+    return "claude title ladder: native ai-title adopted/revised with 0 titler calls; renames during the read and during the titler process win; a request armed during the read survives"
 }
 
 private final class LockedFlag: @unchecked Sendable {
@@ -15415,13 +16537,16 @@ private func checkSpawnFromToolCall(
         throw fail("I5: a role refusal echoes the requested role id or a host path: \(roleRefusalTitles)")
     }
 
-    // MARK: 8 · C12 — a codex parent is refused honestly about OBSERVABILITY
+    // MARK: 8 · a codex parent's Array-owned child is spawned, not refused
 
-    // `codex exec --json` (measured, `.plans/46`) has no wire representation for
-    // subagent activity at all, so Array cannot say a codex parent spawned
-    // anything even where codex itself may be delegating. The refusal must not
-    // claim codex cannot spawn — that would be false — only that this transport
-    // cannot see it.
+    // C12 refused every codex parent because `codex exec --json` showed Array
+    // nothing of a subagent CODEX runs. A request reaching this path with
+    // `observedOnly == false` is not one: it is codex's own `array_delegate` over
+    // MCP (T3), a child ARRAY starts as its own codex agent and observes like any
+    // other. Codex-run subagents still arrive `observedOnly` (app-server
+    // `subAgentActivity`) and are adopted. RED before T4b: refused "Array cannot
+    // observe codex subagents on the transport it runs", so codex could not
+    // delegate at all.
     let codexConfig = AgentModelConfig.resolvedFromDefaults(harness: .codex)
     let codexParentId = supervisor.spawn(
         role: nil, prompt: nil, cwd: repo,
@@ -15434,38 +16559,29 @@ private func checkSpawnFromToolCall(
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: codexParentId) == 1 }) else {
         throw fail("the codex parent's subscriber never registered")
     }
-    let beforeCodexRefusal = supervisor.records.count
-    guard supervisor.handleSpawnRequest(
-        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false),
+    let codexCallID = "exec-0562414f-29fc-47c6-962d-90fe1e889886"
+    guard let codexChild = supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "delegate this to a subagent", isolated: false, sourceItemID: codexCallID),
         from: codexParentId
-    ) == nil else {
-        throw fail("a codex parent was allowed to spawn — Array has no transport evidence of what would happen to the child")
+    ) else {
+        throw fail("a codex parent's Array-owned delegation was refused: \(supervisor.spawnRefusal(for: codexParentId)?.reason ?? "no reason")")
     }
-    guard supervisor.records.count == beforeCodexRefusal else {
-        throw fail("the refused codex spawn still created a record: \(supervisor.records.count), expected \(beforeCodexRefusal)")
+    guard supervisor.records[codexChild]?.harness == .codex,
+          supervisor.records[codexChild]?.parentAgentID == codexParentId else {
+        throw fail("the codex delegation's child must run codex under its parent: \(String(describing: supervisor.records[codexChild]))")
     }
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         codexInbox.events.contains { event in
-            if case let .itemStarted(_, _, kind, title) = event {
-                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.codexSubagentsUnobservable.reason)
+            if case let .childAgentSpawned(_, child, _, _, source, provider, _) = event {
+                return child == codexChild.rawValue && source == codexCallID && provider == AgentHarness.codex.rawValue
             }
             return false
         }
     }) else {
-        throw fail("a codex parent's spawn was refused silently — nothing on its transcript: \(codexInbox.events)")
+        throw fail("the codex parent got no chip naming its call for the child it delegated: \(codexInbox.events)")
     }
-    let codexRefusalTitles = codexInbox.events.compactMap { event -> String? in
-        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
-        return nil
-    }
-    guard codexRefusalTitles.allSatisfy({ !$0.contains("delegate this to a subagent") && !$0.contains(root.path) }) else {
-        throw fail("I5: a codex refusal echoes the requested prompt or a host path: \(codexRefusalTitles)")
-    }
-    guard !codexRefusalTitles.contains(where: { $0.localizedCaseInsensitiveContains("cannot spawn") }) else {
-        throw fail("the codex refusal claims codex cannot spawn, which is false — it says Array cannot observe it: \(codexRefusalTitles)")
-    }
+    supervisor.stop(codexChild)
     supervisor.stop(codexParentId)
-
     // MARK: 9 · C12 — a mirrored (observedReadOnly) parent has no runner to spawn through
 
     // This is a claude `Agent` subagent Array only mirrors — read-only transcript,

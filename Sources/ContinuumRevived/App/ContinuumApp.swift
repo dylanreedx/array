@@ -1666,6 +1666,12 @@ enum ContinuumApp {
                 do {
                     try await runAgentCompactionUIChecks()
                     print("AgentCompactionUIChecks passed")
+                    // T5: the supervisor's steering, force-send, interrupt and
+                    // queue semantics share this leg's queue machinery.
+                    try await runAgentSteeringChecks()
+                    // T5b: the steering/queue rail over that same API, through
+                    // a real tile and composer.
+                    try await runAgentQueueRailChecks()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -3873,6 +3879,9 @@ enum ContinuumApp {
         // re-check) so the picker offers whatever providers the user has
         // authed in pi. QA never enables this and keeps the frozen fallback.
         AgentModelCatalog.shared.enableLiveRefresh()
+        // Session titles: each harness titles with its own CLI. Same opt-in rule
+        // as the catalogue, so no check can ever spend a real provider call.
+        AgentSupervisor.enableLiveNameTitling()
 
         // Every `--*-check` flag is handled above and exits. Reaching here with
         // one still on the command line means it was MISSPELLED or belongs to a
@@ -4456,7 +4465,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     )
     lazy var workspaceMCPHost = WorkspaceMCPHost()
 
-    private func workspaceMCPExecutablePath() -> String? {
+    /// Internal so the delegation leg launches the same helper production does.
+    static func workspaceMCPExecutablePath() -> String? {
         let candidates = [
             ProcessInfo.processInfo.environment["CONTINUUM_WORKSPACE_MCP_BINARY"],
             Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("array-workspace-mcp").path,
@@ -4465,22 +4475,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private func handleWorkspaceMCP(_ request: [String: Any]) -> [String: Any] {
-        guard let agentText = request["agentId"] as? String,
-              let agentUUID = UUID(uuidString: agentText),
-              let record = agentSupervisor.records[AgentID(rawValue: agentUUID)],
-              let op = request["op"] as? String,
-              let requestID = request["requestId"] as? String,
-              let payload = request["payload"] as? [String: Any] else {
-            return ["schema": WorkspaceAPISchema.v1, "status": "error",
-                    "error": ["code": "invalid_request", "message": "Malformed workspace request"]]
-        }
-        let reply = workspaceAPI.dispatch(agentId: record.id, requestId: requestID, op: op, payload: payload)
-        let encoded = WorkspaceAPIService.transportResponse(for: reply).encodedValue(requestId: requestID)
-        return (try? JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]) ??
-            ["schema": WorkspaceAPISchema.v1, "status": "error",
-             "error": ["code": "outcome_unknown", "message": "Array produced an unreadable reply"]]
-    }
     /// Host-local only: drafts are persisted by AgentID and accepted prompt history
     /// remains memory-only. Neither value enters AgentRecord or companion sync.
     private lazy var agentComposerDraftStore = AgentComposerDraftStore(
@@ -16856,12 +16850,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return ["schema": WorkspaceAPISchema.v1, "status": "error",
                         "error": ["code": "unsupported", "message": "Array host unavailable"]]
             }
-            return self.handleWorkspaceMCP(request)
+            return self.workspaceAPI.handleMCPRequest(request)
         }
         agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
             guard harness == .claudeCode || harness == .codex,
                   let self,
-                  let executable = self.workspaceMCPExecutablePath() else { return nil }
+                  let executable = Self.workspaceMCPExecutablePath() else { return nil }
             return self.workspaceMCPHost.configuration(for: agentID, serverExecutable: executable)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in

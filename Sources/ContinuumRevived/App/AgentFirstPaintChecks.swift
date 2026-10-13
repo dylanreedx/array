@@ -66,12 +66,15 @@ enum AgentFirstPaintChecks {
         try checkSettledTailStatus()
         try checkReplyOptionsReachTheComposer()
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
+        try checkWorkingReturnKeysSteerQueueAndForceSend()
         try checkPopoverCommandEchoesLikeATypedSend()
         try checkMirroredAgentOffersNoComposerOrStop()
         try checkStreamingResponseKeepsALivenessSignal()
         try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
         try checkADelegationTurnPresentsInteractiveSubagentChips()
-        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, accepted local commands settle without a stuck glyph, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command waits for Enter and carries the complete surrounding draft, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud")
+        try checkConsecutiveSubagentChipsFlowAndWrapWithTheirStatus()
+        try checkEveryHarnessFoldsItsSpawningCallsIntoOneChipRow()
+        print("ContinuumRevivedAgentFirstPaintChecks passed: the prompt echo precedes the action sink, acceptance and refusal both resolve the latch, the spawn window carries a state, a word, and a clock, the optimistic indicator survives synchronize, accepted local commands settle without a stuck glyph, settled turns read their duration, a mid-turn attachment resolves honestly instead of forcing sendPrompt, and a popover-selected command waits for Enter and carries the complete surrounding draft, an agent Array only mirrors offers no composer, no provider controls and no Stop, a streaming response keeps a liveness signal instead of going dead, and a real captured claude delegation renders two interactive subagent chips that supersede their Agent tool rows, hover, click through to onRevealAgent, and say a failed reveal out loud, and consecutive subagent chips flow onto one line with a constant gap, wrap at a narrow width inside a row measured to fit them, and read their live status in full, and pi, claude-over-MCP and codex-over-MCP delegations each fold their spawning calls into one wrapping chip row while a refused delegate stays a visible failed row")
     }
 
     /// `.plans/45` S6 (C4). `beginOptimisticSubmission` turns the indicator on
@@ -416,6 +419,62 @@ enum AgentFirstPaintChecks {
         }
         guard prompt.text == "steer this turn", prompt.fileReferences.count == 1 else {
             throw fail("attachment mid-turn: the resolved steer intent lost the draft text or the attachment")
+        }
+    }
+
+    /// T5 (D1) — while a turn works, the real key path of the composer's text
+    /// view: ↩ steers, ⌥↩ queues, ⌘↩ force sends, ⇧↩ stays a newline. Each key
+    /// is a hardware-shaped `NSEvent` through `ComposerTextView.keyDown`, so the
+    /// policy, the observer hop and the intent resolver all run as in the app.
+    @MainActor
+    private static func checkWorkingReturnKeysSteerQueueAndForceSend() throws {
+        let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        let sink = OrderRecordingSink(.accepted)
+        composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+            state: .working,
+            capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: true, canQueue: true),
+            turnStartedAt: Date()
+        ))
+        func press(_ flags: NSEvent.ModifierFlags, draft: String) -> AgentComposerIntent? {
+            composer.apply(.init(text: draft, selection: NSRange(location: draft.utf16.count, length: 0), revision: 1))
+            let before = sink.receivedIntents.count
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                isARepeat: false, keyCode: 36) else { return nil }
+            composer.textView.keyDown(with: event)
+            let deadline = Date().addingTimeInterval(2)
+            while sink.receivedIntents.count == before && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            // Let the accepted action settle so the next press is not latched.
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            return sink.receivedIntents.count > before ? sink.receivedIntents.last : nil
+        }
+        guard press([], draft: "steer it") == .steer(AgentPrompt("steer it")) else {
+            throw fail("working Return keys: ↩ while working must steer, got \(sink.receivedIntents)")
+        }
+        guard press(.option, draft: "after this") == .queue(AgentPrompt("after this")) else {
+            throw fail("working Return keys: ⌥↩ while working must queue, got \(sink.receivedIntents)")
+        }
+        guard press(.command, draft: "right now") == .forceSend(AgentPrompt("right now")) else {
+            throw fail("working Return keys: ⌘↩ while working must force send, got \(sink.receivedIntents)")
+        }
+        guard press(.shift, draft: "newline") == nil else {
+            throw fail("working Return keys: ⇧↩ must stay a native newline, got \(sink.receivedIntents)")
+        }
+        // T5b — the hint under the draft names those chords while the turn
+        // works, and an idle composer shows no hint at all, as before.
+        let workingHint = "\u{21A9} steer   \u{2325}\u{21A9} queue   \u{2318}\u{21A9} force send"
+        guard composer.qaKeyHint == workingHint else {
+            throw fail("working Return keys: the hint line must read '\(workingHint)', got \(composer.qaKeyHint ?? "nil")")
+        }
+        composer.updateTurnSnapshot(.init(
+            state: .ready,
+            capabilities: AgentTurnCapabilities(canSend: true, canStop: false, canSteer: false, canQueue: false),
+            turnStartedAt: nil))
+        guard composer.qaKeyHint == nil else {
+            throw fail("working Return keys: an idle composer must show no hint, got \(composer.qaKeyHint ?? "")")
         }
     }
 
@@ -1088,7 +1147,11 @@ extension AgentFirstPaintChecks {
         // dropped everything would pass the second alone, and a fold that never
         // fires would pass the first alone.
         let displayed = Set(transcript.qaDisplayedRowIDsForChecks)
-        for chipID in chipBlockIDs where !displayed.contains(chipID) {
+        // T4: consecutive chips share ONE row, presented by the run's first chip,
+        // so a chip is visible either as its own row or inside a displayed one.
+        let leaderByFollower = transcript.qaChipRunLeaderByFollowerForChecks
+        for chipID in chipBlockIDs
+            where !displayed.contains(chipID) && !displayed.contains(leaderByFollower[chipID] ?? chipID) {
             throw fail(
                 "delegation chips: chip \(chipID.rawValue) is not in the displayed rows — the "
                 + "delegation is invisible, which is the live defect"
@@ -1145,9 +1208,12 @@ extension AgentFirstPaintChecks {
                 }
                 row.layoutSubtreeIfNeeded()
                 chip.layoutSubtreeIfNeeded()
+                // The reading-column clause binds the chip that opens a line; the
+                // rest of a line flows after it (T4).
+                let opensALine = row.chips.first(where: { abs($0.frame.minY - chip.frame.minY) < 0.5 }) === chip
                 guard abs(chip.qaContentGap - CGFloat(Space.s)) < 0.5,
                       abs(chip.qaContentMidX - chip.bounds.midX) < 0.5,
-                      abs((chip.frame.minX + chip.qaTitleMinX) - ToolCallView.detailIndent) < 0.5 else {
+                      !opensALine || abs((chip.frame.minX + chip.qaTitleMinX) - ToolCallView.detailIndent) < 0.5 else {
                     throw fail(
                         "delegation chips: explicit icon/title geometry is not centred internally "
                         + "and aligned to the transcript action reading column"
@@ -1234,6 +1300,731 @@ extension AgentFirstPaintChecks {
                 + "(landed=\(noticeLanded), rows \(rowsBeforeNotice) -> \(transcript.qaSemanticRowCount))"
             )
         }
+    }
+
+    /// T4 (0.7.26). Dylan, with a screenshot: an agent that spawned several
+    /// subagents showed one chip per transcript row, stacked, each a different
+    /// width and each reading "Name ·" with blank capsule after the dot. Two
+    /// defects. The status word WAS composed — the dot is its separator — but
+    /// the attributed title carried no paragraph style, so the label's own
+    /// word-wrapping (not the field's truncation) applied, and at the exact width
+    /// the capsule granted it the last word broke onto a second line the label is
+    /// too short to show. And every chip was its own full-width row.
+    ///
+    /// Driven through the real pipeline: `.childAgentSpawned` → the tile's
+    /// projection → `AgentTranscriptListView`'s display projection → the
+    /// registered renderer, laid out in an offscreen window. The one stand-in is
+    /// the status SOURCE: this tile has no supervisor, so the context carries a
+    /// stub with the production `AgentReferenceStatusSource` shape. The
+    /// supervisor → source half is `--agent-supervisor-check` section 21.
+    @MainActor
+    private static func checkConsecutiveSubagentChipsFlowAndWrapWithTheirStatus() throws {
+        let names = [
+            "Experiment 3 name-keying",
+            "Experiment 4 plants vs ignite",
+            "Experiment 5 side-by-side",
+            "Experiment 6 tidy",
+        ]
+        let childIDs = names.map { _ in UUID() }
+        let parentAgentID = UUID()
+        final class StatusStub {
+            var states: [UUID: InboxState] = [:]
+            var subscribers: [UUID: (agentID: UUID, callback: (InboxState?) -> Void)] = [:]
+            func publish(_ state: InboxState, for agentID: UUID) {
+                states[agentID] = state
+                for subscriber in subscribers.values where subscriber.agentID == agentID {
+                    subscriber.callback(state)
+                }
+            }
+        }
+        let stub = StatusStub()
+        for id in childIDs.prefix(3) { stub.states[id] = .working }
+        // `.ready` carries no label: this chip must read as its bare name.
+        stub.states[childIDs[3]] = .ready
+        let statusSource = AgentReferenceStatusSource(
+            current: { stub.states[$0] },
+            subscribe: { agentID, callback in
+                let token = UUID()
+                stub.subscribers[token] = (agentID, callback)
+                return token
+            },
+            unsubscribe: { stub.subscribers.removeValue(forKey: $0) }
+        )
+        guard let workingLabel = InboxState.working.label, !workingLabel.isEmpty else {
+            throw fail("subagent chip flow: InboxState.working has no label to witness")
+        }
+
+        let wide = NSSize(width: 1280, height: 420)
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "subagent-chip-flow",
+            frame: TileFrame(x: 0, y: 0, width: Double(wide.width), height: Double(wide.height)),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: wide),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+
+        let thread = tile.qaThreadIdForChecks
+        tile.ingest(.turnStarted(threadId: thread, turnId: "turn-chip-flow"))
+        for (index, name) in names.enumerated() {
+            tile.ingest(.childAgentSpawned(
+                threadId: thread,
+                childAgentID: childIDs[index],
+                parentAgentID: parentAgentID,
+                displayName: name,
+                sourceItemID: nil,
+                provider: "claude",
+                spawnedAt: Date(timeIntervalSince1970: 0)))
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("subagent chip flow: the tile has no transcript")
+        }
+        transcript.flushPendingVisualUpdate()
+        try transcript.updateRenderContext(AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: .dark, agentStatus: statusSource))
+
+        func settle() {
+            // A status tick re-measures on the next main-queue turn, never from
+            // inside the layout pass that noticed it.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            transcript.layoutSubtreeIfNeeded()
+            transcript.collectionView.layoutSubtreeIfNeeded()
+        }
+        func chips() throws -> [AgentReferenceChipView] {
+            var found: [String: AgentReferenceChipView] = [:]
+            func walk(_ view: NSView) {
+                if let chip = view as? AgentReferenceChipView, let id = chip.identifier?.rawValue {
+                    found[id] = chip
+                }
+                view.subviews.forEach(walk)
+            }
+            walk(transcript.collectionView)
+            return try childIDs.map { id in
+                guard let chip = found["agent.reference.\(id.uuidString)"] else {
+                    throw fail(
+                        "subagent chip flow: no chip view materialized for child \(id) "
+                        + "(found \(found.count) of \(childIDs.count))")
+                }
+                return chip
+            }
+        }
+        /// Inked pixels in the trailing `word` of a chip's rendered title. The
+        /// assertion is on PIXELS because the defect was a correct string the
+        /// label never drew.
+        func inkedPixels(ofTrailing word: String, in chip: AgentReferenceChipView) throws -> Int {
+            let label = chip.qaTitleLabel
+            let rep = try UIProbe.bitmap(of: label, id: "subagent-chip-title")
+            let text = label.attributedStringValue
+            let font = text.length > 0
+                ? (text.attribute(.font, at: text.length - 1, effectiveRange: nil) as? NSFont)
+                : nil
+            let wordWidth = (word as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 12)]).width
+            let textWidth = ceil(text.size().width)
+            let scale = CGFloat(rep.pixelsWide) / max(1, label.bounds.width)
+            let startX = Int(((textWidth - wordWidth) * scale).rounded(.down))
+            let endX = min(rep.pixelsWide, Int((textWidth * scale).rounded(.up)))
+            var inked = 0
+            for x in max(0, startX)..<max(max(0, startX), endX) {
+                for y in 0..<rep.pixelsHigh where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.3 {
+                    inked += 1
+                }
+            }
+            return inked
+        }
+        func assertStatusReads(_ chips: [AgentReferenceChipView], phase: String) throws {
+            for (index, chip) in chips.enumerated() {
+                let expectsLabel = stub.states[childIDs[index]]?.label != nil
+                let expected = expectsLabel ? "\(names[index])  ·  \(workingLabel)" : names[index]
+                guard chip.qaTitleText == expected else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) composes \"\(chip.qaTitleText)\", "
+                        + "expected \"\(expected)\"")
+                }
+                let titleWidth = ceil(chip.qaTitleLabel.attributedStringValue.size().width)
+                guard chip.qaTitleLabel.frame.width >= titleWidth - 0.5,
+                      chip.qaTitleLabel.frame.maxX <= chip.bounds.width + 0.5 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index)'s title is clipped — label "
+                        + "\(chip.qaTitleLabel.frame.width)pt for a \(titleWidth)pt title in a "
+                        + "\(chip.bounds.width)pt capsule")
+                }
+                // AppKit's own answer to "is this cell's text truncated here".
+                if let cell = chip.qaTitleLabel.cell,
+                   cell.expansionFrame(withFrame: chip.qaTitleLabel.bounds, in: chip.qaTitleLabel) != .zero {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index)'s title \"\(chip.qaTitleText)\" is "
+                        + "truncated in a \(chip.qaTitleLabel.bounds.width)pt label")
+                }
+                guard expectsLabel else { continue }
+                let inked = try inkedPixels(ofTrailing: workingLabel, in: chip)
+                guard inked > 0 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) composes \"\(chip.qaTitleText)\" "
+                        + "but paints nothing where \"\(workingLabel)\" belongs — the status word "
+                        + "wrapped out of the label, so the capsule reads \"Name ·\" (Dylan's screenshot)")
+                }
+            }
+        }
+        /// Frames in the row's own space, plus the line each chip sits on.
+        func assertFlow(_ chips: [AgentReferenceChipView], phase: String) throws -> Int {
+            guard let row = chips.first?.superview as? AgentReferenceChipRowView,
+                  chips.allSatisfy({ $0.superview === row }) else {
+                let rows = Set(chips.compactMap { $0.superview.map(ObjectIdentifier.init) })
+                throw fail(
+                    "subagent chip flow (\(phase)): \(chips.count) consecutive chips render in "
+                    + "\(rows.count) transcript rows — one chip per row, stacked, instead of one "
+                    + "row that lays them out left to right")
+            }
+            let frames = chips.map { row.convert($0.bounds, from: $0) }
+            let lineHeight = AgentReferenceChipView.height(zoom: .default)
+            var lineStarts: [CGFloat] = []
+            for frame in frames where !lineStarts.contains(where: { abs($0 - frame.minY) < 0.5 }) {
+                lineStarts.append(frame.minY)
+            }
+            var gaps: [CGFloat] = []
+            for index in frames.indices.dropFirst() {
+                let previous = frames[index - 1]
+                let frame = frames[index]
+                if abs(previous.minY - frame.minY) < 0.5 {
+                    guard frame.minX > previous.maxX else {
+                        throw fail(
+                            "subagent chip flow (\(phase)): chip \(index) does not follow chip "
+                            + "\(index - 1) on its line (\(frame) after \(previous))")
+                    }
+                    gaps.append(frame.minX - previous.maxX)
+                } else {
+                    guard abs(frame.minX - frames[0].minX) < 0.5 else {
+                        throw fail(
+                            "subagent chip flow (\(phase)): a wrapped line starts at x=\(frame.minX), "
+                            + "not at the row's leading inset \(frames[0].minX)")
+                    }
+                }
+            }
+            if let first = gaps.first, gaps.contains(where: { abs($0 - first) > 0.5 }) {
+                throw fail("subagent chip flow (\(phase)): the gap between chips is not constant: \(gaps)")
+            }
+            guard abs(row.bounds.height - CGFloat(lineStarts.count) * lineHeight) < 0.5 else {
+                throw fail(
+                    "subagent chip flow (\(phase)): \(lineStarts.count) line(s) of chips in a "
+                    + "\(row.bounds.height)pt row — the measured height disagrees with the wrap")
+            }
+            for (index, frame) in frames.enumerated() {
+                guard frame.minX >= -0.5, frame.maxX <= row.bounds.width + 0.5,
+                      frame.minY >= -0.5, frame.maxY <= row.bounds.height + 0.5 else {
+                    throw fail(
+                        "subagent chip flow (\(phase)): chip \(index) at \(frame) spills out of its "
+                        + "\(row.bounds.size) row")
+                }
+            }
+            // The first chip keeps the transcript's reading column: its label
+            // lands where a tool action title does.
+            guard abs(frames[0].minX + chips[0].qaTitleMinX - ToolCallView.detailIndent) < 0.5 else {
+                throw fail(
+                    "subagent chip flow (\(phase)): the first chip's label sits at "
+                    + "\(frames[0].minX + chips[0].qaTitleMinX), not on the tool title column "
+                    + "\(ToolCallView.detailIndent)")
+            }
+            return lineStarts.count
+        }
+
+        /// Optional visual witness: `CONTINUUM_AGENT_REFERENCE_FLOW_CAPTURE` names a
+        /// directory that receives the row at each phase.
+        func capture(_ chips: [AgentReferenceChipView], as phase: String) throws {
+            guard let directory = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_REFERENCE_FLOW_CAPTURE"],
+                  let row = chips.first?.superview else { return }
+            let rep = try UIProbe.bitmap(of: row, id: "agent-reference-chip-flow-\(phase)")
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                throw fail("subagent chip flow: could not encode the requested visual witness")
+            }
+            try png.write(
+                to: URL(fileURLWithPath: directory).appendingPathComponent("chip-flow-\(phase).png"),
+                options: .atomic)
+        }
+
+        settle()
+        let wideChips = try chips()
+        try assertStatusReads(wideChips, phase: "wide")
+        let wideLines = try assertFlow(wideChips, phase: "wide")
+        guard wideLines == 1 else {
+            throw fail("subagent chip flow (wide): four chips took \(wideLines) lines in a \(wide.width)pt tile")
+        }
+        try capture(wideChips, as: "wide")
+
+        // Narrow: a width where the four chips wrap, AND where the status tick
+        // below adds a line — so the tick has to move the row's measured height,
+        // not merely repaint a label. Chosen from the production chip widths and
+        // flow; everything asserted afterwards is read back off the views.
+        guard let wideRow = wideChips.first?.superview as? AgentReferenceChipRowView else {
+            throw fail("subagent chip flow: the wide chips have no row")
+        }
+        let chrome = wide.width - wideRow.bounds.width
+        func predictedLines(lastIsWorking: Bool, rowWidth: CGFloat) -> Int {
+            let widths = names.enumerated().map { index, name in
+                AgentReferenceChipView.preferredWidth(
+                    name: name, label: index == 3 && !lastIsWorking ? nil : workingLabel, zoom: .default)
+            }
+            let height = AgentReferenceChipRowView.flow(widths: widths, width: rowWidth, zoom: .default).height
+            return Int((height / AgentReferenceChipView.height(zoom: .default)).rounded())
+        }
+        guard let narrowRowWidth = stride(from: wideRow.bounds.width, through: 160, by: -1).first(where: { width in
+            let before = predictedLines(lastIsWorking: false, rowWidth: width)
+            return before >= 2 && predictedLines(lastIsWorking: true, rowWidth: width) > before
+        }) else {
+            throw fail("subagent chip flow: no width wraps these chips and lets a status tick add a line")
+        }
+        window.setContentSize(NSSize(width: narrowRowWidth + chrome, height: wide.height))
+        settle()
+        let narrowChips = try chips()
+        try assertStatusReads(narrowChips, phase: "narrow")
+        let narrowLines = try assertFlow(narrowChips, phase: "narrow")
+        guard narrowLines == predictedLines(lastIsWorking: false, rowWidth: narrowRowWidth), narrowLines >= 2 else {
+            throw fail(
+                "subagent chip flow (narrow): \(narrowLines) line(s) in a \(narrowRowWidth)pt row, expected "
+                + "\(predictedLines(lastIsWorking: false, rowWidth: narrowRowWidth))")
+        }
+        try capture(narrowChips, as: "narrow")
+
+        // A live status tick widens the chip that read as its bare name, which
+        // pushes it onto a new line. The row must re-measure to the new wrap —
+        // never clip the line it no longer has room for.
+        stub.publish(.working, for: childIDs[3])
+        settle()
+        let tickedChips = try chips()
+        try assertStatusReads(tickedChips, phase: "after a status tick")
+        let tickedLines = try assertFlow(tickedChips, phase: "after a status tick")
+        guard tickedLines == narrowLines + 1 else {
+            throw fail(
+                "subagent chip flow (after a status tick): \(tickedLines) line(s), expected the tick to "
+                + "wrap the widened chip onto line \(narrowLines + 1)")
+        }
+
+        try capture(tickedChips, as: "ticked")
+    }
+
+    /// T4b (0.7.26) — a delegation reads the same in every harness's transcript.
+    /// T4 flowed consecutive chips into one row, but a run only holds across rows
+    /// a chip SUPERSEDES, and only claude's native `Agent` row was ever
+    /// superseded. Every other spawning call stayed a tool row between chips, so
+    /// each chip still sat on a row of its own.
+    ///
+    /// The fold is one rule for every harness: a chip whose `sourceItemID` is the
+    /// provider's own call id supersedes the tool row that call produced (the
+    /// provenance map, `AgentTranscriptListView.supersededID`). So each replay
+    /// drives the harness's PRODUCTION translator over its own wire vocabulary
+    /// into a real tile, and stands in only for the supervisor's chip — the
+    /// `.childAgentSpawned` `handleSpawnRequest` delivers, carrying the id it was
+    /// handed: pi's toolCallId (the `spawn_agent` side channel and the bridge's
+    /// requestId), or for MCP the requestId `array-workspace-mcp` takes from the
+    /// client's `_meta` call id (`--workspace-api-delegation-check` O witnesses
+    /// that half through the real binary). A refused delegate produces no chip,
+    /// so its failed row must stay on screen.
+    @MainActor
+    private static func checkEveryHarnessFoldsItsSpawningCallsIntoOneChipRow() throws {
+        try replayPiSpawnAgentDelegation()
+        try replayClaudeMCPDelegation()
+        try replayCodexMCPDelegation()
+    }
+
+    /// A provider wire line for the harness's translator, or the supervisor's chip
+    /// for one spawning call.
+    private enum DelegationStep {
+        case line(String)
+        case chip(callID: String, childID: UUID, name: String)
+    }
+
+    private static func jsonLine(_ object: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+    }
+
+    private static func fixtureLines(_ name: String) throws -> [String] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/\(name)", isDirectory: false)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            throw fail("delegation fold: missing fixture at \(url.path)")
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    }
+
+    /// (a) pi: three `spawn_agent` calls, then a refused bridge `array_delegate`
+    /// and the `wait_agents` that collects the batch. The frames are the real
+    /// capture's (`spawn-agent-tool-call.jsonl`, `pi --mode json`) with one
+    /// toolCallId per call; the chips come from the translator's own
+    /// `onSpawnRequest`, after the line that announced them — the order the
+    /// supervisor's main-queue hop delivers them in.
+    @MainActor
+    private static func replayPiSpawnAgentDelegation() throws {
+        let capture = try fixtureLines("spawn-agent-tool-call.jsonl")
+        guard let start = capture.first(where: { $0.contains("\"type\":\"tool_execution_start\"") }),
+              let end = capture.first(where: { $0.contains("\"type\":\"tool_execution_end\"") }),
+              let object = try JSONSerialization.jsonObject(with: Data(start.utf8)) as? [String: Any],
+              let capturedID = object["toolCallId"] as? String else {
+            throw fail("delegation fold (pi): the spawn_agent capture lost its tool_execution frames")
+        }
+        let spawnIDs = (1...3).map { "call_piSpawn\($0)|fc_\(String(repeating: "0", count: 20))\($0)" }
+        let refusedID = "call_piDelegateRefused|fc_00000000000000000000004"
+        let waitID = "call_piWait|fc_00000000000000000000005"
+        var steps: [DelegationStep] = [
+            .line(try jsonLine(["type": "agent_start"])),
+            .line(try jsonLine(["type": "turn_start"])),
+        ]
+        for id in spawnIDs {
+            steps.append(.line(start.replacingOccurrences(of: capturedID, with: id)))
+            steps.append(.line(end.replacingOccurrences(of: capturedID, with: id)))
+        }
+        let refusal = try jsonLine(["schema": "array.workspace.v1", "status": "error", "requestId": refusedID,
+                                    "error": ["code": "permission_denied", "message": "The user declined to let this agent delegate."]])
+        steps.append(.line(try jsonLine(["type": "tool_execution_start", "toolCallId": refusedID, "toolName": "array_delegate",
+                                         "args": ["task": "Rotate the signing key", "idempotencyKey": "k4"]])))
+        steps.append(.line(try jsonLine(["type": "tool_execution_end", "toolCallId": refusedID, "toolName": "array_delegate",
+                                         "result": ["content": [["type": "text", "text": refusal]]], "isError": true])))
+        steps.append(.line(try jsonLine(["type": "tool_execution_start", "toolCallId": waitID, "toolName": "wait_agents",
+                                         "args": ["handles": spawnIDs]])))
+        steps.append(.line(try jsonLine(["type": "tool_execution_end", "toolCallId": waitID, "toolName": "wait_agents",
+                                         "result": ["content": [["type": "text", "text": "3 agents completed"]]], "isError": false])))
+        steps.append(.line(try jsonLine(["type": "turn_end"])))
+        steps.append(.line(try jsonLine(["type": "agent_settled"])))
+
+        final class SpawnBox: @unchecked Sendable { var pending: [SpawnRequest] = [] }
+        let box = SpawnBox()
+        var translator = PiEventTranslator()
+        translator.onSpawnRequest = { box.pending.append($0) }
+        var spawned = 0
+        try assertDelegationFolds(
+            harness: "pi", steps: steps,
+            translate: { translator.translate(line: $0) },
+            drainSpawns: {
+                defer { box.pending = [] }
+                return box.pending.compactMap { request in
+                    guard let id = request.sourceItemID else { return nil }
+                    spawned += 1
+                    let name = request.role ?? "Subagent"
+                    return (id, UUID(), spawned == 1 ? name : "\(name) \(spawned)")
+                }
+            },
+            spawningCallIDs: spawnIDs, refusedCallID: refusedID)
+    }
+
+    /// (b) claude: three `mcp__array_workspace__array_delegate` calls and a fourth
+    /// the user declined, in claude's stream-json (`--include-partial-messages`)
+    /// shapes. Each chip lands while its call is executing — after the tool_use,
+    /// before the tool_result carrying the operation Array returned.
+    @MainActor
+    private static func replayClaudeMCPDelegation() throws {
+        let tool = "mcp__array_workspace__array_delegate"
+        let session = "00000000-0000-4000-8000-00000000c1a0"
+        let messageID = "msg_01ArrayDelegateFixture000"
+        let calls: [(id: String, title: String?, task: String)] = [
+            ("toolu_01ArrayDelegate00000000001", "Survey the ledger", "Survey the ledger and list every unreleased row."),
+            ("toolu_01ArrayDelegate00000000002", "Audit the appcast", "Audit the appcast against the ledger."),
+            ("toolu_01ArrayDelegate00000000003", "Check the release notes", "Check the release notes for missing entries."),
+            ("toolu_01ArrayDelegate00000000004", nil, "Rotate the signing key."),
+        ]
+        let children = calls.dropLast().map { _ in UUID() }
+        func event(_ payload: [String: Any]) throws -> DelegationStep {
+            .line(try jsonLine(["type": "stream_event", "session_id": session, "parent_tool_use_id": NSNull(), "event": payload]))
+        }
+        var steps: [DelegationStep] = [
+            .line(try jsonLine(["type": "system", "subtype": "init", "cwd": "/tmp/fixture", "session_id": session,
+                                "tools": [tool], "model": "fixture-model"])),
+            try event(["type": "message_start", "message": [
+                "model": "fixture-model", "id": messageID, "type": "message", "role": "assistant", "content": [],
+                "usage": ["input_tokens": 4, "output_tokens": 1]]]),
+        ]
+        for (index, call) in calls.enumerated() {
+            var input: [String: Any] = ["task": call.task, "idempotencyKey": "k\(index + 1)"]
+            if let title = call.title { input["title"] = title }
+            steps.append(try event(["type": "content_block_start", "index": index, "content_block": [
+                "type": "tool_use", "id": call.id, "name": tool, "input": [String: Any](), "caller": ["type": "direct"]]]))
+            steps.append(.line(try jsonLine(["type": "assistant", "session_id": session, "parent_tool_use_id": NSNull(),
+                                             "message": ["model": "fixture-model", "id": messageID, "type": "message",
+                                                         "role": "assistant", "content": [[
+                                                             "type": "tool_use", "id": call.id, "name": tool, "input": input]]]])))
+            steps.append(try event(["type": "content_block_stop", "index": index]))
+        }
+        steps.append(try event(["type": "message_stop"]))
+        for (index, call) in calls.enumerated() {
+            let reply: [String: Any]
+            if index < children.count, let title = call.title {
+                steps.append(.chip(callID: call.id, childID: children[index], name: title))
+                reply = ["schema": "array.workspace.v1", "status": "ok", "requestId": call.id, "result": [
+                    "operationId": call.id, "status": "succeeded", "childAgentId": children[index].uuidString,
+                    "provider": "claude", "childRunning": true]]
+            } else {
+                reply = ["schema": "array.workspace.v1", "status": "error", "requestId": call.id, "error": [
+                    "code": "permission_denied", "message": "The user declined to let this agent delegate."]]
+            }
+            var result: [String: Any] = ["tool_use_id": call.id, "type": "tool_result",
+                                         "content": [["type": "text", "text": try jsonLine(reply)]]]
+            if index >= children.count { result["is_error"] = true }
+            steps.append(.line(try jsonLine(["type": "user", "session_id": session, "parent_tool_use_id": NSNull(),
+                                             "message": ["role": "user", "content": [result]]])))
+        }
+        steps.append(.line(try jsonLine(["type": "result", "subtype": "success", "is_error": false, "num_turns": 2,
+                                         "session_id": session, "stop_reason": "end_turn"])))
+        var translator = ClaudeEventTranslator()
+        try assertDelegationFolds(
+            harness: "claude", steps: steps,
+            translate: { translator.translate(line: $0) },
+            spawningCallIDs: children.indices.map { calls[$0].id }, refusedCallID: calls[3].id)
+    }
+
+    /// (c) codex: a LIVE capture (`codex-appserver-mcp-delegate.jsonl`, codex-cli
+    /// 0.159.3 app-server against a stand-in `array_workspace` server): three
+    /// `mcpToolCall` items for `array_delegate` and a refused fourth whose result
+    /// is `isError`. codex names the call to the server in `_meta.callId`, and that
+    /// id is the item's own `id`. Each chip lands right after its item starts.
+    @MainActor
+    private static func replayCodexMCPDelegation() throws {
+        let lines = try fixtureLines("codex-appserver-mcp-delegate.jsonl")
+        var spawns: [String: (childID: UUID, name: String)] = [:]
+        var spawnOrder: [String] = []
+        var refused: [String] = []
+        for line in lines {
+            guard let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  object["method"] as? String == "item/completed",
+                  let item = (object["params"] as? [String: Any])?["item"] as? [String: Any],
+                  item["type"] as? String == "mcpToolCall", item["tool"] as? String == "array_delegate",
+                  let id = item["id"] as? String,
+                  let content = (item["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
+            else { continue }
+            if let result = content["result"] as? [String: Any],
+               let child = (result["childAgentId"] as? String).flatMap(UUID.init(uuidString:)),
+               let title = (item["arguments"] as? [String: Any])?["title"] as? String {
+                spawns[id] = (child, title)
+                spawnOrder.append(id)
+            } else if content["status"] as? String == "error" {
+                refused.append(id)
+            }
+        }
+        guard spawnOrder.count == 3, refused.count == 1 else {
+            throw fail("delegation fold (codex): the capture should hold three spawning array_delegate calls and one refusal, found \(spawnOrder.count) and \(refused.count)")
+        }
+        var steps: [DelegationStep] = []
+        for line in lines {
+            steps.append(.line(line))
+            guard line.contains("\"item/started\""),
+                  let id = spawnOrder.first(where: { line.contains("\"id\": \"\($0)\"") }),
+                  let spawn = spawns[id] else { continue }
+            steps.append(.chip(callID: id, childID: spawn.childID, name: spawn.name))
+        }
+        final class Previews: @unchecked Sendable { var byItem: [String: String] = [:] }
+        let previews = Previews()
+        var translator = CodexAppServerEventTranslator()
+        translator.onRuntimeObservation = { observation in
+            if case let .toolDetail(itemId, detail) = observation, let preview = detail.outputPreview {
+                previews.byItem[itemId] = preview
+            }
+        }
+        try assertDelegationFolds(
+            harness: "codex", steps: steps,
+            translate: { translator.translate(line: $0) },
+            spawningCallIDs: spawnOrder, refusedCallID: refused[0])
+        // The refused row's error is its own text, supplied to the detail pane.
+        guard previews.byItem[refused[0]]?.contains("Array did not start a child") == true else {
+            throw fail("delegation fold (codex): the refused call's error text never reached its row: \(String(describing: previews.byItem[refused[0]]))")
+        }
+    }
+
+    /// Replays one harness's delegation into a real tile in an offscreen window and
+    /// asserts the fold: every spawning call's tool row superseded and off screen,
+    /// the refused call a displayed failed row, the chips one run — one line at a
+    /// wide width (same minY, increasing minX) and wrapped at a narrow one.
+    @MainActor
+    private static func assertDelegationFolds(
+        harness: String,
+        steps: [DelegationStep],
+        translate: (String) -> [AgentRuntimeEvent],
+        drainSpawns: () -> [(callID: String, childID: UUID, name: String)] = { [] },
+        spawningCallIDs: [String],
+        refusedCallID: String
+    ) throws {
+        let wide = NSSize(width: 1100, height: 560)
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "delegation-fold-\(harness)",
+            frame: TileFrame(x: 0, y: 0, width: Double(wide.width), height: Double(wide.height)),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: wide),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        defer { window.orderOut(nil) }
+        window.contentView = tile
+        window.orderFrontOffscreenForChecks()
+
+        let thread = tile.qaThreadIdForChecks
+        let parentAgentID = UUID()
+        var chips: [(callID: String, childID: UUID, name: String)] = []
+        func ingestChip(_ chip: (callID: String, childID: UUID, name: String)) {
+            chips.append(chip)
+            tile.ingest(.childAgentSpawned(
+                threadId: thread, childAgentID: chip.childID, parentAgentID: parentAgentID,
+                displayName: chip.name, sourceItemID: chip.callID, provider: harness,
+                spawnedAt: Date(timeIntervalSince1970: 0)))
+        }
+        for step in steps {
+            switch step {
+            case let .line(line):
+                for event in translate(line) { tile.ingest(event.withThreadId(thread)) }
+                drainSpawns().forEach(ingestChip)
+            case let .chip(callID, childID, name):
+                ingestChip((callID, childID, name))
+            }
+        }
+        guard let transcript = tile.qaTranscriptForChecks else {
+            throw fail("delegation fold (\(harness)): the tile has no transcript")
+        }
+        tile.qaFlushStreamingMarkupForChecks()
+        transcript.flushPendingVisualUpdate()
+
+        // The replay's own teeth: one chip per spawning call, and one tool row for
+        // every call — a call with no row has nothing to fold, and a refusal with
+        // no row is silent.
+        guard chips.map(\.callID) == spawningCallIDs else {
+            throw fail("delegation fold (\(harness)): chips named calls \(chips.map(\.callID)), expected \(spawningCallIDs)")
+        }
+        var toolRowsByCall: [String: [AgentNodeID]] = [:]
+        var statusByCall: [String: AgentItemStatus] = [:]
+        var chipIDs: [AgentNodeID] = []
+        for entry in tile.qaDocumentForChecks.entries {
+            guard case let .providerItem(_, itemID?) = entry.provenance else { continue }
+            for block in entry.blocks {
+                switch block.payload {
+                case .agentReference:
+                    chipIDs.append(block.id)
+                case let .toolCall(payload):
+                    toolRowsByCall[itemID, default: []].append(block.id)
+                    statusByCall[itemID] = payload.status
+                default:
+                    break
+                }
+            }
+        }
+        guard chipIDs.count == spawningCallIDs.count else {
+            throw fail("delegation fold (\(harness)): \(chipIDs.count) chips in the document for \(spawningCallIDs.count) spawns")
+        }
+        for call in spawningCallIDs + [refusedCallID] where toolRowsByCall[call]?.count != 1 {
+            throw fail(
+                "delegation fold (\(harness)): call \(call) has \(toolRowsByCall[call]?.count ?? 0) tool rows in the "
+                + "transcript, expected 1 — the translator drops this harness's delegate call, so a refusal "
+                + "of it would be invisible")
+        }
+        guard statusByCall[refusedCallID] == .failed else {
+            throw fail("delegation fold (\(harness)): the refused call reads \(String(describing: statusByCall[refusedCallID])), not failed")
+        }
+
+        let displayed = Set(transcript.qaDisplayedRowIDsForChecks)
+        let superseded = transcript.qaSupersededRowIDsForChecks
+        for (call, chip) in zip(spawningCallIDs, chips) {
+            let row = toolRowsByCall[call]![0]
+            guard superseded.contains(row), !displayed.contains(row) else {
+                throw fail(
+                    "delegation fold (\(harness)): the call that spawned \"\(chip.name)\" still renders as its own "
+                    + "tool row beside its chip (superseded=\(superseded.contains(row)), displayed=\(displayed.contains(row)))")
+            }
+        }
+        let refusedRow = toolRowsByCall[refusedCallID]![0]
+        guard displayed.contains(refusedRow), !superseded.contains(refusedRow) else {
+            throw fail(
+                "delegation fold (\(harness)): the refused delegate call is not on screen "
+                + "(displayed=\(displayed.contains(refusedRow)), superseded=\(superseded.contains(refusedRow))) — an "
+                + "error must never fold away")
+        }
+        let leaderByFollower = transcript.qaChipRunLeaderByFollowerForChecks
+        guard displayed.contains(chipIDs[0]), chipIDs.dropFirst().allSatisfy({ leaderByFollower[$0] == chipIDs[0] }) else {
+            throw fail(
+                "delegation fold (\(harness)): the \(chipIDs.count) chips are not one run — the spawning calls "
+                + "between them break it (followers \(chipIDs.dropFirst().map { leaderByFollower[$0]?.rawValue ?? "none" }))")
+        }
+
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.layoutIfNeeded()
+            tile.layoutSubtreeIfNeeded()
+            transcript.layoutSubtreeIfNeeded()
+            transcript.collectionView.layoutSubtreeIfNeeded()
+        }
+        /// The chip views, read at the first scroll position that materializes all
+        /// of them — a row scrolled away is recycled, so one viewport answers.
+        func chipViews(phase: String) throws -> [AgentReferenceChipView] {
+            var y: CGFloat = 0
+            repeat {
+                tile.qaScrollTranscript(toY: y)
+                settle()
+                var found: [String: AgentReferenceChipView] = [:]
+                func walk(_ view: NSView) {
+                    if let chip = view as? AgentReferenceChipView, let id = chip.identifier?.rawValue { found[id] = chip }
+                    view.subviews.forEach(walk)
+                }
+                walk(transcript.collectionView)
+                let views = chips.compactMap { found["agent.reference.\($0.childID.uuidString)"] }
+                if views.count == chips.count { return views }
+                y += 120
+            } while y < transcript.collectionView.frame.height
+            throw fail("delegation fold (\(harness), \(phase)): the chips never materialized together in one viewport")
+        }
+        /// Each line's minY, asserting the chips share one row view and advance
+        /// left to right along a line.
+        func lineStarts(_ views: [AgentReferenceChipView], phase: String) throws -> [CGFloat] {
+            guard let row = views.first?.superview as? AgentReferenceChipRowView,
+                  views.allSatisfy({ $0.superview === row }) else {
+                let rows = Set(views.compactMap { $0.superview.map(ObjectIdentifier.init) })
+                throw fail(
+                    "delegation fold (\(harness), \(phase)): \(views.count) chips render in \(rows.count) transcript "
+                    + "rows — the spawning calls between them keep each chip on a row of its own")
+            }
+            let frames = views.map { row.convert($0.bounds, from: $0) }
+            var starts: [CGFloat] = []
+            for frame in frames where !starts.contains(where: { abs($0 - frame.minY) < 0.5 }) { starts.append(frame.minY) }
+            for index in frames.indices.dropFirst() where abs(frames[index].minY - frames[index - 1].minY) < 0.5 {
+                guard frames[index].minX > frames[index - 1].maxX else {
+                    throw fail("delegation fold (\(harness), \(phase)): chip \(index) does not follow chip \(index - 1) on its line")
+                }
+            }
+            return starts
+        }
+        func capture(_ phase: String) throws {
+            guard let directory = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_REFERENCE_FLOW_CAPTURE"] else { return }
+            let rep = try UIProbe.bitmap(of: tile, id: "delegation-fold-\(harness)-\(phase)")
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                throw fail("delegation fold (\(harness)): could not encode the requested visual witness")
+            }
+            try png.write(
+                to: URL(fileURLWithPath: directory).appendingPathComponent("delegation-fold-\(harness)-\(phase).png"),
+                options: .atomic)
+        }
+
+        let wideViews = try chipViews(phase: "wide")
+        let wideLines = try lineStarts(wideViews, phase: "wide")
+        guard wideLines.count == 1 else {
+            throw fail("delegation fold (\(harness), wide): \(chips.count) chips took \(wideLines.count) lines in a \(wide.width)pt tile")
+        }
+        try capture("wide")
+
+        guard let wideRow = wideViews.first?.superview else {
+            throw fail("delegation fold (\(harness)): the wide chips have no row")
+        }
+        let chrome = wide.width - wideRow.bounds.width
+        let widths = chips.map { AgentReferenceChipView.preferredWidth(name: $0.name, label: nil, zoom: .default) }
+        guard let narrowRowWidth = stride(from: wideRow.bounds.width, through: 120, by: -1).first(where: { width in
+            let height = AgentReferenceChipRowView.flow(widths: widths, width: width, zoom: .default).height
+            return height > AgentReferenceChipView.height(zoom: .default) * 1.5
+        }) else {
+            throw fail("delegation fold (\(harness)): no row width wraps these chips")
+        }
+        window.setContentSize(NSSize(width: narrowRowWidth + chrome, height: wide.height))
+        let narrowLines = try lineStarts(try chipViews(phase: "narrow"), phase: "narrow")
+        guard narrowLines.count >= 2 else {
+            throw fail("delegation fold (\(harness), narrow): the run did not wrap in a \(narrowRowWidth)pt row")
+        }
+        try capture("narrow")
     }
 
 }

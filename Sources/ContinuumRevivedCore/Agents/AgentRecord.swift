@@ -359,8 +359,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// stale) instead of "unknown". Host-bound like everything else here; the
     /// sync boundary never sees an `AgentRecord`.
     public var lastContextWindow: AgentContextWindowSnapshot?
-    /// Monotonic provider-context generation. Compaction success advances it;
-    /// telemetry captured before that boundary can no longer repaint the meter.
+    /// Monotonic provider-context generation. Compaction success advances it,
+    /// and every meter reading is stamped with the generation it describes.
+    /// Late readings from a retired runner are rejected by the runner
+    /// generation, not by this (T1: stamping each operation's START epoch also
+    /// dropped that operation's own post-compaction readings).
     public var contextEpoch: UInt64
     /// Durable write-ahead marker for a manual compaction removed from the FIFO.
     /// Focus text deliberately remains only in the local queue item.
@@ -397,6 +400,13 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// the context meter has a denominator immediately after a relaunch or a
     /// workspace switch, before the next turn re-observes it.
     public var resolvedModelId: String?
+    /// Context windows the provider itself STATED, by the model they belong to
+    /// (`resolvedModelId`, else `model`): claude's `result.modelUsage[…]
+    /// .contextWindow`, codex's `modelContextWindow`. Persisted so the next
+    /// turn's first request — and a relaunch — reads as a percentage before the
+    /// provider states it again. Beats pi's models-store, which lacks models it
+    /// has never synced (`claude-opus-5-5`).
+    public var providerContextWindows: [String: Int] = [:]
 
     /// B7.2 — set by `/clear` for a claude-backed agent: the session id to
     /// resume-and-fork FROM on the agent's next launch (`claude --resume
@@ -900,6 +910,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case codexThreadId
         case providerSessionId
         case resolvedModelId
+        case providerContextWindows
         case pendingSessionForkFrom
         // P4.1. The three lifecycle dates take reference intervals for exactly
         // the reason above — a settled-at that drifts on reload reorders
@@ -1002,6 +1013,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // seed).
         providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
         resolvedModelId = try container.decodeIfPresent(String.self, forKey: .resolvedModelId)
+        providerContextWindows = (try? container.decodeIfPresent(
+            [String: Int].self, forKey: .providerContextWindows)) ?? [:]
         pendingSessionForkFrom = try container.decodeIfPresent(String.self, forKey: .pendingSessionForkFrom)
         // P4.1. Decoded through `SettledOverride(persistedRawValue:)` rather
         // than as the enum directly: a record written by a newer build with a
@@ -1073,6 +1086,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(codexThreadId, forKey: .codexThreadId)
         try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
         try container.encodeIfPresent(resolvedModelId, forKey: .resolvedModelId)
+        if !providerContextWindows.isEmpty {
+            try container.encode(providerContextWindows, forKey: .providerContextWindows)
+        }
         try container.encodeIfPresent(pendingSessionForkFrom, forKey: .pendingSessionForkFrom)
         // P4.1. `.neutral` is written as ABSENCE, the same way a headless
         // record omits `tileId`: the default is "nobody has said anything", and

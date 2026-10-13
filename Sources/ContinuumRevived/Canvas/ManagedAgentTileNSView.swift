@@ -178,6 +178,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// this the composer's last repaint shows `canSend == false` forever
     /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
     private var capabilityObserverToken: UUID?
+    private var promptEchoObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
     private let toolDetailStore = AgentToolDetailStore()
@@ -581,10 +582,28 @@ final class ManagedAgentTileNSView: TileNSView {
             composer.onClearQueuedMessages = { [weak supervisor] in
                 supervisor?.clearQueuedMessages(for: agentID)
             }
-            composer.updateQueuedMessages(
-                supervisor.queuedMessages(for: agentID),
-                paused: supervisor.isQueuePaused(for: agentID)
-            )
+            composer.onResumeQueue = { [weak supervisor] in
+                supervisor?.resumeQueue(for: agentID)
+            }
+            // T5b: the rail's per-item verbs. Send-now on a follow-up is D2's
+            // force send; on a held steer it hands the steer over at once.
+            composer.onSendQueuedMessageNow = { [weak supervisor] messageID in
+                Task { @MainActor in _ = await supervisor?.sendQueuedItemNow(messageID, for: agentID) }
+            }
+            composer.onMoveQueuedMessage = { [weak supervisor] messageID, index in
+                supervisor?.moveQueuedItem(messageID, toFollowUpIndex: index, for: agentID)
+            }
+            composer.onTakeQueuedMessageForEditing = { [weak supervisor] messageID in
+                await supervisor?.takeQueuedItemForEditing(messageID, for: agentID)
+            }
+            composer.updateQueueRail(supervisor.queueRailState(for: agentID))
+            // T5 — a prompt the supervisor started itself (a drained follow-up,
+            // a delivered steer) has no composer bubble; show it when it runs.
+            if let token = promptEchoObserverToken { supervisor.removePromptEchoObserver(token, for: agentID) }
+            promptEchoObserverToken = supervisor.addPromptEchoObserver(for: agentID) { [weak self] prompt in
+                guard self?.attachedAgentID == agentID else { return }
+                self?.appendUserPrompt(prompt)
+            }
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
@@ -941,6 +960,10 @@ final class ManagedAgentTileNSView: TileNSView {
         if let displayNameObserverToken, let agentID = attachedAgentID {
             agentSource?.removeDisplayNameObserver(displayNameObserverToken, for: agentID)
             self.displayNameObserverToken = nil
+        }
+        if let promptEchoObserverToken, let agentID = attachedAgentID {
+            agentSource?.removePromptEchoObserver(promptEchoObserverToken, for: agentID)
+            self.promptEchoObserverToken = nil
         }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
@@ -1562,7 +1585,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if compactContextWindow == nil,
            var contextSeed = supervisor.contextWindowSnapshot(for: agentID) {
             if case .live = contextSeed.freshness { contextSeed.freshness = .stale }
-            compactContextWindow = withDerivedOccupancy(contextSeed)
+            compactContextWindow = contextSeed
         }
         if compactContextWindow == nil,
            let record = supervisor.records[agentID],
@@ -1670,7 +1693,10 @@ final class ManagedAgentTileNSView: TileNSView {
         case .itemStarted, .itemCompleted, .tokenUsageUpdated, .childAgentSpawned, .semanticSignal:
             break
         case let .contextWindowUpdated(_, snapshot):
-            compactContextWindow = withDerivedOccupancy(snapshot)
+            // The supervisor's reading, rendered as delivered. It owns the
+            // window lookup and the merge (`AgentContextMeter`); a tile that
+            // derived its own lost the window for any model pi's store lacks.
+            compactContextWindow = snapshot
         }
     }
 
@@ -2003,40 +2029,6 @@ final class ManagedAgentTileNSView: TileNSView {
         return AgentAccountQuotaPresenter.presentCost(compactContextWindow)
     }
 
-    /// Fills a per-turn usage snapshot with an occupancy reading so the radial
-    /// meter can show a real percentage: the prompt tokens the provider reported
-    /// for the turn, over THIS agent's model's published context window. No
-    /// window on file (pi's models-store absent, or a model it does not list)
-    /// leaves the snapshot untouched and the ring empty.
-    private func withDerivedOccupancy(
-        _ snapshot: AgentContextWindowSnapshot
-    ) -> AgentContextWindowSnapshot {
-        AgentContextOccupancy.withDerivedOccupancy(
-            snapshot,
-            contextWindow: contextWindowForCurrentModel())
-    }
-
-    private func contextWindowForCurrentModel() -> Int? {
-        // The RESOLVED id first — what claude itself reported on `system/init`.
-        // It rides the record, so a relaunch or a workspace switch has a
-        // denominator before the next turn.
-        //
-        // The fallback below used to be dead for every claude agent: the harness
-        // offered three aliases (`anthropic/opus`, …) and this map is keyed by
-        // concrete ids, so the lookup always missed and the ring was empty. The
-        // claude catalogue is explicit ids now, so the fallback can hit — but
-        // only when pi's models-store is on disk, which is where the windows come
-        // from. A window is never GUESSED from a family name:
-        // `anthropic/claude-opus-4-5` is 200k and `anthropic/claude-opus-5` is
-        // 1M, so a wrong guess misreports occupancy by 5x.
-        if let id = projectedAgentID,
-           let resolved = agentSource?.resolvedModelId(for: id),
-           let window = AgentModelCatalog.shared.contextWindow(for: resolved) {
-            return window
-        }
-        return AgentModelCatalog.shared.contextWindow(for: providerSettings.model)
-    }
-
     /// Whether the live elapsed tick is currently scheduled. A live phase must
     /// have one (or its reading freezes); idle/silent must not (or an idle canvas
     /// wakes the run loop forever).
@@ -2068,10 +2060,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // chips stay in lockstep with the primary control's own repaint.
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
-                v2Composer?.updateQueuedMessages(
-                    supervisor.queuedMessages(for: agentID),
-                    paused: supervisor.isQueuePaused(for: agentID)
-                )
+                v2Composer?.updateQueueRail(supervisor.queueRailState(for: agentID))
             }
             // TR-06: the reply chips are a function of the turn state as well as
             // the document, and queueing moves ONLY the state — it appends no
@@ -3214,6 +3203,9 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.qaReplyOptionChipAccessibilityLabels ?? []
     }
     var qaComposerDraftText: String { v2Composer?.qaDraftText ?? "" }
+    /// T5b — the installed composer itself, so a check drives its real rail,
+    /// key path and hint line rather than a copy.
+    var qaComposerForChecks: AgentComposerView? { v2Composer }
     /// Drives the composer's real draft-apply path, so clearing a draft in a
     /// check runs the same observer production runs.
     func qaSetComposerDraftForChecks(_ text: String) {

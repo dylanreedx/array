@@ -727,5 +727,245 @@ func runWorkspaceAPIDelegationChecks() async throws {
     let recoveredDelivery = await childReceived("MSG-NOTREADY-91")
     try expect(recoveredDelivery == 1, "and delivers exactly once, got \(recoveredDelivery)")
 
+    // MARK: O — the same host over MCP (T3): the real `array-workspace-mcp`
+    // binary, through the production listener `mountWorkspaceSceneAtBoot` wired
+
+    // Claude and Codex reach Array only this way. Red before T3: the binary
+    // listed six tools, so `array_delegate`, `array_message_agent` and a wait
+    // did not exist for them at all, and refusals came back without isError.
+    guard let helper = AppDelegate.workspaceMCPExecutablePath() else {
+        throw Failure(message: "array-workspace-mcp is not beside the app binary — build the package, not just the Array product")
+    }
+    // A fresh agent session: the delegation and message grants above are gone,
+    // so the user is asked again over MCP exactly as over the pi bridge.
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, false)
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
+    guard let mcpConfig = delegate.workspaceMCPHost.configuration(for: parentId, serverExecutable: helper) else {
+        throw Failure(message: "the production MCP host issued no registration")
+    }
+    let client = try WorkspaceMCPCheckClient(executable: helper, environment: mcpConfig.environment)
+    defer { client.close() }
+
+    let initialized = try await client.request("initialize", ["protocolVersion": "2024-11-05", "capabilities": [:] as [String: Any]])
+    try expect(((initialized["result"] as? [String: Any])?["instructions"] as? String)?.contains("array_delegate") == true,
+               "MCP initialize must carry instructions that name array_delegate: \(initialized)")
+
+    // Parity over the wire: every tool the binary lists is the catalog entry pi
+    // registers — same name, same schema, pi's description and guidelines.
+    let listed = try await client.request("tools/list", [:])
+    let listedTools = ((listed["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
+    guard let catalogURL = PiExtensionInstaller.bundledExtensionURL(fileName: WorkspaceMCPToolCatalog.fileName),
+          let catalogData = FileManager.default.contents(atPath: catalogURL.path),
+          let catalogRoot = try JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
+          let rawTools = catalogRoot["tools"] as? [[String: Any]] else {
+        throw Failure(message: "the shared catalog beside the pi extension is unreadable")
+    }
+    try expect(listedTools.compactMap { $0["name"] as? String }
+               == rawTools.compactMap { $0["name"] as? String } + [WorkspaceMCPToolCatalog.waitAgentsName],
+               "MCP tools/list must be the pi catalog plus wait_agents: \(listedTools.compactMap { $0["name"] as? String })")
+    for raw in rawTools {
+        let name = raw["name"] as? String ?? "?"
+        guard let wire = listedTools.first(where: { $0["name"] as? String == name }),
+              let wireDescription = wire["description"] as? String,
+              let wireSchema = wire["inputSchema"] as? NSDictionary,
+              let rawSchema = raw["parameters"] as? NSDictionary else {
+            throw Failure(message: "\(name) is missing from tools/list or malformed")
+        }
+        try expect(wireSchema.isEqual(rawSchema), "\(name)'s MCP inputSchema differs from the catalog pi registers")
+        try expect(wireDescription.hasPrefix(raw["description"] as? String ?? "\u{0}")
+                   && ((raw["promptGuidelines"] as? [String]) ?? []).allSatisfy(wireDescription.contains),
+                   "\(name)'s MCP description must carry pi's description and every guideline")
+    }
+
+    func toolCall(_ name: String, _ arguments: [String: Any], meta: [String: Any]? = nil) async throws -> (isError: Bool, reply: [String: Any]) {
+        var params: [String: Any] = ["name": name, "arguments": arguments]
+        if let meta { params["_meta"] = meta }
+        let response = try await client.request("tools/call", params)
+        guard let result = response["result"] as? [String: Any],
+              let reply = result["structuredContent"] as? [String: Any] else {
+            throw Failure(message: "\(name): no structured result: \(response)")
+        }
+        return (result["isError"] as? Bool ?? false, reply)
+    }
+
+    // Honest context: delegation is neither a capability nor impossible.
+    let mcpContext = try await toolCall("array_workspace_context", [:])
+    let contextResult = mcpContext.reply["result"] as? [String: Any] ?? [:]
+    let advertised = contextResult["capabilities"] as? [String] ?? []
+    let needsApproval = contextResult["approvalRequired"] as? [String] ?? []
+    try expect(!mcpContext.isError && !advertised.contains("agent.delegate") && needsApproval.contains("agent.delegate")
+               && needsApproval.contains("agent.message") && Set(advertised).isDisjoint(with: needsApproval),
+               "context must list what needs the user's approval apart from what is callable now: capabilities=\(advertised) approvalRequired=\(needsApproval)")
+
+    // array_delegate over MCP: the user is asked, then exactly one child tile
+    // lands inside the PARENT's zone.
+    var mcpPrompts: [WorkspaceAPIService.ScopeApprovalPrompt] = []
+    api.approvalHandler = { prompt in mcpPrompts.append(prompt); return .allowForSession }
+    let childrenBeforeMCP = Set(supervisor.children(of: parentId))
+    let tilesBeforeMCP = agentTileCount()
+    let mcpMarker = "MCP-TASK-5e0c71"
+    // claude names its call in `_meta` (measured, 2.1.291); codex's spelling is
+    // asserted below. T4b: that id must become the operation AND the chip's
+    // `sourceItemID`, or the chip cannot supersede the call's transcript row.
+    let claudeToolUseID = "toolu_01McpDelegateWitness0001"
+    let delegated = try await toolCall("array_delegate", ["task": "\(mcpMarker): summarise the ledger",
+                                                          "idempotencyKey": "mcp-k1",
+                                                          "presentation": ["camera": "preserve"]],
+                                       meta: ["claudecode/toolUseId": claudeToolUseID])
+    try expect(!delegated.isError && delegated.reply["status"] as? String == "ok",
+               "an approved MCP delegation succeeds: \(delegated.reply)")
+    try expect(mcpPrompts.map(\.op) == [.agentDelegate], "the MCP delegation reached the trusted approval UI once: \(mcpPrompts.map(\.op))")
+    let delegatedResult = delegated.reply["result"] as? [String: Any] ?? [:]
+    let newChildren = Set(supervisor.children(of: parentId)).subtracting(childrenBeforeMCP)
+    guard newChildren.count == 1, let mcpChild = newChildren.first,
+          delegatedResult["childAgentId"] as? String == mcpChild.rawValue.uuidString,
+          let mcpTileText = delegatedResult["tileId"] as? String, let mcpTile = UUID(uuidString: mcpTileText),
+          let mcpOperation = delegatedResult["operationId"] as? String else {
+        throw Failure(message: "an MCP delegation must create exactly one child and report it: new children \(newChildren), result \(delegatedResult)")
+    }
+    try expect(agentTileCount() == tilesBeforeMCP + 1, "exactly one new managed-agent tile, got \(agentTileCount() - tilesBeforeMCP)")
+    /// The `sourceItemID` the supervisor's chip for `child` carried on the
+    /// parent's own stream (replayed from history to a fresh subscriber).
+    func chipSource(for child: AgentID) async -> String? {
+        final class Seen: @unchecked Sendable { var source: String?? }
+        let seen = Seen()
+        let stream = supervisor.events(for: parentId)
+        let reader = Task { @MainActor in
+            for await event in stream {
+                if case let .childAgentSpawned(_, childID, _, _, source, _, _) = event, childID == child.rawValue {
+                    seen.source = .some(source)
+                    return
+                }
+            }
+        }
+        defer { reader.cancel() }
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { seen.source != nil }
+        return seen.source ?? nil
+    }
+    try expect(mcpOperation == claudeToolUseID,
+               "the MCP delegation's operationId must be claude's tool_use id from _meta, got \(mcpOperation)")
+    let claudeChipSource = await chipSource(for: mcpChild)
+    try expect(claudeChipSource == claudeToolUseID,
+               "the chip for an MCP delegation must name claude's tool_use id, got \(String(describing: claudeChipSource)) — its tool row can never fold into it")
+    guard let mcpSnapshot = canvas.navigationTileSnapshot(for: mcpTile) else {
+        throw Failure(message: "the MCP child's tile has no navigation snapshot")
+    }
+    let mcpWorld = CGRect(x: mcpSnapshot.worldFrame.x, y: mcpSnapshot.worldFrame.y,
+                          width: mcpSnapshot.worldFrame.width, height: mcpSnapshot.worldFrame.height)
+    try expect(canvas.zoneId(containing: mcpTile) == zoneB && zoneBRect.contains(mcpWorld),
+               "the MCP child's WORLD frame \(mcpWorld) must sit inside the parent's zone \(zoneBRect)")
+    let mcpChildCwd = URL(fileURLWithPath: supervisor.records[mcpChild]?.cwd ?? pbRoot.path, isDirectory: true)
+    func mcpChildLog() -> String {
+        (try? String(contentsOf: mcpChildCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+    }
+    let mcpTaskArrived = await waitUntil(timeout: 30, pollInterval: 0.1) { mcpChildLog().contains(mcpMarker) }
+    try expect(mcpTaskArrived, "the MCP child's own runner must receive the delegated task")
+
+    // wait_agents runs in the helper, polling operation.get until the child is
+    // idle with a settled turn — the app's main thread never blocks on it.
+    let waited = try await toolCall(WorkspaceMCPToolCatalog.waitAgentsName, ["handles": [mcpOperation], "timeoutSeconds": 30])
+    let waitedAgents = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]] ?? []
+    try expect(!waited.isError && waitedAgents.count == 1
+               && waitedAgents[0]["status"] as? String == "completed"
+               && waitedAgents[0]["childAgentId"] as? String == mcpChild.rawValue.uuidString
+               && (waited.reply["result"] as? [String: Any])?["timedOut"] as? Bool == false,
+               "wait_agents must collect the delegated child's settled turn: \(waited.reply)")
+
+    // array_message_agent reaches the child it created …
+    let mcpMessageMarker = "MCP-MSG-a4d2"
+    let messaged = try await toolCall("array_message_agent", ["agentId": mcpChild.rawValue.uuidString,
+                                                              "text": "\(mcpMessageMarker): and the appcast",
+                                                              "idempotencyKey": "mcp-m1"])
+    try expect(!messaged.isError && (messaged.reply["result"] as? [String: Any])?["delivery"] as? String == "delivered",
+               "a message to the caller's own MCP child is delivered: \(messaged.reply)")
+    let mcpDelivered = await waitUntil(timeout: 30, pollInterval: 0.1) { mcpChildLog().contains(mcpMessageMarker) }
+    try expect(mcpDelivered && occurrences(mcpMessageMarker, in: mcpChildLog()) == 1,
+               "the child's own runner receives the MCP message exactly once")
+    // … and a sibling is a structured refusal the client sees as an ERROR.
+    let promptsBeforeSibling = mcpPrompts.count
+    let siblingMessage = try await toolCall("array_message_agent", ["agentId": siblingId.rawValue.uuidString,
+                                                                    "text": "MCP-SIBLING: reach a peer",
+                                                                    "idempotencyKey": "mcp-m-sibling"])
+    try expect(siblingMessage.isError
+               && (siblingMessage.reply["error"] as? [String: Any])?["code"] as? String == "permission_denied",
+               "a sibling is permission_denied, flagged isError so the client reports it as a failure: \(siblingMessage)")
+    try expect(mcpPrompts.count == promptsBeforeSibling, "nobody is asked about a target that was never messageable")
+
+    // codex names its call `_meta.callId` — its `mcpToolCall` item id (measured,
+    // 0.159.3). The same rule: that id is the operation and the chip's source.
+    let codexCallID = "exec-0562414f-29fc-47c6-962d-90fe1e889886"
+    let childrenBeforeCodex = Set(supervisor.children(of: parentId))
+    let codexDelegated = try await toolCall("array_delegate", ["task": "MCP-TASK-codex: audit the appcast",
+                                                               "idempotencyKey": "mcp-k2",
+                                                               "presentation": ["camera": "preserve"]],
+                                            meta: ["callId": codexCallID, "threadId": "01a1123a-f3f3-7652-bd37-5fb118f1ffc0"])
+    let codexChildren = Set(supervisor.children(of: parentId)).subtracting(childrenBeforeCodex)
+    try expect(!codexDelegated.isError && codexChildren.count == 1
+               && (codexDelegated.reply["result"] as? [String: Any])?["operationId"] as? String == codexCallID,
+               "a codex-shaped MCP delegation's operationId must be codex's callId: \(codexDelegated.reply)")
+    let codexChipSource = await chipSource(for: codexChildren.first!)
+    try expect(codexChipSource == codexCallID,
+               "the chip for a codex MCP delegation must name its callId, got \(String(describing: codexChipSource))")
+    client.close()
+
     supervisor.stopAll()
+}
+
+/// A minimal MCP stdio client for the delegation leg: one helper process, one
+/// request at a time, replies matched by id. Reads on the pipe's own queue so
+/// the main queue stays free for the host listener's `main.sync`.
+private final class WorkspaceMCPCheckClient: @unchecked Sendable {
+    private let process = Process()
+    private let input = Pipe()
+    private let output = Pipe()
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var responses: [Int: [String: Any]] = [:]
+    private var nextID = 1
+
+    init(executable: String, environment: [String: String]) throws {
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.consume(handle.availableData)
+        }
+        try process.run()
+    }
+
+    private func consume(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(chunk)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = buffer[buffer.startIndex..<newline]
+            buffer.removeSubrange(buffer.startIndex...newline)
+            if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any], let id = object["id"] as? Int {
+                responses[id] = object
+            }
+        }
+    }
+
+    @MainActor
+    func request(_ method: String, _ params: [String: Any], timeout: TimeInterval = 60) async throws -> [String: Any] {
+        let id = nextID; nextID += 1
+        let line = try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": id, "method": method, "params": params])
+        input.fileHandleForWriting.write(line + Data("\n".utf8))
+        let answered = await waitUntil(timeout: timeout, pollInterval: 0.05) { [self] in response(id) != nil }
+        guard answered, let response = response(id) else {
+            throw NSError(domain: "WorkspaceMCPCheckClient", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "array-workspace-mcp did not answer \(method) within \(Int(timeout))s"])
+        }
+        return response
+    }
+
+    private func response(_ id: Int) -> [String: Any]? {
+        lock.withLock { responses[id] }
+    }
+
+    func close() {
+        output.fileHandleForReading.readabilityHandler = nil
+        if process.isRunning { process.terminate() }
+    }
 }

@@ -46,15 +46,4 @@ extension AgentRuntimeEvent {
             return .runtimeError(threadId: threadId, message: message)
         }
     }
-
-    /// Tags provider telemetry with the context generation that owned the
-    /// operation. Providers do not report Array's epoch, so doing this at the
-    /// runner callback boundary is what lets the supervisor reject a delayed
-    /// pre-compaction meter update after the boundary has advanced.
-    public func withContextEpochIfMissing(_ epoch: UInt64) -> AgentRuntimeEvent {
-        guard case .contextWindowUpdated(let threadId, var snapshot) = self,
-              snapshot.contextEpoch == nil else { return self }
-        snapshot.contextEpoch = epoch
-        return .contextWindowUpdated(threadId: threadId, snapshot: snapshot)
-    }
 }

@@ -34,10 +34,12 @@ import Foundation
 /// `claudeResultUsage` doc comment already SAID "per-turn aggregate … not
 /// occupancy" while this file was summing it anyway.
 ///
-/// This is a last-turn reading for every provider we drive. None of them reports
-/// usage mid-turn on the streams we consume (codex's live `token_count` exists
-/// only in its own rollout log, not in `codex exec --json`), so the meter moves
-/// when a turn ends. Callers present it as such.
+/// Every provider we drive reports a per-request figure mid-turn: claude's
+/// `message_start` (the request's full prompt, at the moment it is sent), codex
+/// app-server's `thread/tokenUsage/updated.last`, pi's `message_end`. The meter
+/// moves with each request, not once per turn. `AgentContextMeter` owns the
+/// reading; this type only answers "how many prompt tokens does this snapshot
+/// state".
 public enum AgentContextOccupancy {
     /// The prompt-token total for the observed turn, or nil when the snapshot's
     /// source has no documented occupancy shape.
@@ -93,5 +95,114 @@ public enum AgentContextOccupancy {
         enriched.usedTokens = used
         enriched.maxTokens = window
         return enriched
+    }
+}
+
+/// The ONE owner of an agent's context-meter reading (T1, `.plans/69`). The
+/// supervisor folds every provider snapshot and compaction lifecycle event
+/// through here and hands the tile the result; the tile renders it and looks
+/// nothing up.
+///
+/// The reading is the prompt of the LATEST request over a window. Three ways it
+/// went wrong before this owned it, each a snapshot REPLACING the reading:
+/// a settings-only snapshot (pi and codex send their auto-compaction policy at
+/// every turn start) blanked the ring, the next usage snapshot dropped the
+/// policy tick, and a cumulative result block painted the run's sum.
+public enum AgentContextMeter {
+    /// The prompt tokens a snapshot states for its request, or nil when it
+    /// states none. Cumulative accounting never counts, even when an older
+    /// derivation left used/max on it.
+    public static func promptTokens(of snapshot: AgentContextWindowSnapshot) -> Int? {
+        switch snapshot.source {
+        case .codexTurnUsage, .claudeResultUsage:
+            return nil
+        default:
+            if let prompt = AgentContextOccupancy.promptTokens(from: snapshot) { return prompt }
+            guard let used = snapshot.usedTokens, used >= 0 else { return nil }
+            return used
+        }
+    }
+
+    /// The reading after one provider snapshot. `window` is the resolved
+    /// denominator (provider-stated first, then pi's models-store); nil leaves
+    /// the reading a bare prompt-token count, never a guessed percentage.
+    ///
+    /// A snapshot that states prompt tokens becomes the reading. One that does
+    /// not (settings, accounting) merges into it: the reading stands, and only
+    /// the fields the snapshot actually carries move. Policy, auto-compaction
+    /// and cost are merged in both cases, so neither kind erases the other's.
+    public static func reading(
+        after incoming: AgentContextWindowSnapshot,
+        current: AgentContextWindowSnapshot?,
+        window: Int?
+    ) -> AgentContextWindowSnapshot {
+        var next: AgentContextWindowSnapshot
+        if let prompt = promptTokens(of: incoming) {
+            next = incoming
+            next.usedTokens = prompt
+            next.maxTokens = window
+            next.compacting = current?.compacting
+        } else if var carried = current {
+            carried.maxTokens = window ?? carried.maxTokens
+            next = carried
+        } else {
+            next = incoming
+            next.usedTokens = nil
+            next.maxTokens = window
+        }
+        next.automaticCompactionPolicy = incoming.automaticCompactionPolicy ?? current?.automaticCompactionPolicy
+        next.automaticCompaction = incoming.automaticCompaction ?? current?.automaticCompaction
+        if incoming.totalCostUsd != nil || incoming.totalProcessedTokens != nil {
+            next.totalCostUsd = incoming.totalCostUsd
+            next.costBasis = incoming.costBasis
+            next.totalProcessedTokens = incoming.totalProcessedTokens
+        } else {
+            next.totalCostUsd = current?.totalCostUsd
+            next.costBasis = current?.costBasis
+            next.totalProcessedTokens = current?.totalProcessedTokens
+        }
+        return next
+    }
+
+    /// The reading after a compaction lifecycle event, or nil when it does not
+    /// change. Running keeps the last reading, dimmed; success makes the
+    /// boundary's `after` the reading (marked when the provider only estimated
+    /// it), or clears it when the provider reported none — the pre-compaction
+    /// number is no longer true; a failure only lifts the dimming.
+    public static func reading(
+        after lifecycle: AgentCompactionLifecycleEvent,
+        current: AgentContextWindowSnapshot?,
+        window: Int?
+    ) -> AgentContextWindowSnapshot? {
+        switch lifecycle.phase {
+        case .requested, .running:
+            guard var next = current, next.compacting != true else { return nil }
+            next.compacting = true
+            return next
+        case .failed, .cancelled, .indeterminate:
+            guard var next = current, next.compacting == true else { return nil }
+            next.compacting = nil
+            return next
+        case .succeeded:
+            var next = current ?? AgentContextWindowSnapshot(
+                observedAt: lifecycle.observedAt, source: .unknown("compaction"), freshness: .live)
+            next.compacting = nil
+            next.usedTokens = lifecycle.afterTokens?.value
+            next.usedTokensEstimated = lifecycle.afterTokens?.precision == .estimated ? true : nil
+            next.maxTokens = window ?? next.maxTokens
+            next.inputTokens = nil
+            next.outputTokens = nil
+            next.cacheReadTokens = nil
+            next.cacheWriteTokens = nil
+            next.source = lifecycle.provider == "claude" ? .claudeCompactBoundary : .unknown("compaction")
+            next.observedAt = lifecycle.observedAt
+            next.freshness = .live
+            switch lifecycle.trigger {
+            case .manual: next.automaticCompaction = false
+            case .providerAutomatic, .threshold, .overflowRecovery: next.automaticCompaction = true
+            case .unknown: break
+            }
+            return next
+        }
     }
 }

@@ -6,6 +6,10 @@ import AppKit
 /// completion surface is open.
 enum ComposerKeyAction: Equatable {
     case send
+    /// T5 (D1) — ⌥↩: queue for after the turn.
+    case queueSend
+    /// T5 (D1) — ⌘↩: interrupt the turn and send now.
+    case forceSend
     case dismissSuggestions
     case nativeTextSystem
 }
@@ -30,16 +34,19 @@ struct ComposerKeyPolicy {
         }
 
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        // Shift+Return is deliberately native insertion. Option, Command, and
-        // Control combinations also stay native so standard macOS editing commands
-        // are never repurposed as send.
-        guard modifiers.intersection([.shift, .option, .command, .control]).isEmpty else {
-            return .nativeTextSystem
-        }
+            .intersection([.shift, .option, .command, .control])
         // Marked text is owned by the input manager. Forward Return unchanged so it
         // can select/commit the actual candidate; clearing the mark ourselves would
         // bypass candidate-window semantics for real IMEs.
         if hasMarkedText { return .nativeTextSystem }
-        return hasTrimmedContent || hasAttachments ? .send : .nativeTextSystem
+        guard hasTrimmedContent || hasAttachments else { return .nativeTextSystem }
+        // Shift+Return is deliberately native insertion, and so is every other
+        // combination: only plain, ⌥ and ⌘ Return are the composer's (D1).
+        switch modifiers {
+        case []: return .send
+        case [.option]: return .queueSend
+        case [.command]: return .forceSend
+        default: return .nativeTextSystem
+        }
     }
 }

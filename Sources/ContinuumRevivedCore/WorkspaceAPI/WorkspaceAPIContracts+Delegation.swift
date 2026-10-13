@@ -383,6 +383,10 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
     public var failureCode: String?
     public var failureMessage: String?
     public var createdAt: Date?
+    /// `agent.delegate` only, and only while the child is idle: the turn it
+    /// last settled with, read from the spawn-result courier the supervisor
+    /// writes for `wait_agents`. A running child has no settled answer yet.
+    public var childResult: OperationChildResult?
 
     public init(
         operationId: String,
@@ -394,7 +398,8 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
         childRunning: Bool?,
         failureCode: String? = nil,
         failureMessage: String? = nil,
-        createdAt: Date? = nil
+        createdAt: Date? = nil,
+        childResult: OperationChildResult? = nil
     ) {
         self.operationId = operationId
         self.op = op
@@ -406,6 +411,25 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
         self.failureCode = failureCode
         self.failureMessage = failureMessage
         self.createdAt = createdAt
+        self.childResult = childResult
+    }
+}
+
+/// A delegated child's settled turn, as `SpawnResultFile` records it.
+public struct OperationChildResult: Codable, Equatable, Sendable {
+    /// `spawned`, `refused`, `completed`, `failed` or `interrupted`.
+    public var status: String
+    public var finalText: String?
+    public var finalTextTruncated: Bool?
+    public var reason: String?
+    public var endedAt: Date?
+
+    public init(_ file: SpawnResultFile) {
+        status = file.status.rawValue
+        finalText = file.finalText
+        finalTextTruncated = file.finalTextTruncated
+        reason = file.reason
+        endedAt = file.endedAt
     }
 }
 

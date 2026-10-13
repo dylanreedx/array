@@ -302,6 +302,18 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// alongside the row dictionary, so it costs the changed set on a delta.
     /// Chips are rare, so this stays a handful of entries even at fan-out scale.
     private var supersededRowIDs: Set<AgentNodeID> = []
+    /// T4 (0.7.26) — runs of CONSECUTIVE subagent chips present as ONE row that
+    /// flows them left to right (`AgentReferenceRenderer`). Every chip row is a
+    /// key here: the run's first chip maps to the rest of its run (empty for a
+    /// lone chip). Followers fold out of the display exactly like a superseded
+    /// row; the leader's presented block carries them as `children`. `rows`
+    /// still equals `flatten(document)`. Rebuilt with the projection; chips are
+    /// rare, so this is a handful of entries at fan-out scale.
+    private var chipRunFollowersByLeader: [AgentNodeID: [AgentNodeID]] = [:]
+    private var chipRunLeaderByFollower: [AgentNodeID: AgentNodeID] = [:]
+    /// Leaders whose run changed in the last rebuild: their measured height and
+    /// their on-screen row are stale even though their own block is not.
+    private var regroupedChipRunLeaders: Set<AgentNodeID> = []
     /// Provider item id → the top-level row id its entry renders as. This is how
     /// a chip's `sourceItemID` (a raw provider tool_use id) resolves to the tool
     /// ROW it supersedes — row node ids are derived from the provider id, never
@@ -897,7 +909,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         // A previously-anchored row may have folded since; its header is the
         // honest restore target (S4.3 — a fold above the viewport must not
         // jump the reader).
-        let resolvedID = displayIndexByID[id] != nil ? id : (headerIDByFoldedMemberID[id] ?? id)
+        let resolvedID = displayIndexByID[id] != nil
+            ? id
+            : (headerIDByFoldedMemberID[id] ?? chipRunLeaderByFollower[id] ?? id)
         guard let index = displayIndexByID[resolvedID] else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.minY
     }
@@ -915,7 +929,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 switch displayItems[path.item] {
                 case let .row(index):
                     guard rows.indices.contains(index) else { return [] }
-                    return [rows[index]]
+                    // A chip run is one row on screen and every chip in it.
+                    let followers = chipRunFollowersByLeader[rows[index].id] ?? []
+                    return [rows[index]] + followers.compactMap { rowsByID[$0] }
                 case let .header(header):
                     guard !header.isExpanded else { return [] }
                     return header.memberIndexes.compactMap {
@@ -1172,6 +1188,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 return row.id
             })
         }
+        // A follower renders inside its run's leader, so a change to it is a
+        // change to the leader's row; and a leader whose run changed must be
+        // re-measured and re-presented though its own block did not move.
+        for id in changedTopLevelIDs {
+            if let leader = chipRunLeaderByFollower[id] { changedTopLevelIDs.insert(leader) }
+        }
+        changedTopLevelIDs.formUnion(regroupedChipRunLeaders)
+        regroupedChipRunLeaders = []
         // `rowsByID` is keyed by exactly the applied row IDs, so membership in it
         // is the same test as membership in `rows.map(\.id)` and costs a walk of
         // the CHANGED set instead of the whole history.
@@ -2307,6 +2331,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// document and its Codable payload remain unchanged.
     private func presentedToolBlock(_ block: AgentBlock) -> AgentBlock {
         switch block.payload {
+        case .agentReference:
+            return presentedChipRun(block)
         case .toolCall, .diff:
             // `.plans/45` S3 (1c.6): in-progress blocks are no longer excluded —
             // the query must show DURING the search, not after it.
@@ -2467,7 +2493,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             isLive: isLive,
             startsTurn: Self.startsTurn(rows, at: index),
             id: row.id,
-            isSuperseded: supersededRowIDs.contains(row.id)
+            isSuperseded: supersededRowIDs.contains(row.id) || chipRunLeaderByFollower[row.id] != nil
         )
     }
 
@@ -2490,6 +2516,64 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         return mapped
     }
 
+    private func isChipRow(_ row: Row?) -> Bool {
+        guard let block = row?.block, case .agentReference = block.payload else { return false }
+        return true
+    }
+
+    /// Groups chip rows into runs over the CURRENT rows. Rows already folded out
+    /// as superseded are transparent — a claude delegation interleaves each
+    /// `Agent` tool row with its chip, and those tool rows are exactly the ones
+    /// the chips supersede — while any other displayed row ends the run.
+    private func rebuildChipRuns() {
+        var followersByLeader: [AgentNodeID: [AgentNodeID]] = [:]
+        var leaderByFollower: [AgentNodeID: AgentNodeID] = [:]
+        var leader: AgentNodeID?
+        for row in rows where !supersededRowIDs.contains(row.id) {
+            guard isChipRow(row) else {
+                leader = nil
+                continue
+            }
+            if let leader {
+                followersByLeader[leader, default: []].append(row.id)
+                leaderByFollower[row.id] = leader
+            } else {
+                leader = row.id
+                followersByLeader[row.id] = []
+            }
+        }
+        for (id, followers) in followersByLeader where chipRunFollowersByLeader[id] != followers {
+            regroupedChipRunLeaders.insert(id)
+        }
+        chipRunFollowersByLeader = followersByLeader
+        chipRunLeaderByFollower = leaderByFollower
+    }
+
+    /// The leader's presented block: itself, carrying its run's followers as
+    /// presentation-only `children` for `AgentReferenceRenderer` to flow.
+    ///
+    /// The run's wrapped height depends on what no block revision records — who
+    /// is in the run, and each child's live status word, which widens its chip.
+    /// Both are folded into the presented revision so the measurement cache keys
+    /// on them: a status tick then re-measures this row (the renderer asks for
+    /// that when its wrap stops fitting), and a tick that landed while the row
+    /// was scrolled away cannot be served a stale height when it returns.
+    private func presentedChipRun(_ block: AgentBlock) -> AgentBlock {
+        guard let followers = chipRunFollowersByLeader[block.id], !followers.isEmpty else { return block }
+        var presented = block
+        presented.children = followers.compactMap { rowsByID[$0]?.block }
+        var identity = Hasher()
+        for member in [block] + presented.children {
+            identity.combine(member.id)
+            identity.combine(member.revision)
+            if case let .agentReference(payload) = member.payload {
+                identity.combine(renderContext.agentStatus.current(payload.agentID)?.label)
+            }
+        }
+        presented.revision = UInt64(bitPattern: Int64(identity.finalize()))
+        return presented
+    }
+
     /// Patches the projection for a content-only delta instead of rebuilding it.
     ///
     /// S4.3 justified an O(rows) rebuild per visual apply on the grounds that the
@@ -2507,6 +2591,14 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard cachedRowFacts.count == rows.count,
               lastPlannedTailStreaming == turnIsInFlight
         else {
+            rebuildDisplayProjection()
+            return
+        }
+        // A chip's run is a fact about its NEIGHBOURS. A changed row that is, or
+        // was, a chip can move a run boundary the slot patch below cannot see;
+        // chips are rare, so the answer is the full rebuild.
+        for id in changedRowIDs where isChipRow(rowsByID[id])
+            || chipRunFollowersByLeader[id] != nil || chipRunLeaderByFollower[id] != nil {
             rebuildDisplayProjection()
             return
         }
@@ -2546,6 +2638,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     private func rebuildDisplayProjection() {
         recordHistoryScan("cluster projection")
         supersededRowIDs = Set(rows.compactMap(supersededID))
+        rebuildChipRuns()
         cachedRowFacts = rows.indices.map { rowFact(at: $0) }
         replanDisplayProjection()
     }
@@ -2902,6 +2995,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         if case let .row(index) = $0 { return rows[index].id } else { return nil }
     } }
     var qaSupersededRowIDsForChecks: Set<AgentNodeID> { supersededRowIDs }
+    /// Chip-run followers → the displayed leader whose row presents them.
+    var qaChipRunLeaderByFollowerForChecks: [AgentNodeID: AgentNodeID] { chipRunLeaderByFollower }
     /// Mirrors `qaIndexEquivalenceMismatch`: nil when the projection, the
     /// snapshot and the semantic rows agree; otherwise a description.
     func qaClusterProjectionMismatch() -> String? {

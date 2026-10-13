@@ -16,6 +16,7 @@ check --agent-message-bus-check
 check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
+check --agent-steering-runner-check
 check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
@@ -194,6 +195,7 @@ check --workspace-chrome-polish-check
 check --workspace-delete-failure-check
 check --workspace-invariants-check
 check --workspace-management-polish-check
+check --workspace-mcp-check
 check --workspace-profile-check
 check --workspace-restart-fault-check
 check --workspace-runtime-install-check
@@ -463,6 +465,7 @@ leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
@@ -471,6 +474,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg scripts/check-app-bundle.sh --configuration debug
@@ -498,7 +502,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 148
+count ContinuumRevivedCoreChecks 149
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

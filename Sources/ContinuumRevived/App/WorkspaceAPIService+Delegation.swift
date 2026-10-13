@@ -684,11 +684,21 @@ extension WorkspaceAPIService {
         let result: OperationGetResult
         switch lookup {
         case let .found(record):
+            let childRunning = record.childAgentId.map { supervisor.records[$0] != nil && supervisor.isRunning($0) }
+            // A delegation's operationId IS its spawn-result handle (step 6 of
+            // `delegate`), so an idle child's settled answer is the courier the
+            // supervisor wrote under the PARENT's cwd. The same channel pi's
+            // `wait_agents` reads; the MCP `wait_agents` polls this instead.
+            var childResult: OperationChildResult?
+            if record.op == .agentDelegate, childRunning == false, let parentCwd = supervisor.records[agentId]?.cwd {
+                childResult = SpawnResultFile.read(parentCwd: parentCwd, handle: record.operationId).map(OperationChildResult.init)
+            }
             result = OperationGetResult(
                 operationId: record.operationId, op: record.op, status: record.status, steps: record.steps,
                 childAgentId: record.childAgentId, tileId: record.tileId,
-                childRunning: record.childAgentId.map { supervisor.records[$0] != nil && supervisor.isRunning($0) },
-                failureCode: record.failureCode, failureMessage: record.failureMessage, createdAt: record.createdAt)
+                childRunning: childRunning,
+                failureCode: record.failureCode, failureMessage: record.failureMessage, createdAt: record.createdAt,
+                childResult: childResult)
         case let .expired(tombstone):
             result = OperationGetResult(
                 operationId: tombstone.operationId, op: nil, status: .expired, steps: nil,

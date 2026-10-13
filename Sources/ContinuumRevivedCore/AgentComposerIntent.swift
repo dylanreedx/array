@@ -15,6 +15,9 @@ public enum AgentComposerIntent: Equatable, Sendable {
     case stop
     case steer(AgentPrompt)
     case queue(AgentPrompt)
+    /// T5 (D2) — interrupt the turn in flight WITHOUT killing its process and
+    /// run this prompt now, ahead of every held steer and queued follow-up.
+    case forceSend(AgentPrompt)
     case command(String)
     /// A completion-selected provider or harness command. The invocation stays
     /// typed until the supervisor/adapter serializes it for the active runtime.
@@ -298,11 +301,28 @@ public struct AgentComposerIntentState: Equatable, Sendable {
     /// text alone rather than being forced to `.sendPrompt` — see the composer's
     /// `composerRequestedSend`.
     public func workingDraftIntent(prompt: AgentPrompt) -> AgentComposerIntent? {
+        workingDraftIntent(prompt: prompt, modifier: .plain)
+    }
+
+    /// T5 (D1) — Return while a turn works STEERS (falling back to the queue
+    /// on a runtime that cannot steer); ⌥↩ queues for after the turn; ⌘↩ force
+    /// sends: interrupt the turn, keep its process, run this now.
+    public func workingDraftIntent(
+        prompt: AgentPrompt,
+        modifier: AgentComposerSubmitModifier
+    ) -> AgentComposerIntent? {
         guard executionState == .working else { return nil }
         guard !prompt.isEmpty else { return nil }
-        if capabilities.canSteer { return .steer(prompt) }
-        if capabilities.canQueue { return .queue(prompt) }
-        return nil
+        switch modifier {
+        case .plain:
+            if capabilities.canSteer { return .steer(prompt) }
+            if capabilities.canQueue { return .queue(prompt) }
+            return nil
+        case .queue:
+            return capabilities.canQueue ? .queue(prompt) : nil
+        case .forceSend:
+            return capabilities.canStop ? .forceSend(prompt) : nil
+        }
     }
 
     public var allowedWorkingDraftIntents: Set<AgentComposerWorkingDraftIntent> {
@@ -316,6 +336,14 @@ public struct AgentComposerIntentState: Equatable, Sendable {
     private static func normalized(_ draft: String) -> String {
         draft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+/// Which Return the user pressed: plain ↩, ⌥↩ (queue) or ⌘↩ (force send).
+/// Only meaningful while a turn works; a ready composer sends on all three.
+public enum AgentComposerSubmitModifier: Hashable, Sendable {
+    case plain
+    case queue
+    case forceSend
 }
 
 public enum AgentComposerWorkingDraftIntent: Hashable, Sendable {

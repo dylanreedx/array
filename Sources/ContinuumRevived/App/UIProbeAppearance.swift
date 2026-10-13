@@ -955,6 +955,12 @@ enum UIProbeAppearance {
         // outline are held to the palette from the first frame; the WORDS on it are
         // covered by section K of `--agent-inbox-check` rather than by a pixel.
         "InboxUndoToast",
+        // T5b (`.plans/69`): the steering/queue rail's one painted layer is the
+        // divider under it — a LINE role (`decorativeHairline`) painted as a
+        // FILL on its own sublayer, the same hand-off as `UserPromptView.rule`.
+        // Its rows paint no fill at rest; the drag drop line paints only
+        // mid-drag.
+        "ComposerQueuedMessageRailView",
         // A6 (`.plans/45`): the approval/question dock's one fill,
         // `AgentSurfaceRole.artifact`, painted unconditionally in
         // `applyTokens()` — an open request is always an artifact surface,
@@ -1033,6 +1039,8 @@ enum UIProbeAppearance {
             // design (a 2.5pt bar and a 1pt divider are drawn as views).
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
+            values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
+        case "ComposerQueuedMessageRailView":
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
         case "UserPromptView.rule":
             // A1 (ticket rulings 1, 3): the authorship rule is a LINE role
@@ -1524,6 +1532,20 @@ enum UIProbeAppearance {
                             source: .claudeRateLimitEvent),
                         enabledElements: [.location, .activity, .contextMeter, .quotaFiveHour],
                         now: quotaNow)
+                    // T5b: the steering/queue rail with every row kind and the
+                    // paused header, so its divider, labels, tints and accents
+                    // are painted here rather than hidden. Same seam production
+                    // repaints through (`updateQueueRail`).
+                    tile.qaComposerForChecks?.updateQueueRail(ComposerQueueRailState(
+                        steers: [
+                            .init(id: UUID(), text: "also check the iOS build", attachmentCount: 0, kind: .heldSteer),
+                            .init(id: UUID(), text: "and the watch target", attachmentCount: 0, kind: .deliveringSteer),
+                        ],
+                        queued: [
+                            .init(id: UUID(), text: "then write the release notes", attachmentCount: 2, kind: .queued),
+                            .init(id: UUID(), text: "Compact context", attachmentCount: 0, kind: .compaction),
+                        ],
+                        pause: .afterStop))
                     tile.layoutSubtreeIfNeeded()
                 }
             ),

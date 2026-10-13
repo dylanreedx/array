@@ -53,7 +53,7 @@ public enum AgentStatusElement: String, CaseIterable, Equatable, Hashable, Senda
         case .activity:
             return "Show the current activity phase and how long it has been running."
         case .contextMeter:
-            return "Show how full this agent's context window is, as of its last completed turn."
+            return "Show how full this agent's context window is, as of its latest model request."
         case .quotaFiveHour:
             return "Show the provider's rolling 5-hour account allowance. Shared by every agent signed into the same provider, not just this one."
         case .quotaSevenDay:

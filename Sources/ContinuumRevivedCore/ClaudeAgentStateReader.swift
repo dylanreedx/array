@@ -110,10 +110,19 @@ public struct ClaudeAgentStateReader: AgentStateReader {
         )
     }
 
+    /// claude's own rule for a project directory name: every UTF-16 unit that
+    /// is not an ASCII letter or digit becomes `-` (`replace(/[^a-zA-Z0-9]/g,"-")`
+    /// in the 2.1.291 binary). Replacing only `/` and `.` sent a cwd holding a
+    /// space, `_` or any other character to a directory claude never writes.
     public static func encodeCwd(_ cwd: String) -> String {
-        String(cwd.map { character in
-            character == "/" || character == "." ? "-" : character
-        })
+        let dash = UInt16(UInt8(ascii: "-"))
+        let units = cwd.utf16.map { unit -> UInt16 in
+            switch unit {
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A: return unit
+            default: return dash
+            }
+        }
+        return String(decoding: units, as: UTF16.self)
     }
 
     public func deriveStatus(from events: [ClaudeReaderEvent], ageSeconds: TimeInterval) -> AgentStatus {
