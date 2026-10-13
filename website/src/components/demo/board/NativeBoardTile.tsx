@@ -72,6 +72,11 @@ export function NativeBoardTile() {
   );
 }
 
+/** The board's single title-bar add action; lane-level add rows remain below. */
+export function NativeBoardChrome() {
+  return <span className={styles.titleBarAdd} data-native-board-chrome aria-hidden="true">+</span>;
+}
+
 /** Task details lives at the canvas level, like the native child window. */
 export function NativeBoardDetails() {
   return (

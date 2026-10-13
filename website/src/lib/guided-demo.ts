@@ -1,25 +1,31 @@
-import type { AssemblySnapshot } from './assembly-controller';
-import { installGuidedGyros } from '../components/demo/agent/AgentGyroModel';
 
-export const WORLD_WIDTH = 1800;
+export const WORLD_WIDTH = 1880;
 export const WORLD_HEIGHT = 1150;
-export type DemoStep = 'landing' | 'task' | 'providers' | 'approval' | 'verification' | 'overview';
+export type DemoStep = 'landing' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
 export type DemoAgent = 'stabilize' | 'verify' | 'audit';
 export type DemoTile = DemoAgent | 'browser' | 'shell' | 'note';
 type Point = { x: number; y: number };
 export const STEPS = [
-  { id: 'landing', start: 0, end: .28, focus: { x: 900, y: 575 }, caption: 'Your work lands together, in one workspace.' },
-  { id: 'task', start: .28, end: .43, focus: { x: 260, y: 325 }, caption: 'Give an agent a task, with the context already beside it.' },
-  { id: 'providers', start: .43, end: .59, focus: { x: 690, y: 325 }, caption: 'Let Claude, Codex, and Pi work in parallel.' },
-  { id: 'approval', start: .59, end: .73, focus: { x: 690, y: 350 }, caption: 'Review the next action before it runs.' },
-  { id: 'verification', start: .73, end: .86, focus: { x: 470, y: 835 }, caption: 'Move from the board to the code, and follow the checks.' },
-  { id: 'overview', start: .86, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
+  { id: 'landing', start: 0, end: .27, focus: { x: 900, y: 575 }, caption: 'Your project and its supporting tiles land together.' },
+  { id: 'creation', start: .27, end: .38, focus: { x: 285, y: 365 }, caption: 'Choose a model. Create an agent beside the work.' },
+  { id: 'task', start: .38, end: .445, focus: { x: 285, y: 365 }, caption: 'Focus the new agent, then give it a task.' },
+  { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude, Codex, and Pi work in parallel.' },
+  { id: 'approval', start: .595, end: .73, focus: { x: 740, y: 350 }, caption: 'Review the next action before it runs.' },
+  { id: 'verification', start: .73, end: .86, focus: { x: 470, y: 895 }, caption: 'Move from the board to the code, and follow the checks.' },
+  { id: 'layout', start: .86, end: .96, focus: { x: 1250, y: 905 }, caption: 'Drag tiles into place. Resize the editor to fit the work.' },
+  { id: 'overview', start: .96, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
 ] as const;
 export const DEMO_TEXT = {
   stabilize: 'Fix zone placement. Keep tiles aligned while zooming.',
   verify: 'Check the zone placement fix and run the canvas tests.',
   audit: 'Review the native spacing, colors, and canvas controls.',
 } as const;
+export type CreationStage = 'absent' | 'command' | 'models' | 'spawning' | 'focused' | 'sent';
+export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | null;
+export interface TileFrameSnapshot {
+  x: number; y: number; width: number; height: number; visible: boolean; selected: boolean; zIndex: number;
+  drag: { active: boolean; lift: number; rotation: number; scaleX: number; scaleY: number };
+}
 export interface TileMotion { x: number; y: number; scale: number; rotation: number; opacity: number; emphasis: number }
 export interface GuidedSnapshot {
   progress: number;
@@ -30,13 +36,22 @@ export interface GuidedSnapshot {
   takeover: number;
   camera: Point & { scale: number; center: Point };
   tiles: Record<DemoTile, TileMotion>;
+  tileFrames: Record<DemoTile, TileFrameSnapshot>;
+  mainCreated: boolean;
+  creation: { stage: CreationStage; query: string; provider: string; model: string };
+  selectedTile: DemoTile | null;
+  focusedTile: DemoTile | null;
+  cursorTarget: CursorTarget;
+  menuTarget: 'creation-agent' | 'creation-model' | 'verify-provider' | null;
+  snapPreview: { tile: DemoTile; x: number; y: number; width: number; height: number; opacity: number; scale: number } | null;
+  resizeReadout: { width: number; height: number } | null;
   boardProgress: number;
   boardDetail: boolean;
   editorProgress: number;
   cursor: Point & { visible: boolean; pressed: boolean };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
-  menu: 'provider' | 'toolbar' | null;
+  menu: 'provider' | 'toolbar' | 'models' | null;
   approval: 'hidden' | 'waiting' | 'approved';
   tool: string;
   reducedMotion: boolean;
@@ -66,22 +81,27 @@ type CameraFrame = { p: number; x: number; y: number; kind: CameraKind; zoom?: n
 // Readable action moments use smaller paths; they do not become static holds.
 const CAMERA: readonly CameraFrame[] = [
   { p: 0, x: 900, y: 575, kind: 'overview' },
-  { p: .26, x: 900, y: 575, kind: 'overview' },
-  { p: .31, x: 245, y: 350, kind: 'agent', mobileX: 260, mobileY: 340 },
-  { p: .38, x: 290, y: 310, kind: 'agent', zoom: 1.04, mobileX: 268, mobileY: 325 },
-  { p: .43, x: 680, y: 325, kind: 'parallel', mobileX: 690 },
-  { p: .49, x: 755, y: 340, kind: 'parallel', mobileX: 690, mobileY: 335 },
-  { p: .55, x: 830, y: 315, kind: 'parallel', mobileX: 1120 },
-  { p: .59, x: 675, y: 370, kind: 'agent', mobileX: 685, mobileY: 360 },
-  { p: .625, x: 680, y: 355, kind: 'agent', mobileX: 686, mobileY: 350 },
-  { p: .69, x: 705, y: 340, kind: 'agent', zoom: 1.02, mobileX: 696, mobileY: 340 },
-  { p: .75, x: 460, y: 840, kind: 'board', mobileX: 210, mobileY: 800 },
-  { p: .765, x: 485, y: 825, kind: 'board', mobileX: 218, mobileY: 795 },
-  { p: .795, x: 1190, y: 835, kind: 'editor', mobileX: 1085, mobileY: 835 },
-  { p: .812, x: 1220, y: 815, kind: 'editor', zoom: 1.03, mobileX: 1090, mobileY: 830 },
-  { p: .84, x: 1510, y: 325, kind: 'terminal', mobileX: 1510, mobileY: 325 },
-  { p: .86, x: 1490, y: 345, kind: 'terminal', mobileX: 1500, mobileY: 335 },
-  { p: .96, x: 900, y: 575, kind: 'overview' },
+  { p: .335, x: 900, y: 575, kind: 'overview' },
+  { p: .38, x: 285, y: 365, kind: 'agent' },
+  { p: .425, x: 285, y: 365, kind: 'agent' },
+  { p: .46, x: 690, y: 325, kind: 'parallel', mobileX: 740 },
+  { p: .505, x: 740, y: 325, kind: 'agent' },
+  { p: .55, x: 740, y: 325, kind: 'agent' },
+  { p: .56, x: 1150, y: 315, kind: 'agent' },
+  { p: .595, x: 1150, y: 315, kind: 'agent' },
+  { p: .625, x: 735, y: 350, kind: 'agent' },
+  { p: .69, x: 755, y: 345, kind: 'agent', mobileX: 746 },
+  { p: .75, x: 470, y: 895, kind: 'board', mobileX: 210, mobileY: 860 },
+  { p: .765, x: 485, y: 885, kind: 'board', mobileX: 218, mobileY: 855 },
+  { p: .795, x: 1190, y: 895, kind: 'editor', mobileX: 1085 },
+  { p: .812, x: 1220, y: 875, kind: 'editor', mobileX: 1090 },
+  { p: .84, x: 1520, y: 325, kind: 'terminal' },
+  { p: .855, x: 1520, y: 325, kind: 'terminal' },
+  { p: .875, x: 730, y: 400, kind: 'parallel', mobileX: 360, mobileY: 366 },
+  { p: .905, x: 750, y: 410, kind: 'parallel', mobileX: 765, mobileY: 370 },
+  { p: .925, x: 1250, y: 905, kind: 'editor', mobileX: 1110 },
+  { p: .96, x: 1280, y: 880, kind: 'editor', mobileX: 1130 },
+  { p: .985, x: 900, y: 575, kind: 'overview' },
   { p: 1, x: 900, y: 575, kind: 'overview' },
 ];
 function cameraAt(p: number, width: number, height: number) {
@@ -89,9 +109,9 @@ function cameraAt(p: number, width: number, height: number) {
   const fit = Math.min(width / WORLD_WIDTH, height / WORLD_HEIGHT) * .96;
   const scaleFor = (frame: CameraFrame) => {
     if (frame.kind === 'overview') return fit;
-    const span = mobile ? frame.kind === 'board' ? 330 : frame.kind === 'editor' ? 350 : 410
+    const span = mobile ? frame.kind === 'board' ? 330 : frame.kind === 'editor' ? 390 : frame.p <= .46 || (frame.p >= .875 && frame.p <= .905) ? 470 : 410
       : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? 650 : 680;
-    const vertical = mobile ? 540 : frame.kind === 'parallel' ? 590 : 540;
+    const vertical = mobile ? frame.p <= .46 ? 650 : 540 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540;
     return Math.min(width / span, height / vertical) * (frame.zoom ?? 1);
   };
   const end = CAMERA.findIndex(frame => frame.p > p);
@@ -107,25 +127,87 @@ function cameraAt(p: number, width: number, height: number) {
     y: mix(ay, by, t) + (distance ? (bx - ax) / distance * arc : 0) };
   let scale = mix(scaleFor(a), scaleFor(b), t);
   if (mobile) {
+    if (p >= .875 && p <= .905) {
+      const drag = smooth(between(p, .865, .905));
+      center.x = mix(70, 550, drag) + 215;
+      center.y = mix(90, 95, drag) + 275;
+    }
     const detail = smooth(between(p, .751, .755)) * (1 - smooth(between(p, .775, .779)));
     center.x = mix(center.x, 285, detail);
-    center.y = mix(center.y, 800, detail);
+    center.y = mix(center.y, 860, detail);
     scale = mix(scale, Math.min(width / 460, height / 580), detail);
   }
   return { x: width / 2 - center.x * scale, y: height / 2 - center.y * scale, scale, center };
 }
-function tileMotions(p: number, reduced: boolean): Record<DemoTile, TileMotion> {
-  const ids: DemoTile[] = ['stabilize', 'verify', 'audit', 'note', 'browser', 'shell'];
-  return Object.fromEntries(ids.map((id, index) => {
-    const ranges: Record<DemoTile, [number, number]> = { stabilize: [.28, .43], verify: [.59, .73], audit: [.49, .59], note: [.735, .775], browser: [.775, .82], shell: [.82, .86] };
-    const [start, end] = ranges[id];
-    const emphasis = reduced ? 0 : Math.sin(Math.PI * between(p, start, end));
-    const alive = reduced ? 0 : Math.sin(Math.PI * between(p, .26, .96));
-    const phase = p * Math.PI * 3 + index * .9;
-    if (reduced) return [id, { x: 0, y: 0, rotation: 0, scale: 1, opacity: 1, emphasis: 0 }];
-    return [id, { x: alive * Math.sin(phase) * 12, y: alive * Math.cos(phase) * 10 - emphasis * 10,
-      rotation: alive * Math.sin(phase) * .35, scale: 1 + emphasis * .025, opacity: 1, emphasis }];
-  })) as Record<DemoTile, TileMotion>;
+function focusAt(p: number): DemoTile | null {
+  if (p >= .34 && p < .445) return 'stabilize';
+  if (p >= .47 && p <= .55) return 'verify';
+  if (p >= .56 && p <= .595) return 'audit';
+  if (p >= .615 && p < .70) return 'verify';
+  if (p >= .735 && p < .775) return 'note';
+  if (p >= .78 && p < .82) return 'browser';
+  if (p >= .82 && p < .86) return 'shell';
+  if (p >= .865 && p < .905) return 'stabilize';
+  if (p >= .905 && p < .96) return 'browser';
+  return null;
+}
+function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): Record<DemoTile, TileFrameSnapshot> {
+  const neutral = { active: false, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+  const base = (id: DemoTile, x: number, y: number, width: number, height: number): TileFrameSnapshot => ({ x, y, width, height,
+    visible: id !== 'stabilize' || p >= .34, selected: id === selected, zIndex: id === selected ? 20 : 2, drag: { ...neutral } });
+  const mainDrag = smooth(between(p, .865, .905));
+  const mainX = mix(70, 550, mainDrag);
+  // CanvasAutoLayoutEngine.solveMemberMove: baseline-relative minimal pushes,
+  // then an origin exchange when the active center enters verify's old slot.
+  // Invert the smooth pointer path to keep the latch seekable and continuous.
+  const latchFraction = (550 - 430 / 2 - 70) / 480;
+  const latchTime = .865 + .04 * (.5 - Math.sin(Math.asin(1 - 2 * latchFraction) / 3));
+  const gap = 8; // TileGapResolver.defaultGap.
+  const pushX = Math.min(mainX, 550 - 430 / 2);
+  const pushedVerify = Math.max(550, pushX + 430 + gap);
+  const pushedAudit = Math.max(980, pushedVerify + 380 + gap);
+  const pushedShell = Math.max(1370, pushedAudit + 340 + gap);
+  const swapRaw = between(p, latchTime, latchTime + .008);
+  const swap = 1 - Math.pow(1 - swapRaw, 3); // Passive 110ms ease-out, projected onto scroll.
+
+  const editorDrag = smooth(between(p, .905, .925));
+  const resize = between(p, .93, .96); // Pointer-owned live dimensions, no spring.
+  const frames: Record<DemoTile, TileFrameSnapshot> = {
+    stabilize: base('stabilize', mainX, mix(90, 95, mainDrag), 430, 550),
+    verify: base('verify', mix(pushedVerify, 70, swap), 90, 380, 470),
+    audit: base('audit', mix(pushedAudit, 980, swap), 90, 340, 450),
+    shell: base('shell', mix(pushedShell, 1370, swap), 90, 300, 470),
+    note: base('note', 70, 680, 800, 430),
+    browser: base('browser', mix(920, 970, editorDrag), mix(680, 690, editorDrag), mix(mobile ? 330 : 560, mobile ? 350 : 620, resize), mix(430, 390, resize)),
+  };
+  frames.stabilize.drag.active = p >= .865 && p < .905;
+  frames.browser.drag.active = p >= .905 && p < .925;
+  return frames;
+}
+function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>): Record<DemoTile, TileMotion> {
+  return Object.fromEntries(Object.entries(frames).map(([id, frame]) => [id,
+    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected ? 1 : 0 },
+  ])) as Record<DemoTile, TileMotion>;
+}
+function targetAt(p: number): CursorTarget {
+  if (p >= .27 && p < .285) return 'command-trigger';
+  if (p >= .285 && p < .295) return 'command-agent';
+  if (p >= .295 && p < .335) return 'creation-model';
+  if (p >= .385 && p < .425) return 'stabilize-composer';
+  if (p >= .425 && p < .445) return 'stabilize-send';
+  if (p >= .47 && p < .505) return 'verify-provider';
+  if (p >= .515 && p < .55) return 'verify-composer';
+  if (p >= .55 && p < .56) return 'verify-send';
+  if (p >= .565 && p < .595) return 'audit-composer';
+  if (p >= .595 && p < .615) return 'audit-send';
+  if (p >= .625 && p < .695) return 'verify-allow';
+  if (p >= .735 && p < .775) return 'board-placement';
+  if (p >= .775 && p < .82) return 'editor-line';
+  if (p >= .82 && p < .86) return 'shell-input';
+  if (p >= .865 && p < .905) return 'stabilize-header';
+  if (p >= .905 && p < .93) return 'editor-header';
+  if (p >= .93 && p < .96) return 'editor-resize';
+  return null;
 }
 /** A complete seekable state: reverse/direct jumps never accumulate animation. */
 export function guidedSnapshot(value: number, options: { width: number; height: number; reducedMotion?: boolean }): GuidedSnapshot {
@@ -133,218 +215,34 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const p = reducedMotion ? 1 : clamp(value);
   const width = Math.max(1, options.width), height = Math.max(1, options.height);
   const step = STEPS.find(s => p >= s.start && p < s.end) ?? STEPS.at(-1)!;
+  const focusedTile = reducedMotion ? null : focusAt(p);
+  const selectedTile = focusedTile ?? (p >= .34 && p < .38 ? 'stabilize' : null);
+  const tileFrames = frameSnapshots(p, width < 700, selectedTile);
+  const creationStage: CreationStage = p < .27 ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
+  const ghostFrame = tileFrames.stabilize;
   return {
     progress: p, step: step.id, caption: step.caption,
     heroOpacity: 1 - between(p, 0, .18), chromeOpacity: between(p, .10, .26), takeover: smooth(between(p, .08, .26)),
-    camera: cameraAt(p, width, height), tiles: tileMotions(p, reducedMotion),
+    camera: cameraAt(p, width, height), tiles: tileMotions(tileFrames), tileFrames,
+    mainCreated: p >= .34, selectedTile, focusedTile,
+    creation: { stage: creationStage, query: creationStage === 'command' ? type('Agent', p, .272, .285) : '', provider: 'Codex', model: 'GPT-5.6 Sol' },
+    cursorTarget: reducedMotion ? null : targetAt(p),
+    menuTarget: creationStage === 'command' ? 'creation-agent' : creationStage === 'models' ? 'creation-model' : p >= .47 && p < .505 ? 'verify-provider' : null,
+    snapPreview: !reducedMotion && p >= .875 && p < .905 ? { tile: 'stabilize', x: 550, y: 95, width: ghostFrame.width, height: ghostFrame.height,
+      opacity: smooth(between(p, .875, .88)), scale: mix(.96, 1, smooth(between(p, .875, .88))) } : null,
+    resizeReadout: !reducedMotion && p >= .93 && p < .96 ? { width: Math.round(tileFrames.browser.width), height: Math.round(tileFrames.browser.height - 24) } : null,
     boardProgress: between(p, .735, .845), boardDetail: !reducedMotion && p >= .755 && p < .775, editorProgress: between(p, .775, .82),
-    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .28 && p < .93,
-      pressed: [.38, .46, .49, .56, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
-    typing: { stabilize: type(DEMO_TEXT.stabilize, p, .315, .365), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
-    status: { stabilize: p < .38 ? 'Ready' : p < .80 ? 'Working' : 'Complete',
+    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .96,
+      pressed: [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
+    typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
+    status: { stabilize: p < .435 ? 'Ready' : p < .855 ? 'Working' : 'Complete',
       verify: p < .56 ? 'Ready' : p < .595 ? 'Working' : p < .68 ? 'Needs approval' : p < .855 ? 'Working' : 'Passed',
-      audit: p < .595 ? 'Ready' : p < .84 ? 'Reviewing' : 'Complete' },
-    menu: p >= .435 && p < .47 ? 'toolbar' : p >= .47 && p < .505 ? 'provider' : null,
+      audit: p < .605 ? 'Ready' : p < .855 ? 'Reviewing' : 'Complete' },
+    menu: creationStage === 'command' ? 'toolbar' : creationStage === 'models' ? 'models' : p >= .47 && p < .505 ? 'provider' : null,
     approval: p < .595 ? 'hidden' : p < .68 ? 'waiting' : 'approved',
-    tool: p < .38 ? 'Tools appear here as the agent works.' : p < .82 ? 'Read CanvasNSView.swift · Inspect zone placement' : p < .855 ? 'Running canvas checks…' : 'Canvas checks passed · Tile positions preserved',
+    tool: p < .435 ? 'Tools appear here as the agent works.' : p < .82 ? 'Read CanvasNSView.swift · Inspect zone placement' : p < .855 ? 'Running canvas checks…' : 'Canvas checks passed · Tile positions preserved',
     reducedMotion,
   };
 }
 
-export function installGuidedDemo() {
-  const root = document.querySelector<HTMLElement>('[data-guided-demo]');
-  const world = root?.querySelector<HTMLElement>('[data-guided-world]');
-  if (!root || !world || root.dataset.demoInstalled) return;
-  root.dataset.demoInstalled = 'true';
-  const pin = root.querySelector<HTMLElement>('[data-assembly-chrome="canvas"]') ?? root.querySelector<HTMLElement>('[data-assembly-pin]') ?? root;
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-  let progress = 0;
-  const nodes = <T extends HTMLElement | SVGElement>(selector: string) => Array.from(root.querySelectorAll<T>(selector));
-  const typings = nodes<HTMLElement>('[data-demo-typing]');
-  const statuses = nodes<HTMLElement>('[data-demo-status]');
-  const mirrors = nodes<HTMLElement>('[data-demo-statusmirror]');
-  const rows = nodes<HTMLElement>('[data-demo-agent-row]');
-  const tools = nodes<HTMLElement>('[data-demo-tool]');
-  const captions = nodes<HTMLElement>('[data-demo-caption]');
-  const menus = nodes<HTMLElement>('[data-demo-menu]');
-  const approvals = nodes<HTMLElement>('[data-demo-approval]');
-  const cursors = nodes<HTMLElement>('[data-demo-cursor]');
-  const presses = nodes<SVGElement>('[data-demo-cursor-press]');
-  const transcripts = nodes<HTMLElement>('[data-demo-transcript]');
-  const tiles = nodes<HTMLElement>('[data-assembly-surface]');
-  const boardCards = nodes<HTMLElement>('[data-demo-board-card]');
-  const editorLines = nodes<HTMLElement>('[data-demo-editor-line]');
-  const boardDetails = nodes<HTMLElement>('[data-demo-board-detail]');
-  const text = (node: HTMLElement, value: string) => { if (node.textContent !== value) node.textContent = value; };
-  const write = (p: number) => {
-    const snapshot = guidedSnapshot(p, { width: pin.clientWidth || innerWidth, height: pin.clientHeight || innerHeight, reducedMotion: reduced.matches });
-    root.dataset.demoProgress = String(snapshot.progress);
-    root.dataset.demoStep = snapshot.step;
-    root.dataset.demoReducedMotion = String(snapshot.reducedMotion);
-    root.style.setProperty('--demo-hero-opacity', String(snapshot.heroOpacity));
-    root.style.setProperty('--demo-chrome-opacity', String(snapshot.chromeOpacity));
-    root.style.setProperty('--demo-takeover', String(snapshot.takeover));
-    root.style.setProperty('--demo-board-progress', String(snapshot.boardProgress));
-    root.style.setProperty('--demo-editor-progress', String(snapshot.editorProgress));
-    const selectedAgent = snapshot.progress < .43 ? 'stabilize' : snapshot.progress < .52 ? 'verify' : snapshot.progress < .59 ? 'audit' : 'verify';
-    for (const row of rows) row.dataset.demoSelected = String(row.dataset.demoAgentRow === selectedAgent);
-    for (const tile of tiles) {
-      const motion = snapshot.tiles[tile.dataset.assemblySurface as DemoTile];
-      if (!motion) continue;
-      tile.style.setProperty('--demo-tile-x', `${motion.x}px`);
-      tile.style.setProperty('--demo-tile-y', `${motion.y}px`);
-      tile.style.setProperty('--demo-tile-r', `${motion.rotation}deg`);
-      tile.style.setProperty('--demo-tile-scale', String(motion.scale));
-      tile.style.setProperty('--demo-tile-opacity', String(motion.opacity));
-      tile.style.setProperty('--demo-tile-emphasis', String(motion.emphasis));
-      tile.dataset.demoEmphasis = String(motion.emphasis);
-    }
-    for (const card of boardCards) {
-      const range: Record<string, [number, number]> = { placement: [.74, .77], approval: [.755, .81], tests: [.78, .845] };
-      const [start, end] = range[card.dataset.demoBoardCard ?? 'placement'] ?? range.placement;
-      card.dataset.demoState = snapshot.progress < start ? 'queued' : snapshot.progress < end ? 'active' : 'done';
-    }
-    for (const detail of boardDetails) {
-      detail.hidden = !snapshot.boardDetail;
-      detail.setAttribute('aria-hidden', String(detail.hidden));
-      const reveal = snapshot.reducedMotion ? 1 : smooth(Math.min(between(snapshot.progress, .755, .759), 1 - between(snapshot.progress, .771, .775)));
-      detail.style.setProperty('--demo-detail-reveal', String(reveal));
-    }
-    for (const line of editorLines) {
-      const number = Number(line.dataset.demoEditorLine);
-      line.dataset.demoActive = String(number === 14 && snapshot.progress >= .775 && snapshot.progress < .815);
-      line.dataset.demoEdited = String([14, 16, 17].includes(number) && snapshot.progress >= .795);
-      line.style.setProperty('--demo-line-reveal', String([16, 17].includes(number) ? between(snapshot.progress, .775, .80) : 1));
-    }
-    world.dataset.cameraX = String(snapshot.camera.center.x);
-    world.dataset.cameraY = String(snapshot.camera.center.y);
-    world.dataset.cameraScale = String(snapshot.camera.scale);
-    world.style.transformOrigin = '0 0';
-    // The reduced-motion stylesheet provides normal flow and readable cards.
-    world.style.transform = snapshot.reducedMotion ? 'none' : `translate(${snapshot.camera.x}px, ${snapshot.camera.y}px) scale(${snapshot.camera.scale})`;
-    const editorScroll = root.querySelector<HTMLElement>('[data-demo-editor-scroll]');
-    const changedLine = root.querySelector<HTMLElement>('[data-demo-editor-line="14"]');
-    if (editorScroll && changedLine) {
-      // A narrow editor keeps its native titlebar in frame, wraps the source,
-      // and follows the edited line inside the document, like the real editor.
-      const lineOffset = (changedLine.getBoundingClientRect().top - editorScroll.getBoundingClientRect().top) / (snapshot.reducedMotion ? 1 : snapshot.camera.scale) + editorScroll.scrollTop;
-      const destination = Math.max(0, lineOffset - editorScroll.clientHeight * .48);
-      editorScroll.scrollTop = !snapshot.reducedMotion && pin.clientWidth < 700
-        ? destination * smooth(between(snapshot.progress, .775, .795)) : 0;
-    }
-    for (const node of typings) {
-      const textarea = node.querySelector<HTMLTextAreaElement>('textarea');
-      const agent = node.dataset.demoTyping as DemoAgent;
-      if (textarea) textarea.value = snapshot.status[agent] === 'Ready' ? snapshot.typing[agent] ?? '' : '';
-    }
-    for (const node of statuses) {
-      const value = snapshot.status[node.dataset.demoStatus as DemoAgent] ?? 'Ready';
-      const nativeState = value === 'Needs approval' ? 'needsAttention' : ['Complete', 'Passed'].includes(value) ? 'done' : value === 'Ready' ? 'idle' : 'working';
-      for (const status of node.querySelectorAll<HTMLElement>('[data-status]')) status.dataset.status = nativeState;
-      for (const label of node.querySelectorAll<HTMLElement>('[data-demo-agent-label], header span[data-status]')) text(label, value);
-      const button = node.querySelector<HTMLButtonElement>('[data-demo-agent-action]');
-      if (button) {
-        const busy = nativeState === 'working' || nativeState === 'needsAttention';
-        const label = button.querySelector<HTMLElement>('[data-demo-agent-action-label]');
-        if (label) text(label, busy ? 'Stop' : 'Send');
-        button.dataset.action = busy ? 'stop' : 'send';
-        button.title = busy ? 'Stop current turn' : 'Send message';
-        button.setAttribute('aria-label', button.title);
-        button.disabled = !busy && !node.querySelector<HTMLTextAreaElement>('textarea')?.value.trim();
-      }
-      const gyro = node.querySelector<HTMLElement>('[data-node]')?.parentElement;
-      if (gyro) {
-        gyro.toggleAttribute('data-active', nativeState === 'working');
-      }
-    }
-    for (const node of mirrors) {
-      const value = snapshot.status[node.dataset.demoStatusmirror as DemoAgent] ?? 'Ready';
-      node.dataset.demoState = value === 'Needs approval' ? 'needsAttention' : ['Complete', 'Passed'].includes(value) ? 'done' : value === 'Ready' ? 'idle' : 'working';
-      // Keep the native status dot mounted while replacing just the label.
-      const label = Array.from(node.childNodes).find(child => child.nodeType === Node.TEXT_NODE);
-      if (label) label.textContent = value;
-      else node.append(document.createTextNode(value));
-    }
-    for (const node of tools) {
-      const paragraph = node.querySelector<HTMLElement>('[data-kind="tool"] p');
-      if (paragraph) text(paragraph, snapshot.tool);
-    }
-    for (const node of transcripts) {
-      const agent = node.dataset.demoTranscript as DemoAgent;
-      const prompt = node.querySelector<HTMLElement>('[data-kind="user"] p');
-      if (prompt) text(prompt, snapshot.typing[agent] || 'Waiting for a task.');
-      const response = node.querySelector<HTMLElement>('[data-kind="assistant"] p');
-      if (response) text(response, snapshot.status[agent] === 'Ready' ? 'Ready when you are.' :
-        snapshot.status[agent] === 'Needs approval' ? 'The next tool action needs your approval.' :
-        ['Complete', 'Passed'].includes(snapshot.status[agent]) ? 'Verified. Canvas checks pass and tile positions stay aligned.' : 'Following the task and checking the linked workspace.');
-    }
-    const shell = root.querySelector<HTMLElement>('[data-assembly-surface="shell"]');
-    if (shell) {
-      const command = shell.querySelector<HTMLElement>('code[data-type="prompt"]');
-      const result = shell.querySelector<HTMLElement>('code[data-type="success"]');
-      const detail = shell.querySelector<HTMLElement>('code[data-type="output"]');
-      const input = shell.querySelector<HTMLInputElement>('input');
-      if (command) text(command, snapshot.progress < .835 ? '$ swift build' : '$ swift test');
-      if (result) text(result, snapshot.progress < .835 ? 'Build complete!' : snapshot.progress < .855 ? 'Running CanvasSceneEditTests…' : '18 checks passed · 0 failures');
-      if (detail) text(detail, snapshot.progress < .835 ? 'Ready for the next command.' : snapshot.progress < .855 ? 'Checking world and zone-local frames.' : 'Tile positions preserved.');
-      if (input) input.value = snapshot.progress >= .82 && snapshot.progress < .835 ? type('swift test', snapshot.progress, .82, .835) : '';
-    }
-    for (const node of captions) text(node, snapshot.caption);
-    for (const node of menus) { node.hidden = snapshot.menu !== node.dataset.demoMenu; node.setAttribute('aria-hidden', String(node.hidden)); }
-    for (const node of approvals) {
-      const aside = node.querySelector<HTMLElement>('aside[aria-label="Pending approval"]');
-      if (aside) {
-        aside.hidden = snapshot.approval === 'hidden' || (snapshot.approval === 'approved' && snapshot.progress >= .695);
-        aside.setAttribute('aria-hidden', String(aside.hidden));
-        const approve = aside.querySelector<HTMLButtonElement>('[data-interaction-id="approval-approve"]');
-        if (approve) text(approve, snapshot.approval === 'approved' ? 'Approved' : 'Approve');
-      }
-      node.dataset.approvalState = snapshot.approval;
-    }
-    for (const node of cursors) {
-      node.hidden = !snapshot.cursor.visible;
-      node.style.top = '0';
-      node.style.left = '0';
-      const origin = node.offsetParent?.getBoundingClientRect();
-      const viewport = pin.getBoundingClientRect();
-      let x = viewport.left - (origin?.left ?? 0) + snapshot.camera.x + snapshot.cursor.x * snapshot.camera.scale;
-      let y = viewport.top - (origin?.top ?? 0) + snapshot.camera.y + snapshot.cursor.y * snapshot.camera.scale;
-      const targetSelector = snapshot.menu === 'toolbar'
-        ? (snapshot.progress < .455 ? '[data-demo-menu-trigger="toolbar"]' : '[data-demo-command-agent]')
-        : snapshot.menu === 'provider' ? '[data-demo-menu="provider"] [data-selected="true"]'
-        : snapshot.progress >= .625 && snapshot.progress < .695 ? '[data-interaction-id="approval-approve"]'
-        : snapshot.progress >= .735 && snapshot.progress < .775 ? '[data-demo-board-card="placement"]'
-        : snapshot.progress >= .775 && snapshot.progress < .82 ? '[data-demo-editor-line="14"]'
-        : snapshot.progress >= .82 && snapshot.progress < .86 ? '[data-interaction-id="shell-input"]' : null;
-      const target = targetSelector ? root.querySelector<HTMLElement>(targetSelector)?.getBoundingClientRect() : null;
-      if (target?.width) {
-        const t = snapshot.menu ? 1 : smooth(between(snapshot.progress, snapshot.progress >= .82 ? .82 : snapshot.progress >= .775 ? .775 : snapshot.progress >= .735 ? .735 : .625, snapshot.progress >= .82 ? .835 : snapshot.progress >= .775 ? .79 : snapshot.progress >= .735 ? .75 : .65));
-        x = mix(x, target.left + target.width / 2 - (origin?.left ?? 0), t);
-        y = mix(y, target.top + target.height / 2 - (origin?.top ?? 0), t);
-      }
-      node.style.transform = `translate(${x}px, ${y}px)`;
-      node.dataset.pressed = String(snapshot.cursor.pressed);
-    }
-    for (const node of presses) {
-      node.style.animation = 'none';
-      node.style.opacity = snapshot.cursor.pressed ? '1' : '0';
-      node.style.transform = snapshot.cursor.pressed ? 'scale(1.4)' : 'scale(.45)';
-      node.style.strokeDasharray = '80';
-      node.style.strokeDashoffset = snapshot.cursor.pressed ? '0' : '80';
-    }
-  };
-  // Assembly already coalesces scroll events into one rAF. Write in that event
-  // rather than scheduling a second frame that leaves camera and tiles behind.
-  root.addEventListener('array:assembly', event => {
-    progress = (event as CustomEvent<AssemblySnapshot>).detail.progress;
-    write(progress);
-  });
-  root.addEventListener('array:assembly-measure', event => {
-    write((event as CustomEvent<boolean>).detail ? 0 : progress);
-  });
-  reduced.addEventListener('change', () => write(progress));
-  write(0); // Establish the world camera before assembly measures float targets.
-  const disposeGyros = installGuidedGyros(root);
-  addEventListener('pagehide', disposeGyros, { once: true });
-  document.addEventListener('astro:before-swap', disposeGyros, { once: true });
-}
+export { installGuidedDemo } from './guided-demo-controller';

@@ -2,24 +2,24 @@ import type { CSSProperties } from 'react';
 import styles from './NativeEditorTile.module.css';
 
 const sourceLines = [
-  <><span className={styles.keyword}>import</span> AppKit</>,
-  <>&nbsp;</>,
-  <span className={styles.comment}>/// The infinite canvas. Tiles live in zones; a zone’s tiles are laid out in</span>,
-  <span className={styles.comment}>/// ZONE-LOCAL coordinates and converted to world space at the model boundary.</span>,
-  <><span className={styles.keyword}>final class</span> <span className={styles.type}>CanvasNSView</span>: <span className={styles.type}>NSView</span> {'{'}</>,
-  <>{'    '}<span className={styles.keyword}>private(set) var</span> viewport = <span className={styles.type}>Viewport</span>(x: <span className={styles.number}>0</span>, y: <span className={styles.number}>0</span>, zoom: <span className={styles.number}>1</span>)</>,
-  <>{'    '}<span className={styles.keyword}>private var</span> zoneLayers: [<span className={styles.type}>ZoneLayer</span>] = []</>,
-  <>{'    '}<span className={styles.keyword}>private var</span> activeZoneId: <span className={styles.type}>UUID</span>?</>,
-  <>&nbsp;</>,
-  <>{'    '}<span className={styles.comment}>/// Installs a freshly spawned tile into its zone.</span></>,
-  <>{'    '}<span className={styles.comment}>/// One target zone for framing AND install: framing against the armed</span></>,
-  <>{'    '}<span className={styles.comment}>/// zone while installing into another displaced the tile by the difference</span></>,
-  <>{'    '}<span className={styles.keyword}>func</span> installProjectTile(_ view: <span className={styles.type}>TileView</span>, for tile: <span className={styles.type}>Tile</span>, scope: <span className={styles.type}>CreationScope</span>?) {'{'}</>,
-  <>{'        '}<span className={styles.keyword}>let</span> targetId = scope?.zoneId ?? activeZoneId</>,
-  <>{'        '}<span className={styles.keyword}>guard let</span> target = zoneLayers.first(where: {'{'} $0.id == targetId {'}'}) <span className={styles.keyword}>else</span> {'{'} <span className={styles.keyword}>return</span> {'}'}</>,
-  <>{'        '}<span className={styles.keyword}>let</span> frame = <span className={styles.type}>TilePlacement</span>.frame(for: tile, in: target)</>,
-  <>{'        '}install(view, in: target, frame: frame)</>,
-  <>{'    '}{'}'}</>,
+  { sourceLine: 6832, content: <>&nbsp;</> },
+  { sourceLine: 6833, content: <><span className={styles.keyword}>if let</span> existing = layer.tileViews[tile.id], existing !== tileView {'{'}</> },
+  { sourceLine: 6834, content: <>{'    '}retireTileView(existing)</> },
+  { sourceLine: 6835, content: <>{'}'}</> },
+  { sourceLine: 6836, content: <><span className={styles.keyword}>var</span> installed = tile</> },
+  { sourceLine: 6837, content: <>installed.zoneId = zoneId</> },
+  { sourceLine: 6838, content: <>layer.tileViews[tile.id] = tileView</> },
+  { sourceLine: 6839, content: <><span className={styles.keyword}>if let</span> index = layer.tiles.firstIndex(where: {'{'} $0.id == tile.id {'}'}) {'{'}</> },
+  { sourceLine: 6840, content: <>{'    '}layer.tiles[index] = installed</> },
+  { sourceLine: 6841, content: <>{'}'} <span className={styles.keyword}>else</span> {'{'}</> },
+  { sourceLine: 6842, content: <>{'    '}layer.tiles.append(installed)</> },
+  { sourceLine: 6843, content: <>{'}'}</> },
+  { sourceLine: 6844, content: <>adoptTileView(tileView, tileId: tile.id)</> },
+  { sourceLine: 6845, content: <><span className={styles.keyword}>_layoutLayerTile</span>(installed, in: layer)</> },
+  { sourceLine: 6846, content: <>tileZoneMembership[tile.id] = zoneId</> },
+  { sourceLine: 6847, content: <>reorderTileSubviewsByZIndex()</> },
+  { sourceLine: 6848, content: <>delegate?.canvasSidebarModelDidChange(self)</> },
+  { sourceLine: 6849, content: <span className={styles.comment}>// T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`</span> },
 ];
 
 export function NativeEditorTile() {
@@ -27,11 +27,11 @@ export function NativeEditorTile() {
     <section className={styles.editor} data-native-editor data-editor-tab="CanvasNSView.swift" aria-label="Swift source editor">
       <div className={styles.codeViewport} data-demo-editor-scroll>
         <div className={styles.codeLines} data-demo-editor-document>
-          {sourceLines.map((content, index) => {
+          {sourceLines.map(({ content, sourceLine }, index) => {
             const line = index + 1;
             return (
-              <div className={styles.line} data-demo-editor-line={line} key={line} style={{ '--line-index': line } as CSSProperties}>
-                <span className={styles.gutter} aria-hidden="true">{line}</span>
+              <div className={styles.line} data-demo-editor-line={line} data-source-line={sourceLine} key={sourceLine} style={{ '--line-index': line } as CSSProperties}>
+                <span className={styles.gutter} aria-hidden="true">{sourceLine}</span>
                 <code className={styles.source}>{content}</code>
               </div>
             );

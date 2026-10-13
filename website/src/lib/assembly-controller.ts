@@ -33,7 +33,7 @@ type SurfacePointerProfile = {
 };
 
 const surfacePointerProfiles: Readonly<Record<string, SurfacePointerProfile>> = {
-  stabilize: { x: 9, y: 6, rotateX: .62, rotateY: .8 },
+  audit: { x: 9, y: 6, rotateX: .62, rotateY: .8 },
   browser: { x: -6.5, y: 5, rotateX: .48, rotateY: -.58 },
   shell: { x: 4.5, y: -4, rotateX: -.34, rotateY: .42 },
   note: { x: -4, y: -5.5, rotateX: -.46, rotateY: -.38 },
@@ -79,7 +79,7 @@ export function installAssembly() {
   const surfaces = Array.from(track.querySelectorAll<HTMLElement>('[data-assembly-surface]'));
   const marketingHeader = document.querySelector<HTMLElement>('.production-header');
   const landingWindows: Record<string, readonly [number, number]> = {
-    stabilize: [.035, .225], verify: [.05, .242], audit: [.09, .26],
+    stabilize: [0, 0], verify: [.05, .242], audit: [.035, .225],
     note: [.025, .21], browser: [.045, .23], shell: [.08, .25],
   };
 
@@ -89,7 +89,7 @@ export function installAssembly() {
     if (width < 700) {
       const floatHeight = Math.max(height, 800);
       return {
-        stabilize: { x: width * .08, y: floatHeight * .91, scale: 1.08 },
+        audit: { x: width * .08, y: floatHeight * .91, scale: 1.08 },
         browser: { x: width * .91, y: floatHeight * .86, scale: 1.06 },
         shell: { x: width * .72, y: floatHeight * 1.09, scale: 1.08 },
         note: { x: width * .14, y: floatHeight * 1.13, scale: 1.1 },
@@ -98,7 +98,7 @@ export function installAssembly() {
     }
     if (width < 1100) {
       return {
-        stabilize: { x: width * .08, y: height * .66, scale: 1.1 },
+        audit: { x: width * .08, y: height * .66, scale: 1.1 },
         browser: { x: width * .91, y: height * .56, scale: 1.08 },
         shell: { x: width * .77, y: height * .82, scale: 1.1 },
         note: { x: width * .22, y: height * .88, scale: 1.1 },
@@ -106,7 +106,7 @@ export function installAssembly() {
       };
     }
     return {
-      stabilize: { x: width * .045, y: height * .62, scale: 1.14 },
+      audit: { x: width * .045, y: height * .62, scale: 1.14 },
       browser: { x: width * .9, y: height * .55, scale: 1.12 },
       shell: { x: width * .76, y: height * .82, scale: 1.15 },
       note: { x: width * .22, y: height * .87, scale: 1.16 },
@@ -173,7 +173,7 @@ export function installAssembly() {
     if (guided) {
       for (const surface of surfaces) {
         const [start, end] = landingWindows[surface.dataset.assemblySurface ?? ''] ?? [0, .26];
-        const t = clamp((snapshot.progress - start) / (end - start));
+        const t = end === start ? 1 : clamp((snapshot.progress - start) / (end - start));
         // A seekable, restrained elastic landing, staggered by tile. It does
         // not rely on playback timers or replay effects when scrolling back.
         const u = t - 1;

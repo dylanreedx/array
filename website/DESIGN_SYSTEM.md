@@ -17,12 +17,12 @@ These instructions supersede the older interactive-device sequence below for the
 ## Full canvas and native tile pass
 
 - The demo grows into the full viewport canvas with its native 46px topbar, 280px desktop sidebar and 28px shortcut rail. No inset rounded window or heading strip.
-- The same six hero articles become three agents, a board, an editor and a terminal. Use native sources for their chrome, typography, status icons, controls and spacing; preserve original hero copy and compact navigation.
-- Independent staggered elastic landings finish by `.26`. Keep curved camera movement within story beats and modest tile movement, while readable actions have smaller paths.
+- Five supporting hero articles become two agents, a board, an editor and a terminal; the sixth reserved article appears through native agent creation. Use native sources for their chrome, typography, status icons, controls and spacing; preserve original hero copy and compact navigation.
+- Independent staggered elastic landings finish by `.26`. Focus and camera settle before typing. After checks, drag the main tile into a neighboring slot with immediate baseline-relative push, a latched exchange and a separate stationary snap target, then move and resize the editor.
 - The native three-node working glyph runs at the transcript tail even when scrolling pauses. Pause it for completed agents, Reduced Motion, hidden documents and offscreen scenes. Do not duplicate it in the compact activity row.
-- Settled text uses 2D transforms without persistent layer promotion. Keep task details outside the zoomed world. Mobile source wraps and scrolls within its editor while preserving the titlebar.
+- Settled text uses 2D transforms without persistent layer promotion. Keep task details outside the zoomed world. Mobile source preserves preformatted lines and scrolls inside its editor while retaining the titlebar.
 - Reduced Motion presents six readable cards in normal flow, including all board lanes. No video or React hydration.
-- Current story and geometry live in `docs/DEMO_STORYBOARD.md`; fidelity limits and source references live in `docs/DEMO_FIDELITY.md`.
+- Current story and geometry live in `docs/DEMO_STORYBOARD.md`; every critical native authority is mapped in `docs/DEMO_COMPONENT_INVENTORY.md`, with fixture limits in `docs/DEMO_FIDELITY.md`.
 
 ## Historical interactive composition
 

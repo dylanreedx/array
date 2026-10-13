@@ -1,6 +1,14 @@
 # Array website production redesign
 
-## October 13 full canvas and native tile motion pass
+## October 13 golden flow and source inventory
+
+The main agent now appears through the native Command Center Agent/model sequence rather than existing from the hero. Focus precedes typing. The flow includes parallel work, source-faithful approval delivery, task/code/check inspection, a real frame drag with neighbor push and a latched slot exchange, then editor movement and live resize. The existing project zone supplies creation scope.
+
+The current source inventory maps every critical surface and motion to Swift/AppKit authority. Agent transcript bubbles and speaker captions are removed in favor of native prose/authorship rules. Header spacing, outer status pill, provider identity, official Pi mark, square unknown context ring, anchored provider menu and canvas-owned marching ants are corrected. The editor shows actual CanvasNSView.swift lines and preserves source formatting on mobile. Fixture task text and terminal results remain scripted.
+
+Current evidence is under `.plans/72-launch-night/qa/golden-flow/`. Node22 Astro check/build,87unit tests and54Chromium/WebKit checks pass. Six cold Lighthouse runs each score100 in all four categories with CLS/TBT0 (mobile LCP1.364–1.369s, desktop0.325s). The old public scene fails all8new behavior checks. Startup mobile editor width and native push cascade regressions were reproduced then repaired. Historical snapshots and Apple pairing fixture-only checks are excluded from this normal production build.
+
+## Earlier October 13 full canvas and native tile motion pass
 
 The continuous demo now expands into a full viewport canvas, with the native workspace topbar and sidebar sliding into place. Independent elastic landings bring the original hero tiles into the scene. Curved camera paths keep moving within task, provider and approval beats; the board opens a native-style task detail, the editor shows a source change, and terminal checks lead into the final overview. Original hero copy and navigation remain intact.
 

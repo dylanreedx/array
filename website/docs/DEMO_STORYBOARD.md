@@ -1,26 +1,27 @@
-# Guided workspace story
+# Golden scroll storyboard
 
-Keep the existing hero, navigation, and product copy. The demo is the same six-tile HTML workspace from the hero through the final overview: `stabilize`, `verify`, `audit`, `browser`, `shell`, and `note`. Preserve each node and its identity while the opening composition lands in the zone; change only world transforms, content, status, and camera. Do not clone, replace, unmount, or recreate tile markup between beats.
+One persistent DOM world turns the original floating hero into the native canvas and sidebar. There is no video, required interaction, ready gate, replacement tree or hydrated React island. Source mapping is in [DEMO_COMPONENT_INVENTORY.md](DEMO_COMPONENT_INVENTORY.md).
 
-The `STEPS` ranges below are the story contract from `src/lib/guided-demo.ts`. One current scroll-progress value determines the tile state, camera, cursor, menu, approval, and caption. Scrolling upward or jumping to any progress point must reproduce that exact frame. No video, click-to-start gate, invented floating toolbar, chapter numbers, or progress bar. If creation UI is shown, use the shipped `⌘K` Command Center; the floating create toolbar is not part of the 0.7.26 app.
+| Progress | Action and subject |
+| --- | --- |
+| 0–.26 | Five existing supporting tiles land in the existing Array project zone. Main agent is absent. |
+| .27–.295 | Open native Command Center; type Agent and choose the Agent command. |
+| .295–.335 | Choose the fixture model from native Quick Start/provider groups. |
+| .34–.38 | New main agent appears with model title and bootstrap prose. Focus/camera settle before typing. |
+| .385–.425 | Type into the focused, centered new agent. |
+| .435 | Send clears composer; prompt remains in transcript; native work indicator starts. |
+| .47–.505 | Existing Claude tile's actual footer provider menu opens above its trigger. |
+| .515–.55 | Claude prompt is typed after its focus and camera settle. |
+| .565–.595 | Pi prompt follows its own settled focus. |
+| .595–.695 | Claude requests approval. Amber native ants, Pending, Allow once; delivery shows Sending then removes the card and resumes work. |
+| .735–.775 | Inspect board task and full-window task details. |
+| .775–.82 | Read actual CanvasNSView excerpt and select the placement lines. |
+| .82–.855 | Type terminal checks; running state precedes passed fixture output. |
+| .865–.905 | Drag main tile by its titlebar into another slot; neighboring agents reflow and native snap preview identifies the destination. |
+| .905–.925 | Reposition the editor by its titlebar. |
+| .93–.96 | Resize its actual frame; code viewport and native dimension readout follow the corner. |
+| .985–1 | Pull back to whole project, completed agent states and download below the track. |
 
-| Progress | Action and composition | Camera and pointer | Caption |
-| --- | --- | --- | --- |
-| `0–.28` Landing | All six same tile nodes start around the hero and settle into the workspace zone. The canvas fills the viewport as the native topbar and sidebar slide into place. Chrome finishes settling at `.26`. | Wide view; independent staggered elastic landings, then restrained tile motion. Keep all six visible and identifiable. | “Your work lands together, in one workspace.” |
-| `.28–.43` Task | Focus `stabilize` (Codex); type the existing zone-placement task into its composer and change its status in place. | Medium close-up on the Codex tile, then a small pullback that keeps the surrounding project visible. | “Give an agent a task, with the context already beside it.” |
-| `.43–.59` Providers | Pan across the existing Codex, Claude Code, and Pi tiles. Their distinct working states stay attached to these same nodes. If a creation affordance appears, open the actual Command Center with `⌘K`. | Lateral camera glide across the agent row; cursor follows the real UI target. | “Let Claude, Codex, and Pi work in parallel.” |
-| `.59–.73` Approval | `verify` displays the staged pending approval, then its resolved state. Keep its tile and sidebar status aligned. | Slow, tight glide to the approval; hold while the request is readable, then ease back. | “Review the next action before it runs.” |
-| `.73–.86` Tools | Visit the native board, its task detail, the editor change, then the terminal checks; staged content updates in place. Keep the three agent tiles mounted in the same workspace. | Board at `.75`, task detail at `.755–.775`, editor at `.795–.812`, terminal at `.84–.86`; curved camera paths connect them. | “Move from the board to the code, and follow the checks.” |
-| `.86–1` Overview | Return to the whole workspace with all six original tiles still present. The normal download action follows the stage. | Crisp wide frame; no forced pause. | “Keep the whole project in view, and pick up anywhere.” |
+Desktop frames begin at main430×550, Claude380×470, Pi340×450, board800×430, editor560×430 and terminal300×470. The main agent exchanges positions with Claude; Pi and the terminal receive the native push cascade while the main tile approaches, then relax to their baselines; the zone expands to preserve content padding. Editor expands to620×390. Mobile uses the same state and a narrower editor; the camera follows the action, not an unfocused composer. Reduced Motion presents all six completed surfaces in normal page flow with no continuous glyph, cursor, camera or ants. No-JavaScript copy and download remain usable.
 
-The pointer is a visual guide, never a required control. Resolve its position from the stage and the target element so it stays attached through camera movement; story state comes from progress, not pointer clicks. Keep captions as readable HTML outside the zoomed world, in a quiet overlay above the native shortcut rail. Hide the caption while the native task detail is open. Reduced motion removes camera travel, cursor movement, blur, and stagger while retaining the same six-tile story and captions as static frames in ordinary page flow. The activity, shell output, and approval are staged fixture content; do not describe them as actions on a visitor's machine or live provider sessions.
-
-Source and product fidelity references: [MOTION_AND_SEO_RESEARCH.md](./MOTION_AND_SEO_RESEARCH.md), [DEMO_FIDELITY.md](./DEMO_FIDELITY.md), `src/lib/guided-demo.ts`, `src/components/demo/GuidedWorkspace.tsx`, and `src/components/demo/command/CommandCenter.tsx`.
-
-## Full canvas and native surfaces
-
-The world is 1800×1150. Three 380×470 agent tiles sit at (70,90), (500,90), and (930,90). A 300×470 terminal sits at (1360,90). The 800×430 board sits at (70,620); the 560×430 editor sits at (920,620). Stable historic IDs `note` and `browser` now identify the board and editor, respectively. These are the same hero articles, not another scene.
-
-The assembled presentation fills the viewport, with a 46px workspace bar, 280px desktop sidebar (240px tablet), and 28px shortcut rail. Marketing navigation yields during the transition and returns after the track. Settled tiles use 2D transforms without persistent layer promotion to keep zoomed text sharp. Curved camera moves continue within task, provider, and approval beats; readable actions have smaller movement. The native working glyph continues orbiting while the visitor pauses scrolling, and stops for completed agents, reduced motion, or an offscreen scene.
-
-Mobile hides the sidebar and follows one readable subject at a time. Its editor is 330px wide, wraps source, and follows the edited line inside the document while retaining its titlebar. The task detail is an unscaled canvas-level panel, outside the world transform. Reduced Motion uses ordinary flow, three stacked board lanes on narrow screens, wrapped source, and no animated working glyph.
+Native tile motion is pointer-owned geometry, neighbor reflow and target ghost; do not put a physics name into visitor-facing copy. Hero float paths and camera glides are site narration. Every content, focus, menu and frame is derived from scroll progress; scrolling upward undoes creation, prompts, approvals and layout in the same scene.
