@@ -7,7 +7,7 @@ async function revealDemo(page: import('@playwright/test').Page) {
   await page.goto('/');
   await expect(page.locator('[data-assembly-root]')).toHaveAttribute('data-assembly-phase', 'ready');
   await expect(page.locator('[data-mac-workspace]')).toBeVisible();
-  await page.getByRole('button', { name: 'Use the workspace' }).click();
+  await page.getByRole('button', { name: page.viewportSize()!.width < 800 ? 'Explore Array Companion' : 'Explore Array workspace', exact: true }).click();
 }
 
 test('static hero, premium download menu, navigation, and theme work without demo hydration', async ({ page }) => {
@@ -40,40 +40,15 @@ test('assembly reaches stable exact endpoints without creating another demo', as
   await expect(track).toHaveAttribute('data-assembly-phase', 'glimpse');
 });
 
-test('ready workspace advertises interaction and removes the cue after activation', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/');
-  await expect(page.locator('[data-assembly-root]')).toHaveAttribute('data-assembly-phase', 'ready');
-  const cue = page.getByTestId('interaction-ready-cue');
-  await expect(cue).toBeVisible();
-  await expect(cue).toContainText('Take control.');
-  await expect(cue).toContainText('Move a tile. Tidy the canvas. Open Command Center. Approve work from Companion.');
-  await page.getByRole('button', { name: 'Use the workspace' }).click();
-  await expect(cue).toHaveCount(0);
-  await expect(page.locator('[data-demo-root]')).toHaveAttribute('data-input-mode', 'workspace');
-});
-
-test('ready workspace has a stable scroll shelf before the track ends', async ({ page }) => {
+test('ready workspace leaves page scrolling free and has no take-control gate', async ({ page }) => {
   await page.goto('/');
   const track = page.locator('[data-assembly-root]');
   await page.getByRole('button', { name: 'See all of it ↓' }).click();
   await expect(track).toHaveAttribute('data-assembly-phase', 'ready', { timeout: 8_000 });
-  const shelf = await track.evaluate((element) => {
-    const top = element.getBoundingClientRect().top + scrollY;
-    const available = element.getBoundingClientRect().height - innerHeight;
-    return { scrollY, top, available, remaining: top + available - scrollY };
-  });
-  expect(shelf.remaining).toBeGreaterThan(page.viewportSize()!.height * .3);
-  const heldAt = await page.evaluate(() => scrollY);
-  await page.mouse.wheel(0, 180);
-  await page.waitForTimeout(120);
-  expect(await page.evaluate(() => scrollY)).toBe(heldAt);
-  await expect(track).toHaveAttribute('data-assembly-phase', 'ready');
-  await expect(track).toHaveAttribute('data-ready-gate', 'held');
-  await expect(page.getByTestId('interaction-ready-cue')).toBeVisible();
-  await page.getByRole('button', { name: 'Keep scrolling' }).click();
-  await expect(track).toHaveAttribute('data-ready-gate', 'released');
-  await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(heldAt);
+  await expect(page.getByTestId('interaction-ready-cue')).toHaveCount(0);
+  const before = await page.evaluate(() => scrollY);
+  await page.mouse.wheel(0, 300);
+  await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(before);
 });
 
 test('native provider marks identify Codex, Claude, and Pi across the paired workspace', async ({ page }) => {
@@ -213,7 +188,7 @@ test('mobile enters Companion-first while retaining a linked Mac panorama', asyn
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Use the workspace' }).click();
+  await page.getByRole('button', { name: page.viewportSize()!.width < 800 ? 'Explore Array Companion' : 'Explore Array workspace', exact: true }).click();
   await expect(page.locator('[data-demo-root]')).toHaveAttribute('data-device-focus', 'companion');
   await expect(page.locator('[data-testid="companion"]')).toBeVisible();
   await expect(page.locator('[data-mac-workspace]')).toBeVisible();

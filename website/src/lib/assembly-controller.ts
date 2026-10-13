@@ -75,10 +75,6 @@ export function installAssembly() {
   let pointerX = 0;
   let pointerY = 0;
   let detachProgress = 1;
-  let previousPhase: AssemblyPhase = 'glimpse';
-  let readyGateHeld = false;
-  let readyGateReleased = false;
-  let touchY = 0;
   const surfaces = Array.from(track.querySelectorAll<HTMLElement>('[data-assembly-surface]'));
 
   type SurfaceTarget = { x: number; y: number; scale: number };
@@ -155,25 +151,6 @@ export function installAssembly() {
 
   const landingTop = () => trackTop + (trackHeight - innerHeight) * READY_LANDING_POINT;
 
-  const announceGate = () => {
-    track.dataset.readyGate = readyGateHeld ? 'held' : 'released';
-    track.dispatchEvent(new CustomEvent('array:ready-gate', { detail: { held: readyGateHeld } }));
-  };
-
-  const releaseReadyGate = () => {
-    if (!readyGateHeld && readyGateReleased) return;
-    readyGateHeld = false;
-    readyGateReleased = true;
-    announceGate();
-  };
-
-  const holdReadyGate = () => {
-    if (readyGateReleased || reduced.matches) return;
-    readyGateHeld = true;
-    announceGate();
-    requestAnimationFrame(() => scrollTo({ top: landingTop(), behavior: 'auto' }));
-  };
-
   const update = () => {
     queued = false;
     const available = Math.max(1, trackHeight - innerHeight);
@@ -186,9 +163,6 @@ export function installAssembly() {
     document.documentElement.style.setProperty('--page-assembly-progress', String(snapshot.progress));
     track.dataset.assemblyPhase = snapshot.phase;
     track.dispatchEvent(new CustomEvent<AssemblySnapshot>('array:assembly', { detail: snapshot }));
-    if (snapshot.phase !== 'ready' && readyGateHeld) releaseReadyGate();
-    if (snapshot.phase === 'ready' && previousPhase !== 'ready') holdReadyGate();
-    previousPhase = snapshot.phase;
     writePointer();
   };
 
@@ -216,33 +190,11 @@ export function installAssembly() {
     requestAnimationFrame(writePointer);
   };
   addEventListener('resize', onResize, { passive: true });
-  addEventListener('wheel', (event) => {
-    if (!readyGateHeld) return;
-    if (event.deltaY < 0) { releaseReadyGate(); return; }
-    event.preventDefault();
-    event.stopPropagation();
-  }, { passive: false, capture: true });
-  addEventListener('touchstart', (event) => { touchY = event.touches[0]?.clientY ?? 0; }, { passive: true });
-  addEventListener('touchmove', (event) => {
-    if (!readyGateHeld) return;
-    const nextY = event.touches[0]?.clientY ?? touchY;
-    if (nextY - touchY > 8) { releaseReadyGate(); touchY = nextY; return; }
-    event.preventDefault();
-    event.stopPropagation();
-    touchY = nextY;
-  }, { passive: false, capture: true });
-  addEventListener('keydown', (event) => {
-    if (!readyGateHeld) return;
-    if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Escape') { releaseReadyGate(); return; }
-    if (event.key === 'ArrowDown' || event.key === 'PageDown' || event.key === ' ' || event.key === 'End') event.preventDefault();
-  }, { capture: true });
   track.addEventListener('pointermove', onPointerMove, { passive: true });
   track.addEventListener('pointerleave', onPointerLeave, { passive: true });
-  track.addEventListener('array:release-ready-gate', releaseReadyGate);
   reduced.addEventListener('change', request);
   new ResizeObserver(onResize).observe(track);
   track.querySelector('[data-see-all]')?.addEventListener('click', () => {
-    readyGateReleased = false;
     scrollTo({ top: landingTop(), behavior: reduced.matches ? 'auto' : 'smooth' });
   });
   measure();

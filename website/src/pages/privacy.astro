@@ -1,0 +1,9 @@
+---
+import ProductionLayout from '../layouts/ProductionLayout.astro';
+import SiteHeader from '../components/marketing/SiteHeader.astro';
+---
+<ProductionLayout title="Privacy · Array" description="How Array handles your workspace, agents and website visits." canonicalPath="/privacy">
+<SiteHeader />
+<main class="legal-page"><h1>Privacy</h1><p>Last updated October 13, 2026.</p><p>Array is free alpha software. Your workspace data stays on your Mac.</p><h2>Your projects and agents</h2><p>Array keeps workspace state, agent sessions, notes and project files on your Mac. Agents run through your own Claude Code, Codex or Pi command-line tools and accounts. Those tools communicate with their providers under the providers’ own terms and privacy policies. Array does not operate an agent service or collect your credentials.</p><h2>This website and downloads</h2><p>We do not use analytics today. Your theme preference is saved locally in your browser. This website is hosted by Vercel, and downloads are hosted on GitHub. These services receive normal request information such as your IP address when you visit or download.</p><h2>Updates</h2><p>Array checks for updates at <a href="https://arrayapp.dev/appcast.xml">arrayapp.dev/appcast.xml</a>. Update downloads come from GitHub. Automatic update checks follow your choices in the app.</p><h2>Contact</h2><p>For privacy questions, open an issue on <a href="https://github.com/dylanreedx/array-releases/issues">Array’s issues page</a>. Do not include private project content or credentials in a public issue.</p></main>
+<footer class="production-footer"><a href="/">Array</a><nav aria-label="Footer"><a href="https://github.com/dylanreedx/array">GitHub</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav></footer>
+</ProductionLayout>

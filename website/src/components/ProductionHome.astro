@@ -20,7 +20,7 @@ import { canonicalCopy } from '../features/demo/fixture';
           <p class="hero-copy__requirements">{canonicalCopy.requirements}</p>
         </div>
         <div class="living-workspace" id="workspace">
-          <DemoIsland client:idle />
+          <DemoIsland client:intent />
         </div>
       </div>
       <span class="assembly-anchor assembly-anchor--companion" id="companion" aria-hidden="true"></span>
@@ -36,7 +36,7 @@ import { canonicalCopy } from '../features/demo/fixture';
   </main>
   <footer class="production-footer">
     <a href="/" aria-label="Array home" data-interaction-id="footer-home">Array</a>
-    <p>Companion for iOS is coming soon.</p>
+    <nav aria-label="Footer"><a href="https://github.com/dylanreedx/array">GitHub</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav>
     <a href="/appcast.xml" data-interaction-id="footer-release-feed">Release feed</a>
   </footer>
 </ProductionLayout>

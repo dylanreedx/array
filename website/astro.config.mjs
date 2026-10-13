@@ -7,9 +7,9 @@ import tailwindcss from '@tailwindcss/vite';
 // https://astro.build/config
 export default defineConfig({
   site: 'https://arrayapp.dev',
-  integrations: [react()],
+  integrations: [react(), { name: 'hydrate-on-intent', hooks: { 'astro:config:setup': ({ addClientDirective }) => addClientDirective({ name: 'intent', entrypoint: './src/lib/hydrate-on-intent.ts' }) } }],
   build: {
-    inlineStylesheets: 'auto'
+    inlineStylesheets: 'always'
   },
   vite: {
     plugins: [tailwindcss()]

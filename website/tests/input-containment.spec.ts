@@ -26,5 +26,5 @@ test('compact download has only essential copy and header has no obsolete sectio
   await navDownload.locator('[data-testid="download-trigger"]').click();
   await expect(navDownload.locator('[data-testid="download-popover"]')).toHaveText(/Array for Mac/);
   await expect(navDownload.locator('[data-testid="download-popover"]')).toHaveText(/Array CompanionComing soon/);
-  await expect(page.locator('.production-header nav')).toHaveCount(0);
+  await expect(page.locator('.production-header nav a')).toHaveAttribute('href', 'https://github.com/dylanreedx/array');
 });
