@@ -19,6 +19,7 @@ export interface AgentTileProps {
   agentId: string;
   onEvent?: (event: AgentEvent) => void;
   className?: string;
+  previewStatus?: string;
 }
 
 const providerModels: Record<string, string[]> = {
@@ -32,7 +33,7 @@ const statusLabel: Record<AgentStatus, string> = {
   idle: 'Idle', starting: 'Starting', working: 'Working', needsAttention: 'Needs attention', stopped: 'Stopped', done: 'Done',
 };
 
-export function AgentTile({ state, dispatch, agentId, onEvent, className = '' }: AgentTileProps) {
+export function AgentTile({ state, dispatch, agentId, onEvent, className = '', previewStatus }: AgentTileProps) {
   const agent = state.agents[agentId];
   const approval = state.approval.agentId === agentId ? state.approval : null;
   const timers = useRef<number[]>([]);
@@ -85,14 +86,14 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '' }:
   };
 
   return (
-    <section className={`${styles.tile} ${className}`} data-agent-id={agent.id} data-status={agent.status} aria-label={`${agent.name}, ${statusLabel[agent.status]}`}>
+    <section className={`${styles.tile} ${className}`} data-agent-id={agent.id} data-status={agent.status} aria-label={`${agent.name}, ${previewStatus ?? statusLabel[agent.status]}`}>
       <header className={styles.header}>
         <AgentGyro active={active} />
         <div className={styles.identity}>
           <strong>{agent.name}</strong>
           <span>{agent.branch}</span>
         </div>
-        <span className={styles.status} data-status={agent.status}>{statusLabel[agent.status]}</span>
+        <span className={styles.status} data-status={agent.status}>{previewStatus ?? statusLabel[agent.status]}</span>
         <ProviderMark provider={agent.provider} className={styles.providerMark} />
         <div className={styles.actions}>
           <button type="button" data-interaction-id={`agent-actions-${agent.id}`} aria-label="Agent actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((value) => !value)}><Glyph name="more" /></button>

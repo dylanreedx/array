@@ -1,0 +1,18 @@
+# Guided workspace story
+
+Keep the existing hero, navigation, and product copy. The demo is the same six-tile HTML workspace from the hero through the final overview: `stabilize`, `verify`, `audit`, `browser`, `shell`, and `note`. Preserve each node and its identity while the opening composition lands in the zone; change only world transforms, content, status, and camera. Do not clone, replace, unmount, or recreate tile markup between beats.
+
+The `STEPS` ranges below are the story contract from `src/lib/guided-demo.ts`. One current scroll-progress value determines the tile state, camera, cursor, menu, approval, and caption. Scrolling upward or jumping to any progress point must reproduce that exact frame. No video, click-to-start gate, invented floating toolbar, chapter numbers, or progress bar. If creation UI is shown, use the shipped `⌘K` Command Center; the floating create toolbar is not part of the 0.7.26 app.
+
+| Progress | Action and composition | Camera and pointer | Caption |
+| --- | --- | --- | --- |
+| `0–.28` Landing | All six same tile nodes start around the hero and settle into the workspace zone. The zone/window resolve around them. | Wide view; varied short translations, then settle. Keep all six visible and identifiable. | “Your work lands together, in one workspace.” |
+| `.28–.43` Task | Focus `stabilize` (Codex); type the existing zone-placement task into its composer and change its status in place. | Medium close-up on the Codex tile, then a small pullback that keeps the surrounding project visible. | “Give an agent a task, with the context already beside it.” |
+| `.43–.59` Providers | Pan across the existing Codex, Claude Code, and Pi tiles. Their distinct working states stay attached to these same nodes. If a creation affordance appears, open the actual Command Center with `⌘K`. | Lateral camera glide across the agent row; cursor follows the real UI target. | “Let Claude, Codex, and Pi work in parallel.” |
+| `.59–.73` Approval | `verify` displays the staged pending approval, then its resolved state. Keep its tile and sidebar status aligned. | Slow, tight glide to the approval; hold while the request is readable, then ease back. | “Review the next action before it runs.” |
+| `.73–.86` Tools | Pan to the existing browser, shell, and note tiles; staged tool text updates in place. Keep the three agent tiles mounted in the same workspace. | Horizontal move to the tool cluster, one tidy settle, then begin the pullback. | “Follow the tools and tests without losing the thread.” |
+| `.86–1` Overview | Return to the whole workspace with all six original tiles still present. The normal download action follows the stage. | Crisp wide frame; no forced pause. | “Keep the whole project in view, and pick up anywhere.” |
+
+The pointer is a visual guide, never a required control. Resolve its position from the stage and the target element so it stays attached through camera movement; story state comes from progress, not pointer clicks. Keep captions as readable HTML outside the zoomed world. Reduced motion removes camera travel, cursor movement, blur, and stagger while retaining the same six-tile story and captions as static frames in ordinary page flow. The activity, shell output, and approval are staged fixture content; do not describe them as actions on a visitor's machine or live provider sessions.
+
+Source and product fidelity references: [MOTION_AND_SEO_RESEARCH.md](./MOTION_AND_SEO_RESEARCH.md), [DEMO_FIDELITY.md](./DEMO_FIDELITY.md), `src/lib/guided-demo.ts`, `src/components/demo/GuidedWorkspace.tsx`, and `src/components/demo/command/CommandCenter.tsx`.

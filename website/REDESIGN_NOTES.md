@@ -1,6 +1,16 @@
 # Array website production redesign
 
-## October 13 correction
+## October 13 continuous DOM demonstration
+
+Dylan rejected the scroll-synchronized film because it degraded image quality and broke the relationship between the floating hero tiles and the demo. The replacement reuses the existing mimic agent/tool primitives in one server-rendered scene. The hero tiles settle into their own zone, then a scripted cursor and camera follow the task, providers, approval and tools. Scene state is derived from scroll progress, so seeking and reverse scrolling preserve the same tile nodes. The original hero copy and compact unboxed navigation stay intact. The five original hero float paths remain. The same six DOM tiles remain mounted through all beats; the controller seeks text, camera, cursor, provider selection, approval and terminal output without timers or React hydration. The demo contains no video. “See all of it” lands at the start of the assembled scene. Reduced Motion lays out all six cards in ordinary document flow; a no-JavaScript explanation and download remain readable.
+
+Verification: Astro check has zero diagnostics; 83 unit tests and 40 Chromium/WebKit checks pass. Browser checks cover actual tile and inner-agent identity, direct/reverse/reload equality, typed tasks, menus, approval cursor alignment and click feedback, terminal output, 320px/390px focus readability, dark theme, reduced motion, no JavaScript, metadata and legal routes. Independent native/source review completed. Extra visual captures at 320×568, 390×844 and 768×1024 have no page overflow or console errors in either engine.
+
+Three final mobile and three desktop cold Lighthouse runs each score 100 in all four categories, with CLS/TBT 0; mobile LCP is 1.353s and desktop 0.323s. Initial tests exposed low caption contrast and a small-screen status label below 12px, both repaired. Initial Lighthouse scores were 100 but the strict zero-CLS assertion failed at 0.001699 because controller startup replaced SSR text; matching the opening fixture to the first snapshot repairs it. A fixture-clone annotation initially failed type checking, then was corrected. Final production builds omit Apple pairing test URLs. Evidence is kept in `.plans/72-launch-night/qa/dom-demo/`.
+
+The creation menu is intentionally condensed from the shipped Command Center; the stage illustrates example agent and tool activity without executing anything on the visitor’s machine.
+
+## Earlier October 13 correction (superseded demo)
 
 Dylan rejected the plain hero, rewritten subheading, added eyebrow, outlined navigation and invented scroll-demo UI. Restored the prior floating tile composition and original supporting copy. Navigation now has an unboxed layout and right-aligned GitHub/actions; download buttons are smaller and use a transparent mask derived from the existing Array logo to remove the corner/background fringe.
 

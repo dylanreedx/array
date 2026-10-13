@@ -9,8 +9,9 @@ These instructions supersede the older interactive-device sequence below for the
 - The nav is unboxed: no outlined or rounded outer container. GitHub belongs beside the compact actions on the right.
 - Keep download controls compact. Use the transparent `array-mark.svg`; do not embed a square logo background inside another rounded background.
 - Keep paragraph wrapping natural, avoid forced line breaks, and keep floating tiles clear of the complete hero copy at small sizes.
-- The scroll demonstration uses the native power-tour film, including its actual cursor and camera motion. No invented toolbar, project picker, agent UI, numbered step header, progress bars or "Scroll to explore" banner.
-- Floating previews are server-rendered decoration, without React hydration. Load the film and its poster only when approaching the demonstration. Reduced Motion preserves the headline and provides manual video controls.
+- The demonstration is an HTML/SVG/CSS interpretation built from the existing mimic components. The same floating tile nodes settle into the workspace and remain through the complete narrated tour. No scroll-synchronized video, duplicate scene or replacement tile tree.
+- Camera, cursor, text, status, approval and tool state are seekable functions of scroll progress, including scroll-up and direct jumps. Use a short caption below the stage; no numbered step header, progress bars or "Scroll to explore" banner.
+- Keep the product surfaces server-rendered without React hydration. Mobile cameras focus readable subjects; Reduced Motion preserves the hero and presents an ordinary static overview with readable narrative text.
 - Keep release/download links, legal pages and social metadata intact.
 
 ## Product source of truth

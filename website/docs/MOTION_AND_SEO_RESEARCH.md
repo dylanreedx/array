@@ -225,3 +225,11 @@ Primary and standards sources checked for this guide:
 - [MDN: Web App Manifest](https://developer.mozilla.org/en-US/docs/Web/Manifest)
 
 Local project material consulted: `.plans/72-launch-night/BOARD_SNAPSHOT.md`, `.plans/72-launch-night/PROGRESS.md`, `.plans/68-launch-film/hero-loop-r3/script.md`, `.plans/68-launch-film/research/11-website-audit.md`, `.plans/68-launch-film/research/15-movez-motion-course.md`, and `.worktrees/hero-loop/film/lib/{Lens.tsx,anim.ts,blur.ts,Overlays.tsx,tracks/camera.ts,tracks/tidy.ts}`.
+
+### Direct reference-source recheck (2026-10-13)
+
+I fetched the current [homepage](https://fuckfigma.app/) and its linked [scroll runtime](https://fuckfigma.app/scroll.js?v=7), [demo timeline](https://fuckfigma.app/demo.js?v=35), [story CSS](https://fuckfigma.app/story.css?v=40), and [demo CSS](https://fuckfigma.app/demo.css?v=40) over ordinary HTTPS. These first-party files confirm that scroll progress is computed from the section top and sticky-stage travel; a passive listener coalesces updates into one animation frame and skips offscreen scenes. The render function receives current progress, so reversing scroll seeks earlier frames directly.
+
+The demo script defines 18 weighted steps and separate caption intervals, camera keys, visitor/AI cursor tracks, and click points. It draws one fixed 1440×900 app composition, then changes transforms and opacity from progress. A `ResizeObserver` recalculates the fit; the reduced-motion still is near the start of `versions`. The scene mutates presentation DOM directly rather than replaying a reducer. For Array, use the same seekable progress principle while deriving the stable demo state from its fixture; keep all six original tile nodes mounted from hero through the final overview. Use `⌘K` and the shipped Command Center for any creation affordance; do not depict a floating create toolbar, which is not part of the shipped 0.7.26 UI.
+
+At retrieval, the reference uses localized card sweeps and a blurred glow edge, not persistent film grain or full-stage progressive blur. Treat those treatments as a visual reference only. Keep any Array blur/grain contained and transient, and profile mobile Safari before retaining it. The linked assets may change independently of this research note.

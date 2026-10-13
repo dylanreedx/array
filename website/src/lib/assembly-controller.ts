@@ -68,6 +68,7 @@ export function installAssembly() {
   if (!track || track.dataset.installed) return;
   track.dataset.installed = 'true';
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const guided = track.matches('[data-guided-demo]') || !!track.querySelector('[data-guided-demo]');
   let queued = false;
   let pointerQueued = false;
   let trackTop = 0;
@@ -110,10 +111,12 @@ export function installAssembly() {
 
   const measureSurfaceTargets = () => {
     if (!surfaces.length) return;
+    track.dispatchEvent(new CustomEvent('array:assembly-measure', { detail: true }));
     const targets = targetsForViewport(innerWidth, innerHeight);
     const stageRect = track.querySelector<HTMLElement>('[data-assembly-pin]')?.getBoundingClientRect();
     const originX = stageRect?.left ?? 0;
     const originY = stageRect?.top ?? 0;
+    const worldScale = guided ? Number(track.querySelector<HTMLElement>('[data-guided-world]')?.dataset.cameraScale) || 1 : 1;
     track.dataset.assemblyMeasuring = 'true';
     for (const surface of surfaces) {
       const id = surface.dataset.assemblySurface;
@@ -122,11 +125,12 @@ export function installAssembly() {
       const rect = surface.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
-      surface.style.setProperty('--float-x', `${originX + target.x - centerX}px`);
-      surface.style.setProperty('--float-y', `${originY + target.y - centerY}px`);
-      surface.style.setProperty('--float-scale', String(target.scale));
+      surface.style.setProperty('--float-x', `${(originX + target.x - centerX) / worldScale}px`);
+      surface.style.setProperty('--float-y', `${(originY + target.y - centerY) / worldScale}px`);
+      surface.style.setProperty('--float-scale', String(guided ? target.scale * .78 / worldScale : target.scale));
     }
     delete track.dataset.assemblyMeasuring;
+    track.dispatchEvent(new CustomEvent('array:assembly-measure', { detail: false }));
   };
 
   const measure = () => {
@@ -150,19 +154,21 @@ export function installAssembly() {
     }
   };
 
-  const landingTop = () => trackTop + (trackHeight - innerHeight) * READY_LANDING_POINT;
+  const landingTop = () => trackTop + (trackHeight - innerHeight) * (guided ? .26 : READY_LANDING_POINT);
 
   const update = () => {
     queued = false;
     const available = Math.max(1, trackHeight - innerHeight);
     const scrollProgress = clamp((scrollY - trackTop) / available);
-    const snapshot = presentationFor(assemblyProgressForScroll(scrollProgress), reduced.matches);
-    detachProgress = 1 - Math.min(1, snapshot.progress / .72);
+    const snapshot = presentationFor(guided ? scrollProgress : assemblyProgressForScroll(scrollProgress), reduced.matches);
+    detachProgress = 1 - Math.min(1, snapshot.progress / (guided ? .26 : .72));
     track.style.setProperty('--assembly-progress', String(snapshot.progress));
     track.style.setProperty('--phase-progress', String(snapshot.phaseProgress));
     track.style.setProperty('--detach-progress', String(detachProgress));
     document.documentElement.style.setProperty('--page-assembly-progress', String(snapshot.progress));
     track.dataset.assemblyPhase = snapshot.phase;
+    const scene = track.querySelector<HTMLElement>('[data-guided-scene]');
+    if (scene) scene.dataset.assemblyPhase = snapshot.progress >= .26 ? 'ready' : snapshot.phase;
     track.dispatchEvent(new CustomEvent<AssemblySnapshot>('array:assembly', { detail: snapshot }));
     writePointer();
   };

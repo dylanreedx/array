@@ -10,11 +10,11 @@ const pages: Record<string, { title: string; copy: string; links: string[] }> = 
   '/release': { title: 'Array 0.5', copy: 'Native parity, Safari motion, and Companion approval remain in the release gate.', links: ['/canvas'] }
 };
 
-export function BrowserTile({ state, dispatch }: { state: DemoState; dispatch: React.Dispatch<DemoAction> }) {
+export function BrowserTile({ state, dispatch, previewPage }: { state: DemoState; dispatch: React.Dispatch<DemoAction>; previewPage?: { title: string; copy: string; links: string[] } }) {
   const timer = useRef<number | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const path = state.browser.history[state.browser.index];
-  const page = pages[path];
+  const page = previewPage ?? pages[path];
   const navigate = (value: string) => dispatch({ type: 'BROWSER_NAVIGATE', path: value.startsWith('/') ? value : `/${value}` });
   const reload = () => {
     dispatch({ type: 'BROWSER_RELOAD', loading: true });
