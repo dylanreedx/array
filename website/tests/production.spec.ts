@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 async function seek(page: import('@playwright/test').Page, progress: number) {
-  await page.locator('[data-narrative]').evaluate((el, value) => scrollTo(0, el.getBoundingClientRect().top + scrollY + (el.getBoundingClientRect().height - innerHeight) * value), progress);
+  await page.locator('[data-assembly-root]').evaluate((el, value) => scrollTo(0, el.getBoundingClientRect().top + scrollY + (el.getBoundingClientRect().height - innerHeight) * value), progress);
 }
 test('homepage links, downloads and theme work', async ({ page }) => {
   await page.goto('/');
@@ -17,51 +17,33 @@ test('homepage links, downloads and theme work', async ({ page }) => {
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
-test('scroll narrates all eight beats and reverses deterministically', async ({ page }) => {
+test('original hero copy and floating tile composition are restored', async ({ page }) => {
   await page.goto('/');
-  const root = page.locator('[data-narrative]');
-  const ids = ['canvas', 'zone', 'agent', 'task', 'parallel', 'approval', 'tools', 'overview'];
-  for (let i = 0; i < ids.length; i++) {
-    await seek(page, (i + .75) / 8);
-    await expect(root).toHaveAttribute('data-step', ids[i]);
-    await expect(page.locator('[data-story-caption]:visible')).toHaveCount(1);
-  }
-  const transform = await page.locator('[data-story-world]').getAttribute('style');
-  await seek(page, .05);
-  await expect(root).toHaveAttribute('data-step', 'canvas');
-  await expect(page.locator('.story-zone')).toHaveAttribute('data-visible', 'false');
-  await seek(page, 7.75 / 8);
-  await expect(root).toHaveAttribute('data-step', 'overview');
-  await expect(page.locator('[data-story-world]')).toHaveAttribute('style', transform!);
+  await expect(page.locator('.hero-copy__body')).toHaveText('Launch agents and tools from anywhere. Array keeps everything they touch visible on one native workspace.');
+  await expect(page.getByText('A native workspace for your coding agents', { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-assembly-surface]')).toHaveCount(6);
+  await expect(page.locator('[data-assembly-root]')).toHaveAttribute('data-installed', 'true');
+  const nav = await page.locator('.production-header__inner').evaluate(el => ({ border: getComputedStyle(el).borderWidth, width: el.clientWidth }));
+  expect(nav.border).toBe('0px');
+  const github = await page.locator('.production-header nav').boundingBox();
+  expect(github!.x).toBeGreaterThan(nav.width / 2);
+  await expect(page.locator('.story-kicker, .story-progress, .story-copy')).toHaveCount(0);
+  await expect(page.locator('video')).not.toHaveAttribute('src');
 });
-test('cursor creates a project zone and agent from the toolbar without visitor interaction', async ({ page }) => {
+test('scroll seeks the real native film forward and backward', async ({ page }) => {
   await page.goto('/');
-  await seek(page, 1.2 / 8);
-  await expect(page.locator('.story-project-picker')).toBeVisible();
-  await expect(page.locator('.story-zone')).toHaveAttribute('data-visible', 'false');
-  const cursor = await page.locator('[data-story-cursor]').boundingBox();
-  const target = await page.locator('[data-toolbar-zone]').boundingBox();
-  expect(cursor!.x).toBeCloseTo(target!.x + target!.width / 2, 0);
-  expect(cursor!.y).toBeCloseTo(target!.y + target!.height / 2, 0);
-  await seek(page, 1.8 / 8);
-  await expect(page.locator('.story-zone')).toHaveAttribute('data-visible', 'true');
-  await seek(page, 2.2 / 8);
-  await expect(page.locator('.story-provider-picker')).toBeVisible();
-  await seek(page, 2.8 / 8);
-  await expect(page.locator('.story-agent--0')).toHaveAttribute('data-visible', 'true');
-  await expect(page.locator('.story-provider-picker')).toBeHidden();
-});
-test('task typing, provider parity, approval and neighboring tools appear in order', async ({ page }) => {
-  await page.goto('/');
-  await seek(page, 3.3 / 8);
-  await expect(page.locator('[data-typed-task]')).toContainText('Build a settings');
-  await seek(page, 4.8 / 8);
-  await expect(page.locator('.story-agent[data-visible=true]')).toHaveCount(3);
-  await seek(page, 5.8 / 8);
-  await expect(page.locator('.story-approval')).toHaveAttribute('data-visible', 'true');
-  await seek(page, 6.8 / 8);
-  await expect(page.locator('.story-terminal')).toHaveAttribute('data-visible', 'true');
-  await expect(page.locator('.story-browser')).toHaveAttribute('data-visible', 'true');
+  await seek(page, .6);
+  const video = page.locator('[data-native-film] video');
+  await expect.poll(() => video.evaluate(v => (v as HTMLVideoElement).currentTime)).toBeGreaterThan(20);
+  await expect.poll(() => video.evaluate(v => (v as HTMLVideoElement).seeking)).toBe(false);
+  const midpoint = await video.evaluate(v => (v as HTMLVideoElement).currentTime);
+  await expect(video).toHaveAttribute('src', '/videos/array-native-tour.mp4');
+  await seek(page, .36);
+  await expect.poll(() => video.evaluate(v => (v as HTMLVideoElement).currentTime)).toBeLessThan(10);
+  await seek(page, .6);
+  await expect.poll(async () => Math.abs(await video.evaluate(v => (v as HTMLVideoElement).currentTime) - midpoint)).toBeLessThan(.1);
+  expect(await video.evaluate(v => (v as HTMLVideoElement).error)).toBeNull();
+  await expect(page.locator('.story-toolbar, .story-agent, .story-project-picker')).toHaveCount(0);
 });
 test('page has no ready gate and keyboard scrolling reaches download', async ({ page }) => {
   await page.goto('/');
@@ -75,15 +57,19 @@ test('desktop, mobile and reduced motion remain accessible', async ({ page }) =>
   await seek(page, .71);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.setViewportSize({ width: 390, height: 844 });
-  await seek(page, .44);
-  await expect(page.locator('[data-narrative]')).toHaveAttribute('data-step', 'task');
+  await page.evaluate(() => scrollTo(0, 0));
+  await expect(page.locator('[data-assembly-root]')).toHaveAttribute('data-assembly-phase', 'glimpse');
+  const copy = await page.locator('.hero-copy__requirements').boundingBox();
+  const floating = await page.locator('[data-assembly-surface=browser]').boundingBox();
+  expect(floating!.y).toBeGreaterThan(copy!.y + copy!.height);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
-  await expect(page.locator('[data-narrative]')).toHaveAttribute('data-step', 'overview');
-  await expect(page.locator('[data-story-cursor]')).toBeHidden();
-  await expect(page.getByRole('heading', { name: 'The demo, step by step' })).toBeVisible();
+  await expect(page.locator('.hero-copy h1')).toBeVisible();
+  await expect(page.locator('[data-native-film] video')).toHaveJSProperty('controls', true);
+  await page.keyboard.press('End');
+  await expect(page.locator('video')).toHaveJSProperty('currentTime', 0);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 test('home and legal pages emit complete metadata and accurate linked legal copy', async ({ page }) => {

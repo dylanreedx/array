@@ -1,5 +1,15 @@
 # Array website production redesign
 
+## October 13 correction
+
+Dylan rejected the plain hero, rewritten subheading, added eyebrow, outlined navigation and invented scroll-demo UI. Restored the prior floating tile composition and original supporting copy. Navigation now has an unboxed layout and right-aligned GitHub/actions; download buttons are smaller and use a transparent mask derived from the existing Array logo to remove the corner/background fringe.
+
+The assembled demo now shows the native power-tour film rather than a new HTML approximation. Scroll seeks its real cursor/camera workflow in both directions. The source is `.plans/68-launch-film/power-tour-r2/power-tour-1080p.mp4`, with a 43.5-second, 1440px H.264 web derivative that omits the closing title card. Decorative hero components render on the server without hydrating React. Video and poster load as the demo approaches. Reduced Motion keeps the hero text and offers a manually controlled film.
+
+The older interactive Mac/Companion components remain available in source; the current homepage does not activate that simulated interface or advertise Companion availability. The corrections retain metadata, privacy/terms and the build-77 appcast.
+
+Verification: Astro check has zero diagnostics; 75 unit tests and 32 Chromium/WebKit browser tests pass. The 12 homepage browser checks were rerun after removing hydration. Axe reports zero violations at desktop/mobile/reduced-motion positions; 320px, tablet and dark-theme visual checks pass. Three mobile and three desktop cold Lighthouse runs each score 100 in all four categories, with zero CLS/TBT. Mobile LCP is about 1.05s and desktop about 0.28s. An initial browser run lacked the pairing fixture environment; rebuilding with that fixture made both pairing checks pass. The final production build excludes those fixture URLs. An initial performance run exposed unnecessary hydration/poster loading; the final run passes after their removal/deferral.
+
 ## Outcome
 
 The previous collection of separate marketing demos was replaced by one production homepage centered on a living Array workspace. Five real product surfaces begin detached around the hero, assemble into the Mac canvas through scroll, demonstrate a synchronized Companion approval handoff, and become interactive without swapping DOM trees or resetting product state.

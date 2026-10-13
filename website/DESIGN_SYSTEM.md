@@ -1,5 +1,18 @@
 # Array marketing design system
 
+## Dylan's October 13 correction
+
+These instructions supersede the older interactive-device sequence below for the homepage:
+
+- Preserve the floating native tiles in the hero and the existing headline and `canonicalCopy.body`. Do not rewrite either without an explicit request.
+- No eyebrow or "native workspace for your coding agents" label above the headline.
+- The nav is unboxed: no outlined or rounded outer container. GitHub belongs beside the compact actions on the right.
+- Keep download controls compact. Use the transparent `array-mark.svg`; do not embed a square logo background inside another rounded background.
+- Keep paragraph wrapping natural, avoid forced line breaks, and keep floating tiles clear of the complete hero copy at small sizes.
+- The scroll demonstration uses the native power-tour film, including its actual cursor and camera motion. No invented toolbar, project picker, agent UI, numbered step header, progress bars or "Scroll to explore" banner.
+- Floating previews are server-rendered decoration, without React hydration. Load the film and its poster only when approaching the demonstration. Reduced Motion preserves the headline and provides manual video controls.
+- Keep release/download links, legal pages and social metadata intact.
+
 ## Product source of truth
 
 The native Array application defines component geometry, surface hierarchy, state colors, typography, and interaction behavior. Marketing expression may change scale, depth, and masking, but it must not restyle a native component into a generic web card.

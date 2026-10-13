@@ -13,7 +13,7 @@ import styles from './DemoIsland.module.css';
 
 type AssemblyPhase = 'glimpse' | 'opening' | 'assembly' | 'mac' | 'companion' | 'ready';
 
-export default function DemoIsland() {
+export default function DemoIsland({ guided = false }: { guided?: boolean }) {
   const [state, dispatch] = useReducer(demoReducer, undefined, makeInitialState);
   const [phase, setPhase] = useState<AssemblyPhase>('glimpse');
   const rootRef = useRef<HTMLElement>(null);
@@ -52,8 +52,8 @@ export default function DemoIsland() {
   }, []);
 
   useEffect(() => {
-    if (matchMedia('(max-width: 800px)').matches) dispatch({ type: 'SET_DEVICE_FOCUS', focus: 'companion' });
-  }, []);
+    if (!guided && matchMedia('(max-width: 800px)').matches) dispatch({ type: 'SET_DEVICE_FOCUS', focus: 'companion' });
+  }, [guided]);
 
   useEffect(() => {
     if (state.inputMode !== 'workspace') return;
@@ -85,18 +85,18 @@ export default function DemoIsland() {
   };
 
   const workspaceMode = state.inputMode === 'workspace';
-  const canEnter = phase === 'ready' && !workspaceMode;
+  const canEnter = !guided && phase === 'ready' && !workspaceMode;
 
   return (
-    <section ref={rootRef} className={styles.assembly} data-demo-root data-assembly-phase={phase} data-input-mode={state.inputMode} data-device-focus={state.deviceFocus} aria-label="Interactive Array workspace">
+    <section ref={rootRef} className={styles.assembly} data-demo-root data-assembly-phase={phase} data-input-mode={state.inputMode} data-device-focus={state.deviceFocus} aria-hidden={guided || undefined} aria-label={guided ? undefined : 'Interactive Array workspace'}>
       <div ref={stageRef} className={styles.stage} data-assembly-stage data-assembly-pin tabIndex={workspaceMode ? -1 : undefined}>
         <div className={styles.portal} aria-hidden="true"><span /><span /></div>
         <div className={`${styles.device} ${styles.macSurface}`} data-device-surface="mac" data-focused={state.deviceFocus === 'mac'} inert={!workspaceMode || state.deviceFocus !== 'mac' ? true : undefined}>
           <MacWorkspace state={state} dispatch={dispatch} renderTileContent={renderTile} workspaceName="Array" />
         </div>
-        <div className={`${styles.device} ${styles.companionSurface}`} data-device-surface="companion" data-focused={state.deviceFocus === 'companion'} inert={!workspaceMode || state.deviceFocus !== 'companion' ? true : undefined}>
+        {!guided && <div className={`${styles.device} ${styles.companionSurface}`} data-device-surface="companion" data-focused={state.deviceFocus === 'companion'} inert={!workspaceMode || state.deviceFocus !== 'companion' ? true : undefined}>
           <Companion state={state} dispatch={dispatch} />
-        </div>
+        </div>}
 
 
         {(canEnter || (workspaceMode && state.deviceFocus !== 'mac')) && <button type="button" className={`${styles.capture} ${styles.captureMac}`} data-interaction-id={canEnter ? 'explore-workspace' : 'device-focus-mac'} onClick={() => enterWorkspace('mac')} aria-label={canEnter ? 'Explore Array workspace' : 'Focus Mac workspace'}><span className="sr-only">{canEnter ? 'Explore Array workspace' : 'Focus Mac workspace'}</span></button>}

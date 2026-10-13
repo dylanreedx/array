@@ -81,12 +81,13 @@ export function installAssembly() {
 
   const targetsForViewport = (width: number, height: number): Record<string, SurfaceTarget> => {
     if (width < 700) {
+      const floatHeight = Math.max(height, 800);
       return {
-        stabilize: { x: width * .08, y: height * .73, scale: 1.08 },
-        browser: { x: width * .91, y: height * .68, scale: 1.06 },
-        shell: { x: width * .72, y: height * .91, scale: 1.08 },
-        note: { x: width * .14, y: height * .95, scale: 1.1 },
-        verify: { x: width * .98, y: height * .88, scale: 1.04 },
+        stabilize: { x: width * .08, y: floatHeight * .91, scale: 1.08 },
+        browser: { x: width * .91, y: floatHeight * .86, scale: 1.06 },
+        shell: { x: width * .72, y: floatHeight * 1.09, scale: 1.08 },
+        note: { x: width * .14, y: floatHeight * 1.13, scale: 1.1 },
+        verify: { x: width * .98, y: floatHeight * 1.06, scale: 1.04 },
       };
     }
     if (width < 1100) {
