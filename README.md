@@ -1,50 +1,51 @@
 # Array
 
-A native macOS spatial workspace for coding agents — projects, agent tiles,
-terminals, browsers, and dev servers on one canvas. Swift/AppKit, SwiftPM,
-GhosttyKit terminals, Sparkle updates. Download: [arrayapp.dev](https://arrayapp.dev).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-- **Orientation + non-negotiables:** [AGENTS.md](AGENTS.md)
-- **Docs index:** [docs/README.md](docs/README.md)
-- **Release runbook:** [RELEASE.md](RELEASE.md) · ledger: [docs/VERSIONING.md](docs/VERSIONING.md)
+**Array is a free, open-source macOS workspace for coding agents.** Keep agents, terminals, browsers, files, and dev servers together on one spatial canvas, with each project organized in its own zone.
 
-## Build & run (dev)
+[Download the latest alpha](https://github.com/dylanreedx/array-releases/releases/latest) · [Explore the source](https://github.com/dylanreedx/array) · [Report a problem](https://github.com/dylanreedx/array/issues)
 
-Requires macOS 14 or newer. `ThirdParty/` is gitignored, so a fresh clone has no
-terminal engine until you link one — `scripts/prepare-ghosttykit.sh` does that,
-and the build fails without it.
+![Array workspace with three agents on one canvas](website/public/og-image.png)
 
-```sh
-scripts/prepare-ghosttykit.sh          # link GhosttyKit.xcframework — once per clone
-swift build --product Array            # bare binary (dev channel by default)
-.build/debug/Array                     # run it — uses "Array Dev" state, never prod
+Try the interactive walkthrough at [arrayapp.dev](https://arrayapp.dev). Array is in alpha; feedback and bug reports are welcome in [GitHub Issues](https://github.com/dylanreedx/array/issues).
 
-scripts/make-app-bundle.sh --configuration debug --output /tmp/ArrayDev.app
-open /tmp/ArrayDev.app                 # a real bundle, still the dev channel
-```
+## Build from source
 
-Dev builds are the **dev channel**: own Application Support dir ("Array Dev"),
-own defaults domain, updater inert. Only `scripts/release-app.sh` produces the
-prod identity.
+Array is a native macOS app and requires macOS 14 or newer, Swift 6.0 or newer, and a macOS `GhosttyKit.xcframework` built from a [Ghostty source checkout](https://github.com/ghostty-org/ghostty). The framework is not included in this repository.
 
-## Verify
+1. Install Xcode or the Xcode Command Line Tools with Swift 6.0 or newer.
+2. Build GhosttyKit by following the Ghostty project's macOS development instructions.
+3. Clone Array, then point the preparation script at that Ghostty checkout:
 
-```sh
-scripts/run-matrix.sh                  # the full offline gate
-swift run ContinuumRevivedCoreChecks   # fast core leg
-scripts/check-app-bundle.sh            # bundle harness (dev channel)
-```
+   ```sh
+   git clone https://github.com/dylanreedx/array.git
+   cd array
+   GHOSTTY_SRC=/path/to/ghostty scripts/prepare-ghosttykit.sh
+   ```
 
-When these commands run inside an Array-managed Pi, Claude, or Codex agent,
-the runner marks the environment so CoreChecks defers only its intentional
-crashing subprocess witnesses; macOS otherwise attributes those crashes to the
-GUI host and can terminate the self-hosting app. Real tmux checks still require
-the disposable namespace supplied by `run-matrix.sh` and
-`qa/run-autonomous.sh`. Run the complete crash-witness gate from an external
-terminal or CI. See `AGENTS.md` under **Verifying**.
+   This links the checkout's `macos/GhosttyKit.xcframework` into the ignored `ThirdParty/` directory. The script expects the framework to exist already; it does not build GhosttyKit.
 
-Some legs are documented KNOWN-RED and are listed in `MATRIX_KNOWN_RED` inside
-`scripts/run-matrix.sh`, which is the only current list — read the end-of-run
-summary rather than the exit code, and see
-[docs/38-tickets/95-go-live.md](docs/38-tickets/95-go-live.md) before assuming
-a regression.
+4. Build and run the development app:
+
+   ```sh
+   swift build --product Array
+   .build/debug/Array
+   ```
+
+   To assemble a development `.app` bundle instead:
+
+   ```sh
+   scripts/make-app-bundle.sh --configuration debug --output /tmp/ArrayDev.app
+   open /tmp/ArrayDev.app
+   ```
+
+Development builds use Array Dev's separate app data and leave the production app's data alone.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository workflow. Open a [GitHub issue](https://github.com/dylanreedx/array/issues) for bugs or suggestions.
+
+## License
+
+Array is licensed under the [MIT License](LICENSE). Third-party components retain their own terms; see [LICENSES/THIRD_PARTY.md](LICENSES/THIRD_PARTY.md).
