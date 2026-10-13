@@ -117,7 +117,7 @@ i.e. the fetch never returns data. AND the final observation of the night is une
   serving an old snapshot despite the listing.
 - The #1 SUBSTANTIVE suspect for "no data" (independent of the row mystery): **iCloud
   account mismatch**. The transport uses the PRIVATE CloudKit database — Mac and phone
-  must be on the same Apple ID. Mac = `dylreed@hotmail.com` (verified via
+  must be on the same Apple ID. Mac = `<apple-id>` (verified via
   `defaults read MobileMeAccounts`). The phone's Apple ID was NEVER confirmed despite
   repeated asks. `fetchChangesWithReport()` returning
   `zoneNotFound (no ContinuumSyncZone in this account's private DB)` on the phone/sim
@@ -171,7 +171,7 @@ CKAccountStatus=N / started) and every fetch report.
 
 Sim state as of 2026-07-18: ALREADY PAIRED (pairing survives in the sim keychain
 across reinstalls; pairedDevices=1 on the Mac before the phone paired was probably
-this sim). Blocked on: Settings → sign into iCloud as **dylreed@hotmail.com**
+this sim). Blocked on: Settings → sign into iCloud as **<apple-id>**
 (CKAccountStatus=3 noAccount until then). If it ever needs re-pairing: Mac menu
 Debug → Auth → Pair Phone… copies a camera bootstrap URL
 (`http://…/open-continuum-pairing?link=<continuum%3A%2F%2F…>`) to the clipboard;

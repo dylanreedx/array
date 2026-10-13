@@ -6,7 +6,6 @@ import MacWorkspace, { type MacTileRenderContext } from './mac/MacWorkspace';
 import { BrowserTile } from './tools/BrowserTile';
 import { NoteTile } from './tools/NoteTile';
 import { ShellTile } from './tools/ShellTile';
-import { Glyph } from './Glyph';
 import { makeInitialState } from '../../features/demo/fixture';
 import { demoReducer } from '../../features/demo/reducer';
 import type { DeviceFocus } from '../../features/demo/types';
@@ -14,31 +13,9 @@ import styles from './DemoIsland.module.css';
 
 type AssemblyPhase = 'glimpse' | 'opening' | 'assembly' | 'mac' | 'companion' | 'ready';
 
-function ReadyCue({ onEnter, onContinue }: { onEnter: () => void; onContinue: () => void }) {
-  return (
-    <div className={`${styles.readyCue} ${styles.portalReadyCue}`} data-testid="interaction-ready-cue" role="region" aria-label="Live workspace ready">
-      <svg className={styles.readyCueBorder} focusable="false">
-        <rect className={styles.readyCueImpact} />
-        <rect className={styles.readyCueMarch} />
-      </svg>
-      <span className={styles.readyCueScrim} aria-hidden="true" />
-      <div className={styles.readyCueLabel}>
-        <span className={styles.readyCuePointer} aria-hidden="true"><Glyph name="cursor" /><i /></span>
-        <strong>Take control.</strong>
-        <p>Move a tile. Tidy the canvas. Open Command Center. Approve work from Companion.</p>
-        <div className={styles.readyCueActions}>
-          <button type="button" data-interaction-id="ready-enter" onClick={onEnter}>Use the workspace</button>
-          <button type="button" data-interaction-id="ready-continue" onClick={onContinue}>Keep scrolling</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function DemoIsland() {
   const [state, dispatch] = useReducer(demoReducer, undefined, makeInitialState);
   const [phase, setPhase] = useState<AssemblyPhase>('glimpse');
-  const [cueDismissed, setCueDismissed] = useState(false);
   const rootRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<DeviceFocus>('mac');
@@ -93,17 +70,10 @@ export default function DemoIsland() {
   }, [state.commandOpen, state.inputMode]);
 
   const enterWorkspace = (focus: DeviceFocus) => {
-    rootRef.current?.closest<HTMLElement>('[data-assembly-root]')?.dispatchEvent(new CustomEvent('array:release-ready-gate'));
     returnFocusRef.current = focus;
     dispatch({ type: 'SET_DEVICE_FOCUS', focus });
     dispatch({ type: 'SET_INPUT_MODE', mode: 'workspace' });
     requestAnimationFrame(() => stageRef.current?.focus());
-  };
-
-  const continuePage = () => {
-    setCueDismissed(true);
-    rootRef.current?.closest<HTMLElement>('[data-assembly-root]')?.dispatchEvent(new CustomEvent('array:release-ready-gate'));
-    requestAnimationFrame(() => scrollBy({ top: innerHeight * .65, behavior: 'smooth' }));
   };
 
   const leaveWorkspace = () => {
@@ -122,13 +92,12 @@ export default function DemoIsland() {
       <div ref={stageRef} className={styles.stage} data-assembly-stage data-assembly-pin tabIndex={workspaceMode ? -1 : undefined}>
         <div className={styles.portal} aria-hidden="true"><span /><span /></div>
         <div className={`${styles.device} ${styles.macSurface}`} data-device-surface="mac" data-focused={state.deviceFocus === 'mac'} inert={!workspaceMode || state.deviceFocus !== 'mac' ? true : undefined}>
-          <MacWorkspace state={state} dispatch={dispatch} renderTileContent={renderTile} workspaceName="Array 0.5" />
+          <MacWorkspace state={state} dispatch={dispatch} renderTileContent={renderTile} workspaceName="Array" />
         </div>
         <div className={`${styles.device} ${styles.companionSurface}`} data-device-surface="companion" data-focused={state.deviceFocus === 'companion'} inert={!workspaceMode || state.deviceFocus !== 'companion' ? true : undefined}>
           <Companion state={state} dispatch={dispatch} />
         </div>
 
-        {canEnter && !cueDismissed && <ReadyCue onEnter={() => enterWorkspace(state.deviceFocus)} onContinue={continuePage} />}
 
         {(canEnter || (workspaceMode && state.deviceFocus !== 'mac')) && <button type="button" className={`${styles.capture} ${styles.captureMac}`} data-interaction-id={canEnter ? 'explore-workspace' : 'device-focus-mac'} onClick={() => enterWorkspace('mac')} aria-label={canEnter ? 'Explore Array workspace' : 'Focus Mac workspace'}><span className="sr-only">{canEnter ? 'Explore Array workspace' : 'Focus Mac workspace'}</span></button>}
         {(canEnter || (workspaceMode && state.deviceFocus !== 'companion')) && <button type="button" className={`${styles.capture} ${styles.captureCompanion}`} data-interaction-id="device-focus-companion" onClick={() => enterWorkspace('companion')} aria-label={canEnter ? 'Explore Array Companion' : 'Focus Companion'}><span className="sr-only">{canEnter ? 'Explore Array Companion' : 'Focus Companion'}</span></button>}

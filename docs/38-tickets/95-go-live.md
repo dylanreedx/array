@@ -289,7 +289,7 @@ Verify — results (2026-08-09):
       "Developer ID Application: Dylan Reed (46TTB6J9DZ)". NOTE: the Developer ID
       team is **46TTB6J9DZ**, not the old Apple Development team DGJTP684C8.
 - [x] notarytool keychain profile `array-notary` stored
-      (apple id dylreed@hotmail.com, team 46TTB6J9DZ, app-specific password).
+      (apple id <apple-id>, team 46TTB6J9DZ, app-specific password).
 - [x] `scripts/release-app.sh` written and tested 2026-08-09 (ad-hoc + --skip-notarize
       leg): release build → Array.app → sign inside-out with hardened runtime
       (nested Frameworks loop is Sparkle-ready) → versioned drag-to-install DMG

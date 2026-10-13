@@ -7,7 +7,7 @@ export const canonicalCopy = {
   body: 'Launch agents and tools from anywhere. Array keeps everything they touch visible on one native workspace.',
   primary: 'Download for Mac',
   secondary: 'See all of it ↓',
-  requirements: 'macOS 14+ · Apple silicon · Free during alpha'
+  requirements: 'macOS 14+ · Apple silicon · Free and open source · Alpha'
 } as const;
 
 export function makeInitialState(): DemoState {
