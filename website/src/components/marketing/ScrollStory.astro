@@ -1,0 +1,47 @@
+---
+import { STEPS } from '../../lib/narrative';
+const agents = [
+  { provider: 'Claude Code', title: 'Build a settings page', tone: 'working', task: 'Add a settings page with a theme picker. Follow the project’s existing styles.', reply: 'I’ll read the existing components first, then build the page.', tool: 'Reading src/components…', mark: '✳', x: 230 },
+  { provider: 'Codex', title: 'Review the changes', tone: 'attention', task: 'Review the settings page and run the test suite.', reply: 'The changes are ready to verify. I need your approval to run this command.', tool: 'pnpm test', mark: '◉', x: 570 },
+  { provider: 'Pi', title: 'Update the release notes', tone: 'done', task: 'Write release notes for the new settings page.', reply: 'Release notes updated with the theme picker and navigation changes.', tool: 'Edited CHANGELOG.md', mark: 'π', x: 910 },
+];
+---
+<section class="scroll-story" id="demo" data-narrative aria-label="How Array works">
+  <div class="story-sticky">
+    <div class="story-copy">
+      <div class="story-kicker"><span>One project, from first task to done</span><span class="story-direction">Scroll to explore ↓</span></div>
+      {STEPS.map((step, i) => <div data-story-caption hidden={i !== 0}><span class="story-number">0{i + 1} / 08</span><h2>{step.title}</h2><p>{step.caption}</p></div>)}
+      <div class="story-progress" aria-hidden="true">{STEPS.map(() => <span><i data-story-fill /></span>)}</div>
+    </div>
+    <div class="story-shell">
+      <div class="story-windowbar" aria-hidden="true"><span class="window-dots"><i /><i /><i /></span><span>Array <span class="window-project">/ storefront</span></span><span>100%</span></div>
+      <div class="story-viewport" data-story-viewport aria-hidden="true">
+        <div class="story-world" data-story-world>
+          <div class="story-empty" data-empty><img src="/array-logo-dark.svg" alt="" width="76" height="76" /><p>A place for everything you’re working on.</p><small>Create a zone to begin.</small></div>
+          <div class="story-zone" data-reveal="1"><div class="zone-label"><span>Storefront</span><small>~/Projects/storefront</small><span class="zone-controls">− &nbsp; ⋯</span></div></div>
+          {agents.map((agent, i) => <div class:list={['story-agent', `story-agent--${i}`]} style={`left:${agent.x}px`} data-reveal={i ? '4' : '2'}>
+            <div class="tile-bar"><span>Agent · {agent.title}</span><span>⋯ &nbsp; ×</span></div>
+            <div class="agent-identity"><span class="agent-mark" data-provider-mark={i === 0 ? "anthropic" : i === 1 ? "openai" : "pi"} /><strong>{agent.title}</strong><span class:list={['agent-status', agent.tone]} data-first-status={i === 0 ? true : undefined}>{agent.tone === 'attention' ? 'Needs attention' : agent.tone === 'done' ? 'Done' : 'Working'}</span></div>
+            <div class="agent-transcript" data-reveal={i ? '4' : '3'}><p class="user-message">{agent.task}</p><p>{agent.reply}</p><div class="tool-row"><span>⌘</span> {agent.tool}<span class="tool-check">{i === 2 ? '✓' : '›'}</span></div></div>
+            {i === 1 && <div class="story-approval" data-reveal="5"><span class="approval-kicker">Approval requested</span><strong>Run the project’s tests?</strong><code>pnpm test</code><div><span>Allow once</span><span>Deny</span></div></div>}
+            <div class="agent-composer"><span data-typed-task={i === 0 ? true : undefined}>Ask this agent to do something…</span><span>↑</span></div>
+            <div class="agent-config"><strong>{agent.provider}</strong><span>Default model</span><span>◌</span></div>
+          </div>)}
+          <div class="story-terminal" data-reveal="6" data-reveal-local=".35"><div class="tile-bar"><span>Terminal · storefront</span><span>⋯ &nbsp; ×</span></div><code><span class="terminal-prompt">~/Projects/storefront</span><br />$ pnpm test<br /><br /><span class="terminal-green">✓ Settings page<br />✓ Theme preference<br />✓ Navigation</span><br /><br />Tests &nbsp; 12 passed (12)<br /><span class="terminal-prompt">$ ▌</span></code></div>
+          <div class="story-browser" data-reveal="6" data-reveal-local=".72"><div class="tile-bar"><span>Browser · localhost:3000</span><span>⋯ &nbsp; ×</span></div><div class="browser-address">‹ &nbsp; › &nbsp; ↻ <span>localhost:3000/settings</span></div><div class="example-page"><span class="example-brand">S / Storefront</span><h3>Make it yours.</h3><p>Your workspace, your preferences.</p><div class="example-setting"><span>Appearance</span><strong>Dark &nbsp;⌄</strong></div><div class="example-setting"><span>Notifications</span><i /></div></div></div>
+        </div>
+        <div class="story-toolbar" data-story-toolbar><span class="toolbar-grip">⠿</span><span data-toolbar-zone title="Create zone"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" stroke-dasharray="2 2"/><path d="M12 8v8m-4-4h8"/></svg></span><span data-toolbar-agent title="Agent"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M6 6l12 12M6 18 18 6"/><circle cx="12" cy="12" r="4"/></svg></span><span data-toolbar-terminal title="Terminal"><svg viewBox="0 0 24 24"><path d="m5 7 5 5-5 5m8 0h6"/></svg></span><span data-toolbar-browser title="Browser"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/></svg></span><span title="Note"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8m-8 4h8m-8 4h5"/></svg></span></div>
+        <div class="story-project-picker"><small>Create a zone</small><strong>Which project is this for?</strong><span class="project-choice">▱ &nbsp; storefront <small>~/Projects/storefront</small></span><span>Choose a folder… <span>⌘O</span></span></div>
+        <div class="story-provider-picker"><small>New agent</small><span class="selected">✳ &nbsp; Claude Code <i>✓</i></span><span>◉ &nbsp; Codex</span><span>π &nbsp; Pi</span></div>
+        <div class="story-cursor" data-story-cursor><svg width="30" height="42" viewBox="0 0 30 42"><path d="M3 2L3 33 10.2 26.4 15 38 20.2 35.8 15.4 24.4 25 24.4Z" fill="#f6f7f8" stroke="#11151b" stroke-width="2" stroke-linejoin="round" /></svg><i /></div>
+        <span class="story-edge story-edge--left" /><span class="story-edge story-edge--right" /><span class="story-grain" />
+      </div>
+    </div>
+    <p class="story-footnote">A guided example of the Array workspace. Your agents use your own Claude Code, Codex and Pi accounts.</p>
+  </div>
+</section>
+<div class="story-accessible sr-only"><h2>The demo, step by step</h2><ol>{STEPS.map(step => <li><strong>{step.title}</strong> {step.caption}</li>)}</ol></div>
+<script>
+import { installNarrative } from '../../lib/narrative';
+installNarrative();
+</script>

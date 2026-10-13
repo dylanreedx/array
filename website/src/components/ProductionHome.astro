@@ -1,47 +1,23 @@
 ---
 import ProductionLayout from '../layouts/ProductionLayout.astro';
 import SiteHeader from './marketing/SiteHeader.astro';
-import DemoIsland from './demo/DemoIsland';
+import ScrollStory from './marketing/ScrollStory.astro';
 import DownloadSplit from './marketing/DownloadSplit.astro';
 import { canonicalCopy } from '../features/demo/fixture';
+import '../styles/story.css';
 ---
-<ProductionLayout title="Array · Keep every agent in view" description="A native macOS workspace for agents, terminals, browsers, notes, and projects.">
+<ProductionLayout title="Array · Keep every agent in view" description="A free, open source native macOS workspace for Claude Code, Codex and Pi. Keep your agents, terminals, browsers and projects in view.">
   <SiteHeader />
   <main>
-    <section class="living-assembly" id="product" data-assembly-root data-testid="hero-scroll-track">
-      <div class="living-assembly__sticky" data-testid="hero-pin">
-        <div class="hero-copy">
-          <h1 data-testid="hero-heading">{canonicalCopy.headline}</h1>
-          <p class="hero-copy__body">{canonicalCopy.body}</p>
-          <div class="hero-copy__actions">
-            <DownloadSplit idPrefix="hero" />
-            <button type="button" class="see-all" data-see-all data-interaction-id="hero-see-all">{canonicalCopy.secondary}</button>
-          </div>
-          <p class="hero-copy__requirements">{canonicalCopy.requirements}</p>
-        </div>
-        <div class="living-workspace" id="workspace">
-          <DemoIsland client:intent />
-        </div>
-      </div>
-      <span class="assembly-anchor assembly-anchor--companion" id="companion" aria-hidden="true"></span>
-      <span class="assembly-anchor assembly-anchor--ready" id="agents" aria-hidden="true"></span>
+    <section class="launch-hero" id="product">
+      <p class="launch-eyebrow"><i aria-hidden="true" /> A native workspace for your coding agents</p>
+      <h1>{canonicalCopy.headline}</h1>
+      <p class="launch-body">Claude Code, Codex and Pi.<br />Your agents, their tools, and the work between them.<br />Together on one canvas.</p>
+      <div class="launch-actions"><DownloadSplit idPrefix="hero" /><a class="launch-scroll-link" href="#demo">See how it works ↓</a></div>
+      <p class="launch-requirements">{canonicalCopy.requirements}</p>
     </section>
-
-    <section class="final-cta">
-      <h2>More work. Less hidden state.</h2>
-      <p>Download Array for Mac and keep every active agent, tool, and project in view.</p>
-      <DownloadSplit idPrefix="final" />
-      <small>{canonicalCopy.requirements}</small>
-    </section>
+    <ScrollStory />
+    <section class="launch-final" id="download"><span class="launch-eyebrow">Built for the way you work</span><h2>More work.<br />Less hidden state.</h2><p>Bring your projects and your agents.<br />Give them room to work.</p><DownloadSplit idPrefix="final" /><small>{canonicalCopy.requirements}</small></section>
   </main>
-  <footer class="production-footer">
-    <a href="/" aria-label="Array home" data-interaction-id="footer-home">Array</a>
-    <nav aria-label="Footer"><a href="https://github.com/dylanreedx/array">GitHub</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav>
-    <a href="/appcast.xml" data-interaction-id="footer-release-feed">Release feed</a>
-  </footer>
+  <footer class="production-footer"><a href="/" aria-label="Array home" data-interaction-id="footer-home">Array</a><nav aria-label="Footer"><a href="https://github.com/dylanreedx/array">GitHub</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><a href="https://github.com/dylanreedx/array-releases/issues">Feedback ↗</a></footer>
 </ProductionLayout>
-
-<script>
-  import { installAssembly } from '../lib/assembly-controller';
-  installAssembly();
-</script>
