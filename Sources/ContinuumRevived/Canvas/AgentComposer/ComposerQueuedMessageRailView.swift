@@ -146,8 +146,9 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         let theme = effectiveTokenTheme
         if !state.steers.isEmpty {
             rows.append(QueueRailHeaderRow(
-                symbol: "arrow.turn.down.right", title: "Steering \u{00B7} after next tool call",
-                pause: nil, showsClear: false, rail: self))
+                symbol: state.pause == nil ? "arrow.turn.down.right" : "pause.fill",
+                title: "Steering \u{00B7} " + (state.pause?.title ?? "after next tool call"),
+                pause: state.queued.isEmpty ? state.pause : nil, showsClear: false, rail: self))
             for item in state.steers { rows.append(QueueRailItemRow(item: item, number: nil, rail: self)) }
         }
         if !state.queued.isEmpty {

@@ -47,7 +47,9 @@ import Foundation
 //               header before agent_start; claude: before system/init)
 //   anything else: a short text reply
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
-// CLI does for a conversation that does not exist yet.
+// CLI does for a conversation that does not exist yet. `clear-queue-delay`
+// (seconds) beside the pi fake delays its `clear_queue` answer, and with it
+// the receipt for every steer an `abort` handed back.
 public enum AgentSteeringQAFakes {
     public enum Harness: String, Sendable {
         case claude
@@ -551,6 +553,13 @@ for line in sys.stdin:
         idle.wait(5)
         respond(obj)
     elif kind == "clear_queue":
+        # `clear-queue-delay` beside the fake (seconds) holds pi's answer back,
+        # so a check can make a steer's receipt arrive late.
+        try:
+            with open(os.path.join(HERE, "clear-queue-delay")) as f:
+                time.sleep(float(f.read().strip() or "0"))
+        except FileNotFoundError:
+            pass
         with lock:
             cleared = list(state["steering"])
             state["steering"] = []

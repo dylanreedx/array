@@ -3283,6 +3283,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
+        recoverForcedMessagesAfterStop(id)
         killRunner(id)
     }
 
@@ -3290,6 +3291,7 @@ final class AgentSupervisor {
     /// and its background work live on. A kill is the fallback, when the
     /// interrupt fails or never lands, and a second Stop while one is pending.
     private func stopFromComposer(_ id: AgentID) {
+        recoverForcedMessagesAfterStop(id)
         if !activeCompactionOperations.contains(id),
            !interruptingAgents.contains(id),
            let steering = runners[id] as? AgentSteeringRunning {
@@ -3305,6 +3307,9 @@ final class AgentSupervisor {
     private func killRunner(_ id: AgentID) {
         interruptingAgents.remove(id)
         deferredForceSends[id] = nil
+        openToolItems[id] = nil
+        returnDeliveringSteers(for: id)
+        pauseQueue(id, .afterStop)
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
@@ -5708,6 +5713,7 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canQueue, let store = submissionRecoveryStore else {
                 return .refused(.unsupported)
             }
+            await qaAfterQueueAdmission?()
             let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
             do {
                 // Validate now, the same way an ordinary send does, so a queued
@@ -5729,6 +5735,7 @@ final class AgentSupervisor {
             )
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
+            if runners[agentID] == nil && !pausedQueues.contains(agentID) { drainQueue(for: agentID) }
             return .accepted
         case .steer(let draft):
             // T5 — HELD by Array, not written to the provider: until the turn
@@ -5740,6 +5747,7 @@ final class AgentSupervisor {
             guard snapshot.capabilities.canSteer, let store = submissionRecoveryStore else {
                 return .refused(.unsupported)
             }
+            await qaAfterQueueAdmission?()
             let draftImageAttachments = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
             do {
                 _ = try await attachmentStore.preparePromptAttachments(for: agentID, draftAttachments: draftImageAttachments)
@@ -5757,6 +5765,7 @@ final class AgentSupervisor {
             queuedWorkItemsCache[agentID] = await store.queuedWorkItems(for: agentID)
             notifyTurnCapabilitiesChanged(agentID)
             handOverHeldSteers(for: agentID)
+            if runners[agentID] == nil && !pausedQueues.contains(agentID) { drainQueue(for: agentID) }
             return .accepted
         case .forceSend(let draft):
             var prompt = draft
@@ -6838,6 +6847,9 @@ final class AgentSupervisor {
     nonisolated static let defaultIdleRunnerTimeout: TimeInterval = 600
     private let idleRunnerTimeout: TimeInterval
     private var idleReapTokens: [AgentID: UUID] = [:]
+    /// QA: runs inside `accept(.queue)`/`accept(.steer)` after admission and
+    /// before the store write, so a check can end the turn in that gap.
+    var qaAfterQueueAdmission: (@MainActor () async -> Void)?
     /// How long an acknowledged interrupt may take to end the turn before
     /// Stop falls back to killing the process. Shortened by the checks.
     var interruptGrace: TimeInterval = 5
@@ -6851,7 +6863,7 @@ final class AgentSupervisor {
     private var interruptingAgents: Set<AgentID> = []
     /// `echo`: no composer painted this prompt (a rail send-now), so the tile
     /// is told when it runs.
-    private var pendingForceSends: [AgentID: (prompt: PreparedAgentPrompt, echo: Bool)] = [:]
+    private var pendingForceSends: [AgentID: [(prompt: PreparedAgentPrompt, echo: Bool)]] = [:]
     private var deferredQueueOutcomes: [AgentID: TurnOutcome] = [:]
     /// A force send whose interrupt ended the turn, waiting for the receipts
     /// of the steers that turn still had in delivery (T5c).
@@ -7003,7 +7015,7 @@ final class AgentSupervisor {
             return true
         }
         guard !activeCompactionOperations.contains(id) else { return false }
-        pendingForceSends[id] = (prepared, echo)
+        pendingForceSends[id, default: []].append((prepared, echo))
         stopRequestedAgents.insert(id)
         turnFacts[id]?.presence.noteStopRequested()
         if interruptingAgents.contains(id) { return true }
@@ -7050,8 +7062,38 @@ final class AgentSupervisor {
         }
     }
 
+    private func takePendingForceSend(for id: AgentID) -> (prompt: PreparedAgentPrompt, echo: Bool)? {
+        guard var pending = pendingForceSends[id], !pending.isEmpty else { return nil }
+        let first = pending.removeFirst()
+        pendingForceSends[id] = pending.isEmpty ? nil : pending
+        return first
+    }
+
+    /// Stop withdraws every force send still waiting for the interrupt. Keep
+    /// the user's words visible and resumable rather than replaying them later.
+    private func recoverForcedMessagesAfterStop(_ id: AgentID) {
+        var pending = pendingForceSends.removeValue(forKey: id) ?? []
+        if let deferred = deferredForceSends.removeValue(forKey: id) {
+            pending.insert((deferred.prompt, deferred.echo), at: 0)
+        }
+        guard !pending.isEmpty, let store = submissionRecoveryStore else { return }
+        let messages = pending.map { entry in
+            AgentComposerQueuedMessage(text: entry.prompt.prompt.text,
+                imageAttachments: entry.prompt.prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
+                fileReferences: entry.prompt.prompt.fileReferences.map {
+                    AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+                }, queuedAt: Date())
+        }
+        pauseQueue(id, .afterStop)
+        appendLocalNotice(id: id, key: "forced-not-sent-\(UUID().uuidString)", title: "Not sent",
+            body: "Your forced message was held when you stopped the turn. Resume the queue when you are ready.")
+        runQueueOp(for: id) {
+            for message in messages.reversed() { await store.requeueWorkItemAtFront(.prompt(message), for: id) }
+        }
+    }
+
     private func escalateToKill(_ id: AgentID) {
-        let forced = pendingForceSends.removeValue(forKey: id)
+        let forced = takePendingForceSend(for: id)
         killRunner(id)
         if let forced, sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
     }
@@ -7805,7 +7847,7 @@ final class AgentSupervisor {
             // T5 (D2) — a force send's interrupt does not pause the queue: the
             // forced message runs now, and everything queued stays held behind it
             // (unless the interrupt handed a steer back — `settleDeliveringSteer`).
-            if let forced = pendingForceSends.removeValue(forKey: id) {
+            if let forced = takePendingForceSend(for: id) {
                 // T5c — pi hands an unread steer back only after `abort` has
                 // already ended the turn. Starting the forced turn first would
                 // settle that steer as consumed, so the forced message waits for

@@ -707,6 +707,7 @@ run_app_check .build/debug/Array --agent-first-paint-check
 # a real tile attached, and asserts every surface reads Starting from Return to
 # the provider's own turn start — through codex's resume prefix and pi's session
 # header, which used to paint Idle with Send disabled.
+run_app_check .build/debug/Array --agent-steering-recovery-check
 run_app_check .build/debug/Array --agent-presence-check
 # TR-06: responding to a request the provider is HOLDING. Drives the real
 # `wireManagedAgentTile` and asserts the response transport is bound by

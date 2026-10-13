@@ -914,11 +914,14 @@ public actor AgentComposerDraftStore {
     public func requeueHeldSteersAtFront(_ messages: [AgentComposerQueuedMessage], for agentID: AgentID) {
         guard !messages.isEmpty else { return }
         var current = loadQueue(for: agentID)
-        current.insert(contentsOf: messages.map {
-            var steer = $0
-            steer.isSteer = true
-            return .prompt(steer)
-        }, at: 0)
+        var held = current.compactMap { item -> AgentComposerQueuedMessage? in
+            guard case .prompt(let message) = item, message.isSteer else { return nil }
+            return message
+        }
+        current.removeAll { if case .prompt(let message) = $0 { return message.isSteer }; return false }
+        held += messages.map { var steer = $0; steer.isSteer = true; return steer }
+        held.sort { $0.queuedAt < $1.queuedAt }
+        current.insert(contentsOf: held.map { .prompt($0) }, at: 0)
         persistQueue(current, for: agentID)
     }
 

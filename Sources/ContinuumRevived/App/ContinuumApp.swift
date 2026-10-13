@@ -1720,6 +1720,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-steering-recovery-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await runAgentSteeringRecoveryChecks()
+                    print("AgentSteeringRecoveryChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-presence-check") {
             _ = NSApplication.shared
             Task { @MainActor in
