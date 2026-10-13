@@ -77,6 +77,11 @@ export function installAssembly() {
   let pointerY = 0;
   let detachProgress = 1;
   const surfaces = Array.from(track.querySelectorAll<HTMLElement>('[data-assembly-surface]'));
+  const marketingHeader = document.querySelector<HTMLElement>('.production-header');
+  const landingWindows: Record<string, readonly [number, number]> = {
+    stabilize: [.035, .225], verify: [.05, .242], audit: [.09, .26],
+    note: [.025, .21], browser: [.045, .23], shell: [.08, .25],
+  };
 
   type SurfaceTarget = { x: number; y: number; scale: number };
 
@@ -127,7 +132,10 @@ export function installAssembly() {
       const centerY = rect.top + rect.height / 2;
       surface.style.setProperty('--float-x', `${(originX + target.x - centerX) / worldScale}px`);
       surface.style.setProperty('--float-y', `${(originY + target.y - centerY) / worldScale}px`);
-      surface.style.setProperty('--float-scale', String(guided ? target.scale * .78 / worldScale : target.scale));
+      // Native board/editor geometry is wider than an agent. Preserve the
+      // original hero's physical card size instead of making the board huge.
+      const sizeRatio = guided ? 340 / surface.offsetWidth : 1;
+      surface.style.setProperty('--float-scale', String(guided ? target.scale * .78 * sizeRatio / worldScale : target.scale));
     }
     delete track.dataset.assemblyMeasuring;
     track.dispatchEvent(new CustomEvent('array:assembly-measure', { detail: false }));
@@ -162,6 +170,24 @@ export function installAssembly() {
     const scrollProgress = clamp((scrollY - trackTop) / available);
     const snapshot = presentationFor(guided ? scrollProgress : assemblyProgressForScroll(scrollProgress), reduced.matches);
     detachProgress = 1 - Math.min(1, snapshot.progress / (guided ? .26 : .72));
+    if (guided) {
+      for (const surface of surfaces) {
+        const [start, end] = landingWindows[surface.dataset.assemblySurface ?? ''] ?? [0, .26];
+        const t = clamp((snapshot.progress - start) / (end - start));
+        // A seekable, restrained elastic landing, staggered by tile. It does
+        // not rely on playback timers or replay effects when scrolling back.
+        const u = t - 1;
+        const arrived = t === 0 ? 0 : t === 1 ? 1 : 1 + 2.15 * u * u * u + 1.15 * u * u;
+        surface.style.setProperty('--surface-detach', String(reduced.matches ? 0 : 1 - arrived));
+      }
+      const navFade = clamp((snapshot.progress - .035) / .115);
+      const pastCanvas = scrollY >= trackTop + trackHeight - 40;
+      const navOpacity = reduced.matches || pastCanvas ? 1 : 1 - navFade * navFade * (3 - 2 * navFade);
+      document.documentElement.style.setProperty('--demo-nav-opacity', String(navOpacity));
+      if (marketingHeader) marketingHeader.inert = navOpacity < .05;
+      const hero = track.querySelector<HTMLElement>('.hero-copy');
+      if (hero) hero.inert = !reduced.matches && snapshot.progress >= .18;
+    }
     track.style.setProperty('--assembly-progress', String(snapshot.progress));
     track.style.setProperty('--phase-progress', String(snapshot.phaseProgress));
     track.style.setProperty('--detach-progress', String(detachProgress));

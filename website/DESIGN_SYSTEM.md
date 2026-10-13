@@ -10,9 +10,23 @@ These instructions supersede the older interactive-device sequence below for the
 - Keep download controls compact. Use the transparent `array-mark.svg`; do not embed a square logo background inside another rounded background.
 - Keep paragraph wrapping natural, avoid forced line breaks, and keep floating tiles clear of the complete hero copy at small sizes.
 - The demonstration is an HTML/SVG/CSS interpretation built from the existing mimic components. The same floating tile nodes settle into the workspace and remain through the complete narrated tour. No scroll-synchronized video, duplicate scene or replacement tile tree.
-- Camera, cursor, text, status, approval and tool state are seekable functions of scroll progress, including scroll-up and direct jumps. Use a short caption below the stage; no numbered step header, progress bars or "Scroll to explore" banner.
+- Camera, cursor, text, status, approval and tool state are seekable functions of scroll progress, including scroll-up and direct jumps. Use a short caption overlay above the native shortcut rail; no numbered step header, progress bars or "Scroll to explore" banner.
 - Keep the product surfaces server-rendered without React hydration. Mobile cameras focus readable subjects; Reduced Motion preserves the hero and presents an ordinary static overview with readable narrative text.
 - Keep release/download links, legal pages and social metadata intact.
+
+## Full canvas and native tile pass
+
+- The demo grows into the full viewport canvas with its native 46px topbar, 280px desktop sidebar and 28px shortcut rail. No inset rounded window or heading strip.
+- The same six hero articles become three agents, a board, an editor and a terminal. Use native sources for their chrome, typography, status icons, controls and spacing; preserve original hero copy and compact navigation.
+- Independent staggered elastic landings finish by `.26`. Keep curved camera movement within story beats and modest tile movement, while readable actions have smaller paths.
+- The native three-node working glyph runs at the transcript tail even when scrolling pauses. Pause it for completed agents, Reduced Motion, hidden documents and offscreen scenes. Do not duplicate it in the compact activity row.
+- Settled text uses 2D transforms without persistent layer promotion. Keep task details outside the zoomed world. Mobile source wraps and scrolls within its editor while preserving the titlebar.
+- Reduced Motion presents six readable cards in normal flow, including all board lanes. No video or React hydration.
+- Current story and geometry live in `docs/DEMO_STORYBOARD.md`; fidelity limits and source references live in `docs/DEMO_FIDELITY.md`.
+
+## Historical interactive composition
+
+The remaining sections describe the earlier interactive Mac/Companion prototype. They apply to those retained components, not the current guided homepage, and cannot override the current rules above.
 
 ## Product source of truth
 

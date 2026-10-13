@@ -1,6 +1,16 @@
 # Array website production redesign
 
-## October 13 continuous DOM demonstration
+## October 13 full canvas and native tile motion pass
+
+The continuous demo now expands into a full viewport canvas, with the native workspace topbar and sidebar sliding into place. Independent elastic landings bring the original hero tiles into the scene. Curved camera paths keep moving within task, provider and approval beats; the board opens a native-style task detail, the editor shows a source change, and terminal checks lead into the final overview. Original hero copy and navigation remain intact.
+
+Agent UI follows the native header, transcript, compact activity row, composer and provider/model/effort footer. The working glyph uses the app's three-node, two-plane orbital geometry and continues while scrolling pauses. It stops for completion, Reduced Motion and offscreen scenes. Board and editor components now follow their native hierarchy rather than the previous note/browser fixtures. All six original article nodes remain mounted.
+
+Mobile task details render outside the camera transform; the narrower editor wraps and follows its edited line while retaining the titlebar. Reduced Motion presents all six cards in ordinary flow, with all board lanes visible. An independent source/fidelity review caught duplicate working indicators, stale status icons, mobile clipping and text raster blur; those were repaired. A React-free gyro model also fixes the development server's TSX preamble error without introducing hydration.
+
+Verification: Astro check passes with no diagnostics, all 86 unit tests and 48 Chromium/WebKit browser checks pass. The browser suite covers full viewport geometry, rendered camera movement, paused-scroll glyph motion, native board/editor states, reversible seeking, stable nodes, mobile readability, theme, keyboard, metadata, no JavaScript and zero axe violations. Production build omits Apple pairing fixtures. Six cold Lighthouse runs score 100 in all categories, with CLS/TBT 0; mobile LCP is 1.217–1.222s and desktop 0.326–0.327s. Current captures and performance evidence are under `.plans/72-launch-night/qa/impact-demo/`.
+
+## Earlier October 13 continuous DOM demonstration
 
 Dylan rejected the scroll-synchronized film because it degraded image quality and broke the relationship between the floating hero tiles and the demo. The replacement reuses the existing mimic agent/tool primitives in one server-rendered scene. The hero tiles settle into their own zone, then a scripted cursor and camera follow the task, providers, approval and tools. Scene state is derived from scroll progress, so seeking and reverse scrolling preserve the same tile nodes. The original hero copy and compact unboxed navigation stay intact. The five original hero float paths remain. The same six DOM tiles remain mounted through all beats; the controller seeks text, camera, cursor, provider selection, approval and terminal output without timers or React hydration. The demo contains no video. “See all of it” lands at the start of the assembled scene. Reduced Motion lays out all six cards in ordinary document flow; a no-JavaScript explanation and download remain readable.
 

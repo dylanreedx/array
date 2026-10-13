@@ -62,7 +62,13 @@
 /* One continuous stage: floating surfaces settle before the narrated camera tour. */
 .living-assembly[data-guided-demo] { height: 680svh; }
 [data-guided-demo] .hero-copy { opacity: clamp(0, calc(1 - var(--assembly-progress) * 5), 1); }
+body:has([data-guided-demo]) .production-header {
+  opacity: var(--demo-nav-opacity, 1);
+  transform: translateY(calc((1 - var(--demo-nav-opacity, 1)) * -28px));
+  transition: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .living-assembly[data-guided-demo] { height: auto; }
   [data-guided-demo] .hero-copy { opacity: 1; }
+  body:has([data-guided-demo]) .production-header { opacity: 1; transform: none; }
 }

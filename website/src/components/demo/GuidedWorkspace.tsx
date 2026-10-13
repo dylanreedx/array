@@ -5,18 +5,18 @@ import { AgentTile } from './agent';
 import { Glyph } from './Glyph';
 import { ProviderMark } from './ProviderMark';
 import islandStyles from './DemoIsland.module.css';
-import { BrowserTile } from './tools/BrowserTile';
-import { NoteTile } from './tools/NoteTile';
+import { NativeBoardTile, NativeBoardDetails } from './board/NativeBoardTile';
+import { NativeEditorTile, NativeEditorChrome } from './editor/NativeEditorTile';
 import { ShellTile } from './tools/ShellTile';
 import styles from './GuidedWorkspace.module.css';
 
 const worldTiles = [
-  { id: 'stabilize', kind: 'agent', title: 'Stabilize zone placement', x: 80, y: 90, width: 340, height: 390 },
-  { id: 'verify', kind: 'agent', title: 'Verify approval handoff', x: 450, y: 90, width: 340, height: 390 },
-  { id: 'audit', kind: 'agent', title: 'Audit native tokens', x: 820, y: 90, width: 340, height: 390 },
-  { id: 'browser', kind: 'browser', title: 'Canvas interaction spec', x: 450, y: 510, width: 340, height: 220 },
-  { id: 'shell', kind: 'shell', title: 'Array build', x: 820, y: 510, width: 340, height: 220 },
-  { id: 'note', kind: 'note', title: '0.7.26 release checklist', x: 80, y: 510, width: 340, height: 220 },
+  { id: 'stabilize', kind: 'agent', title: 'Stabilize zone placement', x: 70, y: 90, width: 380, height: 470 },
+  { id: 'verify', kind: 'agent', title: 'Verify approval handoff', x: 500, y: 90, width: 380, height: 470 },
+  { id: 'audit', kind: 'agent', title: 'Audit native tokens', x: 930, y: 90, width: 380, height: 470 },
+  { id: 'browser', kind: 'editor', title: 'Editor · CanvasNSView.swift', x: 920, y: 620, width: 560, height: 430 },
+  { id: 'shell', kind: 'shell', title: 'Array build', x: 1360, y: 90, width: 300, height: 470 },
+  { id: 'note', kind: 'board', title: 'Canvas polish', x: 70, y: 620, width: 800, height: 430 },
 ] as const;
 
 const agentOrder = ['stabilize', 'verify', 'audit'] as const;
@@ -73,15 +73,15 @@ export default function GuidedWorkspace() {
         </div>
       );
     }
-    if (tileId === 'browser') return <BrowserTile state={state} dispatch={noOpDispatch} previewPage={{ title: 'Canvas interaction spec', copy: 'World frames stay aligned while zones move and the canvas zooms.', links: [] }} />;
+    if (tileId === 'browser') return <NativeEditorTile />;
     if (tileId === 'shell') return <ShellTile state={state} dispatch={noOpDispatch} nextOperation={() => 1} />;
-    return <NoteTile state={state} dispatch={noOpDispatch} title="Placement checklist" checklist={['Verify zone placement', 'Review the tile positions', 'Run the canvas checks']} />;
+    return <NativeBoardTile />;
   };
 
   return (
     <section className={styles.scene} aria-label="Illustrative Array workspace" data-guided-scene data-assembly-pin>
       <div className={`${styles.stage} ${islandStyles.stage}`} data-assembly-stage aria-hidden="true" inert>
-        <div className={styles.window} data-guided-window data-mac-workspace>
+        <div className={styles.window} data-guided-window data-demo-viewport data-mac-workspace>
           <header className={styles.topbar} data-assembly-chrome="topbar">
             <span className={styles.brandMark} aria-hidden="true"><img src="/array-mark.svg" alt="" /></span>
             <strong className={styles.workspaceName}>Array</strong>
@@ -97,7 +97,7 @@ export default function GuidedWorkspace() {
           </header>
 
           <div className={styles.body} data-assembly-chrome="body">
-            <aside className={styles.sidebar} data-assembly-chrome="sidebar" aria-label="Agents">
+            <aside className={styles.sidebar} data-demo-sidebar data-assembly-chrome="sidebar" aria-label="Agents">
               <div className={styles.sidebarHeader}>
                 <h2>Agents</h2>
                 <span>3</span>
@@ -108,7 +108,7 @@ export default function GuidedWorkspace() {
                 {agentOrder.map((id) => {
                   const agent = state.agents[id];
                   return (
-                    <div className={`${styles.agentRow} ${id === 'stabilize' ? styles.agentRowSelected : ''}`} role="listitem" key={id}>
+                    <div className={styles.agentRow} data-demo-agent-row={id} data-demo-selected={id === 'stabilize' ? 'true' : 'false'} role="listitem" key={id}>
                       <div className={styles.agentRowTop}>
                         <ProviderMark provider={agent.provider} />
                         <span>Array</span>
@@ -117,7 +117,7 @@ export default function GuidedWorkspace() {
                       <strong>{agent.name}</strong>
                       <span className={styles.agentBranch}>{agent.branch}</span>
                       <span className={`${styles.agentState} ${styles[`state_${agent.status}`]}`} data-demo-statusmirror={id}>
-                        <i aria-hidden="true" />{agent.status === 'needsAttention' ? 'Needs attention' : agent.status === 'done' ? 'Done' : 'Working'}
+                        <i aria-hidden="true" />Ready
                       </span>
                     </div>
                   );
@@ -127,7 +127,7 @@ export default function GuidedWorkspace() {
             </aside>
 
             <div className={styles.canvasShell} data-assembly-chrome="canvas-shell" role="region" aria-label="Workspace canvas">
-              <div className={styles.canvas} data-assembly-chrome="canvas">
+              <div className={styles.canvas} data-demo-canvas data-assembly-chrome="canvas">
                 <div className={styles.world} data-guided-world data-assembly-chrome="world">
                   <section className={styles.zone} data-assembly-chrome="zone-runtime" aria-label="Array project zone">
                     <header className={styles.zoneHeader}>
@@ -149,11 +149,13 @@ export default function GuidedWorkspace() {
                       >
                         <header className={styles.tileHeader}>
                           <span className={styles.tileGlyph} aria-hidden="true">
-                            <Glyph name={tile.kind === 'agent' ? 'agent' : tile.kind === 'browser' ? 'browser' : tile.kind === 'shell' ? 'terminal' : 'note'} />
+                            <Glyph name={tile.kind === 'agent' ? 'agent' : tile.kind === 'editor' ? 'code' : tile.kind === 'shell' ? 'terminal' : 'board'} />
                           </span>
-                          <span className={styles.tileTitle}>{tile.title}</span>
+                          <span className={styles.tileTitle} data-demo-editor-tab={tile.kind === 'editor' ? '' : undefined}>{tile.title}</span>
                           <span className={styles.tileHeaderSpacer} />
+                          {tile.kind === 'editor' && <NativeEditorChrome />}
                           <button type="button" className={styles.tileMenu} aria-label={`Actions for ${tile.title}`}><Glyph name="more" /></button>
+                          <button type="button" className={styles.tileMenu} aria-label={`Close ${tile.title}`}><Glyph name="close" /></button>
                         </header>
                         <div className={styles.tileBody}>
                           {renderContent(tile.id)}
@@ -173,6 +175,8 @@ export default function GuidedWorkspace() {
                       </article>
                   ))}
                 </div>
+
+                <NativeBoardDetails />
 
                 <div className={styles.commandMenu} data-demo-menu="toolbar" hidden aria-hidden="true">
                   <div className={styles.commandSearch}><Glyph name="command" /><span>Search or create…</span><kbd>esc</kbd></div>
