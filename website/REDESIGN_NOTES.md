@@ -1,5 +1,43 @@
 # Array website production redesign
 
+## October 13 golden flow and source inventory
+
+The main agent now appears through the native Command Center Agent/model sequence rather than existing from the hero. Focus precedes typing. The flow includes parallel work, source-faithful approval delivery, task/code/check inspection, a real frame drag with neighbor push and a latched slot exchange, then editor movement and live resize. The existing project zone supplies creation scope.
+
+The current source inventory maps every critical surface and motion to Swift/AppKit authority. Agent transcript bubbles and speaker captions are removed in favor of native prose/authorship rules. Header spacing, outer status pill, provider identity, official Pi mark, square unknown context ring, anchored provider menu and canvas-owned marching ants are corrected. The editor shows actual CanvasNSView.swift lines and preserves source formatting on mobile. Fixture task text and terminal results remain scripted.
+
+Current evidence is under `.plans/72-launch-night/qa/golden-flow/`. Node22 Astro check/build,87unit tests and54Chromium/WebKit checks pass. Six cold Lighthouse runs each score100 in all four categories with CLS/TBT0 (mobile LCP1.364–1.369s, desktop0.325s). The old public scene fails all8new behavior checks. Startup mobile editor width and native push cascade regressions were reproduced then repaired. Historical snapshots and Apple pairing fixture-only checks are excluded from this normal production build.
+
+## Earlier October 13 full canvas and native tile motion pass
+
+The continuous demo now expands into a full viewport canvas, with the native workspace topbar and sidebar sliding into place. Independent elastic landings bring the original hero tiles into the scene. Curved camera paths keep moving within task, provider and approval beats; the board opens a native-style task detail, the editor shows a source change, and terminal checks lead into the final overview. Original hero copy and navigation remain intact.
+
+Agent UI follows the native header, transcript, compact activity row, composer and provider/model/effort footer. The working glyph uses the app's three-node, two-plane orbital geometry and continues while scrolling pauses. It stops for completion, Reduced Motion and offscreen scenes. Board and editor components now follow their native hierarchy rather than the previous note/browser fixtures. All six original article nodes remain mounted.
+
+Mobile task details render outside the camera transform; the narrower editor wraps and follows its edited line while retaining the titlebar. Reduced Motion presents all six cards in ordinary flow, with all board lanes visible. An independent source/fidelity review caught duplicate working indicators, stale status icons, mobile clipping and text raster blur; those were repaired. A React-free gyro model also fixes the development server's TSX preamble error without introducing hydration.
+
+Verification: Astro check passes with no diagnostics, all 86 unit tests and 48 Chromium/WebKit browser checks pass. The browser suite covers full viewport geometry, rendered camera movement, paused-scroll glyph motion, native board/editor states, reversible seeking, stable nodes, mobile readability, theme, keyboard, metadata, no JavaScript and zero axe violations. Production build omits Apple pairing fixtures. Six cold Lighthouse runs score 100 in all categories, with CLS/TBT 0; mobile LCP is 1.217–1.222s and desktop 0.326–0.327s. Current captures and performance evidence are under `.plans/72-launch-night/qa/impact-demo/`.
+
+## Earlier October 13 continuous DOM demonstration
+
+Dylan rejected the scroll-synchronized film because it degraded image quality and broke the relationship between the floating hero tiles and the demo. The replacement reuses the existing mimic agent/tool primitives in one server-rendered scene. The hero tiles settle into their own zone, then a scripted cursor and camera follow the task, providers, approval and tools. Scene state is derived from scroll progress, so seeking and reverse scrolling preserve the same tile nodes. The original hero copy and compact unboxed navigation stay intact. The five original hero float paths remain. The same six DOM tiles remain mounted through all beats; the controller seeks text, camera, cursor, provider selection, approval and terminal output without timers or React hydration. The demo contains no video. “See all of it” lands at the start of the assembled scene. Reduced Motion lays out all six cards in ordinary document flow; a no-JavaScript explanation and download remain readable.
+
+Verification: Astro check has zero diagnostics; 83 unit tests and 40 Chromium/WebKit checks pass. Browser checks cover actual tile and inner-agent identity, direct/reverse/reload equality, typed tasks, menus, approval cursor alignment and click feedback, terminal output, 320px/390px focus readability, dark theme, reduced motion, no JavaScript, metadata and legal routes. Independent native/source review completed. Extra visual captures at 320×568, 390×844 and 768×1024 have no page overflow or console errors in either engine.
+
+Three final mobile and three desktop cold Lighthouse runs each score 100 in all four categories, with CLS/TBT 0; mobile LCP is 1.353s and desktop 0.323s. Initial tests exposed low caption contrast and a small-screen status label below 12px, both repaired. Initial Lighthouse scores were 100 but the strict zero-CLS assertion failed at 0.001699 because controller startup replaced SSR text; matching the opening fixture to the first snapshot repairs it. A fixture-clone annotation initially failed type checking, then was corrected. Final production builds omit Apple pairing test URLs. Evidence is kept in `.plans/72-launch-night/qa/dom-demo/`.
+
+The creation menu is intentionally condensed from the shipped Command Center; the stage illustrates example agent and tool activity without executing anything on the visitor’s machine.
+
+## Earlier October 13 correction (superseded demo)
+
+Dylan rejected the plain hero, rewritten subheading, added eyebrow, outlined navigation and invented scroll-demo UI. Restored the prior floating tile composition and original supporting copy. Navigation now has an unboxed layout and right-aligned GitHub/actions; download buttons are smaller and use a transparent mask derived from the existing Array logo to remove the corner/background fringe.
+
+The assembled demo now shows the native power-tour film rather than a new HTML approximation. Scroll seeks its real cursor/camera workflow in both directions. The source is `.plans/68-launch-film/power-tour-r2/power-tour-1080p.mp4`, with a 43.5-second, 1440px H.264 web derivative that omits the closing title card. Decorative hero components render on the server without hydrating React. Video and poster load as the demo approaches. Reduced Motion keeps the hero text and offers a manually controlled film.
+
+The older interactive Mac/Companion components remain available in source; the current homepage does not activate that simulated interface or advertise Companion availability. The corrections retain metadata, privacy/terms and the build-77 appcast.
+
+Verification: Astro check has zero diagnostics; 75 unit tests and 32 Chromium/WebKit browser tests pass. The 12 homepage browser checks were rerun after removing hydration. Axe reports zero violations at desktop/mobile/reduced-motion positions; 320px, tablet and dark-theme visual checks pass. Three mobile and three desktop cold Lighthouse runs each score 100 in all four categories, with zero CLS/TBT. Mobile LCP is about 1.05s and desktop about 0.28s. An initial browser run lacked the pairing fixture environment; rebuilding with that fixture made both pairing checks pass. The final production build excludes those fixture URLs. An initial performance run exposed unnecessary hydration/poster loading; the final run passes after their removal/deferral.
+
 ## Outcome
 
 The previous collection of separate marketing demos was replaced by one production homepage centered on a living Array workspace. Five real product surfaces begin detached around the hero, assemble into the Mac canvas through scroll, demonstrate a synchronized Companion approval handoff, and become interactive without swapping DOM trees or resetting product state.

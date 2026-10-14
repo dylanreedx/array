@@ -1,4 +1,5 @@
-.mark{--provider-mark:url('/provider-pi.svg');display:inline-block;flex:none;width:1em;height:1em;color:inherit;background:currentColor;mask:var(--provider-mark) center/contain no-repeat;-webkit-mask:var(--provider-mark) center/contain no-repeat}
+.mark{--provider-mark:none;display:inline-block;flex:none;width:1em;height:1em;color:inherit;background:currentColor;mask:var(--provider-mark) center/contain no-repeat;-webkit-mask:var(--provider-mark) center/contain no-repeat}
 .openai{--provider-mark:url('/provider-openai.svg')}
 .anthropic{--provider-mark:url('/provider-anthropic.svg')}
 .pi{--provider-mark:url('/provider-pi.svg')}
+.generic{background:none;mask:none;-webkit-mask:none}

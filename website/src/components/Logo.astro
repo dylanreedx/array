@@ -9,8 +9,7 @@ const { compact = false, inverted = false } = Astro.props;
 
 <a class:list={["brand", { "brand--compact": compact, "brand--inverted": inverted }]} href="/" aria-label="Array home" data-interaction-id="nav-logo">
   <span class="brand__mark" aria-hidden="true">
-    <img class="brand__logo brand__logo--light" src="/array-logo-light.svg" alt="" />
-    <img class="brand__logo brand__logo--dark" src="/array-logo-dark.svg" alt="" />
+    <img class="brand__logo" src="/array-mark.svg" alt="" />
   </span>
   {!compact && <span class="brand__name">Array</span>}
 </a>

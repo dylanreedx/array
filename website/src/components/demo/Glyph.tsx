@@ -1,5 +1,5 @@
 import type { SVGProps } from 'react';
-export type GlyphName='more'|'tool'|'terminal'|'expand'|'collapse'|'send'|'back'|'forward'|'reload'|'close'|'fit'|'command'|'note'|'browser'|'zone'|'shuffle'|'reset'|'agent'|'check'|'attention'|'chevronDown'|'cursor'|'people'|'grid'|'approval'|'settings';
+export type GlyphName='more'|'tool'|'terminal'|'expand'|'collapse'|'send'|'back'|'forward'|'reload'|'close'|'fit'|'command'|'note'|'browser'|'zone'|'shuffle'|'reset'|'agent'|'check'|'attention'|'chevronDown'|'cursor'|'people'|'grid'|'approval'|'settings'|'folder'|'code'|'board';
 export interface GlyphProps extends Omit<SVGProps<SVGSVGElement>,'children'>{name:GlyphName}
 export function Glyph({name,...props}:GlyphProps){const common={fill:'none',stroke:'currentColor',strokeWidth:1.5,strokeLinecap:'round' as const,strokeLinejoin:'round' as const};return <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true" focusable="false" {...common} {...props}>
   {name==='more'&&<><circle cx="3" cy="8" r=".75" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".75" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r=".75" fill="currentColor" stroke="none"/></>}
@@ -12,6 +12,9 @@ export function Glyph({name,...props}:GlyphProps){const common={fill:'none',stro
   {name==='fit'&&<path d="M6 3H3v3m7-3h3v3M6 13H3v-3m7 3h3v-3"/>}
   {name==='command'&&<path d="M5.25 5.5H4a2 2 0 1 1 2-2v9a2 2 0 1 1-2-2h8a2 2 0 1 1-2 2v-9a2 2 0 1 1 2 2H5.25Z"/>}
   {name==='note'&&<><rect x="3" y="2" width="10" height="12" rx="1.5"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3.5"/></>}
+  {name==='folder'&&<path d="M2 4.5V3.2h4.1l1.4 1.4H14v8H2Z"/>}
+  {name==='code'&&<><path d="m5.5 4.5-3.5 3.5 3.5 3.5m5-7 3.5 3.5-3.5 3.5M9.3 2.5 6.7 13.5"/></>}
+  {name==='board'&&<><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11M10 2.5v11M3.5 5.5h1M7.5 5.5h1M11.5 5.5h1"/></>}
   {name==='browser'&&<><rect x="1.75" y="2.5" width="12.5" height="11" rx="2"/><path d="M2 5.5h12M4 4h.01M6 4h.01"/></>}
   {name==='zone'&&<rect x="2.5" y="2.5" width="11" height="11" rx="2" strokeDasharray="2 2"/>}
   {name==='shuffle'&&<><path d="M2.5 4.5h2c3.5 0 3.5 7 7 7h2"/><path d="m11.5 9.5 2 2-2 2M2.5 11.5h2c1.2 0 2-.8 2.7-1.8M9 6.2c.7-1 1.5-1.7 2.5-1.7h2m-2-2 2 2-2 2"/></>}

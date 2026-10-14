@@ -9,7 +9,8 @@ function providerKey(provider: string) {
   const value = provider.toLowerCase();
   if (value.includes('codex') || value.includes('openai')) return 'openai';
   if (value.includes('claude') || value.includes('anthropic')) return 'anthropic';
-  return 'pi';
+  if (value === 'pi' || value.startsWith('pi/')) return 'pi';
+  return 'generic';
 }
 
 export function ProviderMark({ provider, className = '' }: ProviderMarkProps) {
