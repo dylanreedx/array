@@ -274,7 +274,7 @@
 .canvasRail svg { width: 12px; height: 12px; }
 .scriptedCursor {
   position: absolute;
-  z-index: 80;
+  z-index: 1000001;
   top: var(--cursor-y, 55%);
   left: var(--cursor-x, 50%);
   display: grid;
@@ -477,7 +477,7 @@
 .focusOutline[data-attention="true"] rect { stroke: var(--amber); animation-duration: 1.4s; }
 @keyframes focusMarch { to { stroke-dashoffset: 10; } }
 .focusOutline[hidden],.snapPreview[hidden],.resizeReadout[hidden],.agentRow[hidden] { display: none; }
-.snapPreview { position: absolute; z-index: 1; border: 1px solid rgb(95 168 255 / 55%); border-radius: 10px; background: rgb(95 168 255 / 8%); }
+.snapPreview { position: absolute; z-index: 1000000; box-sizing: border-box; pointer-events: none; border: 2px solid rgb(95 168 255 / 90%); border-radius: 6px; background: rgb(95 168 255 / 6%); }
 .resizeReadout { position: absolute; z-index: 24; padding: 4px 8px; border-radius: 5px; background: var(--overlay); color: var(--text); border: .5px solid var(--line); font: 11px var(--font-mono, monospace); }
 .resizeHandle { position: absolute; right: 1px; bottom: 1px; width: 10px; height: 10px; opacity: 0; border-right: 2px solid var(--blue); border-bottom: 2px solid var(--blue); border-radius: 0 0 6px; }
 .tile[data-demo-resizing="true"] .resizeHandle { opacity: 1; }

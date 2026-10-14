@@ -53,12 +53,29 @@ describe('native golden workspace flow', () => {
     expect(dragging.tileFrames.stabilize.drag).toEqual({ active: true, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 });
     expect(dragging.tileFrames.stabilize.x).toBeGreaterThan(start.tileFrames.stabilize.x);
     expect(dragging.snapPreview).toMatchObject({ tile: 'stabilize', x: 550, y: 95, scale: expect.any(Number), opacity: expect.any(Number) });
-    expect(settled.snapPreview).toBeNull();
+    expect(settled.snapPreview).toMatchObject({ tile: 'browser' });
     expect(settled.tileFrames.verify.x).toBe(70);
     expect(settled.tileFrames.stabilize.x).toBe(start.tileFrames.verify.x);
     expect(settled.tileFrames.audit.x).toBe(988);
     expect(settled.tileFrames.stabilize.drag.active).toBe(false);
     expect(guidedSnapshot(.9025, desktop)).toMatchObject({ cursorTarget: 'stabilize-header', cursor: { pressed: false }, focusedTile: null });
+  });
+  test('move ghosts predict the committed destination before the dragged tile arrives', () => {
+    for (const [start, early, middle, release, id] of [
+      [.873, .875, .884, .902, 'stabilize'], [.909, .911, .916, .923, 'browser'],
+    ] as const) {
+      expect(guidedSnapshot(start - .001, desktop).snapPreview).toBeNull();
+      const preview = guidedSnapshot(early, desktop), later = guidedSnapshot(middle, desktop), dropped = guidedSnapshot(release, desktop);
+      const ghost = preview.snapPreview!;
+      expect(ghost).not.toBeNull();
+      expect(ghost.tile).toBe(id);
+      expect(ghost.x).toBeGreaterThan(preview.tileFrames[id].x);
+      expect(ghost).toMatchObject({ x: dropped.tileFrames[id].x, y: dropped.tileFrames[id].y, width: dropped.tileFrames[id].width, height: dropped.tileFrames[id].height });
+      expect(later.snapPreview).toMatchObject({ tile: id, x: ghost.x, y: ghost.y });
+      expect(preview.tiles[id].emphasis).toBe(0);
+      expect(dropped.snapPreview).toBeNull();
+      expect(guidedSnapshot(early, desktop)).toEqual(preview);
+    }
   });
   test('drag pushes baseline neighbors before latching, and relaxes the cascade after swapping', () => {
     const baseline = guidedSnapshot(.873, desktop);

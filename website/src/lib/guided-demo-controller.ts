@@ -186,12 +186,15 @@ export function installGuidedDemo() {
         ['Complete', 'Passed'].includes(value) ? '✓ Completed' : ready ? '○ Pending' : '◐ In progress');
     }
     const outline = root.querySelector<SVGSVGElement>('[data-demo-focus-outline]');
+    const moving = Object.values(snapshot.tileFrames).some(frame => frame.drag.active);
     const focusId = snapshot.approval === 'waiting' ? 'verify' : snapshot.focusedTile;
     const focusTile = focusId ? tiles.find(tile => tile.dataset.assemblySurface === focusId) : null;
     if (outline) {
       const frame = focusTile?.getBoundingClientRect();
       const canvasRect = pin.getBoundingClientRect();
-      const visible = !snapshot.reducedMotion && snapshot.progress >= .34 && !!frame && frame.right > canvasRect.left && frame.left < canvasRect.right && frame.bottom > canvasRect.top && frame.top < canvasRect.bottom;
+      // During a move the destination ghost is the placement cue. Marching ants
+      // belong to ordinary focus/attention, never to the dragged tile's body.
+      const visible = !moving && !snapshot.reducedMotion && snapshot.progress >= .34 && !!frame && frame.right > canvasRect.left && frame.left < canvasRect.right && frame.bottom > canvasRect.top && frame.top < canvasRect.bottom;
       outline.style.display = visible ? 'block' : 'none';
       outline.dataset.demoFocusTarget = focusId ?? '';
       outline.dataset.attention = String(snapshot.approval === 'waiting');

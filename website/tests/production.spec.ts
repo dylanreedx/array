@@ -323,6 +323,45 @@ test('golden flow drag, neighbor reflow and resize are deterministic on reverse 
   expect(await frames()).toEqual(before);
   await assertTileContinuity(page);
 });
+for (const width of [1440, 390]) {
+  test(`drag highlights the future drop frame instead of the moving tile at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 });
+    await page.goto('/');
+    const ghost = page.locator('[data-demo-snap-preview]');
+    for (const [early, later, release, id] of [[.875, .884, .902, 'stabilize'], [.911, .916, .923, 'browser']] as const) {
+      await seek(page, early);
+      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+      await expect(ghost).toBeVisible();
+      const prediction = await ghost.evaluate((el, id) => {
+        const r = el.getBoundingClientRect(), world = document.querySelector<HTMLElement>('[data-guided-world]')!, w = world.getBoundingClientRect();
+        const scale = Number(world.dataset.cameraScale), tile = document.querySelector(`[data-assembly-surface=${id}]`)!.getBoundingClientRect();
+        const css = getComputedStyle(el), canvas = document.querySelector('[data-demo-canvas]')!.getBoundingClientRect();
+        return { x: (r.left - w.left) / scale, y: (r.top - w.top) / scale, width: r.width / scale, height: r.height / scale,
+          ahead: r.left - tile.left, border: parseFloat(css.borderTopWidth), radius: parseFloat(css.borderTopLeftRadius), z: Number(css.zIndex),
+          visibleWidth: Math.min(r.right, canvas.right) - Math.max(r.left, canvas.left) };
+      }, id);
+      expect(prediction.ahead).toBeGreaterThan(5);
+      expect(prediction.visibleWidth).toBeGreaterThan(100);
+      expect(prediction.border).toBe(2);
+      expect(prediction.radius).toBe(6);
+      expect(prediction.z).toBe(1_000_000);
+      await seek(page, later);
+      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+      await expect(ghost).toBeVisible();
+      // Real scroll positions round to physical pixels; cross mouse-up rather
+      // than landing a fraction of a pixel before the exact release boundary.
+      await seek(page, release + .0005);
+      await expect(ghost).toBeHidden();
+      const committed = await page.locator(`[data-assembly-surface=${id}]`).evaluate(el => {
+        const s = (el as HTMLElement).style; return { x: parseFloat(s.left), y: parseFloat(s.top), width: parseFloat(s.width), height: parseFloat(s.height) };
+      });
+      for (const key of ['x', 'y', 'width', 'height'] as const) expect(prediction[key]).toBeCloseTo(committed[key], 0);
+      await seek(page, early);
+      await expect(ghost).toBeVisible();
+      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+    }
+  });
+}
 test('the native workspace takes over the viewport with a full-height sidebar and canvas', async ({ page }) => {
   await page.goto('/');
   for (const progress of [.26, .64, .80]) {

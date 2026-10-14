@@ -115,3 +115,13 @@ The story now focuses on Claude Code and Codex. Known native context rings show 
 Validation: 90 unit tests, 60 local Chromium/WebKit checks, production build and Astro diagnostics pass (zero errors/warnings/hints). New frame/gesture checks fail against the previous public release. Screenshot matrix covers 1440×960, 390×844 and 320×568 in both engines, with no script errors, document overflow or clipped active tile frames. Historical snapshot and configured Apple destination fixture tests were excluded from the normal production build run. Evidence is in `.plans/72-launch-night/qa/frame-motion/`.
 
 All six Lighthouse runs (three mobile, three desktop) scored 100 in performance, accessibility, best practices and SEO, with zero layout shift and blocking time. Mobile LCP was about 1.37s; desktop about 0.33s.
+
+## Predicted drag destination correction
+
+The move highlight now belongs to the future committed frame. The moving tile has no marching focus border or blue emphasis during titlebar dragging. Both the agent move and editor move render a separate stationary destination ghost before arrival, hide it at mouse-up, and commit the same rectangle. Mobile framing includes both the moving tile and its predicted destination.
+
+Source inspected: `TileNSView.mouseDragged`/`mouseUp`, `CanvasNSView.showDragGhost`, and `DragGhostOverlayView`. The web ghost follows the native 2px accent border at 90% opacity, 6px radius, 6% fill, topmost overlay with cursor above it, and brief .96→1 entrance. The narrated layout supplies deterministic resolved destinations; this scene does not reproduce the full arbitrary-pointer `MagneticPlacement.resolve` solver.
+
+Validation: 91 unit tests and 64 Chromium/WebKit browser checks pass, including rendered preview bounds ahead of the tile, no dragged focus outline, preview-to-commit geometry, and reverse scrolling. All four new destination cases failed against the preceding public deployment. Astro diagnostics and production build pass. Screens cover 1832×944, 1440×960, 390×844 and 320×568 in both engines. Evidence is in `qa/drag-destination/` under the launch QA directory.
+
+All six Lighthouse runs score100 in all four categories, with CLS0 and TBT0.

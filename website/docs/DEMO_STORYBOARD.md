@@ -18,14 +18,14 @@ One persistent DOM world turns the original floating hero into the native canvas
 | .775–.82 | Read actual CanvasNSView excerpt and select the placement lines. |
 | .82–.855 | Type terminal checks; running state precedes passed fixture output. |
 | .86–.873 | Cursor approaches the main titlebar before selection and press. |
-| .873–.902 | Drag main tile by its titlebar into another slot; neighboring agents reflow and native snap preview identifies the destination. |
-| .903–.923 | Approach, press, then reposition the editor by its titlebar. |
+| .873–.902 | Drag main tile by its titlebar into another slot; neighboring agents reflow; a topmost solid ghost marks the future committed frame before arrival. The dragged tile has no focus ants. |
+| .903–.923 | Approach, press, then reposition the editor by its titlebar with its own destination ghost. |
 | .923–.95 | Approach the editor corner, then resize it to reveal more source. |
 | .95–.970 | Approach and resize the main agent into a wider, shorter conversation. |
 | .970–.985 | Approach and widen the terminal so check output fits comfortably. |
 | .985–1 | Pull back to the whole project and contract the screen into its rounded Mac preview frame. Download follows below. |
 
-Desktop frames begin at main430×550, Claude380×470, second Codex340×450, board800×430, editor560×430 and terminal300×470. The main agent exchanges positions with Claude; the second Codex and terminal receive the native push cascade while the main tile approaches, then relax to their baselines; the zone expands to preserve content padding. Editor expands to800×560, main agent to550×420, and terminal to480×560. Mobile editor grows from330 to470 pixels wide. Mobile uses the same state and a narrower editor; the camera follows the action, not an unfocused composer. Reduced Motion presents all six completed surfaces in normal page flow with no continuous glyph, cursor, camera or ants. No-JavaScript copy and download remain usable.
+Desktop frames begin at main430×550, Claude380×470, second Codex340×450, board800×430, editor560×430 and terminal300×470. The main agent exchanges positions with Claude; the second Codex and terminal receive the native push cascade while the main tile approaches, then relax to their baselines; the zone expands to preserve content padding. Editor expands to800×560, main agent to550×420, and terminal to480×560. Mobile editor grows from330 to470 pixels wide. Mobile uses the same state and a narrower editor; the camera follows the action, and pulls back during the main drag to show the moving tile together with its predicted destination. Reduced Motion presents all six completed surfaces in normal page flow with no continuous glyph, cursor, camera or ants. No-JavaScript copy and download remain usable.
 
 Native tile motion is pointer-owned geometry, neighbor reflow and target ghost; do not put a physics name into visitor-facing copy. Hero float paths and camera glides are site narration. Every content, focus, menu and frame is derived from scroll progress; scrolling upward undoes creation, prompts, approvals and layout in the same scene.
 

@@ -97,7 +97,7 @@ const CAMERA: readonly CameraFrame[] = [
   { p: .812, x: 1220, y: 875, kind: 'editor', mobileX: 1090 },
   { p: .84, x: 1520, y: 325, kind: 'terminal' },
   { p: .855, x: 1520, y: 325, kind: 'terminal' },
-  { p: .873, x: 730, y: 400, kind: 'parallel', mobileX: 285, mobileY: 365 },
+  { p: .873, x: 730, y: 400, kind: 'parallel', mobileX: 525, mobileY: 365 },
   { p: .902, x: 750, y: 410, kind: 'parallel', mobileX: 765, mobileY: 370 },
   { p: .923, x: 1250, y: 905, kind: 'editor', mobileX: 1135 },
   { p: .95, x: 1370, y: 970, kind: 'editor', mobileX: 1205, mobileY: 970 },
@@ -112,7 +112,7 @@ function cameraAt(p: number, width: number, height: number) {
   const fit = Math.min(width / WORLD_WIDTH, height / WORLD_HEIGHT) * .96;
   const scaleFor = (frame: CameraFrame) => {
     if (frame.kind === 'overview') return fit;
-    const span = mobile ? frame.p >= .957 && frame.p <= .970 ? 620 : frame.p >= .976 ? 560 : frame.kind === 'board' ? 330 : frame.kind === 'editor' ? frame.p >= .923 ? 550 : 390 : frame.p <= .46 || (frame.p >= .873 && frame.p <= .902) || (frame.p >= .957 && frame.p <= .970) ? 470 : 410
+    const span = mobile ? frame.p >= .873 && frame.p <= .902 ? 1020 : frame.p >= .957 && frame.p <= .970 ? 620 : frame.p >= .976 ? 560 : frame.kind === 'board' ? 330 : frame.kind === 'editor' ? frame.p >= .923 ? 550 : 390 : frame.p <= .46 ? 470 : 410
       : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? frame.p >= .923 ? 900 : 650 : 680;
     const vertical = mobile ? frame.p >= .923 ? 740 : frame.p <= .46 ? 650 : 540 : frame.p >= .923 ? 740 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540;
     return Math.min(width / span, height / vertical) * (frame.zoom ?? 1);
@@ -132,7 +132,8 @@ function cameraAt(p: number, width: number, height: number) {
   if (mobile) {
     if (p >= .873 && p <= .902) {
       const drag = smooth(between(p, .873, .902));
-      center.x = mix(70, 550, drag) + 215;
+      // Keep both the moving tile and its predicted destination in view.
+      center.x = (mix(70, 550, drag) + 550 + 430) / 2;
       center.y = mix(90, 95, drag) + 275;
     }
     const detail = smooth(between(p, .751, .755)) * (1 - smooth(between(p, .775, .779)));
@@ -198,7 +199,7 @@ function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): 
 }
 function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>): Record<DemoTile, TileMotion> {
   return Object.fromEntries(Object.entries(frames).map(([id, frame]) => [id,
-    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected ? 1 : 0 },
+    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected && !frame.drag.active ? 1 : 0 },
   ])) as Record<DemoTile, TileMotion>;
 }
 function targetAt(p: number): CursorTarget {
@@ -233,7 +234,12 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const selectedTile = focusedTile ?? (p >= .34 && p < .38 ? 'stabilize' : null);
   const tileFrames = frameSnapshots(p, width < 700, selectedTile);
   const creationStage: CreationStage = p < .27 ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
-  const ghostFrame = tileFrames.stabilize;
+  // Like showDragGhost(at:) in CanvasNSView, preview the resolved destination
+  // independently of the pointer-owned tile. The story's layout solver supplies
+  // these destinations; mouse-up commits the very same frame.
+  const moving: DemoTile | null = tileFrames.stabilize.drag.active ? 'stabilize' : tileFrames.browser.drag.active ? 'browser' : null;
+  const ghostFrame = moving ? tileFrames[moving] : null;
+  const ghostStart = moving === 'stabilize' ? .873 : .909;
   const resizing: DemoTile | null = p >= .93 && p < .95 ? 'browser' : p >= .957 && p < .970 ? 'stabilize' : p >= .976 && p < .985 ? 'shell' : null;
   const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
   const approach = approaches.find(([start, end]) => p >= start && p < end);
@@ -246,8 +252,8 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
     creation: { stage: creationStage, query: creationStage === 'command' ? type('Agent', p, .272, .285) : '', provider: 'Codex', model: 'GPT-5.6 Sol' },
     cursorTarget: reducedMotion ? null : targetAt(p),
     menuTarget: creationStage === 'command' ? 'creation-agent' : creationStage === 'models' ? 'creation-model' : p >= .47 && p < .505 ? 'verify-provider' : null,
-    snapPreview: !reducedMotion && p >= .88 && p < .902 ? { tile: 'stabilize', x: 550, y: 95, width: ghostFrame.width, height: ghostFrame.height,
-      opacity: smooth(between(p, .88, .885)), scale: mix(.96, 1, smooth(between(p, .88, .885))) } : null,
+    snapPreview: !reducedMotion && moving && ghostFrame ? { tile: moving, x: moving === 'stabilize' ? 550 : 970, y: moving === 'stabilize' ? 95 : 690, width: ghostFrame.width, height: ghostFrame.height,
+      opacity: smooth(between(p, ghostStart, ghostStart + .002)), scale: mix(.96, 1, smooth(between(p, ghostStart, ghostStart + .002))) } : null,
     resizeReadout: !reducedMotion && resizing ? { tile: resizing, width: Math.round(tileFrames[resizing].width), height: Math.round(tileFrames[resizing].height - 24) } : null,
     boardProgress: between(p, .735, .845), boardDetail: !reducedMotion && p >= .755 && p < .775, editorProgress: between(p, .775, .82),
     cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .985, approach: approach ? smooth(between(p, approach[0], approach[1])) : 1, fromTarget: approach?.[2] ?? null,
