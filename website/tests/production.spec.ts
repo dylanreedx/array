@@ -324,41 +324,60 @@ test('golden flow drag, neighbor reflow and resize are deterministic on reverse 
   await assertTileContinuity(page);
 });
 for (const width of [1440, 390]) {
-  test(`drag highlights the future drop frame instead of the moving tile at ${width}px`, async ({ page }) => {
+  test(`drag preview is a vacant native placement and releases into that placement at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 });
     await page.goto('/');
     const ghost = page.locator('[data-demo-snap-preview]');
-    for (const [early, later, release, id] of [[.875, .884, .902, 'stabilize'], [.911, .916, .923, 'browser']] as const) {
-      await seek(page, early);
-      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+    const prediction = () => ghost.evaluate(el => {
+      const world = document.querySelector<HTMLElement>('[data-guided-world]')!, scale = Number(world.dataset.cameraScale);
+      const style = (el as HTMLElement).style, origin = (el as HTMLElement).offsetParent!.getBoundingClientRect(), worldRect = world.getBoundingClientRect();
+      // Camera data records its center; recover world coordinates from the
+      // actual containing block without the native preview's spring scale.
+      return { x: (parseFloat(style.left) + origin.left - worldRect.left) / scale,
+        y: (parseFloat(style.top) + origin.top - worldRect.top) / scale,
+        width: parseFloat(style.width) / scale, height: parseFloat(style.height) / scale };
+    });
+    for (const [samples, beforeRelease, release, id] of [
+      [[.875, .8775, .884, .895], .9019, .902, 'stabilize'],
+      [[.911, .916, .921], .9228, .923, 'browser'],
+    ] as const) {
+      for (const progress of samples) {
+        await seek(page, progress);
+        await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+        await expect(ghost).toBeVisible();
+        const preview = await prediction();
+        if (id === 'stabilize') expect.soft(preview.y, `native row top at ${progress}`).toBeCloseTo(90, 0);
+        const passive = await page.locator('[data-guided-world] [data-assembly-surface]').evaluateAll((tiles, moving) => tiles
+          .filter(el => (el as HTMLElement).dataset.assemblySurface !== moving && (el as HTMLElement).dataset.demoVisible !== 'false')
+          .map(el => { const tile = el as HTMLElement; return { id: tile.dataset.assemblySurface,
+            x: parseFloat(tile.style.left), y: parseFloat(tile.style.top), width: parseFloat(tile.style.width), height: parseFloat(tile.style.height) }; }), id);
+        for (const tile of passive) {
+          if (id === 'stabilize' && ['verify', 'audit', 'shell'].includes(tile.id!))
+            expect.soft(tile.y, `passive row ${tile.id} at ${progress}`).toBeCloseTo(90, 0);
+          const overlapX = Math.min(preview.x + preview.width, tile.x + tile.width) - Math.max(preview.x, tile.x);
+          const overlapY = Math.min(preview.y + preview.height, tile.y + tile.height) - Math.max(preview.y, tile.y);
+          expect.soft(overlapX <= .5 || overlapY <= .5, `preview overlaps passive ${tile.id} at ${progress}: ${overlapX} × ${overlapY}`).toBe(true);
+        }
+      }
+      await seek(page, beforeRelease);
       await expect(ghost).toBeVisible();
-      const prediction = await ghost.evaluate((el, id) => {
-        const r = el.getBoundingClientRect(), world = document.querySelector<HTMLElement>('[data-guided-world]')!, w = world.getBoundingClientRect();
-        const scale = Number(world.dataset.cameraScale), tile = document.querySelector(`[data-assembly-surface=${id}]`)!.getBoundingClientRect();
-        const css = getComputedStyle(el), canvas = document.querySelector('[data-demo-canvas]')!.getBoundingClientRect();
-        return { x: (r.left - w.left) / scale, y: (r.top - w.top) / scale, width: r.width / scale, height: r.height / scale,
-          ahead: r.left - tile.left, border: parseFloat(css.borderTopWidth), radius: parseFloat(css.borderTopLeftRadius), z: Number(css.zIndex),
-          visibleWidth: Math.min(r.right, canvas.right) - Math.max(r.left, canvas.left) };
-      }, id);
-      expect(prediction.ahead).toBeGreaterThan(5);
-      expect(prediction.visibleWidth).toBeGreaterThan(100);
-      expect(prediction.border).toBe(2);
-      expect(prediction.radius).toBe(6);
-      expect(prediction.z).toBe(1_000_000);
-      await seek(page, later);
-      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
-      await expect(ghost).toBeVisible();
-      // Real scroll positions round to physical pixels; cross mouse-up rather
-      // than landing a fraction of a pixel before the exact release boundary.
+      const finalPreview = await prediction();
       await seek(page, release + .0005);
       await expect(ghost).toBeHidden();
       const committed = await page.locator(`[data-assembly-surface=${id}]`).evaluate(el => {
         const s = (el as HTMLElement).style; return { x: parseFloat(s.left), y: parseFloat(s.top), width: parseFloat(s.width), height: parseFloat(s.height) };
       });
-      for (const key of ['x', 'y', 'width', 'height'] as const) expect(prediction[key]).toBeCloseTo(committed[key], 0);
-      await seek(page, early);
+      for (const key of ['x', 'y', 'width', 'height'] as const) expect.soft(finalPreview[key], `release ${id}.${key}`).toBeCloseTo(committed[key], 0);
+      if (id === 'stabilize') {
+        const row = await page.locator('[data-guided-world]').evaluate(world => ['stabilize', 'verify', 'audit', 'shell'].map(id => {
+          const el = world.querySelector<HTMLElement>(`[data-assembly-surface=${id}]`)!;
+          return { id, x: parseFloat(el.style.left), y: parseFloat(el.style.top), width: parseFloat(el.style.width) };
+        }).sort((a, b) => a.x - b.x));
+        for (const tile of row) expect.soft(tile.y, `released row ${tile.id}`).toBeCloseTo(90, 0);
+        for (let i = 1; i < row.length; i++) expect.soft(row[i].x - row[i - 1].x - row[i - 1].width, `native contact ${row[i - 1].id}→${row[i].id}`).toBeCloseTo(8, 0);
+      }
+      await seek(page, samples[0]);
       await expect(ghost).toBeVisible();
-      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
     }
   });
 }

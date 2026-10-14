@@ -125,3 +125,11 @@ Source inspected: `TileNSView.mouseDragged`/`mouseUp`, `CanvasNSView.showDragGho
 Validation: 91 unit tests and 64 Chromium/WebKit browser checks pass, including rendered preview bounds ahead of the tile, no dragged focus outline, preview-to-commit geometry, and reverse scrolling. All four new destination cases failed against the preceding public deployment. Astro diagnostics and production build pass. Screens cover 1832×944, 1440×960, 390×844 and 320×568 in both engines. Evidence is in `qa/drag-destination/` under the launch QA directory.
 
 All six Lighthouse runs score100 in all four categories, with CLS0 and TBT0.
+
+## Native layout logic in the browser
+
+Replaced authored preview coordinates, neighbor offsets and post-swap positions with a reusable TypeScript port of `CanvasAutoLayoutEngine.swift`. `native-layout.ts` computes baseline-relative pushes, swap latches, contact candidates, pinned settle and directional resize pressure. `guided-layout.ts` supplies only the input scene and narrated pointer gestures. The ghost and passive tiles come from the same predicted release, so the preview is vacant and unequal-width swaps finish aligned with exact8px gaps. The native mouse-up sequence includes a second move solve at the snapped frame before settling; a witnessed mid-drag row displacement caught that missing step.
+
+The initial rows compact before the drag. The editor demonstrates contact snapping, then editor, agent and terminal resizes use the source pressure solver. Terminal finishes at480×550. Authored task contents and pointer inputs remain fixtures; the entire arbitrary-pointer magnetic resolver is not replicated.
+
+Validation:115 unit tests, including26 native-layout tests and comparisons against9 move/3 resize outputs generated from actual compiled Swift method bodies. Astro check reports zero errors, warnings and hints; production build passes.64 local Chromium/WebKit checks pass, including occupied-preview and row-alignment cases that fail on the previous public release. Screenshot sweeps cover1832×944,1440×960,390×844 and320×568 in both engines. All six Lighthouse cold runs score100 in all four categories, with zero CLS and TBT. Evidence: `.plans/72-launch-night/qa/native-web-layout/`. Historical checkpoint and configured Apple destination fixture tests are excluded from the normal production-build browser run.

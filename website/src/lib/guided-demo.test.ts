@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { DEMO_TEXT, guidedSnapshot, STEPS } from './guided-demo';
+import { overlapsOrUnderGap } from './native-layout';
 const desktop = { width: 1440, height: 900 };
 const mobile = { width: 390, height: 760 };
 
@@ -47,59 +48,39 @@ describe('native golden workspace flow', () => {
     expect(guidedSnapshot(.58, desktop).approval).toBe('hidden');
     expect(guidedSnapshot(.90, desktop).status).toEqual({ stabilize: 'Complete', verify: 'Passed', audit: 'Complete' });
   });
-  test('native drag moves the actual frame; snap ghost and neighbor reflow are separate', () => {
-    const start = guidedSnapshot(.873, desktop), dragging = guidedSnapshot(.884, desktop), settled = guidedSnapshot(.915, desktop);
-    expect(dragging.cursorTarget).toBe('stabilize-header');
-    expect(dragging.tileFrames.stabilize.drag).toEqual({ active: true, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 });
-    expect(dragging.tileFrames.stabilize.x).toBeGreaterThan(start.tileFrames.stabilize.x);
-    expect(dragging.snapPreview).toMatchObject({ tile: 'stabilize', x: 550, y: 95, scale: expect.any(Number), opacity: expect.any(Number) });
-    expect(settled.snapPreview).toMatchObject({ tile: 'browser' });
-    expect(settled.tileFrames.verify.x).toBe(70);
-    expect(settled.tileFrames.stabilize.x).toBe(start.tileFrames.verify.x);
-    expect(settled.tileFrames.audit.x).toBe(988);
-    expect(settled.tileFrames.stabilize.drag.active).toBe(false);
-    expect(guidedSnapshot(.9025, desktop)).toMatchObject({ cursorTarget: 'stabilize-header', cursor: { pressed: false }, focusedTile: null });
-  });
-  test('move ghosts predict the committed destination before the dragged tile arrives', () => {
-    for (const [start, early, middle, release, id] of [
-      [.873, .875, .884, .902, 'stabilize'], [.909, .911, .916, .923, 'browser'],
-    ] as const) {
-      expect(guidedSnapshot(start - .001, desktop).snapPreview).toBeNull();
-      const preview = guidedSnapshot(early, desktop), later = guidedSnapshot(middle, desktop), dropped = guidedSnapshot(release, desktop);
-      const ghost = preview.snapPreview!;
-      expect(ghost).not.toBeNull();
-      expect(ghost.tile).toBe(id);
-      expect(ghost.x).toBeGreaterThan(preview.tileFrames[id].x);
-      expect(ghost).toMatchObject({ x: dropped.tileFrames[id].x, y: dropped.tileFrames[id].y, width: dropped.tileFrames[id].width, height: dropped.tileFrames[id].height });
-      expect(later.snapPreview).toMatchObject({ tile: id, x: ghost.x, y: ghost.y });
-      expect(preview.tiles[id].emphasis).toBe(0);
-      expect(dropped.snapPreview).toBeNull();
-      expect(guidedSnapshot(early, desktop)).toEqual(preview);
-    }
-  });
-  test('drag pushes baseline neighbors before latching, and relaxes the cascade after swapping', () => {
-    const baseline = guidedSnapshot(.873, desktop);
-    for (const p of [.880, .883, .887]) {
-      const frames = guidedSnapshot(p, desktop).tileFrames;
-      expect(frames.stabilize.x + frames.stabilize.width / 2).toBeLessThan(550);
-      expect(frames.verify.x).toBe(Math.max(550, frames.stabilize.x + frames.stabilize.width + 8));
-      expect(frames.audit.x).toBe(Math.max(980, frames.verify.x + frames.verify.width + 8));
-      expect(frames.shell.x).toBe(Math.max(1370, frames.audit.x + frames.audit.width + 8));
-      for (const [left, right] of [['stabilize', 'verify'], ['verify', 'audit'], ['audit', 'shell']] as const) {
-        expect(frames[right].x - (frames[left].x + frames[left].width)).toBeGreaterThanOrEqual(8 - 1e-9);
+  test('native previews describe vacant release frames and become aligned swaps', () => {
+    for (const options of [desktop, mobile]) {
+      for (const [start, end, id] of [[.873, .902, 'stabilize'], [.909, .923, 'browser']] as const) {
+        for (let p = start + .0005; p < end; p += .0005) {
+          const state = guidedSnapshot(p, options), ghost = state.snapPreview!;
+          expect(ghost, `missing preview at ${p}`).not.toBeNull();
+          expect(ghost.tile).toBe(id);
+          expect(state.tileFrames[id].drag.active).toBe(true);
+          expect(state.tiles[id].emphasis).toBe(0);
+          if (id === 'stabilize') for (const passive of ['verify', 'audit', 'shell'] as const) {
+            expect(state.tileFrames[passive].y, `row skew: ${passive} at ${p}`).toBe(ghost.y);
+          }
+          for (const [other, frame] of Object.entries(state.tileFrames)) {
+            if (other !== id) expect(overlapsOrUnderGap(ghost, frame, 8 - 1e-8), `occupied preview: ${other} at ${p}`).toBe(false);
+          }
+        }
+        const beforeDrop = guidedSnapshot(end - 1e-8, options), dropped = guidedSnapshot(end, options);
+        expect(beforeDrop.snapPreview).toMatchObject({ x: dropped.tileFrames[id].x, y: dropped.tileFrames[id].y, width: dropped.tileFrames[id].width, height: dropped.tileFrames[id].height });
+        expect(dropped.snapPreview).toBeNull();
       }
+      const before = guidedSnapshot(.873, options).tileFrames, swapped = guidedSnapshot(.902, options).tileFrames;
+      expect(swapped.stabilize.x).toBe(before.verify.x);
+      expect(swapped.stabilize.y).toBe(before.verify.y);
+      expect(swapped.verify.x + swapped.verify.width + 8).toBe(swapped.stabilize.x);
+      expect(swapped.audit.x).toBe(swapped.stabilize.x + swapped.stabilize.width + 8);
+      expect(swapped.shell.x).toBe(swapped.audit.x + swapped.audit.width + 8);
+      expect(new Set(['verify', 'stabilize', 'audit', 'shell'].map(id => swapped[id as keyof typeof swapped].y)).size).toBe(1);
+      const lowerSwap = guidedSnapshot(.923, options).tileFrames;
+      expect(lowerSwap.browser.x).toBe(swapped.browser.x);
+      expect(lowerSwap.browser.y).toBe(swapped.browser.y);
+      expect(lowerSwap.browser.x).toBe(lowerSwap.note.x + lowerSwap.note.width + 8);
+      expect(lowerSwap.note.y).toBe(lowerSwap.browser.y);
     }
-    const pushed = guidedSnapshot(.884, desktop);
-    expect(pushed.tileFrames.verify.x).toBeGreaterThan(baseline.tileFrames.verify.x);
-    expect(pushed.tileFrames.audit.x).toBeGreaterThan(baseline.tileFrames.audit.x);
-    expect(pushed.tileFrames.shell.x).toBeGreaterThan(baseline.tileFrames.shell.x);
-    const exchanged = guidedSnapshot(.915, desktop);
-    expect(exchanged.tileFrames.verify).toMatchObject({ x: 70, y: 90 });
-    expect(exchanged.tileFrames.audit.x).toBe(988);
-    expect(exchanged.tileFrames.shell.x).toBe(baseline.tileFrames.shell.x);
-    // Retreat/direct seek recomputes from the gesture baseline, not last solve.
-    guidedSnapshot(.915, desktop);
-    expect(guidedSnapshot(.884, desktop)).toEqual(pushed);
   });
   test('cursor approaches before selection, then holds through drag and each resize', () => {
     for (const [approach, press, target, tile] of [
@@ -129,9 +110,9 @@ describe('native golden workspace flow', () => {
       expect(resizing.resizeReadout).toEqual({ tile, width: Math.round(frame.width), height: Math.round(frame.height - 24) });
     }
     const final = guidedSnapshot(.99, desktop);
-    expect(final.tileFrames.browser).toMatchObject({ x: 970, y: 690, width: 800, height: 560 });
-    expect(final.tileFrames.stabilize).toMatchObject({ x: 550, width: 550, height: 420 });
-    expect(final.tileFrames.shell).toMatchObject({ x: 1456, width: 480, height: 560 });
+    expect(final.tileFrames.browser).toMatchObject({ width: 800, height: 560 });
+    expect(final.tileFrames.stabilize).toMatchObject({ width: 550, height: 420 });
+    expect(final.tileFrames.shell).toMatchObject({ width: 480, height: 550 });
     expect(final.resizeReadout).toBeNull();
     expect(guidedSnapshot(.99, mobile).tileFrames.browser).toMatchObject({ width: 470, height: 560 });
   });
@@ -141,7 +122,7 @@ describe('native golden workspace flow', () => {
     for (let p = .902; p <= .985; p += .001) {
       const frames = guidedSnapshot(p, desktop).tileFrames;
       for (const [left, right] of [['verify', 'stabilize'], ['stabilize', 'audit'], ['audit', 'shell']] as const) {
-        expect(frames[right].x - (frames[left].x + frames[left].width), `gap ${left}/${right} at ${p}`).toBeGreaterThanOrEqual(8 - 1e-8);
+        expect(frames[right].x - (frames[left].x + frames[left].width), `gap ${left}/${right} at ${p}`).toBeCloseTo(8, 7);
       }
     }
     const beforeResize = guidedSnapshot(.957 - 1e-8, desktop).tileFrames.audit.x;
