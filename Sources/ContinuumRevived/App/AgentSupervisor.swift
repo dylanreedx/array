@@ -338,8 +338,10 @@ enum AgentNameOneShot {
 
     /// The argv after the executable, per harness. Every flag here was checked
     /// against the CLI's own help (claude 2.1.291, codex 0.159.3). Two rules
-    /// hold for all three: no session is persisted, and nothing can act — no
-    /// tools, no MCP servers, no hooks, a read-only sandbox, an empty cwd.
+    /// hold for all three: no session is persisted, no MCP configuration or
+    /// hooks load, and a private empty cwd is used. Claude/Pi disable all tools;
+    /// Codex disables shell/connector/browser tools and uses a read-only sandbox
+    /// for residual model-declared utility tools such as apply_patch.
     /// `--bare` is deliberately absent: it skips OAuth and reads an API key,
     /// and a CLI's own login is the only auth Array uses.
     static func arguments(for titler: AgentNameTitler, schemaFile: URL, lastMessageFile: URL) -> [String] {
@@ -349,11 +351,18 @@ enum AgentNameOneShot {
                     "--output-format", "json", "--json-schema", nameSchema,
                     "--model", titler.model]
                 + (ClaudeCLIBackend.effortArgument(forThinking: "low").map { ["--effort", $0] } ?? [])
-                + ["--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+                + ["--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
                    "--settings", #"{"disableAllHooks":true}"#,
                    "--system-prompt", titleRules]
         case .codex:
-            return ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            return ["exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+                    "--disable", "shell_tool", "--disable", "apps", "--disable", "plugins",
+                    "--disable", "remote_plugin", "--disable", "hooks", "--disable", "multi_agent",
+                    "--disable", "browser_use", "--disable", "browser_use_external", "--disable", "browser_use_full_cdp_access",
+                    "--disable", "computer_use", "--disable", "view_image", "--disable", "image_generation",
+                    "--disable", "code_mode_host", "--disable", "sleep_tool", "--disable", "workspace_dependencies",
+                    "--disable", "skill_search", "--disable", "skill_mcp_dependency_install",
+                    "-c", "web_search=disabled",
                     "--output-schema", schemaFile.path, "-o", lastMessageFile.path,
                     "-m", titler.model]
                 + (CodexCLIBackend.effortArgument(forThinking: "low").map { ["-c", "model_reasoning_effort=\($0)"] } ?? [])
@@ -1113,6 +1122,10 @@ final class AgentSupervisor {
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
+    private var latestRecoverablePrompts: [AgentID: AgentPrompt] = [:]
+    private var contextRecoveryInFlight: Set<AgentID> = []
+    private var recoveredContextFailureTurns: [AgentID: String] = [:]
+    private var automaticContextCompactionEpochs: [AgentID: UInt64] = [:]
     /// The opening of the agent's first reply, the titler's second input. Same
     /// memory-only rule as `firstPromptByAgent`; `firstReplyClosed` stops the
     /// capture at the first completed turn.
@@ -1140,6 +1153,81 @@ final class AgentSupervisor {
     /// events can arrive back-to-back; ordering them prevents a late restore from
     /// racing a successful confirmation and makes replay/rebind idempotent.
     private var submissionRecoveryTasks: [AgentID: Task<Void, Never>] = [:]
+
+    /// The original transcript/session survives either recovery choice.
+    /// Returning a new id lets the host reveal the summary session.
+    func recoverContextFull(_ action: AgentContextFullRecovery.Action, for id: AgentID, blockID: AgentNodeID? = nil) async -> AgentID? {
+        if let blockID {
+            guard let block = transcriptProjections[id]?.document.entries.flatMap(\.blocks).last(where: {
+                      if case .error = $0.payload { return true }; return false
+                  }), block.id == blockID,
+                  case .error(let error) = block.payload,
+                  error.message == AgentContextFullRecovery.canonicalErrorMessage else { return nil }
+        }
+        guard contextRecoveryInFlight.insert(id).inserted else { return nil }
+        defer { contextRecoveryInFlight.remove(id) }
+        guard let record = records[id], let harness = record.harness, runners[id] == nil,
+              let terminal = history[id]?.last(where: { if case .turnCompleted = $0 { return true }; return false }),
+              case .turnCompleted(_, let failedTurnID, .failed, let error) = terminal,
+              error == AgentContextFullRecovery.canonicalErrorMessage,
+              recoveredContextFailureTurns[id] != failedTurnID else { return nil }
+        switch action {
+        case .copyTranscript: return id // tile owns the user's local pasteboard
+        case .forkWithSummary:
+            let blocks = transcriptProjections[id]?.document.entries.flatMap(\.blocks) ?? []
+            guard !blocks.isEmpty else { return nil }
+            let context = AgentTranscriptCopyController.plainText(for: blocks)
+            let carry = "Continue this task in a new session. The previous session remains intact.\n"
+                + "Handoff summary — original request: " + (latestRecoverablePrompts[id]?.text ?? "See transcript below")
+                + "\nRecent transcript excerpt (bounded; check project files before assuming omitted details):\n\n"
+                + String(context.suffix(24_000))
+            recoveredContextFailureTurns[id] = failedTurnID
+            return spawn(role: record.role, prompt: carry, cwd: URL(fileURLWithPath: record.cwd),
+                         harness: harness, model: record.model, thinking: record.thinking,
+                         projectId: record.projectId,
+                         projectRoot: record.projectRoot.map { URL(fileURLWithPath: $0) },
+                         parentAgentID: id, displayName: "Continue \(record.displayName)")
+        case .compactAndRetry:
+            guard let store = submissionRecoveryStore, let prompt = latestRecoverablePrompts[id],
+                  let candidate = (idleSessionRunners[id] ?? makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id)))) as? AgentCompactionRunning,
+                  candidate.compactionCapabilities.supportsManual else { return nil }
+            recoveredContextFailureTurns[id] = failedTurnID
+            let draftImages = prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) }
+            let references = prompt.fileReferences.map { AgentComposerDraftFileReference(
+                displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path) }
+            await store.enqueueContextRecovery(text: prompt.text, imageAttachments: draftImages,
+                                              fileReferences: references, for: id)
+            queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            pausedQueues.remove(id)
+            queuePauseReasons[id] = nil
+            drainQueue(for: id)
+            return id
+        }
+    }
+
+    var qaContextAutoCompactionThreshold: (() -> Double?)?
+    var qaDidFinishAutomaticContextCompaction: (() -> Void)?
+    private func contextAutoCompactionThreshold() -> Double? {
+        if let qaContextAutoCompactionThreshold { return qaContextAutoCompactionThreshold() }
+        return AgentContextAutoCompactionPolicy.threshold()
+    }
+
+    private func requestAutomaticContextCompaction(after reading: AgentContextWindowSnapshot, for id: AgentID) {
+        guard let threshold = contextAutoCompactionThreshold(),
+              let used = reading.usedTokens, let max = reading.maxTokens, max > 0,
+              Double(used) / Double(max) >= threshold, reading.compacting != true,
+              let record = records[id], automaticContextCompactionEpochs[id] != record.contextEpoch,
+              !activeCompactionOperations.contains(id), !compactingAgents.contains(id),
+              submissionRecoveryStore != nil else { return }
+        automaticContextCompactionEpochs[id] = record.contextEpoch
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.qaDidFinishAutomaticContextCompaction?() }
+            guard self.records[id]?.contextEpoch == record.contextEpoch,
+                  self.contextAutoCompactionThreshold() != nil else { return }
+            _ = await self.accept(.compact(AgentCompactionRequest()), for: id)
+        }
+    }
 
     // MARK: - Compaction operation
 
@@ -1377,6 +1465,8 @@ final class AgentSupervisor {
     /// after a streaming turn floods it, so a tile that attaches later seeds
     /// from this instead (`contextWindowSnapshot(for:)`).
     private var contextWindowSnapshots: [AgentID: AgentContextWindowSnapshot] = [:]
+    private lazy var contextWindowResolver = AgentContextWindowResolver(
+        applicationSupportDirectory: store.layout.applicationSupportDirectory)
     /// TR-04 — the slash commands each harness has told us THIS session has,
     /// or no entry when it has not said yet.
     ///
@@ -2667,6 +2757,10 @@ final class AgentSupervisor {
 
     @discardableResult
     private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID) -> Bool {
+        guard !contextRecoveryInFlight.contains(id) else {
+            warn("Context recovery is being prepared; keep this draft and send after recovery starts.")
+            return false
+        }
         guard prepared.expectedAgentID == id else {
             warn("AgentSupervisor.send: prepared prompt agent mismatch")
             return false
@@ -2744,6 +2838,7 @@ final class AgentSupervisor {
         // transcript would be missing the prompt that started every turn — the
         // tile used to supply this echo itself (`appendUserPrompt`), which is
         // exactly the tile-shaped dependency this ticket removes.
+        latestRecoverablePrompts[id] = prompt
         recordTranscriptUserPrompt(prompt, for: id)
 
         // Stamp the spawn-window anchor BEFORE the runner is built, so the
@@ -2767,6 +2862,7 @@ final class AgentSupervisor {
                 runner = idle
             } else {
                 idle.stop()
+                interruptWorkingClaudeMirroredChildren(of: id)
                 runner = makeRunner(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi)))
             }
         } else {
@@ -3304,12 +3400,12 @@ final class AgentSupervisor {
     }
 
     /// Kills the bound runner's process group and closes the turn synchronously.
-    private func killRunner(_ id: AgentID) {
+    private func killRunner(_ id: AgentID, pauseAfterStop: Bool = true) {
         interruptingAgents.remove(id)
         deferredForceSends[id] = nil
         openToolItems[id] = nil
         returnDeliveringSteers(for: id)
-        pauseQueue(id, .afterStop)
+        if pauseAfterStop { pauseQueue(id, .afterStop) }
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
@@ -3352,8 +3448,12 @@ final class AgentSupervisor {
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
         for id in Array(runners.keys) { stop(id) }
-        for runner in idleSessionRunners.values { runner.stop() }
-        idleSessionRunners.removeAll()
+        for id in Array(idleSessionRunners.keys) {
+            guard let idle = idleSessionRunners.removeValue(forKey: id) else { continue }
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+        }
         // `stop(id)` reaches `stopObservedRuns(for: id)` only for a parent still
         // in `runners`. A parent whose runner had already exited but whose
         // observed children were still being tailed (B: quiet-forever until the
@@ -4568,6 +4668,10 @@ final class AgentSupervisor {
         locationProjectors.removeValue(forKey: id)
         turnFacts.removeValue(forKey: id)
         contextWindowSnapshots.removeValue(forKey: id)
+        latestRecoverablePrompts.removeValue(forKey: id)
+        automaticContextCompactionEpochs.removeValue(forKey: id)
+        contextRecoveryInFlight.remove(id)
+        recoveredContextFailureTurns.removeValue(forKey: id)
         advertisedCommandNames.removeValue(forKey: id)
         arrayOwnedNoticeCounts.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
@@ -5275,13 +5379,15 @@ final class AgentSupervisor {
         if record.model != effectiveModel { record.model = effectiveModel; changed = true }
         if let thinking, record.thinking != thinking { record.thinking = thinking; changed = true }
         guard changed else { return false }
+        // Retire the old session before replacing its harness in the record:
+        // its Claude children belong to the old provider, even on a harness switch.
+        if let idle = idleSessionRunners.removeValue(forKey: id) {
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+        }
         records[id] = record
         persist(record)
-        // A persistent Pi process was launched with the previous harness/model/
-        // thinking arguments. Provider controls are disabled during a turn, so
-        // the only stale instance possible here is idle; retire it now and let
-        // the next send create a session with the newly persisted settings.
-        idleSessionRunners.removeValue(forKey: id)?.stop()
         return true
     }
 
@@ -5336,28 +5442,33 @@ final class AgentSupervisor {
         return contextWindowSnapshots[id] ?? record.lastContextWindow
     }
 
-    /// The context meter's denominator, resolved here and nowhere else. A
-    /// window the provider states wins and is remembered on the record for the
-    /// model it belongs to, so the next turn's first request has it; then pi's
-    /// models-store. Never guessed from a family name: `claude-opus-4-5` is 200k
-    /// and `claude-opus-5` 1M, so a wrong guess misreports occupancy by 5x.
-    private func contextWindow(for id: AgentID, stated: Int?) -> Int? {
-        guard var record = records[id] else { return nil }
+    /// Provider → shared remembered exact model → bundled → pi-only store → unknown.
+    private func contextWindowResolution(for id: AgentID, stated: Int?) -> AgentContextWindowResolution {
+        guard var record = records[id], let harness = record.harness else {
+            return AgentContextWindowResolution(tokens: nil, source: .unknown, model: "unknown")
+        }
         let model = record.resolvedModelId ?? record.model
-        if let stated, stated > 0 {
-            if record.providerContextWindows[model] != stated {
-                record.providerContextWindows[model] = stated
-                records[id] = record
-                persist(record)
-            }
-            return stated
+        let resolution = contextWindowResolver.resolve(
+            harness: harness, model: model, stated: stated,
+            legacyRemembered: record.providerContextWindows[model],
+            piStore: record.harness == .pi ? AgentModelCatalog.shared.contextWindow(for: model, harness: .pi) : nil)
+        if resolution.source == .provider, let value = resolution.tokens,
+           record.providerContextWindows[model] != value {
+            record.providerContextWindows[model] = value
+            records[id] = record
+            persist(record)
         }
-        if let remembered = record.providerContextWindows[model] { return remembered }
-        if let resolved = record.resolvedModelId,
-           let window = AgentModelCatalog.shared.contextWindow(for: resolved) {
-            return window
+        if resolution.source == .unknown,
+           contextWindowResolver.shouldReportUnknown(harness: harness, model: model) {
+            let message = "Context window unknown for \(model). Prompt tokens remain visible."
+            warn(message)
+            appendLocalNotice(id: id, key: "context-window-unknown", title: "Context window unknown", body: message)
         }
-        return AgentModelCatalog.shared.contextWindow(for: record.model)
+        return resolution
+    }
+
+    private func contextWindow(for id: AgentID, stated: Int?) -> Int? {
+        contextWindowResolution(for: id, stated: stated).tokens
     }
 
     private static func endsInTurnCompaction(_ event: AgentRuntimeEvent) -> Bool {
@@ -5427,7 +5538,9 @@ final class AgentSupervisor {
         return AgentTileTurnSnapshot(
             state: state,
             capabilities: AgentTurnCapabilities(
-                canSend: !mirrored && !occupied && heldForReadiness[id] == nil && state.acceptsNewTurn,
+                canSend: !mirrored && !occupied && heldForReadiness[id] == nil
+                    && deferredForceSends[id] == nil && pendingForceSends[id] == nil
+                    && !contextRecoveryInFlight.contains(id) && state.acceptsNewTurn,
                 // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
                 // genuinely kills a spawning (pre-turnStarted) or draining
                 // (post-settle) process, so gating on `execution == .working`
@@ -6463,8 +6576,13 @@ final class AgentSupervisor {
         if record.harness == .claudeCode {
             record.pendingSessionForkFrom = record.providerSessionId ?? Self.claudeSessionId(for: id)
             // T5 — the idle session process is still the OLD conversation; the
-            // next send must spawn the fork.
-            idleSessionRunners.removeValue(forKey: id)?.stop()
+            // next send must spawn the fork. Stop suppresses the runner's idle
+            // exit callback, so close its children before severing their lineage.
+            if let idle = idleSessionRunners.removeValue(forKey: id) {
+                idleReapTokens[id] = nil
+                idle.stop()
+                interruptWorkingClaudeMirroredChildren(of: id)
+            }
         }
 
         // 2. The stale-but-numeric context meter must not re-seed from a
@@ -6787,7 +6905,10 @@ final class AgentSupervisor {
         queueOpTasks[id] = Task { @MainActor [weak self] in
             if let previous { await previous.value }
             guard let self else { return }
-            guard let next = await store.nextWorkItem(for: id) else { return }
+            await self.qaBeforeQueueDrain?()
+            guard self.canDrainQueue(for: id),
+                  let next = await store.nextWorkItem(for: id),
+                  self.canDrainQueue(for: id) else { return }
             if case .compaction(let compact) = next {
                 // Write-ahead recovery: an app exit from this point onward must
                 // surface an uncertain operation, never silently replay it.
@@ -6809,6 +6930,10 @@ final class AgentSupervisor {
             }
             self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             self.notifyTurnCapabilitiesChanged(id)
+            guard self.canDrainQueue(for: id) else {
+                await self.restoreDrainedWorkItem(workItem, for: id, store: store)
+                return
+            }
             if case .compaction(let compact) = workItem {
                 guard self.startCompaction(
                     AgentCompactionRequest(operationID: compact.operationID, focus: compact.focus),
@@ -6827,6 +6952,10 @@ final class AgentSupervisor {
                 // the next turn like any other.
                 return
             }
+            guard self.canDrainQueue(for: id) else {
+                await self.restoreDrainedWorkItem(workItem, for: id, store: store)
+                return
+            }
             guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
@@ -6841,6 +6970,25 @@ final class AgentSupervisor {
         }
     }
 
+    /// Admission is rechecked after every actor hop: Stop or a new force send
+    /// can change it while the durable queue/attachment store is awaited.
+    private func canDrainQueue(for id: AgentID) -> Bool {
+        runners[id] == nil && !pausedQueues.contains(id)
+            && pendingForceSends[id] == nil && deferredForceSends[id] == nil
+            && !contextRecoveryInFlight.contains(id)
+    }
+
+    private func restoreDrainedWorkItem(_ item: AgentComposerQueuedWorkItem, for id: AgentID, store: AgentComposerDraftStore) async {
+        if case .compaction = item, var record = records[id] {
+            record.inFlightCompaction = nil
+            records[id] = record
+            persist(record)
+        }
+        await store.requeueWorkItemAtFront(item, for: id)
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
+    }
+
     // MARK: - T5 steering, force send, interrupt, idle reaping
 
     /// How long an idle provider session may sit before it is reaped (D3).
@@ -6850,6 +6998,7 @@ final class AgentSupervisor {
     /// QA: runs inside `accept(.queue)`/`accept(.steer)` after admission and
     /// before the store write, so a check can end the turn in that gap.
     var qaAfterQueueAdmission: (@MainActor () async -> Void)?
+    var qaBeforeQueueDrain: (@MainActor () async -> Void)?
     /// How long an acknowledged interrupt may take to end the turn before
     /// Stop falls back to killing the process. Shortened by the checks.
     var interruptGrace: TimeInterval = 5
@@ -6963,6 +7112,15 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
         guard case .prompt(let message) = item else { return nil }
         return message
+    }
+
+    /// An asynchronous composer edit lost its binding: restore the exact held
+    /// item to its original agent, including its id and attachments.
+    func restoreQueuedItemAfterFailedEdit(_ message: AgentComposerQueuedMessage, for id: AgentID) async {
+        guard records[id] != nil, let store = submissionRecoveryStore else { return }
+        await store.requeueWorkItemAtFront(.prompt(message), for: id)
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Reorders the follow-up section; held steers keep the front.
@@ -7094,8 +7252,8 @@ final class AgentSupervisor {
 
     private func escalateToKill(_ id: AgentID) {
         let forced = takePendingForceSend(for: id)
-        killRunner(id)
-        if let forced, sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+        killRunner(id, pauseAfterStop: forced == nil)
+        if let forced { sendOrRecoverForcedPrompt(forced, to: id) }
     }
 
     /// Hands every held steer (or just `only`) to the bound runner, once its
@@ -7175,16 +7333,27 @@ final class AgentSupervisor {
         if deliveringSteers[id]?.isEmpty ?? true { sendDeferredForceSend(for: id) }
     }
 
+    /// A force-send race cannot consume the user's accepted prompt.
+    private func sendOrRecoverForcedPrompt(_ forced: (prompt: PreparedAgentPrompt, echo: Bool), to id: AgentID) {
+        if sendPrepared(forced.prompt, to: id) {
+            if forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+        } else {
+            pendingForceSends[id, default: []].insert(forced, at: 0)
+            recoverForcedMessagesAfterStop(id)
+        }
+    }
+
     private func sendDeferredForceSend(for id: AgentID, token: UUID? = nil) {
         guard let pending = deferredForceSends[id], token == nil || pending.token == token else { return }
         guard let forced = deferredForceSends.removeValue(forKey: id) else { return }
-        if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+        sendOrRecoverForcedPrompt((forced.prompt, forced.echo), to: id)
     }
 
     /// Steers a session that died never confirmed go back to being held.
     private func returnDeliveringSteers(for id: AgentID) {
         guard let entries = deliveringSteers.removeValue(forKey: id), !entries.isEmpty,
               let store = submissionRecoveryStore else { return }
+        pauseQueue(id, .afterStop)
         runQueueOp(for: id) { await store.requeueHeldSteersAtFront(entries.map(\.message), for: id) }
     }
 
@@ -7240,6 +7409,9 @@ final class AgentSupervisor {
         if wasPooled {
             idleSessionRunners[id] = nil
             idleReapTokens[id] = nil
+            // Only this exact session owns the children being closed. A late
+            // exit callback from an old session cannot close newer children.
+            interruptWorkingClaudeMirroredChildren(of: id)
         }
         guard wasPooled || idleSessionRunners[id] == nil else { return }
         let harness = records[id]?.harness?.rawValue ?? "The agent"
@@ -7266,6 +7438,7 @@ final class AgentSupervisor {
             self.idleReapTokens[id] = nil
             self.idleSessionRunners[id] = nil
             runner.stop()
+            self.interruptWorkingClaudeMirroredChildren(of: id)
             self.returnDeliveringSteers(for: id)
             self.notifyTurnCapabilitiesChanged(id)
         }
@@ -7361,9 +7534,12 @@ final class AgentSupervisor {
             openToolItems[id]?.remove(itemID)
         case .turnCompleted:
             openToolItems[id] = nil
-            // A claude session outlives its turns now, so its mirrored children
-            // are closed at the parent's `result` rather than at process exit.
-            interruptWorkingClaudeMirroredChildren(of: id)
+            // A persistent Claude session can keep its mirrored children running
+            // after the parent's result. Their own result or the session's actual
+            // exit closes them; a result with no background work closes orphans.
+            if (runner as? AgentSteeringRunning)?.hasBackgroundWork != true {
+                interruptWorkingClaudeMirroredChildren(of: id)
+            }
         default:
             break
         }
@@ -7375,6 +7551,10 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        if case .turnCompleted(_, _, .failed, let error) = event,
+           error == AgentContextFullRecovery.canonicalErrorMessage {
+            pauseQueue(id, .held)
+        }
         // T1 — the context meter has ONE owner. Every provider snapshot folds
         // into the agent's current reading (`AgentContextMeter`) and the tile is
         // handed the result, so a settings-only snapshot cannot blank the ring
@@ -7387,12 +7567,19 @@ final class AgentSupervisor {
         // compact_boundary snapshot, and every request after an in-turn
         // compaction — so the ring froze on the pre-compaction number.
         if case .contextWindowUpdated(let threadId, let snapshot) = event, let record = records[id] {
+            // A meter published by Array already contains a resolved fallback.
+            // Only an incoming provider frame can state and remember a window.
+            let resolution = contextWindowResolution(
+                for: id, stated: meterPublished ? nil : snapshot.maxTokens)
             var reading = meterPublished ? snapshot : AgentContextMeter.reading(
                 after: snapshot,
                 current: contextWindowSnapshot(for: id),
-                window: contextWindow(for: id, stated: snapshot.maxTokens))
+                window: resolution.tokens)
+            reading.windowResolutionSource = meterPublished ? snapshot.windowResolutionSource : resolution.source
+            reading.contextModel = resolution.model
             reading.contextEpoch = record.contextEpoch
             event = .contextWindowUpdated(threadId: threadId, snapshot: reading)
+            if !meterPublished { requestAutomaticContextCompaction(after: reading, for: id) }
         }
         var publishedMeter: (threadId: String, snapshot: AgentContextWindowSnapshot)?
         if case .compactionChanged(let threadId, let lifecycle) = event {
@@ -7831,8 +8018,8 @@ final class AgentSupervisor {
             } else {
                 // Claude owns mirrored children inside this process. If it exits
                 // or crashes before their matching tool_result, no later transport
-                // can close them (the live-process case closes at `result`, in
-                // `deliver`). Codex is deliberately excluded: its provider
+                // can close them. A retained process with background work closes
+                // them on their own result or its actual exit. Codex is excluded: its provider
                 // children can drain after the parent turn completes.
                 interruptWorkingClaudeMirroredChildren(of: id)
                 // A steer the dead process never confirmed was never read.
@@ -7853,7 +8040,7 @@ final class AgentSupervisor {
                 // settle that steer as consumed, so the forced message waits for
                 // every receipt (bounded by `interruptGrace`).
                 if deliveringSteers[id]?.isEmpty ?? true {
-                    if sendPrepared(forced.prompt, to: id), forced.echo { echoPrompt(forced.prompt.prompt, for: id) }
+                    sendOrRecoverForcedPrompt(forced, to: id)
                 } else {
                     let token = UUID()
                     deferredForceSends[id] = (forced.prompt, forced.echo, token)
@@ -12468,11 +12655,18 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
         (.claudeCode, "anthropic/claude-fixture-opus", "Fix zone drag snapping", [
             "-p", "--no-session-persistence", "--output-format", "json", "--json-schema", schema,
             "--model", "claude-fixture-opus", "--effort", "low", "--tools", "", "--strict-mcp-config",
-            "--disable-slash-commands", "--settings", #"{"disableAllHooks":true}"#,
+            "--setting-sources", "", "--disable-slash-commands", "--settings", #"{"disableAllHooks":true}"#,
             "--system-prompt", AgentNameOneShot.titleRules,
         ]),
         (.codex, "openai-codex/gpt-fixture-codex", "Wire codex session titles", [
-            "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
+            "--disable", "shell_tool", "--disable", "apps", "--disable", "plugins",
+            "--disable", "remote_plugin", "--disable", "hooks", "--disable", "multi_agent",
+            "--disable", "browser_use", "--disable", "browser_use_external", "--disable", "browser_use_full_cdp_access",
+            "--disable", "computer_use", "--disable", "view_image", "--disable", "image_generation",
+            "--disable", "code_mode_host", "--disable", "sleep_tool", "--disable", "workspace_dependencies",
+            "--disable", "skill_search", "--disable", "skill_mcp_dependency_install",
+            "-c", "web_search=disabled",
             "--output-schema", "<schema>", "-o", "<last-message>",
             "-m", "gpt-fixture-codex", "-c", "model_reasoning_effort=low",
         ]),

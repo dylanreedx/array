@@ -504,8 +504,8 @@ enum UIProbeGeometry {
             totalProcessedTokens: 98_446, totalCostUsd: 0.015, observedAt: now,
             source: .claudeAssistantUsage, freshness: .live)
         let count = AgentRadialContextMeterPresenter.present(perRequestCount, policy: policy)
-        try require(count.state == .known && count.fraction == nil,
-                    "a request's usage without a max must present a known token count, not an occupancy fraction (state \(count.state.rawValue), fraction \(String(describing: count.fraction)))")
+        try require(count.state == .unknown && count.fraction == nil,
+                    "a request's usage without a max must present an unknown dashed ring with a measured prompt count (state \(count.state.rawValue), fraction \(String(describing: count.fraction)))")
         try require(count.label == "24.4k",
                     "a request's usage must show its prompt tokens, not 'unknown' or the processed total, got \(count.label)")
         let runSum = AgentContextWindowSnapshot(
@@ -694,10 +694,24 @@ enum UIProbeGeometry {
                         try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity:") && row.qaAccessibilityLabel.contains("Context"),
                                     "compact status row AX label dropped one semantic fact at \(name); label was \"\(row.qaAccessibilityLabel)\"")
                     }
-                    try require(row.qaAccessibilityChildrenCount == 1,
-                                "compact status row must expose exactly its one location-action child")
+                    let expectsCompactAction = presentation.context.state == .warning || presentation.context.state == .critical
+                    let expectedActionLabels = expectsCompactAction ? ["Location actions", "Compact context"] : ["Location actions"]
+                    let actionChildren = (row.accessibilityChildren() ?? []).compactMap { $0 as? NSButton }
+                    try require(row.qaAccessibilityChildrenCount == expectedActionLabels.count
+                                    && actionChildren.map { $0.accessibilityLabel() ?? "" } == expectedActionLabels,
+                                "compact status row must expose its current native action children at \(name)")
                     try require(row.qaLocationActionButtonAccessibilityLabel == "Location actions",
                                 "compact status row lost the single accessible location action route")
+                    if expectsCompactAction {
+                        var requestedCompaction = false
+                        row.onCompactContextRequested = { requestedCompaction = true }
+                        try require(row.qaCompactContextButtonVisible && row.qaCompactContextButtonEnabled,
+                                    "warning/critical Compact action must be visible and enabled")
+                        row.qaPerformCompactContextAction()
+                        try require(requestedCompaction, "accessible Compact action did not invoke its callback")
+                    } else {
+                        try require(!row.qaCompactContextButtonVisible, "ordinary context exposed a Compact action")
+                    }
                     if presentation.activity.showsThinkingIndicator {
                         try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while active")
                     }
@@ -2569,6 +2583,9 @@ enum UIProbeGeometry {
     // width. It reads the laid-out table and the visible label frames, not the
     // height function under test.
     private static func checkSidebarContentDerivedHeights() throws -> Int {
+        // Top-level agents now have an explicit inter-group gap BELOW the
+        // card. Table pitch includes it; content-derived card height does not.
+        let rootGroupGap = AgentInbox96CellView.trailingGap(for: .none)
         let epoch = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let rows = [
             AgentInboxRow(
@@ -2668,7 +2685,8 @@ enum UIProbeGeometry {
                     let roles: [TextRole] = (row.drawsMetaLine ? [.label] : [])
                         + [.title]
                         + (row.drawsDetailLine ? [.label] : [])
-                    let expected = Metrics.rowHeight(for: roles, insets: Inset.card, spacing: Space.s)
+                    let expectedContent = Metrics.rowHeight(for: roles, insets: Inset.card, spacing: Space.s)
+                    let expected = expectedContent + rootGroupGap
                     let measured = probe.inbox.rowHeightsForQA[index]
                     guard abs(measured - expected) <= 0.5 else {
                         throw fail(String(
@@ -2684,6 +2702,9 @@ enum UIProbeGeometry {
                           let maxY = visibleFrames.map(\.maxY).max(),
                           let cardFrame = geometry.elementFrames["card"] else {
                         throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): '\(row.title)' has no visible drawn content frame")
+                    }
+                    guard abs(Double(cardFrame.height) - expectedContent) <= 0.5 else {
+                        throw fail("sidebar-ux-check.content-height: group spacing inflated the card's content height")
                     }
                     let drawnHeight = Double(maxY - minY)
                     let interiorHeight = Double(cardFrame.height) - Inset.card.vertical
@@ -2723,7 +2744,7 @@ enum UIProbeGeometry {
                     throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): captionHidden left the sole project visible")
                 }
                 let oneLineHeight = Metrics.rowHeight(
-                    for: [.title], insets: Inset.card, spacing: Space.s)
+                    for: [.title], insets: Inset.card, spacing: Space.s) + rootGroupGap
                 guard let hiddenHeight = hiddenProbe.inbox.rowHeightForQA(id: captionHiddenProject.id),
                       abs(hiddenHeight - oneLineHeight) <= 0.5 else {
                     throw fail(String(
@@ -2792,9 +2813,9 @@ enum UIProbeGeometry {
             transitionProbe.host.layoutSubtreeIfNeeded()
             transitionProbe.inbox.layoutForQA()
             let transitionTwoLineHeight = Metrics.rowHeight(
-                for: [.label, .title], insets: Inset.card, spacing: Space.s)
+                for: [.label, .title], insets: Inset.card, spacing: Space.s) + rootGroupGap
             let transitionOneLineHeight = Metrics.rowHeight(
-                for: [.title], insets: Inset.card, spacing: Space.s)
+                for: [.title], insets: Inset.card, spacing: Space.s) + rootGroupGap
             guard let wideGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first,
                   wideGeometry.fitTier == .full,
                   wideGeometry.labels.first(where: { $0.element == "project" })?.isHidden == false,
@@ -2924,7 +2945,7 @@ enum UIProbeGeometry {
                 disclosure: .none)
             let middleExpectedHeight = Metrics.rowHeight(
                 for: middleTier.drawsProject ? [.label, .title] : [.title],
-                insets: Inset.card, spacing: Space.s)
+                insets: Inset.card, spacing: Space.s) + rootGroupGap
             let middleGeometry = transitionProbe.inbox.qaRowGeometriesForQA.first
             let middleHeight = transitionProbe.inbox.rowHeightForQA(id: resizingRow.id)
             guard middleGeometry?.fitTier == middleTier,
@@ -3107,9 +3128,9 @@ enum UIProbeGeometry {
             createdAt: scrollRows[5].createdAt)
         let nextScrollRows = scrollRows.map { $0.id == arriving.id ? arriving : $0 }
         let oneLineHeight = Metrics.rowHeight(
-            for: [.title], insets: Inset.card, spacing: Space.s)
+            for: [.title], insets: Inset.card, spacing: Space.s) + rootGroupGap
         let threeLineHeight = Metrics.rowHeight(
-            for: [.label, .title, .label], insets: Inset.card, spacing: Space.s)
+            for: [.label, .title, .label], insets: Inset.card, spacing: Space.s) + rootGroupGap
         var incrementalWidths: [String] = []
         // The selected anchor is the row immediately after the arriving row in
         // the newest-first rendered order. It must remain the visible anchor even
@@ -3203,7 +3224,7 @@ enum UIProbeGeometry {
                 variant: .card, createdAt: row.createdAt)
         }
         let bottomOneLineHeight = Metrics.rowHeight(
-            for: [.title], insets: Inset.card, spacing: Space.s)
+            for: [.title], insets: Inset.card, spacing: Space.s) + rootGroupGap
         for width in widths {
             let bottomProbe = try makeSidebarProbeHost(
                 width: width, height: 190, appearanceName: .aqua)
@@ -5996,15 +6017,17 @@ enum UIProbeGeometry {
                       !tile.qaStatusThinkingIndicatorVisible else {
                     throw fail("\(label): default production order or compact-row thinking-indicator boundary regressed (placement=\(tile.qaStatusRowPlacement.rawValue), order=\(tile.qaCompositionIdentifiers), status=\(tile.qaStatusThinkingIndicatorVisible))")
                 }
-                guard !tile.qaThinkingIndicatorVisible else {
-                    throw fail("\(label): unattached/configuring fixture advertised an active transcript-tail Dual-Plane Gyro")
+                // This Lab fixture explicitly ingests a running session and
+                // turnStarted; it is a simulated live turn, not fresh setup.
+                guard tile.qaThinkingIndicatorVisible else {
+                    throw fail("\(label): explicit live fixture turn lacked its transcript-tail Gyro")
                 }
                 tile.ingest(.contentDelta(
                     threadId: tile.wiringThreadId, turnId: "gyro-yield",
                     streamKind: .assistant, delta: "assistant delta"))
-                guard !tile.qaThinkingIndicatorVisible,
+                guard tile.qaThinkingIndicatorVisible,
                       !tile.qaStatusThinkingIndicatorVisible else {
-                    throw fail("\(label): transcript-tail gyro did not yield immediately on assistant content")
+                    throw fail("\(label): live assistant content must retain the transcript-tail Gyro and silent footer")
                 }
                 try checkManagedTileCompactStatusComposition(tile, label: label)
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
@@ -6280,10 +6303,8 @@ enum UIProbeGeometry {
             throw fail("\(label): the context ring and its reading must stay visible beside the account pills")
         }
 
-        // A zero-turn session is empty for ANY window size: the seeded
-        // zero-used/no-max snapshot renders an authoritative 0%, never
-        // "unknown". A real report always carries a max and keeps the
-        // arithmetic path.
+        // An empty prompt count without a model window cannot establish an
+        // occupancy percentage. Keep its count visible with the unknown ring.
         let emptySession = AgentContextWindowSnapshot(
             usedTokens: 0, observedAt: now, source: .unknown("fresh-session"), freshness: .live)
         tile.qaApplyCompactStatusFacts(
@@ -6291,10 +6312,27 @@ enum UIProbeGeometry {
             contextWindow: emptySession, now: now)
         let emptyRow = tile.qaCompactStatusRow
         emptyRow.layoutSubtreeIfNeeded()
-        guard emptyRow.qaContextState == .known,
-              emptyRow.qaContextFraction == 0,
+        guard emptyRow.qaContextState == .unknown,
+              emptyRow.qaContextFraction == nil,
+              emptyRow.qaContextText == "0",
               tile.qaCompactStatusContentFitsBounds else {
-            throw fail("\(label): a zero-turn empty session must present authoritative 0%, got state \(emptyRow.qaContextState) fraction \(String(describing: emptyRow.qaContextFraction))")
+            throw fail("\(label): zero prompt tokens without a window must remain unknown with count 0, got state \(emptyRow.qaContextState) fraction \(String(describing: emptyRow.qaContextFraction)) text \(emptyRow.qaContextText)")
+        }
+
+        // A supplied denominator makes the same zero count authoritative 0%.
+        let knownEmptySession = AgentContextWindowSnapshot(
+            usedTokens: 0, maxTokens: 128_000, observedAt: now,
+            source: .unknown("known-window"), freshness: .live)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .ready)), location: location,
+            contextWindow: knownEmptySession, now: now)
+        let knownEmptyRow = tile.qaCompactStatusRow
+        knownEmptyRow.layoutSubtreeIfNeeded()
+        guard knownEmptyRow.qaContextState == .known,
+              knownEmptyRow.qaContextFraction == 0,
+              knownEmptyRow.qaContextText == "0%",
+              tile.qaCompactStatusContentFitsBounds else {
+            throw fail("\(label): zero prompt tokens with a known window must present 0%, got state \(knownEmptyRow.qaContextState) fraction \(String(describing: knownEmptyRow.qaContextFraction)) text \(knownEmptyRow.qaContextText)")
         }
 
         // A coarse running session (no active turn) stays intentionally
@@ -7035,6 +7073,22 @@ enum UIProbeGeometry {
         ))
         guard !tile.qaThinkingIndicatorVisible else {
             throw fail("fresh unattached/configuring tile advertised an active Gyro")
+        }
+        tile.ingest(.turnStarted(threadId: tile.wiringThreadId, turnId: "gyro-live"))
+        tile.ingest(.contentDelta(threadId: tile.wiringThreadId, turnId: "gyro-live",
+                                  streamKind: .assistant, delta: "still streaming"))
+        guard tile.qaThinkingIndicatorVisible else {
+            throw fail("explicit live turn with assistant content lacked Gyro")
+        }
+        tile.ingest(.turnCompleted(threadId: tile.wiringThreadId, turnId: "gyro-live",
+                                   outcome: .completed, errorMessage: nil))
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("completed turn retained live Gyro")
+        }
+        tile.ingest(.contentDelta(threadId: tile.wiringThreadId, turnId: "gyro-live",
+                                  streamKind: .assistant, delta: "late content"))
+        guard !tile.qaThinkingIndicatorVisible else {
+            throw fail("late content rearmed completed turn Gyro")
         }
         tile.detach()
         guard !tile.qaThinkingIndicatorVisible else {

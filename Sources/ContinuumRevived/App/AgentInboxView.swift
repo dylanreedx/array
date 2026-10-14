@@ -1161,7 +1161,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the list with it.
     var currentWorkspaceName: String? {
         didSet {
-            guard currentWorkspaceName != oldValue else { return }
+            // The host sets ID then name. Once an ID is available, only the ID
+            // drives filtering; the name is menu presentation and must not make
+            // a workspace switch rebuild the list twice.
+            guard currentWorkspaceId == nil, currentWorkspaceName != oldValue else { return }
+            reload(rows: allRows)
+        }
+    }
+    var currentWorkspaceId: UUID? {
+        didSet {
+            guard currentWorkspaceId != oldValue else { return }
             reload(rows: allRows)
         }
     }
@@ -2000,7 +2009,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
         let scoped = InboxScope.filter(
             rows: newRows, scope: scope, openAgentId: openAgentId,
-            currentWorkspace: currentWorkspaceName)
+            currentWorkspace: currentWorkspaceName,
+            currentWorkspaceId: currentWorkspaceId)
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch]
@@ -2500,7 +2510,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func updateScopeMenu() {
         let entries = InboxScope.entries(
             for: allRows, catalog: scopeCatalog, including: scope,
-            currentWorkspace: currentWorkspaceName)
+            currentWorkspace: currentWorkspaceName,
+            currentWorkspaceId: currentWorkspaceId)
         scopeEntries = entries
         var items = entries.map { ChoiceItem(id: $0.storageValue, title: $0.title) }
         managementItems.removeAll()
@@ -2600,7 +2611,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             for: model,
             availableWidth: available,
             disclosure: disclosure(for: model),
-            rollup: rollupsByParent[model.id])
+            rollup: rollupsByParent[model.id]) + groupEndGap
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
@@ -2697,6 +2708,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         let agentId = model.id
         cell.onToggleDisclosure = { [weak self] in self?.toggleCollapse(parentId: agentId) }
+        if let regular = cell as? AgentInboxCellView {
+            regular.setNesting(nesting(atTableRow: row))
+        }
+        if let slim = cell as? AgentInboxSlimCellView {
+            slim.setNesting(nesting(atTableRow: row))
+        }
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
@@ -2767,7 +2784,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let card = cell as? AgentInbox96CellView {
             card.configureHoverActions(snooze: action(.snooze), settle: action(.settle))
         } else if let slim = cell as? AgentInboxSlimCellView {
-            switch model.lifecycle {
+            if model.closingSince != nil {
+                slim.configureBackgroundActions(
+                    bringBack: isWired(.openInTile) ? { [weak self] in self?.onRevealRow?(id) } : nil,
+                    stop: action(.stopAgent))
+            } else {
+                slim.configureBackgroundActions(bringBack: nil, stop: nil)
+                switch model.lifecycle {
             case .snoozed:
                 slim.configureHoverAction(symbol: "alarm", label: "Wake", perform: action(.wake))
             case .settled:
@@ -2775,6 +2798,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     symbol: "arrow.uturn.backward", label: "Un-settle", perform: action(.unsettle))
             case .active, .archived:
                 slim.configureHoverAction(symbol: "arrow.uturn.backward", label: "Un-settle", perform: nil)
+                }
             }
         }
     }
@@ -2784,7 +2808,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let tableRow = tableRow(forAgentId: id) else { return nil }
         let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
         if let card = cell as? AgentInbox96CellView { return (card.qaHoverActionsShown, card.qaHoverActionTitles) }
-        if let slim = cell as? AgentInboxSlimCellView { return (slim.qaHoverActionShown, []) }
+        if let slim = cell as? AgentInboxSlimCellView {
+            return (slim.qaHoverActionShown, slim.qaHoverActionTitles)
+        }
         return nil
     }
 
@@ -2793,6 +2819,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
         else { return false }
         return card.clickHoverSettleForQA()
+    }
+
+    func clickBackgroundBringBackForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                as? AgentInboxSlimCellView else { return false }
+        return cell.clickBackgroundBringBackForQA()
+    }
+
+    func clickBackgroundStopForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                as? AgentInboxSlimCellView else { return false }
+        return cell.clickBackgroundStopForQA()
     }
 
     /// At most one nudge is ever offered, and only while the list has no unread or
@@ -4153,7 +4193,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for tableRow in visibleTimedTableRows() {
             let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
             (cell as? AgentInbox96CellView)?.updateElapsedClock(now: now)
-            // A Finishing row is slim and still timed (counted from the close).
+            // A Background row is slim and still timed (counted from the close).
             (cell as? AgentInboxSlimCellView)?.updateElapsedClock(now: now)
         }
     }
@@ -4550,6 +4590,35 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         visit(tableView)
         return cells
     }
+    func rowGeometryForQA(id: UUID) -> AgentInboxRowGeometryForQA? {
+        qaMaterializedRowCells.first { $0.qaAgentID == id }?.qaGeometry
+    }
+
+    func groupBackgroundForQA(id: UUID) -> (visible: Bool, roundsTop: Bool, roundsBottom: Bool)? {
+        guard let cell = qaMaterializedRowCells.first(where: { $0.qaAgentID == id }) else {
+            return nil
+        }
+        if let cell = cell as? AgentInboxCellView {
+            return (cell.qaGroupBackgroundVisibleForQA,
+                    cell.qaGroupBackgroundCornersForQA.top,
+                    cell.qaGroupBackgroundCornersForQA.bottom)
+        }
+        if let cell = cell as? AgentInbox96CellView {
+            return (cell.qaGroupBackgroundVisibleForQA,
+                    cell.qaGroupBackgroundCornersForQA.top,
+                    cell.qaGroupBackgroundCornersForQA.bottom)
+        }
+        if let cell = cell as? AgentInboxSlimCellView {
+            return (cell.qaGroupBackgroundVisibleForQA,
+                    cell.qaGroupBackgroundCornersForQA.top,
+                    cell.qaGroupBackgroundCornersForQA.bottom)
+        }
+        return nil
+    }
+
+    func disclosureTitleForQA(id: UUID) -> String? {
+        qaMaterializedRowCells.first(where: { $0.qaAgentID == id })?.qaDisclosureTitle
+    }
 
     var qaMaterializedRowCellCount: Int { qaMaterializedRowCells.count }
 
@@ -4581,7 +4650,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         return nil
     }
-    /// The drawn row's own value (variant, Finishing fact), for the same witnesses.
+    /// The drawn row's own value (variant, Background fact), for the same witnesses.
     func drawnRowForQA(id: UUID) -> AgentInboxRow? { rows.first { $0.id == id } }
     /// Every row the last push handed this view, before scope/search/fold shaping.
     /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
@@ -5153,6 +5222,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// modifier monitor — the paint itself is asserted by `jumpHintsForQA`.
     var areJumpHintsVisibleForQA: Bool { jumpHintsVisible }
     var disclosureGlyphsForQA: [String] { cells().map(\.qaDisclosureGlyph) }
+    var disclosureTitlesForQA: [String] { cells().map(\.qaDisclosureTitle) }
     var collapsedParentsForQA: Set<UUID> { collapsedParents }
 
     /// Fold a group the way the user does — through the button's own target/action,
@@ -5880,6 +5950,7 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
 
     var qaTitle: String { label.stringValue }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaDisclosureTitle: String { disclosureButton.qaTitle }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
@@ -5998,6 +6069,7 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// hidden children of a nested parent advertised themselves at the leading edge,
     /// reading as one more top-level agent.
     private let spine = InboxSpineView()
+    private let groupBackground = InboxGroupBackgroundView()
     private var labelLeading: NSLayoutConstraint?
     private var labelCentre: NSLayoutConstraint?
     private var nesting: InboxNesting = .none
@@ -6020,6 +6092,9 @@ final class AgentInboxRemainderView: NSTableCellView {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.target = self
         button.action = #selector(expandClicked)
+        groupBackground.translatesAutoresizingMaskIntoConstraints = false
+        spine.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(groupBackground)
         addSubview(button)
         addSubview(label)
         addSubview(spine)
@@ -6085,6 +6160,11 @@ final class AgentInboxRemainderView: NSTableCellView {
         let content = Double(bounds.height) - metrics.trailingGap(nesting)
         let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
         clipsToBounds = false
+        groupBackground.clipsToBounds = false
+        groupBackground.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        groupBackground.show(
+            nesting, hasChildren: false, metrics: metrics,
+            rowHeight: bounds.height + bleed * 2)
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -6177,6 +6257,7 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaGlyphAlpha: Double { get }
     var qaIndent: Double { get }
     var qaDisclosureGlyph: String { get }
+    var qaDisclosureTitle: String { get }
     var qaJumpHint: String { get }
     var qaJumpHintHitTestPassesThrough: Bool { get }
     /// The frame of whatever this variant paints the state with — the word on a
@@ -6240,6 +6321,7 @@ enum RowDisclosure: Equatable {
 /// this view to a token. Borderless, so the only thing on screen is the glyph.
 final class InboxDisclosureButton: NSButton, TokenThemed {
     private var glyph = ""
+    private var childCount = 0
 
     init() {
         super.init(frame: .zero)
@@ -6257,13 +6339,15 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
 
     required init?(coder: NSCoder) { return nil }
 
-    func show(_ disclosure: RowDisclosure) {
+    func show(_ disclosure: RowDisclosure, childCount: Int = 0) {
         isHidden = disclosure == .none
         glyph = disclosure.glyph
+        self.childCount = disclosure == .none ? 0 : max(0, childCount)
         let expanded = disclosure == .expanded
         setAccessibilityElement(disclosure != .none)
-        setAccessibilityLabel(disclosure == .collapsed ? "Expand" : "Collapse")
-        setAccessibilityValue(disclosure == .none ? nil : (expanded ? "Expanded" : "Collapsed"))
+        let verb = disclosure == .collapsed ? "Expand" : "Collapse"
+        setAccessibilityLabel(self.childCount > 0 ? "\(verb) \(self.childCount) subagents" : verb)
+        setAccessibilityValue(disclosure == .none ? nil : "\(self.childCount) subagents, \(expanded ? "expanded" : "collapsed")")
         setAccessibilityExpanded(expanded)
         setAccessibilityEnabled(disclosure != .none)
         applyTokens()
@@ -6274,7 +6358,7 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
     /// holds to three.
     func applyTokens() {
         attributedTitle = NSAttributedString(
-            string: glyph,
+            string: childCount > 0 ? "\(glyph) \(childCount)" : glyph,
             attributes: [
                 .font: NSFont.token(.label),
                 .foregroundColor: TextToken.textSecondary.color.nsColor(in: self),
@@ -6287,6 +6371,7 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
     }
 
     var qaGlyph: String { isHidden ? "" : glyph }
+    var qaTitle: String { attributedTitle.string }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
@@ -6803,7 +6888,9 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// The agent has a turn in flight — the only thing `AgentSupervisor.stop` has to
     /// terminate (`isRunning(_:)` there is `runners[id] != nil`).
     ///
-    /// THREE STATES, not one: `working` is obvious, and `approval`/`input` are a turn that
+    /// The row's live-runner fact is first because it comes from that same supervisor
+    /// snapshot and survives closing the tile. Otherwise THREE STATES, not one:
+    /// `working` is obvious, and `approval`/`input` are a turn that
     /// is still running with the adapter holding a request open — `InboxState.state(for:)`
     /// lets a pending request override a `working` status, so a blocked agent is a live
     /// one. `ready` is the resting state ("the agent stopped and is waiting on you") and
@@ -6811,6 +6898,11 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// nothing must not be live. An archived agent has no record left at all.
     private static func hasTurnInFlight(_ row: AgentInboxRow) -> Bool {
         guard !InboxBulkAction.isArchived(row) else { return false }
+        // The supervisor's live-runner fact remains authoritative when a closed
+        // tile's last rendered status is stale. Do not infer this from
+        // `closingSince`: a child blocker can keep a parent's row Background
+        // without leaving a runner on the parent itself.
+        if row.hasLiveRunner { return true }
         switch row.state {
         case .working, .approval, .input: return true
         case .ready, .failed: return false
@@ -7337,6 +7429,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
 
 /// One row's words, on the card that carries them.
 final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
+    private let groupBackground = InboxGroupBackgroundView()
+    private let spine = InboxSpineView()
     private let card = AgentInboxCardView()
 
     private let jumpHint = InboxJumpHintView()
@@ -7357,6 +7451,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private var detailBand: NSStackView?
     private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
+    private var cardBottomConstraint: NSLayoutConstraint?
+    private var nesting: InboxNesting = .none
     private var metaMinimumWidth: NSLayoutConstraint?
     private var metaCollapsedWidth: NSLayoutConstraint?
     private var branchMinimumWidth: NSLayoutConstraint?
@@ -7382,8 +7478,14 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         card.setAccessibilityElement(false)
         jumpHint.setAccessibilityElement(false)
 
+        groupBackground.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(groupBackground)
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
+        // Keep the connector above the card's hover/selection fill. It passes
+        // hits through, so the row remains the only interaction target.
+        spine.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(spine)
 
         projectLabel.font = .token(.caption)
         projectLabel.lineBreakMode = .byTruncatingTail
@@ -7511,11 +7613,14 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         let elapsedColumn = elapsedLabel.widthAnchor.constraint(
             equalToConstant: AgentInboxCellView.elapsedColumnWidth(unconfirmed: false))
         leadingInset = leading
+        let cardBottom = card.bottomAnchor.constraint(equalTo: bottomAnchor)
+        cardBottomConstraint = cardBottom
+        cardBottom.constant = -CGFloat(AgentInbox96CellView.trailingGap(for: .none))
         NSLayoutConstraint.activate([
             leading,
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
             card.topAnchor.constraint(equalTo: topAnchor),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+            cardBottom,
 
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Inset.card.left),
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.card.right),
@@ -7633,7 +7738,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         shown = (row, emphasis, disclosure, rollup)
         card.isSelected = isSelected
         leadingInset?.constant = indent
-        disclosureButton.show(disclosure)
+        disclosureButton.show(disclosure, childCount: rollup?.children ?? 0)
 
         projectLabel.stringValue = row.projectName ?? ""
         projectLabel.isHidden = row.projectName?.isEmpty != false
@@ -7918,7 +8023,27 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     override func layout() {
         super.layout()
+        let metrics = AgentInbox96CellView.spineMetrics
+        let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
+        let content = max(1, bounds.height - CGFloat(metrics.trailingGap(nesting)))
+        groupBackground.clipsToBounds = false
+        groupBackground.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        groupBackground.show(
+            nesting, hasChildren: !disclosureButton.isHidden, metrics: metrics,
+            rowHeight: bounds.height + bleed * 2)
+        spine.clipsToBounds = false
+        spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        spine.show(nesting, metrics: metrics, cardTop: Double(bleed),
+                   cardHeight: Double(content),
+                   rowHeight: Double(bounds.height) + Double(AgentInboxView.rowSpacing))
         applyFitTier()
+    }
+
+    func setNesting(_ nesting: InboxNesting) {
+        self.nesting = nesting
+        cardBottomConstraint?.constant = -CGFloat(
+            AgentInbox96CellView.trailingGap(for: nesting))
+        needsLayout = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -8212,6 +8337,11 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaGlyphAlpha: Double { Opacity.full }
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaDisclosureTitle: String { disclosureButton.qaTitle }
+    var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
+        (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
+    }
     var qaJumpHint: String { jumpHint.qaChord }
     var qaJumpHintHitTestPassesThrough: Bool {
         jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil
@@ -8266,6 +8396,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 /// being an alpha of this view's own choosing.
 final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
+    private let groupBackground = InboxGroupBackgroundView()
+    private let spine = InboxSpineView()
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
@@ -8276,10 +8408,18 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// The slim row's hover action (confidence pass): Wake on a snoozed row,
     /// Un-settle on a settled one, cross-fading over the time.
     private let hoverAction = InboxRowHoverActionButton(symbol: "arrow.uturn.backward", label: "Un-settle")
+    /// Background rows expose restore and stop in the same status slot.
+    private let backgroundStopAction = InboxRowHoverActionButton(symbol: "stop.fill", label: "Stop")
+    private var pairedBackgroundStopTrailing: NSLayoutConstraint?
+    private var soloBackgroundStopTrailing: NSLayoutConstraint?
+    private var lineTrailingConstraint: NSLayoutConstraint?
     private var onHoverAction: (() -> Void)?
+    private var onBackgroundStop: (() -> Void)?
     private var hoverActionShown = false
     private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
+    private var cardBottomConstraint: NSLayoutConstraint?
+    private var nesting: InboxNesting = .none
     private var branchMinimumWidth: NSLayoutConstraint?
     private var branchCollapsedWidth: NSLayoutConstraint?
     private var timeColumnWidth: NSLayoutConstraint?
@@ -8297,7 +8437,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         jumpHint.setAccessibilityElement(false)
 
         card.translatesAutoresizingMaskIntoConstraints = false
+        groupBackground.translatesAutoresizingMaskIntoConstraints = false
+        spine.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(groupBackground)
         addSubview(card)
+        addSubview(spine)
 
         glyphLabel.font = .token(.label)
         glyphLabel.setAccessibilityRole(.image)
@@ -8352,14 +8496,27 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
         let leading = card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
         leadingInset = leading
+        let cardTop = card.topAnchor.constraint(equalTo: topAnchor)
+        let cardBottom = card.bottomAnchor.constraint(equalTo: bottomAnchor)
+        cardBottomConstraint = cardBottom
+        cardBottom.constant = -CGFloat(AgentInbox96CellView.trailingGap(for: .none))
+        let pairedStop = backgroundStopAction.trailingAnchor.constraint(
+            equalTo: hoverAction.leadingAnchor, constant: -Space.s)
+        let soloStop = backgroundStopAction.trailingAnchor.constraint(
+            equalTo: card.trailingAnchor, constant: -Inset.row.right)
+        let lineTrailing = line.trailingAnchor.constraint(
+            equalTo: card.trailingAnchor, constant: -Inset.row.right)
+        pairedBackgroundStopTrailing = pairedStop
+        soloBackgroundStopTrailing = soloStop
+        lineTrailingConstraint = lineTrailing
         NSLayoutConstraint.activate([
             leading,
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
-            card.topAnchor.constraint(equalTo: topAnchor),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+            cardTop,
+            cardBottom,
 
             line.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Inset.row.left),
-            line.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
+            lineTrailing,
             // Centred, not pinned top-and-bottom: one line in a 35pt row, and a
             // centre constraint cannot leave the height ambiguous the way a
             // top+bottom pair on a flexible stack can.
@@ -8405,11 +8562,21 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         hoverAction.alphaValue = 0
         hoverAction.isHidden = true
         card.addSubview(hoverAction)
+        backgroundStopAction.translatesAutoresizingMaskIntoConstraints = false
+        backgroundStopAction.target = self
+        backgroundStopAction.action = #selector(backgroundStopClicked)
+        backgroundStopAction.alphaValue = 0
+        backgroundStopAction.isHidden = true
+        card.addSubview(backgroundStopAction)
         NSLayoutConstraint.activate([
             hoverAction.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
             hoverAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
             hoverAction.widthAnchor.constraint(equalToConstant: 20),
             hoverAction.heightAnchor.constraint(equalToConstant: 20),
+            pairedStop,
+            backgroundStopAction.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            backgroundStopAction.widthAnchor.constraint(equalToConstant: 20),
+            backgroundStopAction.heightAnchor.constraint(equalToConstant: 20),
         ])
 
         jumpHint.translatesAutoresizingMaskIntoConstraints = false
@@ -8425,6 +8592,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     func setLayoutWidth(_ width: Double) {
         layoutColumnWidth = width
         applyFitTier()
+    }
+
+    func setNesting(_ nesting: InboxNesting) {
+        self.nesting = nesting
+        cardBottomConstraint?.constant = -CGFloat(
+            AgentInbox96CellView.trailingGap(for: nesting))
+        needsLayout = true
     }
 
     /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
@@ -8533,6 +8707,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         guard let shown else { return }
         let available = (layoutColumnWidth ?? Double(bounds.width))
             - Double(leadingInset?.constant ?? 0) - Inset.row.horizontal
+            - Double(actionLayoutReservation)
         guard available > 0 else { return }
         let tier = AgentInboxSlimCellView.fitTier(
             for: shown.row,
@@ -8548,6 +8723,25 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         applyRelocatedFacts()
     }
 
+    /// Hover actions are overlaid on the row, so the text stack must yield the
+    /// same trailing lane that the actions occupy. Otherwise its title paints
+    /// underneath both controls at the narrow sidebar widths used by the app.
+    private var actionLayoutReservation: CGFloat {
+        guard hoverActionShown else { return 0 }
+        let count = (onBackgroundStop == nil ? 0 : 1) + (onHoverAction == nil ? 0 : 1)
+        guard count > 0 else { return 0 }
+        // The action controls keep their 12pt outer inset; this extra 2pt gives
+        // the title 4pt of clearance after the stack's internal text inset.
+        return CGFloat(count) * CGFloat(20 + Space.s) + CGFloat(Space.xs)
+    }
+
+    private func updateActionLayoutReservation() {
+        lineTrailingConstraint?.constant = -CGFloat(Inset.row.right) - actionLayoutReservation
+        appliedTier = nil
+        applyFitTier()
+        needsLayout = true
+    }
+
     /// A dropped branch or relative time is relocated into the cell's spoken
     /// label. The sighted row keeps its name-first line; VoiceOver keeps every
     /// fact the measured tier had to remove.
@@ -8560,6 +8754,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         if row.isUnconfirmed {
             return "Unconfirmed: no live agent snapshot; last known status \(row.label ?? "Ready")"
         }
+        if row.closingSince != nil { return "Background" }
         return row.presentationLabel ?? "Ready"
     }
 
@@ -8619,6 +8814,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             where child.isAccessibilityElement() && !child.isHidden {
             children.append(child)
         }
+        for child in [hoverAction, backgroundStopAction]
+            where child.isAccessibilityElement() && !child.isHidden {
+            children.append(child)
+        }
         setAccessibilityChildren(children)
     }
 
@@ -8629,7 +8828,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         shown = (row, emphasis, disclosure, isInteracting, now)
         card.isSelected = isSelected
         leadingInset?.constant = indent
-        disclosureButton.show(disclosure)
+        disclosureButton.show(disclosure, childCount: rollup?.children ?? 0)
 
         glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.isUnconfirmed ? .ready : row.state)
         glyphLabel.setAccessibilityLabel(row.isUnconfirmed ? "Unconfirmed" : (row.state.label ?? "Ready"))
@@ -8661,6 +8860,21 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     override func layout() {
         super.layout()
+        let metrics = AgentInbox96CellView.spineMetrics
+        let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
+        clipsToBounds = false
+        groupBackground.clipsToBounds = false
+        groupBackground.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        groupBackground.show(
+            nesting, hasChildren: !disclosureButton.isHidden,
+            metrics: metrics, rowHeight: bounds.height + bleed * 2)
+        spine.clipsToBounds = false
+        spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        spine.show(
+            nesting, metrics: metrics,
+            cardTop: Double(card.frame.minY + bleed),
+            cardHeight: Double(card.frame.height),
+            rowHeight: Double(bounds.height + bleed * 2))
         applyFitTier()
     }
 
@@ -8674,7 +8888,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
 
-    /// The shared inbox clock, for a Finishing row: only its time label moves.
+    /// The shared inbox clock, for a Background row: only its time label moves.
     func updateElapsedClock(now: Date) {
         guard let row = shown?.row, row.closingSince != nil, !row.isUnconfirmed else { return }
         timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row, now: now)
@@ -8687,22 +8901,34 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
-        let on = interaction.isHovered && onHoverAction != nil
+        let on = interaction.isHovered && (onHoverAction != nil || onBackgroundStop != nil)
         hoverActionShown = on
-        hoverAction.isHidden = !on
+        let showRestore = on && onHoverAction != nil
+        let showStop = on && onBackgroundStop != nil
+        hoverAction.isHidden = !showRestore
+        backgroundStopAction.isHidden = !showStop
+        updateActionLayoutReservation()
+        pairedBackgroundStopTrailing?.isActive = onHoverAction != nil
+        soloBackgroundStopTrailing?.isActive = onHoverAction == nil
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || window == nil
         NSAnimationContext.runAnimationGroup { context in
             context.duration = reduce ? 0 : 0.15
             context.allowsImplicitAnimation = !reduce
-            (reduce ? hoverAction : hoverAction.animator()).alphaValue = on ? 1 : 0
+            (reduce ? hoverAction : hoverAction.animator()).alphaValue = showRestore ? 1 : 0
+            (reduce ? backgroundStopAction : backgroundStopAction.animator()).alphaValue = showStop ? 1 : 0
             (reduce ? timeLabel : timeLabel.animator()).alphaValue = on ? 0 : CGFloat(shown?.emphasis.textOpacity ?? 1)
         }
+        updateAccessibilityPresentation()
     }
 
     @objc private func hoverActionClicked() { onHoverAction?() }
+    @objc private func backgroundStopClicked() { onBackgroundStop?() }
 
     /// The one action this slim row offers on hover, or nil for none.
     func configureHoverAction(symbol: String, label: String, perform: (() -> Void)?) {
+        onBackgroundStop = nil
+        backgroundStopAction.isHidden = true
+        backgroundStopAction.alphaValue = 0
         onHoverAction = perform
         hoverAction.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
         hoverAction.toolTip = label
@@ -8710,7 +8936,48 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         hoverAction.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
     }
 
+    func configureBackgroundActions(bringBack: (() -> Void)?, stop: (() -> Void)?) {
+        onHoverAction = bringBack
+        onBackgroundStop = stop
+        hoverAction.isHidden = bringBack == nil
+        hoverAction.alphaValue = 0
+        backgroundStopAction.isHidden = stop == nil
+        backgroundStopAction.alphaValue = 0
+        pairedBackgroundStopTrailing?.isActive = bringBack != nil
+        soloBackgroundStopTrailing?.isActive = bringBack == nil
+        hoverAction.image = NSImage(
+            systemSymbolName: "arrow.uturn.backward", accessibilityDescription: "Bring back to canvas")
+        hoverAction.toolTip = "Bring back to canvas"
+        hoverAction.setAccessibilityLabel("Bring back to canvas")
+        hoverAction.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        backgroundStopAction.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
     var qaHoverActionShown: Bool { hoverActionShown }
+    var qaHoverActionTitles: [String] {
+        var titles: [String] = []
+        if onHoverAction != nil { titles.append(hoverAction.accessibilityLabel() ?? "Bring back to canvas") }
+        if onBackgroundStop != nil { titles.append(backgroundStopAction.accessibilityLabel() ?? "Stop") }
+        return titles
+    }
+    var qaBackgroundActionFrames: [String: NSRect] {
+        var frames: [String: NSRect] = [:]
+        if onHoverAction != nil { frames["bringBackAction"] = hoverAction.convert(hoverAction.bounds, to: self) }
+        if onBackgroundStop != nil { frames["stopAction"] = backgroundStopAction.convert(backgroundStopAction.bounds, to: self) }
+        return frames
+    }
+    @discardableResult
+    func clickBackgroundBringBackForQA() -> Bool {
+        guard onHoverAction != nil, !hoverAction.isHidden else { return false }
+        hoverAction.performClick(nil)
+        return true
+    }
+    @discardableResult
+    func clickBackgroundStopForQA() -> Bool {
+        guard onBackgroundStop != nil, !backgroundStopAction.isHidden else { return false }
+        backgroundStopAction.performClick(nil)
+        return true
+    }
 
     func setIncreasedContrast(_ enabled: Bool) {
         card.usesIncreasedContrast = enabled
@@ -8769,7 +9036,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     static func relativeTimeColumnWidth(unconfirmed: Bool, closing: Bool = false) -> Double {
         let font = NSFont.token(.captionMono)
         let labels = AgentElapsedFormatter.columnLabels.flatMap {
-            closing ? [finishingText($0)]
+            closing ? [backgroundText($0)]
                 : unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
         }
         return labels.map { label in
@@ -8785,16 +9052,16 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// it collapses into. Empty for a lifecycle with no time to show and for a
     /// distance that has gone negative — an overdue snooze is P4.6's raised hand,
     /// not a row for this view to label "in -3m".
-    /// A closed tile whose agent is still working: "Finishing · 2m", counted from
-    /// the close. The word says the row will leave by itself; the time says how
-    /// long it has been at it since you let it go.
-    static func finishingText(_ elapsed: String) -> String {
-        "\(AgentStatusVocabulary.finishing) · \(elapsed)"
+    /// A closed tile whose agent is still working: "Background · 2m", counted
+    /// from the close. The turn remains live and can be restored or stopped from
+    /// the two hover controls.
+    static func backgroundText(_ elapsed: String) -> String {
+        "Background · \(elapsed)"
     }
 
     static func relativeText(for row: AgentInboxRow, now: Date) -> String {
         guard let since = row.closingSince else { return relativeText(for: row.lifecycle, now: now) }
-        return finishingText(AgentInboxCellView.elapsedText(max(0, now.timeIntervalSince(since))) ?? "")
+        return backgroundText(AgentInboxCellView.elapsedText(max(0, now.timeIntervalSince(since))) ?? "")
     }
 
     static func relativeText(for lifecycle: InboxLifecycle, now: Date) -> String {
@@ -8833,6 +9100,9 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // up as a missing entry, which is the defect, not a formatting choice.
         if let disclosure = shown?.disclosure, disclosure != .none, !disclosureButton.isHidden {
             frames["disclosure"] = disclosureButton.convert(disclosureButton.bounds, to: self)
+        }
+        if onBackgroundStop != nil {
+            frames.merge(qaBackgroundActionFrames, uniquingKeysWith: { _, newest in newest })
         }
         return AgentInboxRowGeometryForQA(
             agentID: shown?.row.id,
@@ -8873,6 +9143,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var qaGlyphAlpha: Double { Double(glyphLabel.alphaValue) }
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaDisclosureTitle: String { disclosureButton.qaTitle }
+    var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
+        (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
+    }
     var qaJumpHint: String { jumpHint.qaChord }
     var qaJumpHintHitTestPassesThrough: Bool {
         jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil

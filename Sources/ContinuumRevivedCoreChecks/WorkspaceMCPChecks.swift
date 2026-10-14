@@ -53,14 +53,47 @@ func runWorkspaceMCPChecks() {
            && required("array_message_agent") == ["agentId", "text", "idempotencyKey"]
            && required("array_canvas_apply") == ["op", "tileId", "expectedRevision"],
            "required fields drifted from pi's TypeBox definitions")
+    func requiredAlternatives(_ value: WorkspaceMCPJSON?) -> Set<Set<String>> {
+        guard case .array(let clauses)? = value else { return [] }
+        return Set(clauses.compactMap { clause -> Set<String>? in
+            guard case .object(let fields) = clause,
+                  case .array(let values)? = fields["required"] else { return nil }
+            return Set(values.compactMap { if case .string(let key) = $0 { return key } else { return nil } })
+        })
+    }
+    func operationCondition(_ value: WorkspaceMCPJSON?, _ op: String) -> WorkspaceMCPJSON? {
+        guard case .array(let clauses)? = value else { return nil }
+        for clause in clauses {
+            guard case .object(let condition) = clause,
+                  case .object(let ifSchema)? = condition["if"],
+                  case .object(let properties)? = ifSchema["properties"],
+                  case .object(let operation)? = properties["op"],
+                  operation["const"] == .string(op),
+                  case .object(let thenSchema)? = condition["then"] else { continue }
+            return thenSchema["anyOf"]
+        }
+        return nil
+    }
+    let openSchema = WorkspaceMCPToolCatalog.tool(named: "array_open_document")?.inputSchema
+    let operationSchema = WorkspaceMCPToolCatalog.tool(named: "array_get_operation")?.inputSchema
+    let canvasSchema = WorkspaceMCPToolCatalog.tool(named: "array_canvas_apply")?.inputSchema
+    expect(requiredAlternatives(openSchema?["anyOf"]) == [["relativePath"], ["artifactHandle"]],
+           "artifact.open must require a path or artifactHandle in its shared schema")
+    expect(requiredAlternatives(operationSchema?["anyOf"]) == [["operationId"], ["idempotencyKey"]],
+           "operation.get must reject a lookup with neither operationId nor idempotencyKey")
+    expect(requiredAlternatives(operationCondition(canvasSchema?["allOf"], "move")) == [["origin"], ["worldFrame"]]
+           && requiredAlternatives(operationCondition(canvasSchema?["allOf"], "resize")) == [["size"], ["worldFrame"]],
+           "canvas.apply must require move geometry or resize geometry according to op")
     expect(WorkspaceMCPToolCatalog.tool(named: "array_delegate")?.operation == .agentDelegate
            && WorkspaceMCPToolCatalog.tool(named: "array_message_agent")?.operation == .agentMessage
            && WorkspaceMCPToolCatalog.tool(named: "array_get_operation")?.operation == .operationGet,
            "delegation tools did not map to their host operations")
     expect(!WorkspaceMCPToolCatalog.serverInstructions.isEmpty
+           && WorkspaceMCPToolCatalog.serverInstructions.contains("array_workspace_context")
            && WorkspaceMCPToolCatalog.serverInstructions.contains("array_delegate")
-           && WorkspaceMCPToolCatalog.serverInstructions.contains(WorkspaceMCPToolCatalog.waitAgentsName),
-           "MCP initialize instructions must name delegation and the wait tool")
+           && WorkspaceMCPToolCatalog.serverInstructions.contains(WorkspaceMCPToolCatalog.waitAgentsName)
+           && WorkspaceMCPToolCatalog.serverInstructions.contains("first delegation"),
+           "MCP initialize instructions must carry Array tile, delegation, approval, and wait guidance")
 
     // MARK: Provider launch projections
 
@@ -102,8 +135,6 @@ func runWorkspaceMCPChecks() {
            "Codex refuses an unapproved MCP call under approval_policy=never; Array's own approval must be the only gate")
     expect(config.environment.keys.allSatisfy { key in codexOverrides.contains { $0.hasPrefix("mcp_servers.array_workspace.env.\(key)=") } },
            "Codex's MCP server config must carry the server env block: \(codexOverrides)")
-    expect(codexOverrides.contains { $0.hasPrefix("developer_instructions=") && $0.contains("array_delegate") },
-           "Codex needs the Array guidance as developer instructions")
 
     let claudeArgs = ClaudeAgentRunner.processArguments(
         model: "opus", effort: Optional<String>.none, sessionMode: ClaudeSessionMode.start,
@@ -138,6 +169,14 @@ func runWorkspaceMCPChecks() {
            "Codex exec argv did not include the MCP command override")
     let appServerArgs = CodexCLIBackend.appServerArguments(extraArgs: [], workspaceMCP: config)
     expect(codexOverrides.allSatisfy(appServerArgs.contains), "Codex app-server argv must carry every MCP override")
+    func hasDeveloperInstructionsCLIOverride(_ args: [String]) -> Bool {
+        zip(args, args.dropFirst()).contains { flag, value in
+            flag == "-c" && value.hasPrefix("developer_instructions=")
+        }
+    }
+    expect(!hasDeveloperInstructionsCLIOverride(codexArgs)
+           && !hasDeveloperInstructionsCLIOverride(appServerArgs),
+           "Neither Codex exec nor app-server launch may override the user's developer_instructions")
     expect(!claudeArgs.contains { $0.contains("secret") } && !codexArgs.contains { $0.contains("secret") }
            && !appServerArgs.contains { $0.contains("secret") }, "provider argv leaked the MCP token")
 

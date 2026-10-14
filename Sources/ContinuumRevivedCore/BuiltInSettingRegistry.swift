@@ -10,6 +10,25 @@ public enum CanvasShortcutRailConfig {
     }
 }
 
+/// User-wide preferences for the floating canvas creation toolbar.
+public enum FloatingToolbarConfig {
+    public static let visibleKey = "continuum.floatingToolbar.visible"
+    public static let alwaysVisibleKey = "continuum.floatingToolbar.alwaysVisible"
+    public static let compactKey = "continuum.floatingToolbar.compact"
+    public static let positionEdgeKey = "continuum.floatingToolbar.position.edge"
+    public static let positionAlongEdgeKey = "continuum.floatingToolbar.position.alongEdge"
+    public static let positionXKey = "continuum.floatingToolbar.position.x"
+    public static let positionYKey = "continuum.floatingToolbar.position.y"
+    public static let defaultVisible = true
+    public static let defaultAlwaysVisible = false
+    public static let defaultCompact = false
+    public static let defaultItemVisible = true
+
+    public static func itemVisibleKey(commandID: String) -> String {
+        "continuum.floatingToolbar.item.\(commandID).visible"
+    }
+}
+
 public enum ZoneColorAssignmentPolicy: String, Codable, CaseIterable, Equatable, Sendable {
     case nextUnusedThenLeastRecent
     case alwaysTeal
@@ -121,6 +140,83 @@ public enum BuiltInSettingRegistry {
         consumerID: "canvas.shortcutRail"
     )
 
+    public static let floatingToolbarVisible = SettingDefinition(
+        id: SettingID(rawValue: FloatingToolbarConfig.visibleKey),
+        category: .canvasAndZones,
+        title: "Floating Toolbar",
+        description: "Show the draggable toolbar for creating zones and tiles.",
+        defaultValue: FloatingToolbarConfig.defaultVisible,
+        control: .toggle,
+        applicationPolicy: .live,
+        keywords: ["toolbar", "create", "zones", "tiles"],
+        consumerID: "canvas.floatingToolbar.visible"
+    )
+
+    public static let floatingToolbarAlwaysVisible = SettingDefinition(
+        id: SettingID(rawValue: FloatingToolbarConfig.alwaysVisibleKey),
+        category: .canvasAndZones,
+        title: "Always Show Labels",
+        description: "Keep action labels visible; otherwise show labels in token-themed hover pills.",
+        defaultValue: FloatingToolbarConfig.defaultAlwaysVisible,
+        control: .toggle,
+        applicationPolicy: .live,
+        keywords: ["toolbar", "hover", "always visible"],
+        consumerID: "canvas.floatingToolbar.alwaysVisible"
+    )
+
+    public static let floatingToolbarCompact = SettingDefinition(
+        id: SettingID(rawValue: FloatingToolbarConfig.compactKey),
+        category: .canvasAndZones,
+        title: "Compact Floating Toolbar",
+        description: "Use icon-only buttons in the floating toolbar.",
+        defaultValue: FloatingToolbarConfig.defaultCompact,
+        control: .toggle,
+        applicationPolicy: .live,
+        keywords: ["toolbar", "compact", "icons"],
+        consumerID: "canvas.floatingToolbar.compact"
+    )
+
+    public static let agentContextAutoCompact = SettingDefinition(
+        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.enabledKey),
+        category: .agents,
+        title: "Automatically compact context",
+        description: "Automatically compact supported agent contexts as they approach the selected threshold.",
+        defaultValue: true,
+        control: .toggle,
+        applicationPolicy: .live,
+        keywords: ["agent", "context", "compact", "tokens"],
+        consumerID: "agent.context.autoCompact"
+    )
+
+    public static let agentContextAutoCompactPercent = SettingDefinition(
+        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.percentKey),
+        category: .agents,
+        title: "Compact at (%)",
+        description: "Context usage percentage that triggers automatic compaction.",
+        defaultValue: 90.0,
+        control: .boundedNumber(range: 50...99, unit: "%", step: 1),
+        validation: SettingValidation { (50...99).contains($0) ? nil : "Choose a threshold from 50% to 99%." },
+        applicationPolicy: .live,
+        keywords: ["agent", "context", "compact", "threshold", "percent"],
+        consumerID: "agent.context.autoCompactPercent"
+    )
+
+    public static let floatingToolbarItemVisibility: [SettingDefinition<Bool>] =
+        CommandRegistry.definitions().compactMap { definition in
+            guard let item = definition.floatingToolbarItem else { return nil }
+            return SettingDefinition(
+                id: SettingID(rawValue: FloatingToolbarConfig.itemVisibleKey(commandID: definition.id.rawValue)),
+                category: .canvasAndZones,
+                title: "Show \(item.title) Button",
+                description: "Show the \(item.title) action in the floating toolbar.",
+                defaultValue: FloatingToolbarConfig.defaultItemVisible,
+                control: .toggle,
+                applicationPolicy: .live,
+                keywords: ["toolbar", "button", item.title.lowercased()],
+                consumerID: SettingConsumerID(rawValue: "canvas.floatingToolbar.item.\(definition.id.rawValue)")
+            )
+        }
+
     public static let zoneColorPolicy = SettingDefinition(
         id: SettingID(rawValue: ZoneColorConfig.assignmentPolicyKey),
         category: .canvasAndZones,
@@ -188,6 +284,12 @@ public enum BuiltInSettingRegistry {
             zoneChrome.erased,
             tileGap.erased,
             shortcutRail.erased,
+            floatingToolbarVisible.erased,
+            floatingToolbarAlwaysVisible.erased,
+            floatingToolbarCompact.erased,
+            agentContextAutoCompact.erased,
+            agentContextAutoCompactPercent.erased,
+        ] + floatingToolbarItemVisibility.map { $0.erased } + [
             zoneColorPolicy.erased,
             zonePadding.erased,
             creationThreshold.erased,

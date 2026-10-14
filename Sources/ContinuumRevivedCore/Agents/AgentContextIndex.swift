@@ -28,6 +28,8 @@ import Foundation
 public struct AgentRowContext: Equatable, Sendable {
     /// nil when the agent has no view — a headless agent lives in no workspace.
     public let workspaceName: String?
+    /// Stable workspace identity; nil when the agent has no workspace placement.
+    public let workspaceId: UUID?
     /// nil when the agent has no view, or when its zone's name is unresolvable.
     public let zoneName: String?
     public let projectName: String?
@@ -108,6 +110,7 @@ public struct AgentRowContext: Equatable, Sendable {
 
     public init(
         workspaceName: String? = nil,
+        workspaceId: UUID? = nil,
         zoneName: String? = nil,
         projectName: String? = nil,
         projectId: UUID? = nil,
@@ -124,6 +127,7 @@ public struct AgentRowContext: Equatable, Sendable {
         parentId: UUID? = nil
     ) {
         self.workspaceName = workspaceName
+        self.workspaceId = workspaceId
         self.zoneName = zoneName
         self.projectName = projectName
         self.projectId = projectId
@@ -183,12 +187,17 @@ public enum AgentContextIndex {
             },
             uniquingKeysWith: { first, _ in first }
         )
+        let projectWorkspaceIds = Dictionary(
+            registry.projects.compactMap { project in project.workspaceId.map { (project.id, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         var index: [UUID: AgentRowContext] = [:]
         for descriptor in terminalDescriptors {
             let placement = placements[descriptor.tileId]
             index[descriptor.tileId] = AgentRowContext(
                 workspaceName: placement?.workspaceName,
+                workspaceId: placement?.workspaceId,
                 zoneName: placement?.zoneName,
                 projectName: placement?.projectId.flatMap { projectNames[$0] },
                 projectId: placement?.projectId,
@@ -211,6 +220,8 @@ public enum AgentContextIndex {
             index[record.id.rawValue] = AgentRowContext(
                 workspaceName: placement?.workspaceName
                     ?? (record.projectId ?? placement?.projectId).flatMap { projectWorkspaceNames[$0] },
+                workspaceId: placement?.workspaceId
+                    ?? (record.projectId ?? placement?.projectId).flatMap { projectWorkspaceIds[$0] },
                 zoneName: placement?.zoneName,
                 // The record's own project wins over the one its tile happens to
                 // sit in: a headless agent has only the former, and an agent
@@ -254,6 +265,7 @@ public enum AgentContextIndex {
 
     private struct TilePlacement {
         let workspaceName: String?
+        let workspaceId: UUID
         let zoneName: String?
         let projectId: UUID?
         let tileTitle: String?
@@ -281,6 +293,7 @@ public enum AgentContextIndex {
                     guard placements[tile.tileId] == nil else { continue }
                     placements[tile.tileId] = TilePlacement(
                         workspaceName: nonEmpty(workspace.name),
+                        workspaceId: workspace.workspaceId,
                         // `SidebarTreeBuilder` falls back to "" for a project zone
                         // whose project is not in the registry. An empty string
                         // would render as a stray separator in "project · title ·

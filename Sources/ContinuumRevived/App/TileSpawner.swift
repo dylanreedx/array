@@ -1716,7 +1716,8 @@ final class TileSpawner {
             delta: mirrored
                 ? "Watching this subagent. It runs inside its parent, so it takes no prompts here."
                 : "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
+        let target = canvasView.installProjectTile(
+            tileView: view, for: tile, targetZoneId: creationScope?.zoneId, arrangeAfterSpawn: false)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
@@ -1732,6 +1733,10 @@ final class TileSpawner {
                 runtimePayload: nil
             ))
             try persistProjectCanvas(after: target, in: canvasView)
+            // The layout transaction must see the new tile in the saved canvas.
+            if case let .zoneLayer(zoneId) = target {
+                canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
+            }
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             withdrawFailedSpawn(tileId, target: target, in: canvasView)
@@ -2767,14 +2772,16 @@ final class TileSpawner {
         try? writeBrowserTileSnapshotOrThrow(for: runtime)
     }
 
-    func writeBrowserTileSnapshotOrThrow(for runtime: WKWebViewBrowserRuntime) throws {
-        guard let canvasView,
-              let tile = canvasView.tileRecord(for: runtime.tileId)
-        else { return }
+    func writeBrowserTileSnapshotOrThrow(
+        for runtime: WKWebViewBrowserRuntime,
+        parkedTile: Tile? = nil,
+        parkedView: BrowserTileNSView? = nil
+    ) throws {
+        guard let tile = parkedTile ?? canvasView?.tileRecord(for: runtime.tileId) else { return }
         let persistedTile = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })
         let profile = browserProfile(for: persistedTile?.profileId ?? tile.metadata.browserProfileId)
         let storageGroupId = persistedTile?.storageGroupId ?? profile.dataStoreIdentifier
-        if let browserView = canvasView.tileView(for: runtime.tileId) as? BrowserTileNSView {
+        if let browserView = parkedView ?? (canvasView?.tileView(for: runtime.tileId) as? BrowserTileNSView) {
             try writeBrowserTabModel(
                 tileId: tile.id,
                 runtimeId: runtime.id,

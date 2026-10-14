@@ -22,6 +22,7 @@ public enum SettingsSchema {
             // an image import and a live preview are not independent defaults
             // keys, and the precedence rule must live in exactly one place.
             SettingsSection(id: "canvasBackground", title: "Canvas Background", iconSystemName: "photo", fields: []),
+            SettingsSection(id: "floatingToolbar", title: "Floating Toolbar", iconSystemName: "rectangle.bottomthird.inset.filled", fields: []),
             SettingsSection(id: "canvasAndZones", title: "Canvas & Zones", iconSystemName: "square.grid.2x2", fields: [
                 .toggle(key: CanvasAutoLayoutConfig.enabledKey, label: "Auto Layout by Default", default: CanvasAutoLayoutConfig.defaultEnabled),
                 .choice(key: CanvasAutoLayoutConfig.activationKey, label: "When Enabling Auto Layout", options: CanvasAutoLayoutActivation.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultActivation.rawValue),
@@ -60,6 +61,10 @@ public enum SettingsSchema {
             ] + AgentStatusElement.presentationOrder.map { element in
                 .toggle(key: element.settingKey, label: element.title, default: element.defaultVisible)
             }),
+            SettingsSection(id: "agentContext", title: "Agent context", iconSystemName: "text.alignleft", fields: [
+                .toggle(key: AgentContextAutoCompactionPolicy.enabledKey, label: "Automatically compact context", default: true),
+                .number(key: AgentContextAutoCompactionPolicy.percentKey, label: "Compact at (%)", range: 50...99, default: 90, unit: "%", step: 1),
+            ]),
             SettingsSection(id: "editor", title: "Editor", iconSystemName: "curlybraces", fields: [
                 .info(label: "Applies live to all Editor tiles. Editor appearance is independent of Array’s app theme."),
                 .choice(key: EditorPreferences.appearanceKey, label: "Appearance", options: EditorAppearance.allCases.map(\.rawValue), default: EditorAppearance.system.rawValue),
@@ -164,10 +169,10 @@ private extension SettingsCategory {
     init(sectionID: String) {
         switch sectionID {
         case "appearance", "editor": self = .appearance
-        case "canvasAndZones": self = .canvasAndZones
+        case "canvasAndZones", "floatingToolbar": self = .canvasAndZones
         case "navigation": self = .navigation
         case "keybindings": self = .keybindings
-        case "agents": self = .agents
+        case "agents", "agentContext": self = .agents
         case "terminal": self = .terminal
         case "browser": self = .browser
         case "activityAndNotifications": self = .activityAndNotifications

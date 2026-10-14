@@ -321,9 +321,9 @@ public enum AgentStatusVocabulary {
     /// health — it is neither failed nor unconfirmed, and reopening the row brings
     /// it back exactly as it was left.
     public static let closed = "Closed"
-    /// A closed tile whose agent is still finishing its turn. Not "Working": the
+    /// A closed tile whose agent is still working in the background. Not "Working": the
     /// window is gone, and the word says the row will leave by itself.
-    public static let finishing = "Finishing"
+    public static let background = "Background"
 }
 
 /// What the agent is doing. FIVE STATES, and only three MEANINGS get colour:
@@ -792,6 +792,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// tile (a headless agent lives in no workspace) and for any caller that built
     /// rows with no context, exactly like `projectName` beside it.
     public let workspaceName: String?
+    /// Stable workspace identity used for exact inbox filtering.
+    public let workspaceId: UUID?
     public let state: InboxState
     public let attention: InboxAttention
     public let lifecycle: InboxLifecycle
@@ -904,9 +906,13 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public let terminalEvent: AgentTerminalEvent?
     public let terminalIsUnread: Bool
     /// When this agent's tile was closed while it was still busy — the row reads
-    /// "Finishing" and draws slim until its turn ends, when the builder derives it
+    /// "Background" and draws slim until its turn ends, when the builder derives it
     /// into History by itself. nil for every agent that is not closing.
     public let closingSince: Date?
+    /// Whether the supervisor currently owns a runner for this agent. This is
+    /// distinct from the last status sample and remains the authoritative Stop
+    /// capability while a tile is closed or its rendered status is stale.
+    public let hasLiveRunner: Bool
     /// Whether the card's upper metadata band has something to draw. These
     /// predicates intentionally inspect only the content slots, never a row's
     /// semantic importance or lifecycle. The AppKit cell uses the same facts to
@@ -994,6 +1000,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         projectId: UUID? = nil,
         directoryName: String? = nil,
         workspaceName: String? = nil,
+        workspaceId: UUID? = nil,
         state: InboxState,
         attention: InboxAttention = .none,
         lifecycle: InboxLifecycle = .active,
@@ -1018,7 +1025,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         checkedOutBranch: String? = nil,
         terminalEvent: AgentTerminalEvent? = nil,
         terminalIsUnread: Bool = false,
-        closingSince: Date? = nil
+        closingSince: Date? = nil,
+        hasLiveRunner: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -1026,6 +1034,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.projectId = projectId
         self.directoryName = directoryName
         self.workspaceName = workspaceName
+        self.workspaceId = workspaceId
         self.state = state
         self.attention = attention
         self.lifecycle = lifecycle
@@ -1053,20 +1062,23 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.terminalEvent = terminalEvent
         self.terminalIsUnread = terminalIsUnread
         self.closingSince = closingSince
+        self.hasLiveRunner = hasLiveRunner
     }
 
     /// The same row, placed where its PARENT is: a subagent travels with the agent
     /// that spawned it (confidence pass, sidebar stream) — into History with it,
-    /// into the Finishing tail with it, and inside its workspace's scope — so a
+    /// into History with it while it remains in Background, and inside its
+    /// workspace's scope — so a
     /// closed parent can never leave its children behind as stray top-level rows.
     public func followingParent(
         lifecycle: InboxLifecycle,
         closingSince: Date?,
-        workspaceName: String?
+        workspaceName: String?,
+        workspaceId: UUID? = nil
     ) -> AgentInboxRow {
         AgentInboxRow(
             id: id, title: title, projectName: projectName, projectId: projectId,
-            directoryName: directoryName, workspaceName: workspaceName,
+            directoryName: directoryName, workspaceName: workspaceName, workspaceId: workspaceId,
             state: state, attention: attention, lifecycle: lifecycle,
             model: model, role: role, branch: branch, isIsolated: isIsolated,
             elapsed: elapsed, elapsedStartedAt: elapsedStartedAt,
@@ -1075,7 +1087,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             settlementBlocked: settlementBlocked, zoneName: zoneName,
             harness: harness, checkedOutBranch: checkedOutBranch,
             terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
-            closingSince: closingSince)
+            closingSince: closingSince, hasLiveRunner: hasLiveRunner)
     }
 
     /// The agent's branch and the checkout's disagree. `checkedOutBranch` is nil
@@ -1110,6 +1122,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             id: id, title: title, projectName: projectName, projectId: projectId,
             directoryName: directoryName,
             workspaceName: workspaceName,
+            workspaceId: workspaceId,
             state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
             branch: branch, isIsolated: isIsolated,
             elapsed: frozenElapsed ?? elapsed,
@@ -1118,7 +1131,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             variant: variant, createdAt: createdAt, parentId: parentId,
             isUnconfirmed: value, settlementBlocked: settlementBlocked,
             zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
-            terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread)
+            terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
+            closingSince: closingSince, hasLiveRunner: hasLiveRunner)
     }
 
     /// The status words the row may paint. Unconfirmed is a confidence modifier,
@@ -1137,7 +1151,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         // of ignorance into wallpaper — which is exactly what it had become when
         // every closed tile left one of these rows behind.
         if case .archived = lifecycle { return AgentStatusVocabulary.closed }
-        if closingSince != nil { return AgentStatusVocabulary.finishing }
+        if closingSince != nil { return AgentStatusVocabulary.background }
         return isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
     }
 

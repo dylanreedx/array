@@ -233,13 +233,17 @@ enum SidebarScreenshotChecks {
         // about card rows.
         let frames = host.inbox.qaMaterializedRowCells
             .filter { $0.qaAgentID != nil && $0.qaVariant == .card }
-            .map { $0.convert($0.bounds, to: host.inbox) }
-            .sorted { $0.minY < $1.minY }
+            .compactMap { cell -> (row: NSRect, card: NSRect)? in
+                guard let card = cell.qaGeometry.elementFrames["card"] else { return nil }
+                return (cell.convert(cell.bounds, to: host.inbox),
+                        cell.convert(card, to: host.inbox))
+            }
+            .sorted { $0.row.minY < $1.row.minY }
         guard frames.count >= 2 else { return nil }
         for (first, second) in zip(frames, frames.dropFirst()) {
-            let pitch = second.minY - first.minY
+            let pitch = second.row.minY - first.row.minY
             // Adjacent means the gap is a row gap, not a slim row wedged between.
-            if pitch > 0, pitch < first.height * 1.5 { return (first.height, pitch) }
+            if pitch > 0, pitch < first.row.height * 1.5 { return (first.card.height, pitch) }
         }
         return nil
     }
@@ -781,8 +785,9 @@ enum SidebarScreenshotChecks {
             let measuredPitch = measured.pitchPt ?? 0
             // The PRODUCTION proposal (T3 since the confidence pass) is the one the
             // shipped list must measure as.
-            let expectedCard = AgentInbox96CellView.rowHeight(for: .production)
-            let expectedPitch = expectedCard + Space.s
+            let expectedCard = SidebarDensityProposal.production.cardHeight
+            let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + Space.s
+                + AgentInbox96CellView.trailingGap(for: .none)
             try expect(abs(measuredCard - expectedCard) <= 0.5
                        && abs(measuredPitch - expectedPitch) <= 0.5,
                        "the production proposal's live list geometry claims \(expectedCard)/"

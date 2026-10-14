@@ -243,6 +243,37 @@ func runAgentSteeringRecoveryChecks() async throws -> String {
         try expect(rail.qaPressResume() && resumed == 1, "rail: Resume must reach the supervisor")
     }
 
+    // 7. Stop after the slot frees but before a queued drain takes its item.
+    // The queue task suspended at an actor boundary must honor the new pause.
+    await scenario {
+        let h = try Harness(.pi)
+        defer { h.tearDown() }
+        onPath(h)
+        var entered = false
+        var released = false
+        defer { released = true; h.supervisor.qaBeforeQueueDrain = nil }
+        h.supervisor.qaBeforeQueueDrain = {
+            entered = true
+            while !released { try? await Task.sleep(for: .milliseconds(20)) }
+        }
+        try expect(h.supervisor.send("PLAIN seed", to: h.id), "drain pause: seed refused")
+        try await bound(h)
+        try expect(await h.supervisor.accept(.queue(AgentPrompt("held after pause")), for: h.id) == .accepted,
+                   "drain pause: queue refused")
+        try await eventually("drain pause: drain never reached suspended boundary") { entered }
+        h.supervisor.stop(h.id)
+        released = true
+        h.supervisor.qaBeforeQueueDrain = nil
+        try await Task.sleep(for: .milliseconds(350))
+        try expect(h.promptTexts == ["PLAIN seed"], "drain pause: queued item ran after Stop, prompts \(h.promptTexts)")
+        try expect(h.rail.queued.map(\.text) == ["held after pause"] && h.rail.pause == .afterStop,
+                   "drain pause: the paused queue must retain its message, rail \(h.rail)")
+        h.supervisor.resumeQueue(for: h.id)
+        try await eventually("drain pause: Resume must run the held message") {
+            h.promptTexts == ["PLAIN seed", "held after pause"] && !h.supervisor.isRunning(h.id)
+        }
+    }
+
     if !failures.isEmpty {
         throw Failure(description: "\(failures.count) scenario(s) failed:\n  - " + failures.joined(separator: "\n  - "))
     }

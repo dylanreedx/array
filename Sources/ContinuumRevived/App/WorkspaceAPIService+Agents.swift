@@ -91,7 +91,7 @@ extension WorkspaceAPIService {
 
     func inspectAgent(
         agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle,
-        payload: [String: Any], canvas: CanvasNSView
+        payload: [String: Any], canvas: CanvasNSView, isCancelled: () -> Bool
     ) -> Reply {
         let request: AgentInspectRequest
         do {
@@ -126,6 +126,7 @@ extension WorkspaceAPIService {
                 checkout: targetHandle, checkoutDisplayName: targetCheckoutName,
                 op: .agentInspect, relativePath: nil,
                 targetAgentId: target.id, targetAgentDisplayName: target.displayName))
+            if isCancelled() { return .cancelled(result: nil) }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools were disabled for this agent.", approvalRequestId: promptId))
             }

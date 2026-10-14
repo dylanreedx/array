@@ -79,6 +79,12 @@ public struct CodexAppServerEventTranslator {
     /// — which is exactly why this is tracked per item rather than assumed either
     /// way. Whichever a given codex build does, the text crosses exactly once.)
     private var streamedItemIDs: Set<String> = []
+    /// The legacy `thread/compacted` notification can accompany the newer
+    /// `contextCompaction` item lifecycle. Reuse the item's id and suppress a
+    /// second terminal boundary when both protocol shapes describe one compact.
+    private var activeCompactionBoundaryByThread: [String: String] = [:]
+    private var completedCompactionBoundaryIDs: Set<String> = []
+    private var legacyCompactionSequenceByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -126,6 +132,8 @@ public struct CodexAppServerEventTranslator {
         switch method {
         case "thread/started":
             return translateThreadStarted(params)
+        case "thread/compacted":
+            return translateThreadCompacted(params)
         case "turn/started":
             retryAttempts = 0
             return translateTurnStarted(params)
@@ -209,7 +217,7 @@ public struct CodexAppServerEventTranslator {
 
     // MARK: - items
 
-    private func translateItemStarted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateItemStarted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
               let item = params["item"] as? [String: Any],
               let itemId = item["id"] as? String,
@@ -218,6 +226,7 @@ public struct CodexAppServerEventTranslator {
 
         switch itemType {
         case "contextCompaction":
+            activeCompactionBoundaryByThread[threadId] = itemId
             return [.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
                 operationID: compactionOperationID,
                 boundaryID: itemId,
@@ -346,7 +355,7 @@ public struct CodexAppServerEventTranslator {
         return [.contentDelta(threadId: threadId, turnId: turnId, streamKind: .assistant, delta: delta)]
     }
 
-    private func translateItemCompleted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateItemCompleted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
               let item = params["item"] as? [String: Any],
               let itemId = item["id"] as? String,
@@ -355,6 +364,9 @@ public struct CodexAppServerEventTranslator {
 
         switch itemType {
         case "contextCompaction":
+            activeCompactionBoundaryByThread[threadId] = itemId
+            guard completedCompactionBoundaryIDs.insert(Self.compactionBoundaryKey(
+                threadId: threadId, boundaryID: itemId)).inserted else { return [] }
             return [
                 .compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
                     operationID: compactionOperationID,
@@ -465,6 +477,65 @@ public struct CodexAppServerEventTranslator {
         }
     }
 
+    /// Older app-server versions report a completed compact as a thread-level
+    /// notification. Newer versions use the `contextCompaction` item lifecycle;
+    /// when both are present they describe the same boundary and must be applied
+    /// once. Summary/message fields are deliberately ignored because they may
+    /// contain the full private compacted prompt.
+    private mutating func translateThreadCompacted(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+        guard let threadId = params["threadId"] as? String, !threadId.isEmpty else { return [] }
+        let explicitBoundaryID = (params["boundaryId"] as? String)
+            ?? (params["boundaryID"] as? String)
+            ?? (params["compactionId"] as? String)
+        let boundaryID: String
+        if let explicitBoundaryID, !explicitBoundaryID.isEmpty {
+            boundaryID = explicitBoundaryID
+        } else if let active = activeCompactionBoundaryByThread[threadId] {
+            boundaryID = active
+        } else {
+            // Legacy-only protocol. Prefer the provider turn or event timestamp
+            // when supplied so later compactions in one thread remain distinct.
+            let identity = (params["turnId"] as? String)
+                ?? (params["emittedAtMs"] as? NSNumber)?.stringValue
+            if let identity, !identity.isEmpty {
+                boundaryID = "codex-thread:\(threadId):\(identity)"
+            } else {
+                let sequence = (legacyCompactionSequenceByThread[threadId] ?? 0) + 1
+                legacyCompactionSequenceByThread[threadId] = sequence
+                boundaryID = "codex-thread:\(threadId):\(sequence)"
+            }
+        }
+        guard completedCompactionBoundaryIDs.insert(Self.compactionBoundaryKey(
+            threadId: threadId, boundaryID: boundaryID)).inserted else { return [] }
+        return compactionBoundaryEvents(threadId: threadId, boundaryID: boundaryID)
+    }
+
+    private func compactionBoundaryEvents(threadId: String, boundaryID: String) -> [AgentRuntimeEvent] {
+        [
+            .compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
+                operationID: compactionOperationID,
+                boundaryID: boundaryID,
+                phase: .succeeded,
+                trigger: compactionTrigger,
+                provider: "codex",
+                observedAt: now()
+            )),
+            .itemStarted(threadId: threadId, itemId: boundaryID, kind: .compaction, title: AgentCompactionPayload.encodeTitle(
+                preTokens: nil,
+                postTokens: nil,
+                automaticCompaction: compactionTrigger == .manual ? false : nil,
+                provider: "codex",
+                boundaryID: boundaryID,
+                trigger: compactionTrigger.providerValue
+            )),
+            .itemCompleted(threadId: threadId, itemId: boundaryID, kind: .compaction, status: .completed),
+        ]
+    }
+
+    private static func compactionBoundaryKey(threadId: String, boundaryID: String) -> String {
+        "\(threadId.utf8.count):\(threadId)\(boundaryID)"
+    }
+
     /// `error.message`, else the result's joined text blocks.
     private static func mcpOutputPreview(_ item: [String: Any]) -> String? {
         let error = (item["error"] as? [String: Any])?["message"] as? String
@@ -533,11 +604,22 @@ public struct CodexAppServerEventTranslator {
         let failed = (turn["status"] as? String) == "failed"
         var code: String?
         if failed, let error = turn["error"] as? [String: Any] {
+            let message = error["message"] as? String
+            let codexErrorInfo = error["codexErrorInfo"] as? String
+            let errorCode = error["code"] as? String
+            let errorType = error["type"] as? String
+            let contextFull = AgentContextFullRecovery.isContextFull(
+                provider: "codex",
+                candidates: [codexErrorInfo, errorCode, errorType, message])
+            if contextFull {
+                code = AgentContextFullRecovery.canonicalErrorMessage
+            }
             // The API's own account/transport failure in its own words
             // ("unexpected status 401 Unauthorized"); otherwise the short code.
-            code = AgentFailureText.providerMessage(error["message"] as? String)
-                ?? (error["code"] as? String) ?? (error["type"] as? String)
-                ?? (error["codexErrorInfo"] as? String)
+            if !contextFull {
+                code = AgentFailureText.providerMessage(message)
+                    ?? errorCode ?? errorType ?? codexErrorInfo
+            }
         }
         // T5 — `turn/interrupt` ends the turn `interrupted`; reporting that as
         // completed drained the queue into a turn the user had just stopped.

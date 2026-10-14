@@ -131,6 +131,27 @@ public enum CommandMenuPlacement: String, Codable, Equatable, Sendable {
     case help
 }
 
+/// A command that can be shown on the floating canvas toolbar. This metadata
+/// lives beside the command definition so toolbar buttons cannot drift into a
+/// second hand-maintained command list.
+public enum FloatingToolbarAction: Equatable, Sendable {
+    case createZone
+    case terminalProfiles
+    case palette(LaunchPaletteAction)
+}
+
+public struct FloatingToolbarItem: Equatable, Sendable {
+    public let title: String
+    public let symbolName: String
+    public let action: FloatingToolbarAction
+
+    public init(title: String, symbolName: String, action: FloatingToolbarAction) {
+        self.title = title
+        self.symbolName = symbolName
+        self.action = action
+    }
+}
+
 /// Stable Core identity and presentation. App owns execution closures; the
 /// optional palette action is a platform-neutral dispatch token only.
 public struct CommandDefinition: Equatable, Sendable {
@@ -139,6 +160,7 @@ public struct CommandDefinition: Equatable, Sendable {
     public let subtitle: String?
     public let aliases: [String]
     public let paletteAction: LaunchPaletteAction?
+    public let floatingToolbarItem: FloatingToolbarItem?
     public let paletteVisible: Bool
     public let menuPlacement: CommandMenuPlacement?
     public let shortcuts: [ShortcutDefinition]
@@ -150,6 +172,7 @@ public struct CommandDefinition: Equatable, Sendable {
         subtitle: String? = nil,
         aliases: [String] = [],
         paletteAction: LaunchPaletteAction? = nil,
+        floatingToolbarItem: FloatingToolbarItem? = nil,
         paletteVisible: Bool = true,
         menuPlacement: CommandMenuPlacement? = nil,
         shortcuts: [ShortcutDefinition] = [],
@@ -160,6 +183,7 @@ public struct CommandDefinition: Equatable, Sendable {
         self.subtitle = subtitle
         self.aliases = aliases
         self.paletteAction = paletteAction
+        self.floatingToolbarItem = floatingToolbarItem
         self.paletteVisible = paletteVisible
         self.menuPlacement = menuPlacement
         self.shortcuts = shortcuts

@@ -519,12 +519,56 @@ enum WorkspaceAPIChecks {
         _ = try error(open(f, ["relativePath": "other.md", "artifactHandle": "\(f.pbHandle.rawValue):notes.md"]), .targetConflict, "handle vs path")
         try expect(prompts.count == promptsBeforeConflict && fileTileCount(f) == fileTilesBefore + 1, "a conflict prompts nobody and opens nothing")
 
+        // A Stop while the trusted scope alert is open cancels this request.
+        // A delayed "Allow for This Agent Session" must not mint authority that
+        // a later retry can use without another user decision.
+        let grantsBeforeCancelledApproval = f.api.qaGrants(for: f.agentId)
+        let filesBeforeCancelledApproval = fileTileCount(f)
+        var cancelledDuringApproval = false
+        f.api.approvalHandler = { prompt in
+            prompts.append(prompt)
+            cancelledDuringApproval = true
+            return .allowForSession
+        }
+        let cancelledApproval = f.api.dispatch(
+            agentId: f.agentId, requestId: "cancelled-session-approval", op: "artifact.open",
+            payload: ["relativePath": "second.md", "checkoutHandle": f.paHandle.rawValue],
+            isCancelled: { cancelledDuringApproval })
+        guard case .cancelled = cancelledApproval else {
+            throw Failure(message: "a call stopped during approval must return cancelled, got \(cancelledApproval)")
+        }
+        try expect(f.api.qaGrants(for: f.agentId) == grantsBeforeCancelledApproval,
+                   "a delayed approval after Stop must not mint a session grant")
+        try expect(fileTileCount(f) == filesBeforeCancelledApproval,
+                   "a delayed approval after Stop must not open its document")
+        let promptsAfterCancelledApproval = prompts.count
+        f.api.approvalHandler = { prompt in
+            prompts.append(prompt)
+            return .deny
+        }
+        let retryAfterCancelledApproval = try error(
+            f.api.dispatch(
+                agentId: f.agentId, requestId: "retry-cancelled-session-approval", op: "artifact.open",
+                payload: ["relativePath": "second.md", "checkoutHandle": f.paHandle.rawValue]),
+            .permissionDenied, "retry after cancelled approval")
+        try expect(retryAfterCancelledApproval.approvalRequestId != nil
+                   && prompts.count == promptsAfterCancelledApproval + 1,
+                   "retry must ask again because the cancelled request created no grant")
+        try expect(f.api.qaGrants(for: f.agentId) == grantsBeforeCancelledApproval
+                   && fileTileCount(f) == filesBeforeCancelledApproval,
+                   "retry after cancellation cannot bypass approval or open the file")
+        f.api.approvalHandler = { prompt in
+            prompts.append(prompt)
+            return decisions.isEmpty ? .deny : decisions.removeFirst()
+        }
+
         // W28 — session approval: one prompt, then repeated Pa opens are silent.
+        let promptsBeforeSession = prompts.count
         decisions = [.allowForSession]
         let second = try result(open(f, ["relativePath": "second.md", "checkoutHandle": f.paHandle.rawValue, "presentation": ["camera": "preserve"]]), "session approval")
-        try expect(second["document"]?.string == "opened" && prompts.count == promptsBeforeConflict + 1, "session approval prompts once")
+        try expect(second["document"]?.string == "opened" && prompts.count == promptsBeforeSession + 1, "session approval prompts once")
         let again = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue, "presentation": ["camera": "preserve"]]), "repeat under session grant")
-        try expect(uuid(again["tileId"]) == paTileId && prompts.count == promptsBeforeConflict + 1, "a second in-session open prompts nobody and reuses the tile")
+        try expect(uuid(again["tileId"]) == paTileId && prompts.count == promptsBeforeSession + 1, "a second in-session open prompts nobody and reuses the tile")
 
         // W28 — forged authorization in the payload is inert: a NEW checkout still
         // prompts, and a denied prompt denies.

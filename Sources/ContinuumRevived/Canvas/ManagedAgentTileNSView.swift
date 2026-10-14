@@ -299,6 +299,14 @@ final class ManagedAgentTileNSView: TileNSView {
     /// response transport renders a readable request and no controls at all —
     /// rather than controls that press into nothing.
     var onProviderResponse: ((_ requestID: String, _ value: String) -> Bool)?
+    /// App-owned recovery route for a context-full transcript error. The tile
+    /// validates the block and copies its transcript locally; compaction and
+    /// fork actions cross this closure to the runner/session owner.
+    var onContextFullRecoveryAction: ((_ blockID: AgentNodeID, _ action: AgentContextFullRecovery.Action) -> Void)?
+    /// App-owned sink for a user-requested context compaction from the native
+    /// warning meter. The row only exposes the action for warning/critical
+    /// readings; the session owner chooses provider routing.
+    var onCompactContextRequested: (() -> Void)?
 
     /// App-owned sink for a local-file link this agent authored. It receives the
     /// unresolved destination exactly as written; `AppDelegate.wireManagedAgentTile`
@@ -387,6 +395,9 @@ final class ManagedAgentTileNSView: TileNSView {
         compactStatusRow.onActionMenuRequested = { [weak self] anchor in
             guard let self, let agentID = self.projectedAgentID else { return }
             self.onLocationActionMenuRequested?(agentID, anchor)
+        }
+        compactStatusRow.onCompactContextRequested = { [weak self] in
+            self?.onCompactContextRequested?()
         }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
@@ -633,6 +644,9 @@ final class ManagedAgentTileNSView: TileNSView {
             }
             composer.onTakeQueuedMessageForEditing = { [weak supervisor] messageID in
                 await supervisor?.takeQueuedItemForEditing(messageID, for: agentID)
+            }
+            composer.onRestoreQueuedMessageAfterFailedEdit = { [weak supervisor] message in
+                await supervisor?.restoreQueuedItemAfterFailedEdit(message, for: agentID)
             }
             composer.updateQueueRail(supervisor.queueRailState(for: agentID))
             // T5 — a prompt the supervisor started itself (a drained follow-up,
@@ -1750,9 +1764,9 @@ final class ManagedAgentTileNSView: TileNSView {
         if compactContextWindow == nil,
            let record = supervisor.records[agentID],
            record.latestPromptAt == nil, record.latestTurnAt == nil {
-            // Zero prior turns and no telemetry: the window is empty for any
-            // size — seed an authoritative 0% instead of "unknown". The first
-            // real provider report overwrites this through the event path.
+            // Zero prior turns establishes an empty prompt, but no denominator
+            // has been published. Keep the unknown ring with a zero-token count
+            // until the supervisor publishes the resolved window.
             compactContextWindow = AgentContextWindowSnapshot(
                 usedTokens: 0,
                 observedAt: record.createdAt,
@@ -3008,6 +3022,15 @@ final class ManagedAgentTileNSView: TileNSView {
         case let .revealAgent(_, agentID, parentAgentID):
             onRevealAgent?(AgentID(rawValue: agentID), AgentID(rawValue: parentAgentID))
             return
+        case let .contextFullRecovery(blockID, recoveryAction):
+            guard isContextFullErrorBlock(blockID) else { return }
+            if recoveryAction == .copyTranscript {
+                let blocks = model.document.entries.flatMap(\.blocks)
+                AgentTranscriptCopyController.writeToPasteboard(blocks: blocks)
+            } else {
+                onContextFullRecoveryAction?(blockID, recoveryAction)
+            }
+            return
         case .submitResponse:
             break
         default:
@@ -3041,6 +3064,19 @@ final class ManagedAgentTileNSView: TileNSView {
             return
         }
         markProviderResponse(requestID: requestID, .submitting)
+    }
+
+    private func isContextFullErrorBlock(_ blockID: AgentNodeID) -> Bool {
+        func matchingBlock(in blocks: [AgentBlock]) -> AgentBlock? {
+            for block in blocks {
+                if block.id == blockID { return block }
+                if let nested = matchingBlock(in: block.children) { return nested }
+            }
+            return nil
+        }
+        guard let block = matchingBlock(in: model.document.entries.flatMap(\.blocks)),
+              case let .error(payload) = block.payload else { return false }
+        return payload.message == AgentContextFullRecovery.canonicalErrorMessage
     }
 
     /// TR-06 — the app's report that a dispatch it accepted did not reach the

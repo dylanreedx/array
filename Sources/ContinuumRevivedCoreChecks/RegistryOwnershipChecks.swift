@@ -149,6 +149,37 @@ func runRegistryOwnershipChecks() {
         check(found[andable] == .some(work), "unmigrated: a single membership was not read as the owner")
     }
 
+    // 4b. A declaration is only authoritative while its workspace is registered.
+    //    If it dangles, a valid legacy membership is adopted; without one, the
+    //    project is unowned instead of pointing at an unmountable workspace.
+    do {
+        let valid = uuid("0000000000D1")
+        let missing = uuid("0000000000D2")
+        let withMembership = registry(
+            [workspace(valid, "valid", [harmony])],
+            [project(harmony, "harmony", owner: missing)],
+            lastActive: missing)
+        check((try? withMembership.exclusiveWorkspaceOwner(of: harmony)) == .some(valid),
+              "dangling owner: a registered legacy membership was not used as fallback")
+        if let decoded = roundTrip(withMembership, "dangling-owner-membership") {
+            check(decoded.projects.first(where: { $0.id == harmony })?.workspaceId == valid,
+                  "dangling owner: decode kept an owner whose workspace is not registered")
+            check(listed(decoded, valid) == [harmony],
+                  "dangling owner: decode failed to rebuild the valid workspace index")
+        }
+
+        let noMembership = registry(
+            [workspace(valid, "valid", [])],
+            [project(harmony, "harmony", owner: missing)],
+            lastActive: missing)
+        check((try? noMembership.exclusiveWorkspaceOwner(of: harmony)) == .some(nil),
+              "dangling owner: an unregistered owner without a legacy membership was preserved")
+        if let decoded = roundTrip(noMembership, "dangling-owner-unowned") {
+            check(decoded.projects.first(where: { $0.id == harmony })?.workspaceId == nil,
+                  "dangling owner: decode did not clear an owner without a registered workspace")
+        }
+    }
+
     // 5. Delete W where P declares V but carries a stale membership in W: P
     //    stays V's. (Before: W's membership list was cleared wholesale.)
     do {

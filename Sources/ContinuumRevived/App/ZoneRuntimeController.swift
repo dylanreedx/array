@@ -46,6 +46,10 @@ final class ZoneRuntimeController {
     /// companion publish hangs off this so the phone tracks canvas changes
     /// without manual publishes.
     var onCanvasStatePersisted: (() -> Void)?
+    /// Fired once when the project's canvas becomes unreadable after this
+    /// controller was mounted. The owning workspace surfaces the refusal to
+    /// the user; persistence must not silently degrade to an empty canvas.
+    var onCanvasUnavailable: ((UUID, Error) -> Void)?
     /// Test-only override for the observer's readers, bypassing the default
     /// `ClaudeAgentStateReader()`/`CodexAgentStateReader()`/`PiAgentStateReader()`
     /// construction in `startSessionObserver()`. `NSHomeDirectory()` does not
@@ -716,13 +720,13 @@ final class ZoneRuntimeController {
     /// wrote project A's tiles into project B's file. Witnessed by
     /// `--canvas-persistence-model-check`.
     func markCanvasUnavailable(_ error: Error) {
-        if canvasUnavailable == nil {
-            fputs("ZoneRuntimeController: \(project.name)'s canvas cannot be read and will not be written: \(error)\n", stderr)
-        }
+        guard canvasUnavailable == nil else { return }
+        fputs("ZoneRuntimeController: \(project.name)'s canvas cannot be read and will not be written: \(error)\n", stderr)
         canvasUnavailable = error
         isCanvasDirty = false
         saveTimer?.invalidate()
         saveTimer = nil
+        onCanvasUnavailable?(project.id, error)
     }
 
     private func canvasStateToPersist(canvasView: CanvasNSView) throws -> CanvasState {
@@ -827,10 +831,30 @@ final class ZoneRuntimeController {
     /// close releases the project lock right after this returns. A failure —
     /// this write's or a queued one's — leaves the canvas dirty.
     /// Witness: `--canvas-save-receipt-check`.
+    /// QA: mutate isolated storage after projection, before the real write.
+    var qaBeforeCanvasWrite: (() -> Void)?
+
     func flushCanvasSave() throws {
         saveTimer?.invalidate()
         saveTimer = nil
-        if isCanvasDirty, let canvasView, let snapshot = try? canvasStateToPersist(canvasView: canvasView) {
+        if isCanvasDirty {
+            guard let canvasView else {
+                Self.canvasSaveQueue.sync {}
+                throw HydrationLifecycleError.uiUnavailable
+            }
+            let snapshot: CanvasState
+            do {
+                snapshot = try canvasStateToPersist(canvasView: canvasView)
+            } catch {
+                // Keep the lifecycle boundary a true barrier even when taking
+                // the new snapshot reveals an unreadable canvas. A queued older
+                // write must settle before the caller may release this project.
+                Self.canvasSaveQueue.sync {}
+                throw error
+            }
+            let beforeWrite = qaBeforeCanvasWrite
+            qaBeforeCanvasWrite = nil
+            beforeWrite?()
             let store = projectStore
             let outcomes = canvasSaveOutcomes
             canvasSubmittedGeneration &+= 1

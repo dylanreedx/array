@@ -626,6 +626,8 @@ public struct AgentCompactionCapabilities: Equatable, Sendable {
 public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public var usedTokens: Int?
     public var maxTokens: Int?
+    public var windowResolutionSource: AgentContextWindowResolutionSource?
+    public var contextModel: String?
     public var inputTokens: Int?
     public var outputTokens: Int?
     public var cacheReadTokens: Int?
@@ -651,6 +653,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     public init(
         usedTokens: Int? = nil,
         maxTokens: Int? = nil,
+        windowResolutionSource: AgentContextWindowResolutionSource? = nil,
+        contextModel: String? = nil,
         inputTokens: Int? = nil,
         outputTokens: Int? = nil,
         cacheReadTokens: Int? = nil,
@@ -669,6 +673,8 @@ public struct AgentContextWindowSnapshot: Codable, Equatable, Sendable {
     ) {
         self.usedTokens = usedTokens
         self.maxTokens = maxTokens
+        self.windowResolutionSource = windowResolutionSource
+        self.contextModel = contextModel
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.cacheReadTokens = cacheReadTokens

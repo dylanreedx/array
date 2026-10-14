@@ -18,6 +18,9 @@ import Foundation
 public final class AgentModelCatalog: @unchecked Sendable {
     public static let didRefreshNotification = Notification.Name("ArrayAgentModelCatalogDidRefresh")
     public static let shared = AgentModelCatalog()
+    public static let piModelProbeArguments = [
+        "--list-models", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files",
+    ]
 
     private let lock = NSLock()
     private var liveOptions: [String]?
@@ -476,7 +479,9 @@ public final class AgentModelCatalog: @unchecked Sendable {
             return
         }
         guard let output = boundedProbeOutput(
-            command: command, arguments: ["--list-models"], timeout: timeout) else {
+            command: command,
+            arguments: Self.piModelProbeArguments,
+            timeout: timeout) else {
             apply(readiness: .loggedOut, for: .pi)
             return
         }

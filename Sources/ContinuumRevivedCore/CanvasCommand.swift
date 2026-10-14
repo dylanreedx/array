@@ -31,7 +31,17 @@ public enum CommandRegistry {
     /// the same stable identities.
     public static func definitions() -> [CommandDefinition] {
         [
-            definition("agent.newManaged", .newManagedAgent, aliases: ["create agent", "assistant"]),
+            CommandDefinition(
+                id: "zone.create",
+                title: "Create Zone",
+                aliases: ["new zone", "project zone"],
+                paletteAction: .createZone,
+                floatingToolbarItem: FloatingToolbarItem(title: "Zone", symbolName: "square.dashed", action: .createZone),
+                paletteVisible: false
+            ),
+            definition("agent.newManaged", .newManagedAgent, aliases: ["create agent", "assistant"], shortcuts: [
+                globalShortcut("global.newAgent", command: "agent.newManaged", keyCode: 45, modifiers: .command, priority: .canvasRail)
+            ]),
             // A tile-less agent (P2A.6). `agent.newManaged` is spawn + attach a
             // tile; this one is the spawn alone, so an agent can exist and run
             // without any canvas layout.
@@ -39,7 +49,17 @@ public enum CommandRegistry {
             // N selected queue rows, N isolated agents (P2D.6). The multi-row
             // sibling of the ticket tile's own one-row dispatch.
             definition("agent.fanOut", .fanOutQueueSelection, aliases: ["batch agents", "tickets"]),
-            definition("tile.newNote", .newNote, aliases: ["note"]),
+            CommandDefinition(
+                id: "tile.newTerminal",
+                title: "New Terminal…",
+                aliases: ["shell", "terminal"],
+                floatingToolbarItem: FloatingToolbarItem(title: "Terminal", symbolName: "terminal", action: .terminalProfiles),
+                paletteVisible: false,
+                shortcuts: [globalShortcut("global.newTerminal", command: "tile.newTerminal", keyCode: 17, modifiers: .command, priority: .canvasRail)]
+            ),
+            definition("tile.newNote", .newNote, aliases: ["note"], shortcuts: [
+                globalShortcut("global.newNote", command: "tile.newNote", keyCode: 45, modifiers: [.command, .shift], priority: .canvasRail)
+            ]),
             definition("tile.newBoard", .newBoard, aliases: ["kanban", "board", "tasks"]),
             definition("tile.newBrowser", .newBrowser, aliases: ["web"]),
             definition("tile.openFile", .openFile, aliases: ["document"]),
@@ -148,14 +168,41 @@ public enum CommandRegistry {
     private static func definition(
         _ id: CommandID,
         _ action: LaunchPaletteAction,
-        aliases: [String] = []
+        aliases: [String] = [],
+        shortcuts: [ShortcutDefinition] = []
     ) -> CommandDefinition {
         CommandDefinition(
             id: id,
             title: action.displayName,
             aliases: aliases,
-            paletteAction: action
+            paletteAction: action,
+            floatingToolbarItem: toolbarItem(for: action),
+            shortcuts: shortcuts
         )
+    }
+
+    /// All user-facing canvas tile creation actions flow through this mapping.
+    /// The AppKit toolbar enumerates `definitions()` and consumes this metadata;
+    /// adding a new tile command here makes it appear there automatically.
+    private static func toolbarItem(for action: LaunchPaletteAction) -> FloatingToolbarItem? {
+        switch action {
+        case .newManagedAgent:
+            return FloatingToolbarItem(title: "Agent", symbolName: "sparkles", action: .palette(action))
+        case .newNote:
+            return FloatingToolbarItem(title: "Note", symbolName: "note.text", action: .palette(action))
+        case .newBoard:
+            return FloatingToolbarItem(title: "Board", symbolName: "rectangle.split.3x1", action: .palette(action))
+        case .newBrowser:
+            return FloatingToolbarItem(title: "Browser", symbolName: "globe", action: .palette(action))
+        case .openFile:
+            return FloatingToolbarItem(title: "Editor", symbolName: "doc.text", action: .palette(action))
+        case .openFileTree:
+            return FloatingToolbarItem(title: "File Tree", symbolName: "folder", action: .palette(action))
+        case .newDiffReview:
+            return FloatingToolbarItem(title: "Diff", symbolName: "plusminus", action: .palette(action))
+        default:
+            return nil
+        }
     }
 
     private static func globalShortcut(

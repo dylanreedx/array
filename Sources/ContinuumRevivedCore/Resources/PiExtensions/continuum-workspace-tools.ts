@@ -23,9 +23,11 @@ import { readFileSync } from "node:fs";
 // described twice drifts.
 
 const SCHEMA = "array.workspace.v1";
-// Longer than Array's own host deadline (30 s) so the host's structured
-// `outcome_unknown` answer wins over a bare timeout.
-const TOOL_TIMEOUT_MS = 45_000;
+// Match the MCP clients' 24-hour request horizon, plus five seconds so the
+// host's structured `outcome_unknown` answer wins over pi's bare UI timeout.
+// Workspace scope approvals have no separate deadline and must stay pending
+// until the user decides or the host's shared request horizon expires.
+const TOOL_TIMEOUT_MS = 86_405_000;
 const CONTEXT_TIMEOUT_MS = 2_000;
 
 type Envelope = { schema: string; kind: "request"; requestId: string; op: string; payload: unknown };

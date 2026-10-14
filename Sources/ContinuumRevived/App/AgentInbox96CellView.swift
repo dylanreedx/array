@@ -276,6 +276,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     let anatomy: SidebarRowAnatomy
 
     private let card = AgentInboxCardView()
+    private let groupBackground = InboxGroupBackgroundView()
     // Ticket: .plans/0721-subagents-handoff.md
     /// The tree connector, in the indent gutters to the left of the card.
     private let spine = InboxSpineView()
@@ -375,6 +376,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                  height: Self.rowHeight(for: proposal)))
         wantsLayer = true
 
+        addSubview(groupBackground)
         addSubview(card)
         // ABOVE the card: a parent's descender crosses its own card's leading
         // inset, and the card paints a fill while hovered, selected or active.
@@ -511,7 +513,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
 
         disclosureButton.isHidden = disclosure == .none
-        disclosureButton.show(disclosure)
+        disclosureButton.show(disclosure, childCount: rollup?.children ?? 0)
 
         applyColours()
         applyAccessibility()
@@ -853,6 +855,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // same reason — the default flipped in the macOS 14 SDK.
         let bleed = CGFloat(AgentInboxView.rowSpacing) / 2
         clipsToBounds = false
+        groupBackground.clipsToBounds = false
+        groupBackground.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        groupBackground.show(
+            nesting, hasChildren: !disclosureButton.isHidden,
+            metrics: Self.spineMetrics,
+            rowHeight: bounds.height + bleed * 2)
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -874,9 +882,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             let side: CGFloat = 14
             let lane = CGFloat(AgentInboxView.indentPerLevel)
             let laneX = (lane - side) / 2
+            let controlWidth = max(side, disclosureButton.fittingSize.width)
             disclosureButton.frame = inCard(NSRect(
-                x: laneX, y: (card.bounds.height - side) / 2, width: side, height: side))
-            textLeft = max(textLeft, laneX + side + CGFloat(Space.s))
+                x: laneX, y: (card.bounds.height - side) / 2,
+                width: controlWidth, height: side))
+            textLeft = max(textLeft, laneX + controlWidth + CGFloat(Space.s))
         }
 
         var bandY = proposal.insetV
@@ -1221,7 +1231,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
     var qaNestingForQA: InboxNesting { nesting }
+    var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
+        (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
+    }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaDisclosureTitle: String { disclosureButton.qaTitle }
     var qaJumpHint: String { jumpHint.qaChord }
     var qaJumpHintHitTestPassesThrough: Bool {
         jumpHint.hitTest(NSPoint(x: jumpHint.bounds.midX, y: jumpHint.bounds.midY)) == nil

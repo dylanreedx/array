@@ -1190,7 +1190,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         // section declares `fields: []`, so without a sentinel it renders nothing
         // and `selectedSectionFieldsAllRenderedForQA` reports the section as
         // unrendered — which is what happened when WS7 added Canvas Background.
-        let customSectionIds = ["companion", "canvasBackground"]
+        let customSectionIds = ["companion", "canvasBackground", "floatingToolbar"]
         var customSectionMounts: [String: Int] = [:]
         var customSentinels: [String: NSView] = [:]
         var customViewFactories: [String: () -> NSView] = [:]

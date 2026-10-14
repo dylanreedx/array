@@ -409,6 +409,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # precision semantics. Standalone so unrelated long-running CoreChecks failures
 # cannot prevent this contract from running.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
+# Standalone: the bare CoreChecks run is KNOWN-RED before the meter sections.
+run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
+run_leg scripts/capture-cli-fixtures.sh check
 # ST-01. Standalone for the same reason as the compaction leg above: the bare
 # CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
 # and a witness only counts if the gate reports IT rather than the first red
@@ -420,6 +425,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
 # Parity against pi's allowlist, one catalog for both transports, the Claude and
@@ -465,6 +471,7 @@ run_leg swift run ContinuumRevivedPerfChecks
 run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
+run_app_check .build/debug/Array --floating-toolbar-check
 # Ordered HERE, ahead of the KNOWN-RED restore leg below: this script is
 # `set -euo pipefail` with bare calls, so it aborts at the first red leg and
 # everything after it never runs. A witness the gate cannot reach never runs at all.
@@ -550,6 +557,11 @@ run_app_check .build/debug/Array --agent-supervisor-check
 # display-independent, so it belongs in the gate like any other app leg.
 run_app_check .build/debug/Array --agent-completion-semantic-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+# Real installed-provider warning/compaction/task-retention acceptance spends
+# subscription usage. Opt in explicitly; ordinary matrix runs stay offline.
+if [[ "${CONTINUUM_CHECK_CONTEXT_LIVE_COMPACTION:-0}" == "1" ]]; then
+  run_app_check .build/debug/Array --agent-context-live-compaction-check
+fi
 run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
@@ -1192,6 +1204,7 @@ run_app_check .build/debug/Array --viewport-sanitize-check
 run_app_check .build/debug/Array --project-lock-check
 run_app_check .build/debug/Array --project-root-resolution-check
 run_app_check .build/debug/Array --project-picker-resolution-check
+run_app_check .build/debug/Array --fresh-install-check
 run_app_check .build/debug/Array --topology-migration-check
 run_app_check .build/debug/Array --terminal-tmux-persistence-check
 run_app_check .build/debug/Array --terminal-tmux-no-mirror-check

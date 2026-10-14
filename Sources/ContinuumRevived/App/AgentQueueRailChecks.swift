@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Darwin
@@ -54,10 +55,11 @@ func runAgentQueueRailChecks() async throws {
         let work = root.appendingPathComponent("work", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         setenv("PATH", "\(bin.path):\(originalPath)", 1)
+        let recoveryStore = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
         let supervisor = AgentSupervisor(
             store: AgentStore(applicationSupportDirectory: root),
             makeRunner: AgentSupervisor.productionRunner,
-            submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+            submissionRecoveryStore: recoveryStore)
         supervisor.interruptGrace = 3
         let (harness, model): (AgentHarness, String) = switch kind {
         case .claude: (.claudeCode, "anthropic/claude-haiku-4-5-20251001")
@@ -363,6 +365,47 @@ func runAgentQueueRailChecks() async throws {
         try expect(rail.qaPressResume(), "\(kind): Resume was not offered")
         try await eventually("\(kind): Resume must drain the paused queue, prompts \(promptTexts)", timeout: 10) {
             promptTexts.last == "after stop" && !supervisor.isRunning(id) && rail.state.isEmpty
+        }
+        // Hold the rail before direct fixture insertion: the prior completion
+        // can still have an asynchronous drain awaiting its store hop.
+        supervisor.stop(id)
+        try expect(supervisor.isQueuePaused(for: id), "\(kind): stale Edit fixture must use a paused queue")
+        // Async Edit must return A's exact item to A's durable queue if the
+        // composer binds B during either the take or attachment-load boundary.
+        for boundary in ["take", "attachments"] {
+            let image = AgentComposerDraftImageAttachment(metadata: AgentImageAttachmentMetadata(
+                id: AgentImageAttachmentID(rawValue: UUID().uuidString)!, displayName: "queued-edit.png"))
+            let message = await recoveryStore.enqueueMessage(text: "A message \(boundary)",
+                imageAttachments: boundary == "attachments" ? [image] : [], for: id)
+            composer.bindAttachmentStore(AgentComposerAttachmentStore(applicationSupportDirectory: root), agentID: id)
+            composer.apply(.init(text: "", selection: NSRange(location: 0, length: 0), revision: 1))
+            let otherID = AgentID(rawValue: UUID())
+            func rebindToB() {
+                composer.bindAttachmentStore(AgentComposerAttachmentStore(applicationSupportDirectory: root), agentID: otherID)
+                composer.apply(.init(text: "B draft", selection: NSRange(location: 7, length: 0), revision: 1))
+            }
+            var restored = false
+            composer.onRestoreQueuedMessageAfterFailedEdit = { item in
+                await supervisor.restoreQueuedItemAfterFailedEdit(item, for: id)
+                restored = true
+            }
+            composer.onTakeQueuedMessageForEditing = { itemID in
+                let item = await supervisor.takeQueuedItemForEditing(itemID, for: id)
+                if boundary == "take" { rebindToB() }
+                return item
+            }
+            composer.qaAfterQueuedEditAttachmentLoad = {
+                if boundary == "attachments" { rebindToB() }
+            }
+            composer.editQueuedMessage(message.id)
+            try await eventually("\(kind): stale edit after \(boundary) must restore A's queue") { restored }
+            let queueAfter = await recoveryStore.queuedMessages(for: id)
+            try expect(queueAfter.first == message,
+                       "\(kind): stale edit after \(boundary) must restore exact item at front, got \(queueAfter)")
+            try expect(composer.qaDraftText == "B draft" && composer.qaImageAttachmentCount == 0,
+                       "\(kind): stale edit after \(boundary) must leave B draft untouched")
+            _ = await recoveryStore.removeQueuedMessage(id: message.id, for: id)
+            composer.qaAfterQueuedEditAttachmentLoad = nil
         }
         try expect(kind == .codex || AgentSteeringQAFakes.spawnCount(in: bin) == 1,
                    "\(kind): one process for the whole session, spawned \(AgentSteeringQAFakes.spawnCount(in: bin))")

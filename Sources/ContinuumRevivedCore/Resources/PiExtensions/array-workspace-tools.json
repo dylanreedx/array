@@ -100,7 +100,11 @@
             "type": "string",
             "maxLength": 128
           }
-        }
+        },
+        "anyOf": [
+          { "required": ["relativePath"] },
+          { "required": ["artifactHandle"] }
+        ]
       }
     },
     {
@@ -309,6 +313,32 @@
           "op",
           "tileId",
           "expectedRevision"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": { "op": { "const": "move" } },
+              "required": ["op"]
+            },
+            "then": {
+              "anyOf": [
+                { "required": ["origin"] },
+                { "required": ["worldFrame"] }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": { "op": { "const": "resize" } },
+              "required": ["op"]
+            },
+            "then": {
+              "anyOf": [
+                { "required": ["size"] },
+                { "required": ["worldFrame"] }
+              ]
+            }
+          }
         ]
       }
     },
@@ -594,7 +624,11 @@
             "type": "string",
             "maxLength": 128
           }
-        }
+        },
+        "anyOf": [
+          { "required": ["operationId"] },
+          { "required": ["idempotencyKey"] }
+        ]
       }
     },
     {

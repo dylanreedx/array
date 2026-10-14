@@ -545,7 +545,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     }
 
     /// The workspace on screen, which the default scope resolves to.
-    func setInboxCurrentWorkspace(_ name: String?) {
+    func setInboxCurrentWorkspace(id: UUID?, name: String?) {
+        inboxView.currentWorkspaceId = id
         inboxView.currentWorkspaceName = name
     }
 
@@ -792,10 +793,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     /// THE SCOPED WORKSPACE FIRST (P3.14): the scope popup is the control the verbs
     /// now hang off, so "Rename Workspace…" under a workspace scope must mean that
     /// workspace and not whichever one the canvas happens to be showing. The scope
-    /// carries a NAME (`InboxScope.workspace`), so it is resolved against the tree,
-    /// and only a UNIQUE match counts — duplicate workspace names are allowed by
-    /// `Registry.createWorkspace`, and guessing which of two same-named workspaces to
-    /// delete is not a guess this view may make.
+    /// ID scopes resolve exactly. Legacy name scopes are accepted only when the name
+    /// has one match; duplicate workspace names are valid in Registry.
     ///
     /// AN AMBIGUOUS WORKSPACE SCOPE HAS NO TARGET AT ALL — it does not fall through
     /// (found in cross-review). Falling back would put the verbs back on the open
@@ -809,6 +808,9 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     /// the current workspace. Under `.all` — the default — that is exactly the
     /// behaviour the header buttons had.
     private func workspaceIdForManagementAction() -> UUID? {
+        if case let .workspaceID(id, _) = inboxView.scope {
+            return tree.workspaces.first { $0.workspaceId == id }?.workspaceId
+        }
         if case let .workspace(name) = inboxView.scope {
             let matches = tree.workspaces.filter { $0.name == name }
             return matches.count == 1 ? matches[0].workspaceId : nil

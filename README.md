@@ -12,9 +12,9 @@ Try the interactive walkthrough at [arrayapp.dev](https://arrayapp.dev). Array i
 
 ## Build from source
 
-Array is a native macOS app and requires macOS 14 or newer, Swift 6.0 or newer, and a macOS `GhosttyKit.xcframework` built from a [Ghostty source checkout](https://github.com/ghostty-org/ghostty). The framework is not included in this repository.
+Array is a native macOS app and requires macOS 14 or newer, Swift 6.2 or newer, and a macOS `GhosttyKit.xcframework` built from a [Ghostty source checkout](https://github.com/ghostty-org/ghostty). The framework is not included in this repository.
 
-1. Install Xcode or the Xcode Command Line Tools with Swift 6.0 or newer.
+1. Install Xcode or the Xcode Command Line Tools with Swift 6.2 or newer.
 2. Build GhosttyKit by following the Ghostty project's macOS development instructions.
 3. Clone Array, then point the preparation script at that Ghostty checkout:
 

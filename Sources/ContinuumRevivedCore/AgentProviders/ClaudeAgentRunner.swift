@@ -64,6 +64,7 @@ public enum ClaudeCLIBackend {
     /// checked against the live CLI 2026-10-01).
     public static let modelProbeArguments = [
         "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--tools", "", "--strict-mcp-config", "--setting-sources", "",
         "--settings", #"{"disableAllHooks":true}"#,
     ]
     public static let modelProbeRequestId = "array-models"

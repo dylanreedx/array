@@ -998,6 +998,11 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--floating-toolbar-check") {
+            do { _ = NSApplication.shared; try FloatingToolbarChecks.run(); print("FloatingToolbarChecks passed"); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
         if CommandLine.arguments.contains("--project-root-resolution-check") {
             do {
                 try AppDelegate.runProjectRootResolutionSelfCheck()
@@ -1693,6 +1698,25 @@ enum ContinuumApp {
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // Usage-bearing release acceptance is explicitly opt-in and separate
+        // from the offline matrix and ordinary startup.
+        if CommandLine.arguments.contains("--agent-context-live-compaction-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentContextLiveCompactionChecks()
+                    print("AgentContextLiveCompactionChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    // The check prints sanitized assertions and writes partial
+                    // evidence; do not expose arbitrary provider error text here.
+                    fputs("FAIL: AgentContextLiveCompactionChecks; see sanitized evidence\n", stderr)
                     Foundation.exit(1)
                 }
             }
@@ -3758,6 +3782,13 @@ enum ContinuumApp {
             Foundation.exit(1)
         }
 
+        // The fresh-install witness mounts the real project-free workspace,
+        // including its Ghostty runtime, so it requires the global bootstrap.
+        if CommandLine.arguments.contains("--fresh-install-check") {
+            do { _ = NSApplication.shared; try AppDelegate.runFreshInstallSelfCheck(); print("FreshInstallChecks passed"); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
         // C4 (round-3 continuation): moved below `ghostty_init()` — this
         // check now constructs a real `GhosttyRuntimeContext` (to drive
         // `spawner.restartTerminalTile(tileId:)`, the real production
@@ -4251,6 +4282,28 @@ enum ContinuumApp {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
+        let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        let fileMenu = NSMenu(title: "File")
+        let newItem = NSMenuItem(title: "New", action: nil, keyEquivalent: "")
+        let newMenu = NSMenu(title: "New")
+        newMenu.addItem(NSMenuItem(title: "Zone…", action: #selector(AppDelegate.createZoneFromMenu(_:)), keyEquivalent: ""))
+        let agentItem = NSMenuItem(title: "Agent", action: #selector(AppDelegate.createAgentFromMenu(_:)), keyEquivalent: "")
+        agentItem.tag = registeredAgentMenuTag
+        newMenu.addItem(agentItem)
+        let terminalItem = NSMenuItem(title: "Terminal", action: #selector(AppDelegate.createTerminalFromMenu(_:)), keyEquivalent: "")
+        terminalItem.tag = registeredTerminalMenuTag
+        newMenu.addItem(terminalItem)
+        let noteItem = NSMenuItem(title: "Note", action: #selector(AppDelegate.createNoteFromMenu(_:)), keyEquivalent: "")
+        noteItem.tag = registeredNoteMenuTag
+        newMenu.addItem(noteItem)
+        newMenu.addItem(NSMenuItem(title: "Board", action: #selector(AppDelegate.createBoardFromMenu(_:)), keyEquivalent: ""))
+        newMenu.addItem(NSMenuItem(title: "Browser", action: #selector(AppDelegate.createBrowserFromMenu(_:)), keyEquivalent: ""))
+        newMenu.addItem(NSMenuItem(title: "File Tree", action: #selector(AppDelegate.createFileTreeFromMenu(_:)), keyEquivalent: ""))
+        newItem.submenu = newMenu
+        fileMenu.addItem(newItem)
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
         let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
@@ -4314,6 +4367,9 @@ enum ContinuumApp {
     private static let registeredKeybindingsMenuTag = 8_402
     private static let registeredSettingsMenuTag = 8_403
     private static let registeredSidebarMenuTag = 8_404
+    private static let registeredAgentMenuTag = 8_405
+    private static let registeredTerminalMenuTag = 8_406
+    private static let registeredNoteMenuTag = 8_407
 
     @MainActor
     fileprivate static func refreshRegisteredCommandMenuItems() {
@@ -4337,6 +4393,9 @@ enum ContinuumApp {
         update(tag: registeredKeybindingsMenuTag, commandID: "app.openKeybindings", title: "All Shortcuts…")
         update(tag: registeredSettingsMenuTag, commandID: "app.settings", title: "Settings…")
         update(tag: registeredSidebarMenuTag, commandID: "view.toggleWorkspaceSidebar", title: "Show Workspace Sidebar")
+        update(tag: registeredAgentMenuTag, commandID: "agent.newManaged", title: "Agent")
+        update(tag: registeredTerminalMenuTag, commandID: "tile.newTerminal", title: "Terminal")
+        update(tag: registeredNoteMenuTag, commandID: "tile.newNote", title: "Note")
     }
 
     private static func launchProbeSentinelPath() -> String? {
@@ -4832,6 +4891,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private let companionRelayProvisioning = CompanionRelayProvisioning()
     private var companionRelayPairingGrantID: UUID?
     private var companionRelayPairingMonitorTask: Task<Void, Never>?
+    private var contextCatalogObserver: NSObjectProtocol?
+    private var contextWindowResolver: AgentContextWindowResolver?
+    private var floatingToolbar: FloatingToolbarController?
     private var onboardingPanel: OnboardingPanel?
     private lazy var onboardingProgressStore = OnboardingProgressStore()
     private var starterCreationEligible = false
@@ -4990,6 +5052,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 instanceDisplayName: Host.current().localizedName ?? "Continuum"
             )
             let registry = try registryStore.loadOrEmpty()
+            self.registryStore = registryStore
+            if !smokeTestEnabled, ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil,
+               Self.shouldLaunchWithoutProject(registry: registry) {
+                try launchProjectFreeWorkspace(registryStore: registryStore)
+                return
+            }
             // Go-live Phase 4: an empty registry is the "no prior state"
             // signal the first-run onboarding gate consumes after boot.
             let registryWasEmpty = registry.projects.isEmpty
@@ -5275,6 +5343,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 }
             }
+        } catch let error as CocoaError where error.code == .userCancelled {
+            do {
+                if let registryStore { try launchProjectFreeWorkspace(registryStore: registryStore) }
+            } catch { presentFatalError(error) }
         } catch {
             presentFatalError(error)
         }
@@ -6611,10 +6683,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let runtime = owner.browserRuntimes.first(where: { $0.id == runtimeId }) else { return }
         let tileId = runtime.tileId
 
-        owner.tileSpawner?.writeBrowserTileSnapshot(for: runtime)
+        if let parkedTile = workspaceRuntime?.parkedTileRecord(for: tileId, projectId: owner.project.id) {
+            do {
+                try owner.tileSpawner?.writeBrowserTileSnapshotOrThrow(
+                    for: runtime, parkedTile: parkedTile,
+                    parkedView: workspaceRuntime?.parkedTileView(for: tileId, projectId: owner.project.id) as? BrowserTileNSView)
+            } catch {
+                fputs("Parked browser termination snapshot failed: \(error)\n", stderr)
+            }
+        } else {
+            owner.tileSpawner?.writeBrowserTileSnapshot(for: runtime)
+        }
 
         owner.browserRuntimes.removeAll { $0.id == runtimeId }
         runtime.terminate(policy: .force)
+
+        if workspaceRuntime?.replaceParkedTileView(for: tileId, projectId: owner.project.id, makeView: { tile in
+            BrowserRestartTileNSView(tile: tile, statusText: "Web content process terminated", onRestart: { [weak self] in
+                self?.restartBrowserTile(tileId: tileId)
+            })
+        }) == true { return }
 
         guard let canvasView,
               let tile = canvasView.tileRecord(for: tileId)
@@ -6654,16 +6742,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile that no longer has a live runtime.
         owner.sessionObserverTileDidClose(tileId: tileId)
 
-        guard let canvasView,
-              let tile = canvasView.tileRecord(for: tileId)
-        else { return }
-
         let statusText: String
         if let exitCode {
             statusText = "Shell exited (code \(exitCode))"
         } else {
             statusText = "Shell exited"
         }
+        if workspaceRuntime?.replaceParkedTileView(for: tileId, projectId: owner.project.id, makeView: { tile in
+            TerminalRestartTileNSView(tile: tile, statusText: statusText, onRestart: { [weak self] in
+                self?.restartTile(tileId: tileId)
+            })
+        }) == true { return }
+
+        guard let canvasView, let tile = canvasView.tileRecord(for: tileId) else { return }
         installRestartPlaceholder(for: tile, statusText: statusText, restartable: true, in: canvasView)
         focusBroker.enterScope(.tile(tileId), reason: .runtimeExited)
     }
@@ -8099,6 +8190,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// QA (`--browser-click-recency-check`): adopt a fixture workspace runtime.
+    func qaRuntimeExited(_ runtimeId: TerminalSessionID, exitCode: Int32?) {
+        handleRuntimeExited(runtimeId: runtimeId, exitCode: exitCode)
+    }
+    func qaBrowserContentProcessTerminated(_ runtimeId: BrowserRuntimeID) {
+        handleBrowserContentProcessTerminated(runtimeId: runtimeId)
+    }
+    func qaRestartBrowserTile(_ tileId: UUID) { restartBrowserTile(tileId: tileId) }
+
     func qaAdoptWorkspaceRuntime(_ runtime: WorkspaceRuntime) {
         workspaceRuntime = runtime
     }
@@ -9041,6 +9140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func performRegisteredGlobalCommand(_ commandID: CommandID) -> Bool {
         switch commandID.rawValue {
+        case "agent.newManaged": _ = spawnManagedAgentFromPalette()
+        case "tile.newTerminal": _ = spawnTerminalFromProfile("shell", trigger: "shortcut:new-terminal")
+        case "tile.newNote": _ = performPaletteAction(.newNote)
         case "app.commandCenter":
             openProfilePalette()
         case "app.openKeybindings":
@@ -9549,6 +9651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func showOnboardingPanel() {
         let panel = onboardingPanel ?? {
             let created = OnboardingPanel(probes: OnboardingPanel.liveProbes(environment: { ToolEnvironment.shared.environment() }))
+            created.onCreateZone = { [weak self] in _ = self?.performPaletteAction(.createZone) }
             created.onOpenTile = { [weak self] profileId in
                 self?.spawnTerminalFromProfile(profileId, trigger: "onboarding:\(profileId)")
             }
@@ -10567,6 +10670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let panel = SettingsPanel(
             navKeymap: navKeymap,
             customSectionViews: [
+                "floatingToolbar": { FloatingToolbarSettingsView() },
                 "companion": { [weak self] in
                     self?.makeCompanionSettingsView() ?? NSView()
                 },
@@ -10627,6 +10731,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         shortcutRail.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
         shortcutRail.onOpenKeybindings = { [weak self] in self?.openKeybindingsSettings() }
         let gettingStarted = CanvasGettingStartedView(frame: .zero)
+        gettingStarted.onAddAgent = { [weak self] in _ = self?.spawnManagedAgentFromPalette() }
+        gettingStarted.onAddTerminal = { [weak self] in _ = self?.spawnTerminalFromProfile("shell", trigger: "onboarding:add-terminal") }
         gettingStarted.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
         gettingStarted.onShowZoneActions = { [weak self] in self?.openProfilePalette(initialQuery: "This Zone") }
         gettingStarted.onSkipTask = { [weak self] task in self?.skipGettingStartedTask(task) }
@@ -10742,6 +10848,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let contentFrame = window.contentRect(forFrameRect: window.frame)
         window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
         window.delegate = self
+        let toolbarQAOptIn = ProcessInfo.processInfo.environment["CONTINUUM_TOOLBAR_QA"] == "1"
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
+           toolbarQAOptIn || (!smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
+            let toolbar = FloatingToolbarController(terminalProfiles: {
+                LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
+            }, onSelection: { [weak self] selection in
+                guard let self else { return }
+                switch selection {
+                case .createZone: _ = self.performPaletteAction(.createZone)
+                case .fanOutQueueSelection: _ = self.performPaletteAction(.fanOutQueueSelection)
+                case let .palette(action): _ = self.performPaletteAction(action)
+                case let .terminalProfile(id): _ = self.spawnTerminalFromProfile(id, trigger: "toolbar:terminal")
+                case let .agentHarness(harness): _ = self.spawnManagedAgentForHarness(harness)
+                }
+            })
+            toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
+            floatingToolbar?.close()
+            floatingToolbar = toolbar
+            toolbar.show(near: window)
+        }
         return window
     }
 
@@ -11089,7 +11215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// be empty.
     private func inboxScopeCatalog(registry: Registry) -> [InboxScope] {
         return registry.projects.filter { !$0.missing }.map { .project($0.name) }
-            + registry.workspaces.map { .workspace($0.name) }
+            + registry.workspaces.map { .workspaceID($0.id, $0.name) }
     }
 
     private func focusedInboxAgentId() -> UUID? {
@@ -11118,7 +11244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.setInboxScopeCatalog(inboxScopeCatalog(registry: registry))
         // R6: the default scope is the workspace on screen.
         let onScreen = workspaceRuntime?.workspaceId ?? registry.lastActiveWorkspaceId
-        sidebar.setInboxCurrentWorkspace(registry.workspaces.first { $0.id == onScreen }?.name)
+        let currentWorkspace = registry.workspaces.first { $0.id == onScreen }
+        sidebar.setInboxCurrentWorkspace(id: currentWorkspace?.id, name: currentWorkspace?.name)
         sidebar.agentInbox.setProjectIconSources(Dictionary(
             uniqueKeysWithValues: registry.projects.filter { !$0.missing }.map {
                 ($0.id, URL(fileURLWithPath: $0.rootPath, isDirectory: true))
@@ -14254,6 +14381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         wireRuntimeExitHandler(runtime)
         controller(owning: spawner)?.runtimes.append(runtime)
         focusSpawnedTile(runtime.tileId)
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) { demonstrateOnboarding(.terminalAdded) }
     }
 
     private func liveTerminalRuntimeCount() -> Int {
@@ -14294,6 +14422,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         case let .failure(error):
             fputs("TileSpawner.spawnTerminal failed: \(error)\n", stderr)
+            return false
+        }
+    }
+
+    @objc func createZoneFromMenu(_ sender: Any?) { _ = performPaletteAction(.createZone) }
+    @objc func createAgentFromMenu(_ sender: Any?) { _ = spawnManagedAgentFromPalette() }
+    @objc func createTerminalFromMenu(_ sender: Any?) { _ = spawnTerminalFromProfile("shell", trigger: "menu:new-terminal") }
+    @objc func createNoteFromMenu(_ sender: Any?) { _ = performPaletteAction(.newNote) }
+    @objc func createBoardFromMenu(_ sender: Any?) { _ = performPaletteAction(.newBoard) }
+    @objc func createBrowserFromMenu(_ sender: Any?) { _ = performPaletteAction(.newBrowser) }
+    @objc func createFileTreeFromMenu(_ sender: Any?) { _ = performPaletteAction(.openFileTree) }
+
+    /// Explicit provider choice belongs to this new agent, never global Settings.
+    @discardableResult
+    private func spawnManagedAgentForHarness(_ harness: AgentHarness) -> Bool {
+        guard resolvedCreationScope() != nil else {
+            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentForHarness(harness) }
+            return false
+        }
+        let providerModel = AgentModelConfig.resolvedFromDefaults(harness: harness).model
+        guard let selection = AgentModelConfig.launchSelection(harness: harness, model: providerModel), AgentModelConfig.validates(selection) else {
+            presentSpawnRefusal("\(harness.rawValue) is not ready. Open Environment Setup to install or sign in.")
+            showOnboardingPanel()
+            return false
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return false }
+        switch spawner.spawnManagedAgent(launchSelection: selection) {
+        case let .spawned(tileId):
+            wireManagedAgentTile(tileId, initialLaunchSelection: selection)
+            focusSpawnedTile(tileId)
+            return true
+        case let .failure(error):
+            presentSpawnRefusal(error.localizedDescription)
             return false
         }
     }
@@ -14629,6 +14790,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     view?.reportProviderResponseFailure(requestID: requestID, message: message)
                 }
             )
+        }
+        view.onCompactContextRequested = { [weak self, weak view] in
+            Task { @MainActor [weak self, weak view] in
+                guard let self else { return }
+                let result = await self.agentSupervisor.accept(.compact(AgentCompactionRequest()), for: agentId)
+                if result != .accepted { view?.showActionFailedNotice("Couldn't compact this context. Wait for the turn to finish and try again.") }
+            }
+        }
+        view.onContextFullRecoveryAction = { [weak self, weak view] blockID, action in
+            Task { @MainActor [weak self, weak view] in
+                guard let self else { return }
+                guard let recovered = await self.agentSupervisor.recoverContextFull(action, for: agentId, blockID: blockID) else {
+                    view?.showActionFailedNotice("Couldn't recover this turn. Copy the transcript to keep a local copy.")
+                    return
+                }
+                if recovered != agentId { _ = self.revealAgentFromInbox(recovered.rawValue) }
+            }
         }
         // C4: transcript persistence moved to `AgentSupervisor` itself, fed from
         // the same restamped event stream every consumer sees, so a tile-less
@@ -15042,6 +15220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// timeline and nudges a companion publish so the phone updates (88.4c).
     /// `tileId` rides along as the optional view hint only (P2A.8).
     private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: AgentStatus) {
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
+           case .turnStarted = event, !onboardingProgressStore.load().startedAgentIDs.contains(agentId.rawValue) {
+            onboardingProgressStore.update { $0.demonstrateAgentStarted(agentId.rawValue) }
+            refreshGettingStartedTasks()
+        }
         let overrides = tileId.flatMap { id in
             canvasView?.allWorkspaceTiles().first(where: { $0.id == id })?.metadata.agentSoundOverrides
         }
@@ -16080,6 +16263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             anchor: anchor,
             relativeTo: canvasView,
             addProject: { [weak self] in self?.registerProjectUsingOpenPanel() },
+            registerFolder: { [weak self] in self?.registerProjectFolder($0) },
             confirmsDestructiveCancellation: isNewZone,
             onInteractionOwnershipChanged: { [weak canvasView] owned in
                 canvasView?.setZoneScopePickerInteractionOwned(owned)
@@ -16175,6 +16359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func persistLastExplicitCreationScope(_ scope: ZoneScope) {
         guard scope.projectId != nil, let workspaceRuntime else { return }
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }), onboardingProgressStore.load().firstProjectId == nil {
+            onboardingProgressStore.update { $0.firstProjectId = scope.projectId }
+            refreshGettingStartedTasks()
+        }
         // Through the mounted document, never a disk reload: reading the file
         // back reverted whatever was still inside the arming debounce.
         do {
@@ -16205,7 +16393,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         panel.allowsMultipleSelection = false
         panel.prompt = "Add Project"
         guard panel.runModal() == .OK, let rawURL = panel.url else { return nil }
+        UserDefaults.standard.set(true, forKey: Self.projectFolderGrantAcknowledgementKey(for: rawURL))
+        return registerProjectFolder(rawURL)
+    }
+
+    private func registerProjectFolder(_ rawURL: URL) -> ProjectEntry? {
+        guard let registryStore else { return nil }
         let root = rawURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]),
+              values.isDirectory == true, values.isPackage != true else { return nil }
         do {
             var registry = try registryStore.loadOrEmpty()
             if let existing = registry.projects.first(where: {
@@ -17113,8 +17309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// retry.
     @discardableResult
     private func offerCreationScope(then action: @escaping () -> Void) -> Bool {
-        let projects = ((try? registryStore?.loadOrEmpty()) ?? nil)?.projects.filter { !$0.missing } ?? []
-        guard !projects.isEmpty else { return false }
+        guard registryStore != nil else { return false }
         requestCreationScope(then: action)
         return true
     }
@@ -17145,6 +17340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             anchor: CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY),
             relativeTo: canvasView,
             addProject: { [weak self] in self?.registerProjectUsingOpenPanel() },
+            registerFolder: { [weak self] in self?.registerProjectFolder($0) },
             onInteractionOwnershipChanged: { [weak canvasView] owned in canvasView?.setZoneScopePickerInteractionOwned(owned) },
             onConfirm: { [weak self] selection in
                 guard let self else { return }
@@ -17509,6 +17705,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.onZoneScopeChangeRequested = { [weak self] placement, anchor in
             self?.presentProjectHomePicker(for: placement, anchor: anchor, isNewZone: false)
         }
+        canvasView.onProjectFolderDrop = { [weak self] url, point in
+            self?.createZoneForDroppedProject(url, at: point) ?? false
+        }
     }
 
     /// Everything that turns a freshly built canvas, runtime and spawner into the
@@ -17526,8 +17725,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Order is load-bearing and matches launch exactly; do not reshuffle.
     func mountWorkspaceSceneAtBoot(
         canvasView: CanvasNSView,
-        spawner: TileSpawner,
-        projectStore: any ProjectStoring,
+        spawner: TileSpawner?,
+        projectStore: (any ProjectStoring)?,
         canvasState: CanvasState,
         installsGlobalEventMonitors: Bool = true
     ) throws {
@@ -17544,6 +17743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         self.bootTileSpawner = spawner
+        if installsGlobalEventMonitors { installContextCatalogNotices() }
         // T2 (`.plans/47`): clicking a zone arms it for creation. Wired HERE, not
         // in the surrounding `applicationDidFinishLaunching` block with the other
         // canvas callbacks, so `--zone-arming-check` drives the same assignment
@@ -17591,7 +17791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.onLayoutCommitted = { [weak self] transaction in
             self?.persistLayoutTransaction(transaction) ?? false
         }
-        configureCreationAndRuntimeRoutes(on: spawner)
+        if let spawner { configureCreationAndRuntimeRoutes(on: spawner) }
         configureWorkspaceRuntimeHooks()
         installSettingsChangeObserver()
         configureActiveControllerRuntimeCallbacks()
@@ -17611,7 +17811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runtime.ensureZoneForActiveProject(controller: controller)
             }
         }
-        if persistedWorkspaceRegistry == nil {
+        if persistedWorkspaceRegistry == nil, let spawner {
             workspaceRuntime?.activeController?.attachUI(
                 canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
         }
@@ -17661,6 +17861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // resolve), and install descriptor placeholders for non-terminal
         // tiles. The spawner persists each session descriptor; saveCanvas
         // happens once at the end.
+        guard let spawner, let projectStore else { return }
         for tile in canvasState.tiles {
             switch tile.kind {
             case .terminal:
@@ -17713,6 +17914,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.refreshDocumentRelationships()
 
         try projectStore.saveCanvas(canvasView.flatCanvasStateForPersistence())
+    }
+
+    private func installContextCatalogNotices() {
+        guard contextCatalogObserver == nil else { return }
+        contextWindowResolver = AgentContextWindowResolver(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled) ?? RegistryStore.defaultApplicationSupportDirectory())
+        contextCatalogObserver = NotificationCenter.default.addObserver(forName: AgentModelCatalog.didRefreshNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.reportUnknownContextWindows() }
+        }
+        reportUnknownContextWindows()
+    }
+
+    private func reportUnknownContextWindows() {
+        guard let resolver = contextWindowResolver else { return }
+        for harness in AgentHarness.allCases {
+            let catalog = AgentModelCatalog.shared.snapshot(for: harness)
+            for model in catalog.models where resolver.resolve(harness: harness, model: model, piStore: catalog.contextWindows[model]).tokens == nil {
+                guard resolver.shouldReportUnknown(harness: harness, model: model) else { continue }
+                let message = "Context window unknown for \(model). Prompt tokens remain visible."
+                fputs(message + "\n", stderr)
+                if workspaceManagementAction == nil { setWorkspaceManagementMessage(message, kind: .warning) }
+            }
+        }
     }
 
     private func configureActiveControllerRuntimeCallbacks() {
@@ -18289,6 +18512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, true)
         }
         focusBroker.applicationDidBecomeActive()
+        floatingToolbar?.writeVisibilityDiagnostic(reason: "applicationDidBecomeActive")
         refreshAgentSurfaces()
     }
 
@@ -18362,6 +18586,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             NSEvent.removeMonitor(monitor)
             canvasMagnifyMonitor = nil
         }
+        if let contextCatalogObserver { NotificationCenter.default.removeObserver(contextCatalogObserver) }
+        contextCatalogObserver = nil
+        contextWindowResolver = nil
+        floatingToolbar?.close()
+        floatingToolbar = nil
         profilePalette?.close()
         profilePalette = nil
         settingsPanel?.close()
@@ -18518,7 +18747,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     )
                     let picker = ProjectPickerPanel(request: request)
                     guard let selected = picker.runModal() else {
-                        NSApp.terminate(nil)
                         throw CocoaError(.userCancelled)
                     }
                     candidate = selected
@@ -18619,6 +18847,210 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    static func runFreshInstallSelfCheck() throws {
+        func expect(_ value: Bool, _ message: String) throws {
+            if !value { throw NSError(domain: "FreshInstallCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        try expect(shouldLaunchWithoutProject(registry: .empty()), "Fresh launch must not ask for a project")
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("array-fresh-install-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let previousSupport = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"]
+        setenv("CONTINUUM_APP_SUPPORT", root.appendingPathComponent("support").path, 1)
+        defer {
+            if let previousSupport { setenv("CONTINUUM_APP_SUPPORT", previousSupport, 1) } else { unsetenv("CONTINUUM_APP_SUPPORT") }
+            try? fm.removeItem(at: root)
+        }
+        let store = RegistryStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let app = AppDelegate()
+        let suite = "array.fresh-install.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { throw CocoaError(.fileReadUnknown) }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        app.onboardingProgressStore = OnboardingProgressStore(defaults: defaults)
+        app.agentSupervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents")), makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        try app.launchProjectFreeWorkspace(registryStore: store, installsGlobalEventMonitors: false)
+        defer {
+            app.window?.orderOut(nil)
+            app.workspaceRuntime?.closeAll()
+            app.ghostty?.shutdown()
+            app.browserEngine?.shutdown()
+        }
+        let initial = try store.loadOrEmpty()
+        try expect(initial.projects.isEmpty, "Empty launch invented a project")
+        try expect(initial.workspaces.count == 1, "Empty launch must create exactly one workspace")
+        try expect(app.agentActivity.isReconciled, "Project-free boot must reconcile managed sessions before publishing sidebar inventory")
+        var disabledAutoOpen = try store.loadOrEmpty()
+        disabledAutoOpen.settings.openLastProjectOnLaunch = false
+        try store.save(disabledAutoOpen)
+        let resumed = try app.projectFreeWorkspaceSelection(in: store)
+        let afterResume = try store.loadOrEmpty()
+        try expect(resumed.workspaceId == initial.lastActiveWorkspaceId && afterResume.workspaces.count == 1, "Project-free selection must reuse the desk without adding another workspace")
+        try expect(app.workspaceRuntime?.document.zones.isEmpty == true, "Empty launch must have no folderless zones")
+        try expect(app.qaHasTileSpawner == false, "Empty launch retained a hidden boot project")
+        var recovered = false
+        app.setWorkspaceManagementMessage("Recover missing tiles", action: ("Recover", { recovered = true }))
+        app.contextWindowResolver = AgentContextWindowResolver(bundledWindows: [:])
+        app.reportUnknownContextWindows()
+        try expect(app.qaPerformWorkspaceNotificationAction() == "Recover" && recovered, "Catalog context notice must preserve an action-bearing recovery offer")
+        guard app.canvasView != nil else { throw CocoaError(.fileReadUnknown) }
+        try expect(app.qaPerformPaletteAction(.createZone), "First zone creation action was refused")
+        try expect(app.projectHomePicker?.isPresented == true, "First zone must offer the native project picker")
+        app.projectHomePicker?.dismiss(cancelled: true)
+        try expect(app.workspaceRuntime?.document.zones.isEmpty == true && app.window?.isVisible == true, "Cancel must leave the app and empty workspace open")
+        let project = root.appendingPathComponent("project", isDirectory: true)
+        try fm.createDirectory(at: project, withIntermediateDirectories: true)
+        defaults.set(AgentHarness.claudeCode.rawValue, forKey: AgentHarnessConfig.key)
+        app.workspaceRuntime?.spawnerDefaults = defaults
+        let savedCatalogs = AgentHarness.allCases.map { AgentModelCatalog.shared.snapshot(for: $0) }
+        defer { for snapshot in savedCatalogs { AgentModelCatalog.shared.resetForQA(snapshot: snapshot) } }
+        for snapshot in savedCatalogs {
+            try expect(!snapshot.models.isEmpty, "Offline catalog fixture must offer models for \(snapshot.harness.rawValue)")
+            AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(harness: snapshot.harness, readiness: .ready, models: snapshot.models, displayNames: snapshot.displayNames, contextWindows: snapshot.contextWindows, defaultModel: snapshot.defaultModel ?? snapshot.models.first))
+        }
+        guard let pickedProject = app.registerProjectFolder(project) else { throw CocoaError(.fileReadUnknown) }
+        app.createZoneFromMenu(nil)
+        try expect(app.projectHomePicker?.qaConfirm(projectId: pickedProject.id, relativePath: nil) == true, "First project must commit through the real picker confirmation")
+        let beforeMenuAgent = app.agentSupervisor.records.count
+        app.createAgentFromMenu(nil)
+        try expect(app.agentSupervisor.records.count == beforeMenuAgent + 1, "File > New > Agent must create an agent immediately after picker confirmation without manual activation")
+        try expect(app.qaCreationSpawnerProjectId == pickedProject.id, "Picker commit must mount the selected project creation spawner")
+        let afterDrop = try store.loadOrEmpty()
+        try expect(afterDrop.projects.count == 1 && app.workspaceRuntime?.document.zones.count == 1, "Folder drop must create one registered project and one zone")
+        try expect(app.workspaceRuntime?.document.zones.first?.projectId == afterDrop.projects.first?.id, "Dropped zone project is incoherent")
+        try expect(app.qaResolvedCreationScope?.projectId == afterDrop.projects.first?.id, "First agent must resolve the dropped project")
+        for harness in AgentHarness.allCases {
+            guard let model = AgentModelCatalog.shared.snapshot(for: harness).models.first else { throw CocoaError(.fileReadUnknown) }
+            let agent = app.agentSupervisor.spawn(role: nil, prompt: nil, cwd: project, harness: harness, model: model, thinking: "medium", projectId: afterDrop.projects.first?.id)
+            app.refreshAgentSurfaces(notify: false)
+            try expect(app.agentActivity.isReconciled && app.workspaceSidebarView?.inboxForQA.rowIdsForQA.contains(agent.rawValue) == true, "Fresh project agent must appear in the reconciled inbox for \(harness.rawValue)")
+        }
+        let subfolder = project.appendingPathComponent("src", isDirectory: true)
+        try fm.createDirectory(at: subfolder, withIntermediateDirectories: true)
+        try expect(app.createZoneForDroppedProject(subfolder, at: CGPoint(x: 900, y: 100)), "Nested folder drop must create a zone")
+        let beforeDroppedZoneAgent = app.agentSupervisor.records.count
+        app.createAgentFromMenu(nil)
+        try expect(app.agentSupervisor.records.count == beforeDroppedZoneAgent + 1, "File > New > Agent must work immediately after Finder folder-zone creation")
+        let afterNestedDrop = try store.loadOrEmpty()
+        try expect(afterNestedDrop.projects.count == 1 && app.workspaceRuntime?.document.zones.last?.homeRelativePath == "src", "Nested folder must reuse its registered project with a relative Home")
+        try expect(!fm.fileExists(atPath: subfolder.appendingPathComponent(".array").path), "Nested drop must not invent overlapping project state")
+        let package = root.appendingPathComponent("Example.app", isDirectory: true)
+        try fm.createDirectory(at: package, withIntermediateDirectories: true)
+        try expect(!app.createZoneForDroppedProject(package, at: .zero), "App packages must not become projects")
+        let home = root.appendingPathComponent("discovery", isDirectory: true)
+        let repo = home.appendingPathComponent("Developer/first/.git", isDirectory: true)
+        try fm.createDirectory(at: repo, withIntermediateDirectories: true)
+        let discoveredRoots = ProjectHomePickerController.discoverProjects(home: home).map { $0.standardizedFileURL.resolvingSymlinksInPath().path }
+        let expectedRoot = repo.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
+        try expect(discoveredRoots == [expectedRoot], "Opt-in discovery must find exactly the fixture git project; found \(discoveredRoots)")
+        print("fresh-install: empty workspace, cancel keeps window, Finder folder creates project zone, creation scope and opt-in discovery")
+    }
+
+    static func shouldLaunchWithoutProject(registry: Registry) -> Bool {
+        if registry.projects.isEmpty { return true }
+        if !registry.settings.openLastProjectOnLaunch { return true }
+        if let id = registry.lastActiveWorkspaceId,
+           let workspace = registry.workspaces.first(where: { $0.id == id }), workspace.projectIds.isEmpty { return true }
+        if case .presentPicker = ProjectLaunchCoordinator.decide(registry: registry) { return true }
+        return false
+    }
+
+    /// Workspace selection is independent of the project launch preference and
+    /// picker cancellation. Reuse an existing document before inventing a desk.
+    private func projectFreeWorkspaceSelection(in registryStore: RegistryStore) throws -> (workspaceId: UUID, document: WorkspaceDocument) {
+        self.registryStore = registryStore
+        if let selected = try? Self.loadActiveWorkspaceDocument(from: registryStore) { return selected }
+        var registry = try registryStore.loadOrEmpty()
+        let support = registryStore.registryFile.deletingLastPathComponent()
+        let existing = registry.workspaces.compactMap { entry -> (workspaceId: UUID, document: WorkspaceDocument)? in
+            guard let document = try? WorkspaceStore(workspaceId: entry.id, applicationSupportDirectory: support).load() else { return nil }
+            return (entry.id, document)
+        }
+        if let selected = existing.first(where: { $0.document.zones.isEmpty }) ?? existing.first {
+            registry.lastActiveWorkspaceId = selected.workspaceId
+            try registryStore.save(registry)
+            return selected
+        }
+        let entry = try createEmptyWorkspace(name: "My Workspace")
+        registry = try registryStore.loadOrEmpty()
+        registry.lastActiveWorkspaceId = entry.id
+        registry.lastActiveProjectId = nil
+        try registryStore.save(registry)
+        return (entry.id, try WorkspaceStore(workspaceId: entry.id, applicationSupportDirectory: support).load())
+    }
+
+    private func projectSelectionForFolder(_ url: URL) -> ProjectHomeSelection? {
+        let folder = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard let values = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]),
+              values.isDirectory == true, values.isPackage != true else { return nil }
+        let projects = ((try? registryStore?.loadOrEmpty()) ?? nil)?.projects.filter { !$0.missing } ?? []
+        for project in projects.sorted(by: { $0.rootPath.count > $1.rootPath.count }) {
+            let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            if let relative = try? ProjectHomeValidator.relativeHome(projectRoot: root, selectedHome: folder) {
+                return ProjectHomeSelection(project: project, homeRelativePath: relative)
+            }
+        }
+        guard let project = registerProjectFolder(folder) else { return nil }
+        return ProjectHomeSelection(project: project, homeRelativePath: nil)
+    }
+
+    /// Mount the actual workspace scene without acquiring or inventing a project.
+    /// The first zone supplies its project through the same picker used later.
+    func launchProjectFreeWorkspace(registryStore: RegistryStore, installsGlobalEventMonitors: Bool = true) throws {
+        self.registryStore = registryStore
+        let selected = try projectFreeWorkspaceSelection(in: registryStore)
+        let workspaceId = selected.workspaceId
+        let document = selected.document
+        _ = try reconciledManagedSessionSource.reconcile(registry: try registryStore.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+        let ghostty = try GhosttyRuntimeContext()
+        let browserEngine = BrowserEngineContext()
+        self.ghostty = ghostty
+        self.browserEngine = browserEngine
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: document.viewport, tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil)
+        self.canvasView = canvas
+        wireCanvasCallbacks(canvas)
+        let controllers = ZoneRuntimeRegistry(closeOnZero: true, makeController: { [weak self] id in
+            guard let self else { throw CocoaError(.userCancelled) }
+            return try self.makeWorkspaceProjectController(projectId: id)
+        })
+        workspaceRuntime = WorkspaceRuntime(workspaceId: workspaceId, document: document, registry: controllers, focusBroker: focusBroker, registryStore: registryStore, ghostty: ghostty, browserEngine: browserEngine)
+        try mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: nil, projectStore: nil, canvasState: canvas.canvasState, installsGlobalEventMonitors: installsGlobalEventMonitors)
+        let host = makeWorkspaceWindow(canvasView: canvas, title: "Array")
+        self.window = host
+        host.makeKeyAndOrderFront(nil)
+        host.makeFirstResponder(canvas)
+        refreshAgentSurfaces(notify: false)
+        if installsGlobalEventMonitors {
+            NSApp.activate(ignoringOtherApps: true)
+            startDesktopCompanionSyncService()
+            if onboardingProgressStore.load().needsIntro,
+               ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil { showOnboardingPanel() }
+        }
+    }
+
+    @discardableResult
+    private func createZoneForDroppedProject(_ url: URL, at point: CGPoint) -> Bool {
+        guard let canvasView, workspaceRuntime != nil,
+              let selection = projectSelectionForFolder(url) else { return false }
+        let entry = selection.project
+        if let registry = try? registryStore?.loadOrEmpty(),
+           let owner = try? registry.exclusiveWorkspaceOwner(of: entry.id),
+           owner != workspaceRuntime?.workspaceId {
+            offerSwitchToOwningWorkspace(projectId: entry.id, workspaceId: owner)
+            return false
+        }
+        projectHomePicker?.dismiss(cancelled: false)
+        projectHomePicker = nil
+        let id = canvasView.beginProvisionalZone(screenRect: CGRect(x: point.x, y: point.y, width: 720, height: 520), requestsProjectSelection: false)
+        projectHomePicker?.dismiss(cancelled: false)
+        projectHomePicker = nil
+        guard canvasView.zonePlacement(for: id) != nil else { return false }
+        canvasView.commitProvisionalZone(zoneId: id, projectId: entry.id, homeRelativePath: selection.homeRelativePath, project: .registered(entry))
+        workspaceRuntime?.setActiveZone(id, reason: .click)
+        persistLastExplicitCreationScope(ZoneScope(projectId: entry.id, homeRelativePath: selection.homeRelativePath))
+        reloadWorkspaceSidebar()
+        return workspaceRuntime?.document.zones.contains(where: { $0.zoneId == id }) == true
+    }
+
     private static func resolveProjectRoot(smokeTest: Bool, registry: Registry) throws -> URL {
         if smokeTest, ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
             let temp = FileManager.default.temporaryDirectory
@@ -18649,7 +19081,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .presentPicker(request):
             let picker = ProjectPickerPanel(request: request)
             guard let selected = picker.runModal() else {
-                NSApp.terminate(nil)
                 throw CocoaError(.userCancelled)
             }
             return try requestProjectFolderAccessIfNeeded(selected)
@@ -18672,17 +19103,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let alert = NSAlert()
-        alert.messageText = "Grant Continuum access to this project folder"
-        alert.informativeText = "Continuum needs access to restore this project once. Select the project folder in the next dialog; if you cancel, Continuum will quit instead of repeatedly triggering macOS privacy prompts.\n\n\(standardized.path)"
+        alert.messageText = "Grant Array access to this project folder"
+        alert.informativeText = "Array needs access to restore this project. Choose its folder, or cancel to open an empty workspace.\n\n\(standardized.path)"
         alert.addButton(withTitle: "Choose Folder…")
-        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
-            NSApp.terminate(nil)
             throw CocoaError(.userCancelled)
         }
 
         let panel = NSOpenPanel()
-        panel.message = "Choose the Continuum project folder"
+        panel.message = "Choose the Array project folder"
         panel.prompt = "Grant Access"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -18692,7 +19122,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         panel.nameFieldStringValue = standardized.lastPathComponent
 
         guard panel.runModal() == .OK, let selected = panel.url?.standardizedFileURL else {
-            NSApp.terminate(nil)
             throw CocoaError(.userCancelled)
         }
         UserDefaults.standard.set(true, forKey: projectFolderGrantAcknowledgementKey(for: selected))

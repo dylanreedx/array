@@ -13,7 +13,7 @@ import Foundation
 //   3. THE OPEN AGENT SURVIVES ANY SCOPE — the packet's "watch out", stated as its
 //      own property because it is the one row a filter is forbidden to drop.
 //   4. THE MENU: `All agents` first, projects then workspaces, each sorted
-//      case-insensitively, deduplicated, the CATALOG (what is open) unioned with what
+//      case-insensitively; workspace IDs remain distinct across duplicate names; the CATALOG (what is open) unioned with what
 //      the rows mention so an agentless open project is still pickable, and the
 //      SELECTED scope present even when neither mentions it any more.
 //   5. THE STORAGE ROUND TRIP is total and tagged — a project named "all", a
@@ -25,8 +25,34 @@ func runInboxScopeChecks() {
     runInboxScopeOrderCheck()
     runInboxScopeOpenAgentCheck()
     runInboxScopeEntriesCheck()
+    runInboxWorkspaceIdentityCheck()
     runInboxScopeStorageCheck()
-    print("InboxScope checks: project/workspace/all filtering, order preserved (filter∘sort == sort∘filter), the open agent surviving every scope, menu entries (all-first, projects before workspaces, case-insensitive, deduped, open-but-agentless projects offered from the catalog, stale selection kept across a rename) and a total tagged storage round trip passed")
+    print("InboxScope checks: project/workspace/all filtering, order preserved (filter∘sort == sort∘filter), open agent inclusion, ID-distinct duplicate-name workspace entries, catalog coverage, stale selection, and tagged storage round trip passed")
+}
+
+private func runInboxWorkspaceIdentityCheck() {
+    let alpha = UUID(uuidString: "A1000000-0000-4000-8000-000000000001")!
+    let beta = UUID(uuidString: "B2000000-0000-4000-8000-000000000002")!
+    func row(_ index: Int, workspaceId: UUID) -> AgentInboxRow {
+        AgentInboxRow(
+            id: UUID(uuidString: String(format: "C3000000-0000-4000-8000-%012X", index))!,
+            title: "same-name \(index)", workspaceName: "Overnight", workspaceId: workspaceId,
+            state: .ready, createdAt: scopeEpoch.addingTimeInterval(Double(index)))
+    }
+    let rows = [row(1, workspaceId: alpha), row(2, workspaceId: beta)]
+    expect(InboxScope.filter(rows: rows, scope: .workspaceID(alpha, "Overnight")).map(\.title) == ["same-name 1"],
+           "same-named workspaces filter by their stable IDs, not their labels")
+    expect(InboxScope.filter(rows: rows, scope: .currentWorkspace, currentWorkspaceId: beta).map(\.title) == ["same-name 2"],
+           "This workspace resolves to the current workspace ID")
+    let catalog: [InboxScope] = [.workspaceID(alpha, "Overnight"), .workspaceID(beta, "Overnight")]
+    let entries = InboxScope.entries(for: rows, catalog: catalog, currentWorkspaceId: alpha)
+    expect(entries.filter { if case .workspaceID(_, _) = $0 { return true }; return false }.count == 2,
+           "the menu preserves two workspaces with the same display name")
+    expect(entries.filter { $0.title == "Overnight" }.count == 2,
+           "both same-named workspaces remain independently pickable")
+    let stored = InboxScope.workspaceID(alpha, "Overnight").storageValue
+    expect(InboxScope(storageValue: stored)?.storageValue == stored,
+           "workspace identity survives persistence even when its display name is not stored")
 }
 
 private let scopeEpoch = Date(timeIntervalSince1970: 1_900_000_000)
@@ -193,12 +219,8 @@ private func runInboxScopeEntriesCheck() {
     expect(InboxScope.entries(for: [], catalog: [.all]) == [.all],
            "`.all` cannot be duplicated by a catalog that names it")
 
-    // THE DOCUMENTED LIMIT, pinned so it cannot change unnoticed: a scope is a NAME,
-    // so two open projects sharing a display name are ONE entry that matches both.
-    // Declined deliberately rather than missed — ids are not on the row (P3.1 flattened
-    // them out to share the type with iOS), and the failure mode here is a scope that
-    // shows a SUPERSET, which hides no agent. Widening this to ids means widening the
-    // row, and it would be a change to P3.1's model, not to this file.
+    // Project scopes remain name-based. Workspace scopes with row IDs are tested
+    // separately above, including duplicate display names.
     let twinNames = InboxScope.entries(
         for: [], catalog: [.project("Continuum"), .project("Continuum")])
     expect(twinNames == [.all, .project("Continuum")],

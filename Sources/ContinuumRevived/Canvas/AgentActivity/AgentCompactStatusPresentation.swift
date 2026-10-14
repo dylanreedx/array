@@ -488,19 +488,8 @@ enum AgentRadialContextMeterPresenter {
 
         let freshness = freshnessLabel(snapshot.freshness)
         let source = sourceLabel(snapshot.source)
-        // A session with zero prior turns is empty for ANY window size, so 0%
-        // is authoritative even though the max is provider-reported and not yet
-        // known. Only the zero-used/no-max shape takes this path; a real report
-        // always carries a max and flows through the arithmetic below.
-        if snapshot.usedTokens == 0, snapshot.maxTokens == nil {
-            return AgentRadialContextMeterPresentation(
-                state: .known,
-                fraction: 0,
-                label: "0%",
-                accessibilityLabel: "Context window 0 percent used. Freshness: \(freshness).",
-                detailText: "Authoritative context: empty (0 tokens used)\nSource: \(source)\nFreshness: \(freshness)\nNo turns have run in this session.",
-                warningMarker: nil)
-        }
+        // Even an empty request needs a known window to claim a percentage.
+        // An unresolved model keeps its dashed unknown ring and prompt count.
         let arithmetic = occupancyArithmetic(snapshot)
         // RAW, NOT CAPPED — a deliberate contract (`--ui-geometry-check`:
         // "over-capacity label lost raw arithmetic"). A reading above 100% is
@@ -540,7 +529,7 @@ enum AgentRadialContextMeterPresenter {
             }
         } else if countLabel != nil {
             // A real measurement (token count), just not an occupancy fraction.
-            state = .known
+            state = .unknown
             marker = nil
         } else {
             state = .unknown
@@ -629,6 +618,11 @@ enum AgentRadialContextMeterPresenter {
             }
         } else {
             lines.append("Authoritative context: unknown")
+            if let max = snapshot.maxTokens, max > 0 {
+                lines.append("Context usage unknown for \(snapshot.contextModel ?? "this model"); window \(max) tokens")
+            } else {
+                lines.append("Context window unknown for \(snapshot.contextModel ?? "this model")")
+            }
             if let count = promptTokenLabel(snapshot) {
                 lines.append("Occupancy note: the latest request carried \(count) prompt tokens; no context-window size is known for this model, so no percentage is shown.")
             } else if !snapshot.source.isAuthoritativeForContextOccupancy {
@@ -648,6 +642,9 @@ enum AgentRadialContextMeterPresenter {
             lines.append("Compacting: this reading is from before the compaction now running.")
         }
         lines.append("Threshold policy: \(policy.detailLabel)")
+        if let resolution = snapshot.windowResolutionSource {
+            lines.append("Window source: \(resolution.rawValue)")
+        }
         lines.append("Source: \(source)")
         lines.append("Freshness: \(freshness)")
         lines.append("Observed: \(ISO8601DateFormatter().string(from: snapshot.observedAt))")
@@ -657,7 +654,6 @@ enum AgentRadialContextMeterPresenter {
             snapshot.outputTokens.map { "output \($0)" },
             snapshot.cacheReadTokens.map { "cache read \($0)" },
             snapshot.cacheWriteTokens.map { "cache write \($0)" },
-            snapshot.totalProcessedTokens.map { "processed \($0)" },
             snapshot.totalCostUsd.map { String(format: "cost $%.4f", $0) },
         ].compactMap { $0 }
         if usageFields.isEmpty {
@@ -687,7 +683,7 @@ enum AgentRadialContextMeterPresenter {
     /// the "8" mid-turn and the run's sum at turn end. Nil for cumulative
     /// accounting, which states no prompt at all.
     private static func promptTokenLabel(_ snapshot: AgentContextWindowSnapshot) -> String? {
-        guard let total = AgentContextMeter.promptTokens(of: snapshot), total > 0 else { return nil }
+        guard let total = AgentContextMeter.promptTokens(of: snapshot), total >= 0 else { return nil }
         if total >= 1_000_000 {
             return String(format: "%.1fM", Double(total) / 1_000_000)
         } else if total >= 1_000 {

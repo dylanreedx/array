@@ -103,6 +103,11 @@ extension WorkspaceAPIService {
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: ownHandle, checkoutDisplayName: URL(fileURLWithPath: record.checkoutRoot).lastPathComponent,
                 op: .agentDelegate, relativePath: nil))
+            if isCancelled() {
+                operations.release(operationId: requestId)
+                remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentDelegate, outcome: "cancelledBeforeEffect"))
+                return .cancelled(result: nil)
+            }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return fail(.permissionDenied, "Workspace tools were disabled for this agent.", approvalRequestId: promptId)
             }
@@ -541,6 +546,11 @@ extension WorkspaceAPIService {
                 checkout: ownHandle, checkoutDisplayName: URL(fileURLWithPath: record.checkoutRoot).lastPathComponent,
                 op: .agentMessage, relativePath: nil,
                 targetAgentId: childId, targetAgentDisplayName: target.displayName))
+            if isCancelled() {
+                operations.release(operationId: requestId)
+                remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentMessage, outcome: "cancelledBeforeEffect"))
+                return .cancelled(result: nil)
+            }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return failNothingDelivered(.permissionDenied, "Workspace tools were disabled for this agent.", approvalRequestId: promptId)
             }

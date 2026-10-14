@@ -164,13 +164,16 @@ public struct Registry: Codable, Equatable, Sendable {
     ///  1. a declaration naming a registered workspace wins, whatever lists it;
     ///  2. otherwise a legacy membership is adopted — the last-active workspace
     ///     if it is one of them, else the first in registry order;
-    ///  3. otherwise the project is unowned.
+    ///  3. otherwise the project is unowned. A dangling declaration is not an
+    ///     owner: its workspace no longer exists and cannot mount the project.
     private static func resolvedOwner(
         of project: ProjectEntry,
         in workspaces: [WorkspaceEntry],
         lastActiveWorkspaceId: UUID?
     ) -> UUID? {
-        if let declared = project.workspaceId { return declared }
+        if let declared = project.workspaceId, workspaces.contains(where: { $0.id == declared }) {
+            return declared
+        }
         let memberships = workspaces.filter { $0.projectIds.contains(project.id) }.map(\.id)
         if let lastActiveWorkspaceId, memberships.contains(lastActiveWorkspaceId) { return lastActiveWorkspaceId }
         return memberships.first
@@ -180,12 +183,13 @@ public struct Registry: Codable, Equatable, Sendable {
     /// workspace's `projectIds` from it. Run on every decode, so a registry from
     /// any earlier version mounts without an ownership throw.
     ///
-    /// Lossless for ownership: every project that was owned through either field
-    /// is still owned afterwards — an undeclared project adopts its membership,
-    /// and a declared one keeps its declaration. What goes is only a membership
-    /// that CONTRADICTS a declaration (or a second membership of one project);
-    /// those were the stale references the ownership throw existed to report.
-    /// Their zones stay in the workspace documents, unmounted, exactly as before.
+    /// Lossless for registered ownership: an undeclared project adopts its
+    /// membership, and a declaration survives only while its workspace exists.
+    /// A dangling declaration falls back to a registered membership or becomes
+    /// unowned. What goes is a membership that CONTRADICTS a valid declaration
+    /// (or a second membership of one project); those were the stale references
+    /// the ownership throw existed to report. Their zones stay in the workspace
+    /// documents, unmounted, exactly as before.
     /// `projectIds` keeps its existing order; newly listed projects append in
     /// registry order. Idempotent.
     public mutating func normalizeOwnership() {

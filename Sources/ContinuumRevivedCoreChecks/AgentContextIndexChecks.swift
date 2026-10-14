@@ -329,6 +329,7 @@ private func runAgentContextTiledAndHeadlessCheck() {
         Foundation.exit(1)
     }
     expect(tiled.workspaceName == "Alpha", "tiled agent resolves its workspace name, got \(tiled.workspaceName ?? "nil")")
+    expect(tiled.workspaceId == contextWorkspaceId, "tiled agent carries its stable workspace ID")
     expect(tiled.zoneName == "Continuum", "tiled agent's project-zone name is backfilled from the registry, got \(tiled.zoneName ?? "nil")")
     expect(tiled.projectName == "Continuum", "tiled agent resolves its project name, got \(tiled.projectName ?? "nil")")
     expect(tiled.tileTitle == "Agent Tile", "tiled agent resolves its TILE ROW title, not the descriptor's, got \(tiled.tileTitle ?? "nil")")
@@ -347,6 +348,8 @@ private func runAgentContextTiledAndHeadlessCheck() {
     // show it, not even in History. It has no zone and no tile title.
     expect(headless.workspaceName == "Alpha" && headless.zoneName == nil && headless.tileTitle == nil,
            "headless agent takes its PROJECT's workspace and has no zone/title — nil, never \"\" — got \(headless)")
+    expect(headless.workspaceId == contextWorkspaceId,
+           "headless agent takes its project's stable workspace ID")
     expect(headless.model == "anthropic/claude-opus-5" && headless.role == "builder",
            "headless agent still carries model and role, got \(headless.model ?? "nil")/\(headless.role ?? "nil")")
 
@@ -461,11 +464,11 @@ private func runAgentContextSidebarAgreementCheck() {
     let tree = SidebarTreeBuilder.build(registry: registry, documents: documents, projectCanvases: canvases)
 
     // Walk the tree independently and compare every placement the index claims.
-    var treePlacements: [UUID: (workspace: String, zone: String, title: String)] = [:]
+    var treePlacements: [UUID: (workspaceId: UUID, workspace: String, zone: String, title: String)] = [:]
     for workspace in tree.workspaces {
         for zone in workspace.zones {
             for tile in zone.tiles where treePlacements[tile.tileId] == nil {
-                treePlacements[tile.tileId] = (workspace.name, zone.name, tile.title)
+                treePlacements[tile.tileId] = (workspace.workspaceId, workspace.name, zone.name, tile.title)
             }
         }
     }
@@ -490,6 +493,8 @@ private func runAgentContextSidebarAgreementCheck() {
         // through it rather than pretending the two spellings are equal.
         expect(context.workspaceName == placement.workspace,
                "index workspace must equal the sidebar's for \(tileId): \(context.workspaceName ?? "nil") vs \(placement.workspace)")
+        expect(context.workspaceId == placement.workspaceId,
+               "index workspace ID must equal the sidebar's for \(tileId)")
         expect(context.zoneName == (placement.zone.isEmpty ? nil : placement.zone),
                "index zone must equal the sidebar's for \(tileId): \(context.zoneName ?? "nil") vs \(placement.zone)")
         expect(context.tileTitle == placement.title,

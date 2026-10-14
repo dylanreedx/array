@@ -147,6 +147,10 @@ enum CanvasPersistenceModelChecks {
 
         var appRegistry = Registry.empty()
         appRegistry.lastActiveWorkspaceId = workspaceWA
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "A", projectIds: [projectPa], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "B", projectIds: [projectPb], createdAt: now, updatedAt: now)
+        ]
         appRegistry.projects = [
             ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false),
@@ -261,7 +265,60 @@ enum CanvasPersistenceModelChecks {
         try expect(paFinalIds == Set(paAllTiles),
                    "pa-final: Pa's canvas must still be exactly its own 5 tiles; got \(paFinalIds.count)")
 
+        // The previous unreadable fixture fails while projecting the canvas,
+        // before any write outcome exists. This one reaches the actual writer:
+        // corruption happens only AFTER a valid projection has been captured.
+        guard let receiptController = runtime.activeController else {
+            throw Failure(message: "write-outcome: missing mounted controller")
+        }
+        let durableCanvasBytes = try Data(contentsOf: storePa.layout.canvasFile)
+        let writeBoundaryCorruption = Data("unreadable-at-write-boundary".utf8)
+        var corruptionFailure: Error?
+        receiptController.qaBeforeCanvasWrite = {
+            do {
+                try? fileManager.removeItem(at: storePa.layout.backupsDirectory)
+                try writeBoundaryCorruption.write(to: storePa.layout.canvasFile)
+            } catch { corruptionFailure = error }
+        }
+        delegate.canvasDidChange(canvas)
+        var writeOutcomeFailure: Error?
+        do { try receiptController.flushCanvasSave() } catch { writeOutcomeFailure = error }
+        try expect(corruptionFailure == nil, "write-outcome: fixture failed to corrupt at write boundary")
+        try expect(receiptController.canvasSubmittedGeneration > receiptController.canvasDurableGeneration,
+                   "write-outcome: fixture must submit a real failed write, not fail before submission")
+        try expect((writeOutcomeFailure as? ProjectStoreError)
+                   == .canvasUnreadable(path: storePa.layout.canvasFile.path),
+                   "write-outcome: unresolved failed receipt must throw, got \(String(describing: writeOutcomeFailure))")
+        try expect((try? Data(contentsOf: storePa.layout.canvasFile)) == writeBoundaryCorruption,
+                   "write-outcome: failed write must preserve unreadable bytes")
+        // Restore isolated storage directly; the retained dirty write must then
+        // retry, advance the receipt, and stop reporting the old failure.
+        try durableCanvasBytes.write(to: storePa.layout.canvasFile)
+        try receiptController.flushCanvasSave()
+        try expect(receiptController.canvasSubmittedGeneration == receiptController.canvasDurableGeneration,
+                   "write-outcome: repaired storage must make the retained write durable")
+
+        // A file that becomes unreadable after mount must be reported at the
+        // save boundary, and the flush must throw instead of acknowledging an
+        // empty projection. Drop backups in this isolated fixture so the store
+        // cannot legitimately recover an older copy.
+        delegate.canvasDidChange(canvas)
+        try? fileManager.removeItem(at: storePa.layout.backupsDirectory)
+        let unreadableCanvas = Data(#"{"schemaVersion":1,"viewport":{"x":0,"y":0,"zoom":1},"tiles":[{"id":"6A000000-0000-0000-0000-000000000001","kind":"futureKind","title":"t","frame":{"x":0,"y":0,"width":10,"height":10},"zIndex":1,"runtimeRef":null,"metadata":{}}],"groups":[],"lastActiveTileId":null}"#.utf8)
+        try unreadableCanvas.write(to: storePa.layout.canvasFile)
+        var unavailableReports: [UUID] = []
+        runtime.onZoneProjectUnavailable = { projectId, _ in unavailableReports.append(projectId) }
+        var flushFailure: Error?
+        do { try runtime.activeController?.flushCanvasSave() } catch { flushFailure = error }
+        try expect((flushFailure as? ProjectStoreError)
+                   == .canvasUnreadable(path: storePa.layout.canvasFile.path),
+                   "unreadable-save: flush must throw the canvas read failure, got \(String(describing: flushFailure))")
+        try expect(unavailableReports == [projectPa],
+                   "unreadable-save: the mounted workspace must report the unavailable project once; got \(unavailableReports)")
+        try expect((try? Data(contentsOf: storePa.layout.canvasFile)) == unreadableCanvas,
+                   "unreadable-save: discovering the failure must preserve canvas.json byte-for-byte")
+
         print("CanvasPersistenceModelChecks: a switch persisted only the active project's tiles, and a "
-              + "project's un-installed zone survived the write")
+              + "project's un-installed zone survived the write; unreadable saves report and throw")
     }
 }

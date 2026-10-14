@@ -31,6 +31,10 @@ final class ProjectHomePickerController {
     private var stage: Stage = .projects
     private var selected: ProjectHomeSelection?
     private var addProject: AddProjectHandler?
+    private var registerFolder: ((URL) -> ProjectEntry?)?
+    private var discovered: [URL] = []
+    private var discoveryRunning = false
+    private var discoveryGeneration = UUID()
     private var onConfirm: ((ProjectHomeSelection) -> Void)?
     private var onCancel: (() -> Void)?
     private var onInteractionOwnershipChanged: ((Bool) -> Void)?
@@ -46,6 +50,7 @@ final class ProjectHomePickerController {
         anchor: NSPoint,
         relativeTo view: NSView,
         addProject: AddProjectHandler? = nil,
+        registerFolder: ((URL) -> ProjectEntry?)? = nil,
         confirmsDestructiveCancellation: Bool = false,
         onInteractionOwnershipChanged: ((Bool) -> Void)? = nil,
         onConfirm: @escaping (ProjectHomeSelection) -> Void,
@@ -59,6 +64,10 @@ final class ProjectHomePickerController {
         self.anchorView = view
         self.anchorRect = NSRect(x: anchor.x, y: anchor.y, width: 1, height: 1)
         self.addProject = addProject
+        self.registerFolder = registerFolder
+        discovered = []
+        discoveryRunning = false
+        discoveryGeneration = UUID()
         self.confirmsDestructiveCancellation = confirmsDestructiveCancellation
         self.onInteractionOwnershipChanged = onInteractionOwnershipChanged
         self.onConfirm = onConfirm
@@ -126,10 +135,16 @@ final class ProjectHomePickerController {
         if addProject != nil {
             items.append(ChoiceItem(
                 id: "add-project",
-                title: "Add Project…",
-                detail: "Register another project folder",
+                title: "Choose…",
+                detail: "Choose a project folder",
                 icon: .system("plus")
             ))
+        }
+        if registerFolder != nil {
+            items.append(ChoiceItem(id: "find-projects", title: discoveryRunning ? "Finding projects…" : "Find my projects", detail: "Scan Developer, Projects, code and Documents when you ask", icon: .system("magnifyingglass"), enabled: !discoveryRunning))
+            for (index, url) in discovered.enumerated() {
+                items.append(ChoiceItem(id: "found:\(index)", title: url.lastPathComponent, detail: compactPath(url.path), icon: .system("folder")))
+            }
         }
         if items.isEmpty {
             items.append(ChoiceItem(
@@ -144,8 +159,8 @@ final class ProjectHomePickerController {
             selectedID: selected.map { "project:\($0.project.id.uuidString)" },
             presentation: .completions,
             layout: .completion(.init(
-                breadcrumb: "Choose Project & Home",
-                footer: validationMessage ?? "Choose a project · ↑↓ Select · Return Open · Esc Cancel",
+                breadcrumb: "Which project does this zone work in?",
+                footer: validationMessage ?? "↑↓ Select · Return Open · Esc Cancel · Drop folders on the canvas",
                 maximumVisibleRows: 7,
                 minimumWidth: 380,
                 maximumWidth: 480
@@ -160,6 +175,10 @@ final class ProjectHomePickerController {
     }
 
     private func chooseProjectRow(_ item: ChoiceItem) {
+        if item.id == "find-projects" { findProjects(); return }
+        if item.id.hasPrefix("found:"), let index = Int(item.id.dropFirst(6)), discovered.indices.contains(index) {
+            acceptFolder(discovered[index]); return
+        }
         if item.id == "add-project" {
             guard let project = addProject?() else {
                 showProjects()
@@ -191,6 +210,48 @@ final class ProjectHomePickerController {
         // it to the root — re-picking the current project is not a request to
         // discard its Home.
         confirm(project: project, relativePath: selected?.project.id == project.id ? selected?.homeRelativePath : nil)
+    }
+
+    private func acceptFolder(_ url: URL) {
+        guard let project = registerFolder?(url) else {
+            validationMessage = "That project could not be opened. Choose another folder."
+            showProjects()
+            return
+        }
+        if !projects.contains(where: { $0.id == project.id }) { projects.append(project) }
+        confirm(project: project, relativePath: nil)
+    }
+
+    private func findProjects() {
+        guard !discoveryRunning else { return }
+        discoveryRunning = true
+        let generation = discoveryGeneration
+        showProjects()
+        Task { [weak self] in
+            let urls = await Task.detached(priority: .userInitiated) { Self.discoverProjects() }.value
+            guard let self, self.discoveryGeneration == generation, self.isPresented else { return }
+            self.discovered = urls
+            self.discoveryRunning = false
+            self.validationMessage = urls.isEmpty ? "No projects found. Drop a folder on the canvas or choose one." : nil
+            self.showProjects()
+        }
+    }
+
+    /// Bounded, opt-in discovery. Never traverses whole home folders or repositories.
+    nonisolated static func discoverProjects(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
+        let fm = FileManager.default
+        var found: [URL] = []
+        for name in ["Developer", "Projects", "code", "Documents"] {
+            let root = home.appendingPathComponent(name, isDirectory: true)
+            let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey], options: [.skipsHiddenFiles, .skipsPackageDescendants])) ?? []
+            for child in children.prefix(300) where (try? child.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]).isDirectory) == true && (try? child.resourceValues(forKeys: [.isPackageKey]).isPackage) != true {
+                if fm.fileExists(atPath: child.appendingPathComponent(".git").path) { found.append(child); continue }
+                if name == "Documents" { continue }
+                let nested = (try? fm.contentsOfDirectory(at: child, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey], options: [.skipsHiddenFiles, .skipsPackageDescendants])) ?? []
+                for repo in nested.prefix(100) where fm.fileExists(atPath: repo.appendingPathComponent(".git").path) { found.append(repo) }
+            }
+        }
+        return Array(Set(found)).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     private func showFolders(project: ProjectEntry, relativePath: String?) {

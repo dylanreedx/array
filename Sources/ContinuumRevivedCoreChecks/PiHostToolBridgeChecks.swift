@@ -17,6 +17,7 @@ func runPiHostToolBridgeChecks() {
     checkBridgeBoardTool()
     checkBridgeStructuredError()
     checkBridgeCancellationOnAbort()
+    checkBridgeApprovalCanRemainPending()
     checkBridgeHostDeadline()
     checkBridgeLateReplyAfterRunnerReplaced()
     checkBridgeConcurrentCallsCorrelateByPiId()
@@ -86,7 +87,7 @@ def run_call(call):
     tool_name = call.get("toolName", "array_open_document")
     emit({"type": "tool_execution_start", "toolCallId": tool_call_id, "toolName": tool_name, "args": call.get("payload", {})})
     req_id = str(uuid.uuid4())
-    timeout_ms = call.get("timeout_ms", 45000)
+    timeout_ms = call.get("timeout_ms", 86405000)
     emit({"type": "extension_ui_request", "id": req_id, "method": "input",
           "title": envelope(tool_call_id, call.get("op", "artifact.open"), call.get("payload", {})),
           "timeout": timeout_ms})
@@ -205,10 +206,15 @@ func prependFakePiToPath(_ root: URL) -> () -> Void {
     return { _ = setenv("PATH", originalPath, 1) }
 }
 
-private func makeBridgeRunner(root: URL) -> (runner: PiRpcAgentRunner, restorePath: () -> Void) {
+private func makeBridgeRunner(
+    root: URL,
+    deadlineScheduler: (@Sendable (TimeInterval, DispatchWorkItem, DispatchQueue) -> Void)? = nil
+) -> (runner: PiRpcAgentRunner, restorePath: () -> Void) {
     let restore = prependFakePiToPath(root)
     let config = PiRpcAgentRunner.Config(model: "fixture-model", thinking: "low", cwd: root, sessionId: "bridge-session")
-    return (PiRpcAgentRunner(config: config), restore)
+    let runner = deadlineScheduler.map { PiRpcAgentRunner(config: config, hostToolDeadlineScheduler: $0) }
+        ?? PiRpcAgentRunner(config: config)
+    return (runner, restore)
 }
 
 func bridgeToolResult(root: URL, toolCallId: String) -> [String: Any]? {
@@ -393,6 +399,54 @@ private func checkBridgeHostDeadline() {
     expect(delivery.value == .droppedAlreadyAnswered || delivery.value == .droppedToolReturned,
            "bridge deadline: a reply after the deadline is dropped, got \(String(describing: delivery.value))")
     expect(bridgeLog(root: root, "ui-responses.log").count == 1, "bridge deadline: exactly one reply (the deadline's) reached pi")
+    runner.stop()
+}
+
+/// A scope approval holds the host call while the user decides. It must not
+/// inherit the old 30-second Pi-only deadline; the extension and MCP clients
+/// share the same long request horizon, and the host answer remains authoritative.
+private func checkBridgeApprovalCanRemainPending() {
+    guard let root = try? makeFakeBridgePi(scenario: ["calls": [oneCall("tc-approval")]]) else {
+        expect(false, "bridge approval: fake"); return
+    }
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scheduled = BridgeBox<(TimeInterval, DispatchWorkItem, DispatchQueue)?>(nil)
+    let (runner, restorePath) = makeBridgeRunner(root: root) { interval, item, queue in
+        scheduled.value = (interval, item, queue)
+    }
+    defer { restorePath() }
+    expect(runner.hostToolDeadline == TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds),
+           "bridge approval: Pi host deadline matches MCP's shared request horizon")
+    let held = BridgeBox<PiHostToolCall?>(nil)
+    runner.observeHostToolRequests { held.value = $0 }
+    let done = runTurnInBackground(runner)
+    expect(waitUntilBridge { held.value != nil }, "bridge approval: host receives the call")
+    let deadline = scheduled.value
+    expect(deadline?.0 == TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds),
+           "bridge approval: scheduled deadline matches the MCP request horizon")
+    // Treat this approval as 45 seconds old. Its scheduled production deadline
+    // remains in the future, so a live approval keeps its host call open.
+    expect((deadline?.0 ?? 0) > 45,
+           "bridge approval: a simulated 45-second-old approval is still before its deadline")
+    expect(done.wait(timeout: .now()) != .success,
+           "bridge approval: Pi stays waiting while the host holds the approval")
+    expect(bridgeToolResult(root: root, toolCallId: "tc-approval") == nil,
+           "bridge approval: the model has not received an outcome before the decision")
+    let delivery = BridgeBox<PiHostToolDelivery?>(nil)
+    let answered = DispatchSemaphore(value: 0)
+    held.value?.respond(.ok(["tileId": "tile-approved"])) { delivery.value = $0; answered.signal() }
+    expect(answered.wait(timeout: .now() + 5) == .success,
+           "bridge approval: the host decision reaches the Pi extension")
+    expect(done.wait(timeout: .now() + 15) == .success,
+           "bridge approval: the turn completes with the user's decision")
+    let result = bridgeToolResult(root: root, toolCallId: "tc-approval")
+    expect(result?["status"] as? String == "ok"
+           && (result?["result"] as? [String: Any])?["tileId"] as? String == "tile-approved",
+           "bridge approval: the model sees the approved result, got \(String(describing: result))")
+    expect(delivery.value == .delivered,
+           "bridge approval: decision is delivered once, got \(String(describing: delivery.value))")
+    expect(deadline?.1.isCancelled == true,
+           "bridge approval: answering cancels the scheduled deadline")
     runner.stop()
 }
 

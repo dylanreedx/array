@@ -105,6 +105,31 @@ func runAgentContextMeterChecks(root: URL) async throws {
         return abs(value - expected) < 0.000_001
     }
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    let unknownReading = AgentContextWindowSnapshot(
+        usedTokens: 21_936, windowResolutionSource: .unknown, contextModel: "fixture/new-model",
+        totalProcessedTokens: 9_999_999, observedAt: Date(), source: .claudeAssistantUsage, freshness: .live)
+    let unknownPresentation = AgentRadialContextMeterPresenter.present(unknownReading)
+    guard unknownPresentation.state == .unknown, unknownPresentation.fraction == nil,
+          unknownPresentation.label == "21.9k",
+          unknownPresentation.detailText.contains("Context window unknown for fixture/new-model"),
+          !unknownPresentation.detailText.contains("processed"),
+          !unknownPresentation.detailText.contains("9999999") else {
+        throw Failure(description: "unknown window must show a dashed unknown ring and prompt count, never the run total")
+    }
+    let zeroUnknown = AgentRadialContextMeterPresenter.present(AgentContextWindowSnapshot(
+        usedTokens: 0, windowResolutionSource: .unknown, contextModel: "fixture/cold-unknown",
+        observedAt: Date(), source: .providerSessionStats, freshness: .live))
+    guard zeroUnknown.state == .unknown, zeroUnknown.fraction == nil,
+          zeroUnknown.label == "0",
+          zeroUnknown.detailText.contains("Context window unknown for fixture/cold-unknown"),
+          !zeroUnknown.label.contains("%") else {
+        throw Failure(description: "zero prompt tokens with an unknown window must keep the dashed unknown ring, never claim 0%")
+    }
+    let overflowPresentation = AgentRadialContextMeterPresenter.present(AgentContextWindowSnapshot(
+        usedTokens: 237, maxTokens: 100, observedAt: Date(), source: .providerSessionStats, freshness: .live))
+    guard overflowPresentation.fraction == 2.37, overflowPresentation.label.contains("237%") else {
+        throw Failure(description: "over-capacity must preserve the raw fraction and label")
+    }
 
     func spawnWithTile(
         _ supervisor: AgentSupervisor, harness: AgentHarness, model: String
@@ -172,8 +197,9 @@ func runAgentContextMeterChecks(root: URL) async throws {
     let prompt = 2 + 11_239 + 10_695
     guard claudeSupervisor.send("say hi", to: claudeID) else { throw Failure(description: "(a) send refused") }
     try await expectEventually("(a) first turn never reached message_start") { claudeRunner.isPaused }
-    try await expectEventually("(a) mid-turn the ring must show the request's prompt tokens (21.9k) — \(meter(claudeTile))") {
-        claudeTile.qaCompactStatusRow.qaContextText == "21.9k"
+    try await expectEventually("(a) mid-turn the ring must resolve the bundled window from the first request — \(meter(claudeTile))") {
+        claudeTile.qaCompactStatusRow.qaContextText == "2%"
+            && near(claudeTile.qaCompactStatusRow.qaContextFraction, Double(prompt) / 1_000_000)
     }
     claudeRunner.resume()
     try await expectEventually("(a) turn end must divide the prompt by claude's stated 1M window — \(meter(claudeTile))") {
@@ -236,13 +262,13 @@ func runAgentContextMeterChecks(root: URL) async throws {
     guard compactSupervisor.send("compact", to: compactID) else { throw Failure(description: "(b) send refused") }
     try await expectEventually("(b) never reached the compacting status") { compactRunner.isPaused }
     try await expectEventually("(b) while compacting the ring keeps its last reading, dimmed — \(meter(compactTile))") {
-        compactTile.qaCompactStatusRow.qaContextText == "13%"
+        compactTile.qaCompactStatusRow.qaContextText == "3%"
             && compactTile.qaCompactStatusRow.qaContextState == .stale
             && compactSupervisor.turnSnapshot(for: compactID)?.state == .compacting
     }
     compactRunner.resume()
     try await expectEventually("(b) after the boundary the ring must show post_tokens (2140) over the window — \(meter(compactTile))") {
-        near(compactTile.qaCompactStatusRow.qaContextFraction, 2_140.0 / 200_000)
+        near(compactTile.qaCompactStatusRow.qaContextFraction, 2_140.0 / 1_000_000)
             && compactTile.qaCompactStatusRow.qaContextState == .known
     }
 
@@ -310,32 +336,32 @@ func runAgentContextMeterChecks(root: URL) async throws {
     let (piID, piTile) = spawnWithTile(piSupervisor, harness: .pi, model: piModel)
     guard piSupervisor.send("one", to: piID) else { throw Failure(description: "(d) send refused") }
     try await expectEventually("(d) first pi turn must read 50k/200k with the 160k policy tick — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 0.25)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 0.8)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 272_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
             && piRunner.finishedRunCount == 1 && !piSupervisor.isRunning(piID)
     }
     guard piSupervisor.send("two", to: piID) else { throw Failure(description: "(d) second send refused") }
     try await expectEventually("(d) second turn never started") { piRunner.isPaused }
     try await expectEventually("(d) the turn-start settings snapshot must not blank the ring — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 0.25)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 0.8)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 50_000.0 / 272_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
     }
     piRunner.resume()
     try await expectEventually("(d) the next usage snapshot must keep the policy tick — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 0.30)
-            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 0.8)
+        near(piTile.qaCompactStatusRow.qaContextFraction, 60_000.0 / 272_000)
+            && near(piTile.qaCompactStatusRow.qaContextThresholdFraction, 160_000.0 / 272_000)
             && piRunner.finishedRunCount == 2 && !piSupervisor.isRunning(piID)
     }
     guard piSupervisor.send("three", to: piID) else { throw Failure(description: "(e) send refused") }
     try await expectEventually("(e) compaction never started") { piRunner.isPaused }
     try await expectEventually("(e) while pi compacts the ring keeps 30%, dimmed — \(meter(piTile))") {
-        piTile.qaCompactStatusRow.qaContextText == "30%"
+        piTile.qaCompactStatusRow.qaContextText == "22%"
             && piTile.qaCompactStatusRow.qaContextState == .stale
     }
     piRunner.resume()
     try await expectEventually("(e) compaction_end must move the ring to the estimated 12k, marked ≈ — \(meter(piTile))") {
-        near(piTile.qaCompactStatusRow.qaContextFraction, 0.06)
-            && piTile.qaCompactStatusRow.qaContextText == "≈6%"
+        near(piTile.qaCompactStatusRow.qaContextFraction, 12_000.0 / 272_000)
+            && piTile.qaCompactStatusRow.qaContextText == "≈4%"
     }
 
     // (f) an in-turn compaction whose provider never reports a terminal: the

@@ -1,0 +1,8 @@
+{
+  "cli": "pi",
+  "version": "0.85.0",
+  "model": "openai-codex/gpt-5.6-sol",
+  "captured_at_utc": "2026-10-13T03:46:15.668367+00:00",
+  "turn": "tool-free tiny prompt",
+  "scrubbed": true
+}

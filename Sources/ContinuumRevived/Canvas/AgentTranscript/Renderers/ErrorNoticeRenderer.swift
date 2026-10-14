@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedCore
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
@@ -28,9 +29,12 @@ final class ErrorNoticeRenderer: AgentBlockRendering {
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
         switch block.payload {
         case .error(let payload) where kind == .error:
+            let contextFullRecovery = payload.message == AgentContextFullRecovery.canonicalErrorMessage
             return AgentErrorNoticeView.measuredHeight(
-                message: payload.message, metadata: payload.code,
-                actionCount: payload.isRecoverable ? 2 : 1, width: width,
+                message: contextFullRecovery ? AgentErrorNoticeView.contextFullRecoveryMessage : payload.message, metadata: payload.code,
+                actionCount: contextFullRecovery ? 3 : (payload.isRecoverable ? 2 : 1),
+                width: width,
+                contextFullRecovery: contextFullRecovery,
                 zoom: context.pageZoom
             )
         case .notice(let payload) where kind == .notice:
@@ -50,6 +54,7 @@ final class ErrorNoticeRenderer: AgentBlockRendering {
 
 @MainActor
 final class AgentErrorNoticeView: NSView {
+    static let contextFullRecoveryMessage = "This session filled its context window. Compact and retry, start a new session with a summary, or copy the transcript."
     static let headerHeight = CGFloat(Space.xxl + Space.l)
     static let horizontalInset = CGFloat(Space.l)
     static let actionHeight = CGFloat(Space.xxl + Space.xs)
@@ -78,6 +83,10 @@ final class AgentErrorNoticeView: NSView {
     private(set) var metadataLabel = NSTextField(labelWithString: "")
     private(set) var retryButton = AgentRequestChoiceButton(title: "Retry")
     private(set) var copyButton = AgentRequestChoiceButton(title: "Copy details")
+    private(set) var compactRetryButton = AgentRequestChoiceButton(title: "Compact & retry")
+    private(set) var forkSummaryButton = AgentRequestChoiceButton(title: "New session with summary")
+    private(set) var copyTranscriptButton = AgentRequestChoiceButton(title: "Copy transcript")
+    private var contextFullRecoveryVisible = false
 
     private var generation: UInt64 = 0
     private var blockID: AgentNodeID?
@@ -101,7 +110,14 @@ final class AgentErrorNoticeView: NSView {
         retryButton.action = #selector(retry(_:))
         copyButton.target = self
         copyButton.action = #selector(copyDetails(_:))
-        [titleLabel, statusLabel, messageLabel, metadataLabel, retryButton, copyButton].forEach(addSubview)
+        compactRetryButton.target = self
+        compactRetryButton.action = #selector(contextFullRecovery(_:))
+        forkSummaryButton.target = self
+        forkSummaryButton.action = #selector(contextFullRecovery(_:))
+        copyTranscriptButton.target = self
+        copyTranscriptButton.action = #selector(contextFullRecovery(_:))
+        [titleLabel, statusLabel, messageLabel, metadataLabel, retryButton, copyButton,
+         compactRetryButton, forkSummaryButton, copyTranscriptButton].forEach(addSubview)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         applyZoomMetrics()
@@ -118,6 +134,9 @@ final class AgentErrorNoticeView: NSView {
         metadataLabel.font = NSFont.token(.captionMono, zoom: zoom)
         retryButton.applyZoom(zoom)
         copyButton.applyZoom(zoom)
+        compactRetryButton.applyZoom(zoom)
+        forkSummaryButton.applyZoom(zoom)
+        copyTranscriptButton.applyZoom(zoom)
     }
 
     @available(*, unavailable)
@@ -127,17 +146,26 @@ final class AgentErrorNoticeView: NSView {
 
     func applyError(blockID: AgentNodeID, payload: AgentErrorPayload, context: AgentRenderContext) {
         beginApply(blockID: blockID, context: context)
-        titleLabel.stringValue = "Error"
-        statusLabel.stringValue = "! Failed"
+        contextFullRecoveryVisible = payload.message == AgentContextFullRecovery.canonicalErrorMessage
+        titleLabel.stringValue = contextFullRecoveryVisible ? "Context full" : "Error"
+        statusLabel.stringValue = contextFullRecoveryVisible ? "! Recovery available" : "! Failed"
         statusLabel.isHidden = false
-        messageLabel.stringValue = payload.message
+        messageLabel.stringValue = contextFullRecoveryVisible
+            ? Self.contextFullRecoveryMessage
+            : payload.message
         metadataLabel.stringValue = safeSingleLine(payload.code ?? "", fallback: "")
         metadataLabel.isHidden = metadataLabel.stringValue.isEmpty
-        retryButton.isHidden = !payload.isRecoverable
-        copyButton.isHidden = false
+        retryButton.isHidden = contextFullRecoveryVisible || !payload.isRecoverable
+        copyButton.isHidden = contextFullRecoveryVisible
+        compactRetryButton.isHidden = !contextFullRecoveryVisible
+        forkSummaryButton.isHidden = !contextFullRecoveryVisible
+        copyTranscriptButton.isHidden = !contextFullRecoveryVisible
         let token = BlockToken(generation: generation, blockID: blockID)
         retryButton.actionToken = token
         copyButton.actionToken = token
+        compactRetryButton.actionToken = token
+        forkSummaryButton.actionToken = token
+        copyTranscriptButton.actionToken = token
         finishApply(blockID: blockID)
     }
 
@@ -157,8 +185,15 @@ final class AgentErrorNoticeView: NSView {
         metadataLabel.isHidden = true
         retryButton.isHidden = true
         copyButton.isHidden = true
+        compactRetryButton.isHidden = true
+        forkSummaryButton.isHidden = true
+        copyTranscriptButton.isHidden = true
+        contextFullRecoveryVisible = false
         retryButton.actionToken = nil
         copyButton.actionToken = nil
+        compactRetryButton.actionToken = nil
+        forkSummaryButton.actionToken = nil
+        copyTranscriptButton.actionToken = nil
         finishApply(blockID: blockID)
     }
 
@@ -170,6 +205,9 @@ final class AgentErrorNoticeView: NSView {
         if !metadataLabel.isHidden { children.append(metadataLabel) }
         if !retryButton.isHidden { children.append(retryButton) }
         if !copyButton.isHidden { children.append(copyButton) }
+        if !compactRetryButton.isHidden { children.append(compactRetryButton) }
+        if !forkSummaryButton.isHidden { children.append(forkSummaryButton) }
+        if !copyTranscriptButton.isHidden { children.append(copyTranscriptButton) }
         setAccessibilityChildren(children)
     }
 
@@ -199,13 +237,25 @@ final class AgentErrorNoticeView: NSView {
             metadataLabel.frame = NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: metadataLabel.intrinsicContentSize.height)
             y = metadataLabel.frame.maxY
         }
-        let buttons = [retryButton, copyButton].filter { !$0.isHidden }
-        guard !buttons.isEmpty else { return }
-        y += CGFloat(zoom.scaled(Space.m))
-        let gap = CGFloat(zoom.scaled(Space.s))
-        let width = max(1, (bounds.width - inset * 2 - gap * CGFloat(buttons.count - 1)) / CGFloat(buttons.count))
-        for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight(zoom: zoom))
+        if contextFullRecoveryVisible {
+            let buttons = [compactRetryButton, forkSummaryButton, copyTranscriptButton]
+            y += CGFloat(zoom.scaled(Space.m))
+            let gap = CGFloat(zoom.scaled(Space.xs))
+            for (index, button) in buttons.enumerated() {
+                button.frame = NSRect(
+                    x: inset, y: y + CGFloat(index) * (Self.actionHeight(zoom: zoom) + gap),
+                    width: max(1, bounds.width - inset * 2),
+                    height: Self.actionHeight(zoom: zoom))
+            }
+        } else {
+            let buttons = [retryButton, copyButton].filter { !$0.isHidden }
+            guard !buttons.isEmpty else { return }
+            y += CGFloat(zoom.scaled(Space.m))
+            let gap = CGFloat(zoom.scaled(Space.s))
+            let width = max(1, (bounds.width - inset * 2 - gap * CGFloat(buttons.count - 1)) / CGFloat(buttons.count))
+            for (index, button) in buttons.enumerated() {
+                button.frame = NSRect(x: inset + CGFloat(index) * (width + gap), y: y, width: width, height: Self.actionHeight(zoom: zoom))
+            }
         }
     }
 
@@ -245,10 +295,14 @@ final class AgentErrorNoticeView: NSView {
             : context.tokens.secondaryText.color.nsColor(for: theme)
         retryButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
         copyButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
+        compactRetryButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
+        forkSummaryButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
+        copyTranscriptButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
     }
 
     static func measuredHeight(
         message: String, metadata: String?, actionCount: Int, width: CGFloat,
+        contextFullRecovery: Bool = false,
         zoom: AgentPageZoom = .default
     ) -> CGFloat {
         var height = headerHeight(zoom: zoom)
@@ -256,7 +310,15 @@ final class AgentErrorNoticeView: NSView {
         if let metadata, !metadata.isEmpty {
             height += CGFloat(zoom.scaled(Space.s) + zoom.lineHeight(for: .caption))
         }
-        if actionCount > 0 { height += CGFloat(zoom.scaled(Space.m)) + actionHeight(zoom: zoom) }
+        if actionCount > 0 {
+            height += CGFloat(zoom.scaled(Space.m))
+            if contextFullRecovery {
+                height += CGFloat(actionCount) * actionHeight(zoom: zoom)
+                    + CGFloat(max(0, actionCount - 1)) * CGFloat(zoom.scaled(Space.xs))
+            } else {
+                height += actionHeight(zoom: zoom)
+            }
+        }
         return height + bottomInset(zoom: zoom)
     }
 
@@ -282,6 +344,17 @@ final class AgentErrorNoticeView: NSView {
     @objc private func copyDetails(_ sender: AgentRequestChoiceButton) {
         guard let token = validToken(sender) else { return }
         context.actions.perform(.copy(blockID: token.blockID))
+    }
+
+    @objc private func contextFullRecovery(_ sender: AgentRequestChoiceButton) {
+        guard contextFullRecoveryVisible,
+              let token = validToken(sender) else { return }
+        let action: AgentContextFullRecovery.Action
+        if sender === compactRetryButton { action = .compactAndRetry }
+        else if sender === forkSummaryButton { action = .forkWithSummary }
+        else if sender === copyTranscriptButton { action = .copyTranscript }
+        else { return }
+        context.actions.perform(.contextFullRecovery(blockID: token.blockID, action: action))
     }
 
     private func validToken(_ sender: AgentRequestChoiceButton) -> BlockToken? {

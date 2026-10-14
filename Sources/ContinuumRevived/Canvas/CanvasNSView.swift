@@ -30,6 +30,7 @@ private func firstWinsDictionary<Key: Hashable, Value>(
 @MainActor
 final class CanvasNSView: NSView, TokenThemed {
     weak var delegate: CanvasNSViewDelegate?
+    var onProjectFolderDrop: ((URL, CGPoint) -> Bool)?
     var onFileURLDrop: ((String, CGPoint) -> Void)?
     /// Single-point hook for the app's tile-delete orchestrator. The canvas
     /// wires every installed tile's `onClose` to call this, so the app sets
@@ -905,7 +906,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Command Center and other non-pointer creation surfaces. The provisional
     /// zone cannot persist or capture members until a project/Home is confirmed.
     @discardableResult
-    func beginProvisionalZone(screenRect: CGRect? = nil) -> UUID {
+    func beginProvisionalZone(screenRect: CGRect? = nil, requestsProjectSelection: Bool = true) -> UUID {
         let availableWidth = max(320, bounds.width - 80)
         let availableHeight = max(220, bounds.height - 80)
         let width = min(760, availableWidth)
@@ -947,6 +948,7 @@ final class CanvasNSView: NSView, TokenThemed {
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
 
+        guard requestsProjectSelection else { return zoneId }
         if let scope = agreedFilesystemScope(enclosedBy: placement),
            let projectId = scope.projectId {
             commitProvisionalZone(
@@ -6951,7 +6953,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Replacing the view of a tile that already exists is
     /// `materializeProjectTile`, which moves nothing.
     @discardableResult
-    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil) -> ProjectTileTarget {
+    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil,
+                            arrangeAfterSpawn: Bool = true) -> ProjectTileTarget {
         guard let zoneId = targetZoneId ?? activeProjectZoneId,
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
@@ -6993,7 +6996,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // already expands the zone, but only when auto-layout is enabled — with it off,
         // a spawned tile sat outside its zone until someone dragged it.
         growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
-        arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
+        if arrangeAfterSpawn { arrangeAutoLayoutAfterSpawn(zoneId: zoneId) }
         return .zoneLayer(zoneId)
     }
 
@@ -12706,6 +12709,10 @@ final class CanvasNSView: NSView, TokenThemed {
             return false
         }
         let screenPoint = convert(sender.draggingLocation, from: nil)
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]),
+           values.isDirectory == true, values.isPackage != true {
+            return onProjectFolderDrop?(url, screenPoint) ?? false
+        }
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
         let spawnPoint = activeZone.map { CanvasEngine.zoneLocalPoint(world: worldPoint, zone: $0) } ?? worldPoint
         onFileURLDrop?(url.path, spawnPoint)

@@ -202,6 +202,8 @@ enum WorkspaceSwitchConfidenceChecks {
         var failures: [String] = []
         let scenarios: [(String, (Fixture, Findings) throws -> Void)] = [
             ("warm-round-trip", warmRoundTrip),
+            ("warm-browser-global-budget", warmBrowserBudget),
+            ("warm-runtime-exits", warmRuntimeExits),
             ("released-workspace-keeps-terminal-descriptors", releasedWorkspaceKeepsDescriptors),
             ("switch-inside-a-switch-is-refused", switchInsideSwitchIsRefused),
             ("held-project-lock-fails-cleanly", heldProjectLockFailsCleanly),
@@ -259,6 +261,103 @@ enum WorkspaceSwitchConfidenceChecks {
     }
 
     // MARK: - Scenarios
+
+    private static func warmRuntimeExits(_ fixture: Fixture, _ findings: Findings) throws {
+        try fixture.mount()
+        let window = try attachWindow(fixture)
+        defer { window.close() }
+        let m = try fixture.requireMounted("parked exit mount")
+        let a1 = try requireController(fixture, Fixture.projectA1, "parked terminal owner")
+        let a2 = try requireController(fixture, Fixture.projectA2, "parked browser owner")
+        guard let terminal = a1.runtimes.first(where: { $0.tileId == terminalA1 }),
+              let browser = a2.browserRuntimes.first(where: { $0.tileId == browserA2 }),
+              let browserView = m.canvas.tileView(for: browserA2) as? BrowserTileNSView else {
+            throw Failure(message: "parked exits: missing live A runtimes")
+        }
+        _ = try measuredSwitch(fixture, to: Fixture.workspaceB, label: "exit A→B", into: findings)
+        // Mutate detached live tab state without the tab-change persistence
+        // callback; only the death callback's snapshot can preserve this edit.
+        browserView.onTabModelChange = nil
+        browserView.createTabForQA(url: "about:blank#parked-exit", title: "Unsaved parked tab")
+        let expectedBrowserState = browserView.tabModelForBrowserStatePersistence
+        let bTileIdentity = m.canvas.tileView(for: terminalB1).map(ObjectIdentifier.init)
+        let b1 = try requireController(fixture, Fixture.projectB1, "parked exit B owner")
+        let bCanvasBefore = try b1.projectStore.loadCanvas()
+        m.delegate.qaRuntimeExited(terminal.id, exitCode: 23)
+        m.delegate.qaBrowserContentProcessTerminated(browser.id)
+        findings.expect(!a1.runtimes.contains { $0.id == terminal.id }, "parked terminal exit must unregister runtime")
+        findings.expect(!a2.browserRuntimes.contains { $0.id == browser.id }, "parked browser death must unregister runtime")
+        findings.expect(m.canvas.tileView(for: terminalB1).map(ObjectIdentifier.init) == bTileIdentity,
+                        "parked exits must preserve mounted B tile identity")
+        let bCanvasAfter = try b1.projectStore.loadCanvas()
+        findings.expect(bCanvasAfter == bCanvasBefore, "parked exits must preserve mounted B persistence")
+        let lastExit = try a1.projectStore.loadSession(id: terminal.id).lastExit
+        findings.expect(lastExit?.exitCode == 23, "parked terminal exit must persist its exit status")
+        let savedBrowser = try a2.projectStore.loadBrowserState().tiles.first { $0.tileId == browserA2 }
+        findings.expect(savedBrowser?.activeTabId == expectedBrowserState.activeTabId,
+                        "parked browser death must snapshot its current active tab before retiring view")
+        findings.expect(savedBrowser?.tabs.count == expectedBrowserState.tabs.count,
+                        "parked browser death must snapshot all current tabs")
+        _ = try measuredSwitch(fixture, to: Fixture.workspaceA, label: "exit B→A", into: findings)
+        findings.expect(m.canvas.tileView(for: terminalA1) is TerminalRestartTileNSView,
+                        "remount must show a restart placeholder instead of dead parked terminal")
+        findings.expect(m.canvas.tileView(for: browserA2) is BrowserRestartTileNSView,
+                        "remount must show a restart placeholder instead of dead parked browser")
+        m.delegate.qaRestartTerminalTile(terminalA1)
+        m.delegate.qaRestartBrowserTile(browserA2)
+        findings.expect(pump(until: 5, { m.canvas.tileView(for: terminalA1) is TerminalTileNSView }),
+                        "parked terminal placeholder must restart after remount")
+        findings.expect(m.canvas.tileView(for: browserA2) is BrowserTileNSView,
+                        "parked browser placeholder must restart after remount")
+        let restoredBrowser = m.canvas.tileView(for: browserA2) as? BrowserTileNSView
+        findings.expect(restoredBrowser?.activeTabIdForQA == expectedBrowserState.activeTabId,
+                        "browser restart must restore snapshotted parked active tab")
+        findings.expect(restoredBrowser?.tabCountForQA == expectedBrowserState.tabs.count,
+                        "browser restart must restore snapshotted parked tabs")
+    }
+
+    private static func warmBrowserBudget(_ fixture: Fixture, _ findings: Findings) throws {
+        try fixture.mount()
+        let window = try attachWindow(fixture)
+        defer { window.close() }
+        let m = try fixture.requireMounted("browser budget mount")
+        let a1 = try requireController(fixture, Fixture.projectA1, "browser budget")
+        let a2 = try requireController(fixture, Fixture.projectA2, "browser budget")
+        guard let oldBrowser = a2.browserRuntimes.first else { throw Failure(message: "browser budget: A browser not restored") }
+        let oldIdentity = ObjectIdentifier(oldBrowser)
+        let terminals = a1.runtimes.map(\.id)
+        m.runtime.registerLiveBrowser(tileId: oldBrowser.tileId)
+        _ = try measuredSwitch(fixture, to: Fixture.workspaceB, label: "budget A→B", into: findings)
+        let b1 = try requireController(fixture, Fixture.projectB1, "browser budget B")
+        guard let spawner = b1.tileSpawner else { throw Failure(message: "browser budget: missing B spawner") }
+        let bBrowser: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: "about:blank", targetZoneId: Fixture.zoneB1) {
+        case .spawned(let runtime): bBrowser = runtime
+        default: throw Failure(message: "browser budget: B browser spawn failed")
+        }
+        if !b1.browserRuntimes.contains(where: { $0 === bBrowser }) { b1.browserRuntimes.append(bBrowser) }
+        m.runtime.registerLiveBrowser(tileId: bBrowser.tileId)
+        let bView = m.canvas.tileView(for: bBrowser.tileId).map(ObjectIdentifier.init)
+        let bCanvas = try b1.projectStore.loadCanvas()
+        m.runtime.qaSetBrowserRuntimeMaxLive(1)
+        m.runtime.enforceBrowserRuntimeBudget()
+        findings.expect(a2.browserRuntimes.isEmpty, "global cap must evict the parked A browser")
+        findings.expect(b1.browserRuntimes.contains { $0 === bBrowser }, "visible B browser must survive warm eviction")
+        findings.expect(m.canvas.tileView(for: bBrowser.tileId).map(ObjectIdentifier.init) == bView,
+                        "warm eviction must not replace a view on mounted B canvas")
+        let bCanvasAfter = try b1.projectStore.loadCanvas()
+        findings.expect(bCanvasAfter == bCanvas, "warm eviction must not persist changes to B canvas")
+        findings.expect(a1.runtimes.map(\.id) == terminals, "warm browser eviction must preserve A terminals")
+        let persistedA = try a2.projectStore.loadCanvas().tiles.first { $0.id == oldBrowser.tileId }
+        findings.expect(persistedA?.runtimeRef == nil, "parked A browser descriptor must be persisted without live runtime")
+        m.runtime.qaSetBrowserRuntimeMaxLive(6)
+        _ = try measuredSwitch(fixture, to: Fixture.workspaceA, label: "budget B→A", into: findings)
+        findings.expect(m.canvas.tileView(for: oldBrowser.tileId) is BrowserTileNSView,
+                        "remount must restore the evicted parked browser")
+        findings.expect(a2.browserRuntimes.first.map(ObjectIdentifier.init) != oldIdentity,
+                        "remount must hydrate a fresh browser after eviction")
+        findings.expect(a1.runtimes.map(\.id) == terminals, "remount must keep A terminal identity")
+    }
 
     private static func warmRoundTrip(_ fixture: Fixture, _ findings: Findings) throws {
         try fixture.mount()

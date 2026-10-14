@@ -182,6 +182,10 @@ extension WorkspaceAPIService {
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: ownHandle, checkoutDisplayName: known[ownHandle]?.displayName ?? record.displayName,
                 op: .canvasApply, relativePath: nil))
+            if isCancelled() {
+                remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .canvasApply, outcome: "cancelledBeforeEffect", tileId: request.tileId))
+                return .cancelled(result: nil)
+            }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools were disabled for this agent.", approvalRequestId: promptId))
             }

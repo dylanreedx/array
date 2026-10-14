@@ -100,6 +100,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var onMoveQueuedMessage: ((UUID, Int) -> Void)?
     /// Removes one item from the queue and hands it back for editing.
     var onTakeQueuedMessageForEditing: ((UUID) async -> AgentComposerQueuedMessage?)?
+    /// Paired with take: a rebind returns the original item to its own queue.
+    var onRestoreQueuedMessageAfterFailedEdit: ((AgentComposerQueuedMessage) async -> Void)?
+    var qaAfterQueuedEditAttachmentLoad: (@MainActor () async -> Void)?
     private var attachmentStore: AgentComposerAttachmentStore?
     private var importedAttachments: [AgentPromptImageAttachment] = []
     private var importedFileReferences: [AgentPromptFileReference] = []
@@ -605,16 +608,27 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             showTransientHint("Send or clear your draft to edit a queued message")
             return
         }
-        guard let take = onTakeQueuedMessageForEditing, let agentID = draftAgentID else { return }
+        guard let take = onTakeQueuedMessageForEditing,
+              let restore = onRestoreQueuedMessageAfterFailedEdit,
+              let agentID = draftAgentID else { return }
         let generation = bindingGeneration
+        let attachments = attachmentStore
         Task { @MainActor [weak self] in
-            guard let message = await take(messageID), let self,
-                  self.isCurrentBinding(agentID: agentID, generation: generation) else { return }
+            guard let message = await take(messageID) else { return }
+            guard let self, self.isCurrentBinding(agentID: agentID, generation: generation) else {
+                await restore(message)
+                return
+            }
             var images: [AgentPromptImageAttachment] = []
             for attachment in message.imageAttachments {
-                if let stored = try? await self.attachmentStore?.storedAttachment(for: attachment.attachmentID) {
+                if let stored = try? await attachments?.storedAttachment(for: attachment.attachmentID) {
                     images.append(stored.promptAttachment)
                 }
+            }
+            await self.qaAfterQueuedEditAttachmentLoad?()
+            guard self.isCurrentBinding(agentID: agentID, generation: generation) else {
+                await restore(message)
+                return
             }
             // Typed into meanwhile: keep both rather than lose either.
             let current = self.textView.string

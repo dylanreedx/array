@@ -323,6 +323,15 @@ enum UIProbeAppearance {
                 return view
             }),
             ("appearance.topBar", NSSize(width: 900, height: 44), { WorkspaceTopBarView(frame: .zero) }),
+            ("appearance.floatingToolbar", NSSize(width: 640, height: 64), {
+                FloatingToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 64))
+            }),
+            ("appearance.floatingToolbarHoverPill", NSSize(width: 240, height: 48), {
+                ToolbarHoverPillView(title: "New Note", shortcut: "⇧⌘N")
+            }),
+            ("appearance.onboardingContent", NSSize(width: 620, height: 600), {
+                OnboardingContentView(frame: NSRect(x: 0, y: 0, width: 620, height: 600))
+            }),
             // P1.11 made the canvas a `TokenThemed` conformer, so `declaredConformers()`
             // requires it here — and the canvas fill is the background half of the
             // `borderStrong`-on-`canvas` pair this ticket's Goal names.
@@ -860,6 +869,12 @@ enum UIProbeAppearance {
         // reads as one object. A pill with no reading paints `nil`, never
         // `.clear`, so an absent metric contributes no slot at all.
         "AgentStatusPillView",
+        // The floating creation surface uses the same panel and line tokens in
+        // both appearances; its settings are separately covered by its controls.
+        "FloatingToolbarView",
+        "ToolbarDragHandleView",
+        "ToolbarHoverPillView",
+        "OnboardingContentView",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
         // paint the composer shell on every managed-agent surface, so the composer
@@ -1654,6 +1669,15 @@ enum UIProbeAppearance {
                 let view = WorkspaceTopBarView(frame: .zero)
                 view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))
                 return view
+            }),
+            AdoptedSurface(id: "floatingToolbar", size: NSSize(width: 640, height: 64), make: {
+                FloatingToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 64))
+            }),
+            AdoptedSurface(id: "floatingToolbarHoverPill", size: NSSize(width: 240, height: 48), make: {
+                ToolbarHoverPillView(title: "New Note", shortcut: "⇧⌘N")
+            }),
+            AdoptedSurface(id: "onboardingContent", size: NSSize(width: 620, height: 600), make: {
+                OnboardingContentView(frame: NSRect(x: 0, y: 0, width: 620, height: 600))
             })
         ]
     }

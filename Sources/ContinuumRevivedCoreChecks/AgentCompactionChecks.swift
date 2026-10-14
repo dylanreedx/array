@@ -70,6 +70,73 @@ func runAgentCompactionChecks() {
            "Codex must not fabricate compaction token counts")
     expect(!String(describing: codexEnd).contains("DO NOT READ"),
            "Codex opaque compaction content must not enter normalized events")
+    let codexLegacyDuplicate = codex.translate(line: #"{"method":"thread/compacted","params":{"threadId":"codex-thread","boundaryId":"compact-item","summary":"PRIVATE SUMMARY","message":"PRIVATE COMPACTED PROMPT"}}"#)
+    expect(codexLegacyDuplicate.isEmpty,
+           "Codex legacy thread/compacted must deduplicate against the contextCompaction item boundary")
+    expect(!String(describing: codexLegacyDuplicate).contains("PRIVATE"),
+           "Codex compacted summary and message must remain private")
+    let codexLegacyOnly = codex.translate(line: #"{"method":"thread/compacted","params":{"threadId":"legacy-thread","boundaryId":"legacy-boundary","summary":"PRIVATE SUMMARY"}}"#)
+    guard case .compactionChanged(_, let codexLegacyBoundary)? = codexLegacyOnly.first else {
+        expect(false, "Codex legacy thread/compacted must emit a first-class boundary")
+        return
+    }
+    expect(codexLegacyBoundary.phase == .succeeded && codexLegacyBoundary.boundaryID == "legacy-boundary",
+           "Codex legacy compact notification must retain its stable boundary identity")
+    expect(!String(describing: codexLegacyOnly).contains("PRIVATE"),
+           "Codex legacy compacted summary must not enter normalized events")
+    expect(codex.translate(line: #"{"method":"thread/compacted","params":{"threadId":"legacy-thread","boundaryId":"legacy-boundary"}}"#).isEmpty,
+           "replayed Codex legacy compact notifications must not advance the boundary twice")
+
+    // The error code is the last recovery signal app-server provides when a
+    // failed Codex turn reaches its context ceiling. Keep this as a normalized
+    // marker so the shared recovery surface can offer the same actions for all
+    // three harnesses without retaining provider diagnostics.
+    var codexFailure = CodexAppServerEventTranslator(now: { Date(timeIntervalSinceReferenceDate: 58) })
+    let contextFull = codexFailure.translate(line: #"{"method":"turn/completed","params":{"threadId":"codex-thread","turn":{"id":"turn-1","status":"failed","error":{"codexErrorInfo":"contextWindowExceeded","message":"private provider diagnostic 768-SECRET"}}}}"#)
+    guard case .turnCompleted(_, _, .failed, let contextFullMessage)? = contextFull.first else {
+        expect(false, "Codex contextWindowExceeded must still complete the failed turn")
+        return
+    }
+    expect(contextFullMessage == AgentContextFullRecovery.canonicalErrorMessage,
+           "Codex codexErrorInfo must become the shared context-full recovery marker")
+    expect(!String(describing: contextFull).contains("768-SECRET"),
+           "context-full recovery must not retain raw provider diagnostics")
+
+    var claudeFailure = ClaudeEventTranslator(
+        runToken: "context-full-check",
+        now: { Date(timeIntervalSinceReferenceDate: 58) })
+    _ = claudeFailure.translate(line: #"{"type":"system","subtype":"init","session_id":"claude-context-full","model":"claude-opus-5"}"#)
+    let claudeFull = claudeFailure.translate(line: #"{"type":"result","is_error":true,"subtype":"error_prompt_too_long","result":"private transcript excerpt"}"#)
+    guard case .turnCompleted(_, _, .failed, let claudeFullMessage)? = claudeFull.first else {
+        expect(false, "Claude prompt-too-long result must complete the failed turn")
+        return
+    }
+    expect(claudeFullMessage == AgentContextFullRecovery.canonicalErrorMessage,
+           "Claude context-limit error must become the shared recovery marker")
+
+    var piFailure = PiEventTranslator(now: { Date(timeIntervalSinceReferenceDate: 58) })
+    _ = piFailure.translate(line: #"{"type":"agent_start"}"#)
+    _ = piFailure.translate(line: #"{"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"The prompt exceeds the model context window"}}"#)
+    let piFull = piFailure.translate(line: #"{"type":"agent_settled"}"#)
+    guard case .turnCompleted(_, _, .failed, let piFullMessage)? = piFull.first else {
+        expect(false, "Pi context-limit result must complete the failed run")
+        return
+    }
+    expect(piFullMessage == AgentContextFullRecovery.canonicalErrorMessage,
+           "Pi context-limit error must become the shared recovery marker")
+
+    expect(AgentContextFullRecovery.isContextFull(
+        provider: "claude", candidates: ["error_prompt_too_long", nil]),
+        "Claude prompt-over-context error codes must qualify for recovery")
+    expect(AgentContextFullRecovery.isContextFull(
+        provider: "pi", candidates: ["The prompt exceeds the model context window", nil]),
+        "Pi context-limit messages must qualify for recovery")
+    expect(!AgentContextFullRecovery.isContextFull(
+        provider: "claude", candidates: ["error_max_tokens", "maximum output tokens reached"]),
+        "output-token limits must not be mistaken for full context")
+    expect(AgentContextFullRecovery.actions == [
+        .compactAndRetry, .forkWithSummary, .copyTranscript,
+    ], "context-full recovery must expose compact/retry, summary fork, and transcript copy")
 
     print("AgentCompactionChecks passed")
 }

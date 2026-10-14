@@ -1,0 +1,12 @@
+{
+  "cli": "claude",
+  "version": "2.1.296",
+  "model": "claude-haiku-5-5",
+  "models": [
+    "sonnet",
+    "claude-haiku-5-5"
+  ],
+  "captured_at_utc": "2026-10-13T03:56:10.055291+00:00",
+  "turn": "tool-free tiny prompt",
+  "scrubbed": true
+}

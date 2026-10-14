@@ -122,17 +122,26 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     /// `transport.onEvent` runs `queue.sync`, and `transport.send` runs its own
     /// `queue.sync`, so answering synchronously inside a translator hook deadlocks.
     private let bridgeQueue = DispatchQueue(label: "continuum.pi-rpc-host-tool-bridge")
+    private let scheduleHostToolDeadline: @Sendable (TimeInterval, DispatchWorkItem, DispatchQueue) -> Void
     /// How long the host may take before the model is told `outcome_unknown`.
-    /// Shorter than the extension's own 45 s `ui.input` timeout so the host's
-    /// structured answer wins. Injectable for the bridge witnesses.
+    /// Match the MCP clients' 24-hour request horizon: the host can be holding
+    /// a real user approval, which has no independent deadline. The extension
+    /// waits slightly longer so this structured answer still wins. Injectable
+    /// for the bridge witnesses.
     public var hostToolDeadline: TimeInterval {
         get { queue.sync { hostToolDeadlineStorage } }
         set { queue.sync { hostToolDeadlineStorage = newValue } }
     }
-    private var hostToolDeadlineStorage: TimeInterval = 30
+    private var hostToolDeadlineStorage: TimeInterval = TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)
 
-    public init(config: Config) {
+    public init(
+        config: Config,
+        hostToolDeadlineScheduler: @escaping @Sendable (TimeInterval, DispatchWorkItem, DispatchQueue) -> Void = { interval, item, queue in
+            queue.asyncAfter(deadline: .now() + interval, execute: item)
+        }
+    ) {
         self.config = config
+        self.scheduleHostToolDeadline = hostToolDeadlineScheduler
         self.translator = PiEventTranslator(workingDirectory: config.cwd)
         transport.onEvent = { [weak self] line in
             self?.queue.sync { self?.handleEventLine(line) }
@@ -339,7 +348,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
         }
         hostToolPending[piId] = HostToolEntry(call: call, phase: .dispatched, deadline: deadline)
         hostToolPiIdByRequestId[request.requestId] = piId
-        bridgeQueue.asyncAfter(deadline: .now() + hostToolDeadlineStorage, execute: deadline)
+        scheduleHostToolDeadline(hostToolDeadlineStorage, deadline, bridgeQueue)
         if let hostToolHandler {
             hostToolHandler(call)
         } else {

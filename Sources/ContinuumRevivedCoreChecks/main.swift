@@ -163,6 +163,15 @@ if CommandLine.arguments.contains("--canvas-background-model-check") {
     Foundation.exit(0)
 }
 
+// Current provider argv and on-disk context readers must run independently of
+// the pre-existing failures earlier in the combined CoreChecks entry.
+if CommandLine.arguments.contains("--provider-context-support-check") {
+    runClaudeAgentBackendChecks()
+    runClaudeAgentStateReaderTests()
+    print("ProviderContextSupportChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--codex-appserver-parity-check") {
     runCodexAppServerParityChecks()
     print("CodexAppServerParityChecks passed")
@@ -363,6 +372,16 @@ if CommandLine.arguments.contains("--agent-prompt-image-contract-check") {
 
 if CommandLine.arguments.contains("--agent-prompt-file-reference-contract-check") {
     runAgentPromptFileReferenceContractChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--context-meter-live-check") {
+    runAgentContextRealRunnerChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--context-meter-contract-check") {
+    runAgentContextMeterContractChecks()
     Foundation.exit(0)
 }
 

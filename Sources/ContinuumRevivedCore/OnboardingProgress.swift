@@ -1,6 +1,8 @@
 import Foundation
 
 public enum OnboardingMilestone: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case terminalAdded
+    case toolbarDragged
     case commandCenterOpened
     case quickJumpUsed
     case navigationModeEntered
@@ -11,9 +13,15 @@ public enum OnboardingMilestone: String, Codable, CaseIterable, Equatable, Hasha
 }
 
 public enum GettingStartedTask: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case secondAgent
+    case addTerminal
+    case dragToolbar
     case openCommandCenter
     case navigate
     case personalizeZone
+
+    /// Legacy task values remain decodable; new profiles show the launch checklist.
+    public static let launchTasks: [GettingStartedTask] = [.secondAgent, .addTerminal, .openCommandCenter, .dragToolbar]
 }
 
 public enum StarterPhase: String, Codable, Equatable, Sendable {
@@ -51,7 +59,7 @@ public struct StarterLayoutProgress: Codable, Equatable, Sendable {
 }
 
 public struct OnboardingProgress: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
     public static let currentIntroVersion = 1
 
     public var schemaVersion: Int
@@ -60,6 +68,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
     public var explicitlySkippedStarter: Bool
     public var firstProjectId: UUID?
     public var starter: StarterLayoutProgress
+    public var startedAgentIDs: Set<UUID>
     public var milestones: Set<OnboardingMilestone>
     public var skippedTasks: Set<GettingStartedTask>
     public var educationReplayRequested: Bool
@@ -71,6 +80,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
         explicitlySkippedStarter: Bool = false,
         firstProjectId: UUID? = nil,
         starter: StarterLayoutProgress = StarterLayoutProgress(),
+        startedAgentIDs: Set<UUID> = [],
         milestones: Set<OnboardingMilestone> = [],
         skippedTasks: Set<GettingStartedTask> = [],
         educationReplayRequested: Bool = false
@@ -81,6 +91,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
         self.explicitlySkippedStarter = explicitlySkippedStarter
         self.firstProjectId = firstProjectId
         self.starter = starter
+        self.startedAgentIDs = startedAgentIDs
         self.milestones = milestones
         self.skippedTasks = skippedTasks
         self.educationReplayRequested = educationReplayRequested
@@ -94,8 +105,13 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
         milestones.insert(milestone)
     }
 
+    public mutating func demonstrateAgentStarted(_ id: UUID) { startedAgentIDs.insert(id) }
+
     public func isTaskComplete(_ task: GettingStartedTask) -> Bool {
         switch task {
+        case .secondAgent: return startedAgentIDs.count >= 2
+        case .addTerminal: return milestones.contains(.terminalAdded)
+        case .dragToolbar: return milestones.contains(.toolbarDragged)
         case .openCommandCenter:
             return milestones.contains(.commandCenterOpened)
         case .navigate:
@@ -118,7 +134,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
     }
 
     public var hasPendingGettingStartedTasks: Bool {
-        GettingStartedTask.allCases.contains { !isTaskResolved($0) }
+        GettingStartedTask.launchTasks.contains { !isTaskResolved($0) }
     }
 
     public mutating func skipTask(_ task: GettingStartedTask) {
@@ -127,6 +143,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
 
     /// Educational replay never creates/deletes/repositions workspace content.
     public mutating func replayEducation() {
+        startedAgentIDs.removeAll()
         milestones.removeAll()
         skippedTasks.removeAll()
         educationReplayRequested = true
@@ -139,6 +156,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
         case explicitlySkippedStarter
         case firstProjectId
         case starter
+        case startedAgentIDs
         case milestones
         case skippedTasks
         case educationReplayRequested
@@ -153,6 +171,7 @@ public struct OnboardingProgress: Codable, Equatable, Sendable {
         explicitlySkippedStarter = try container.decodeIfPresent(Bool.self, forKey: .explicitlySkippedStarter) ?? false
         firstProjectId = try container.decodeIfPresent(UUID.self, forKey: .firstProjectId)
         starter = try container.decodeIfPresent(StarterLayoutProgress.self, forKey: .starter) ?? StarterLayoutProgress()
+        startedAgentIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .startedAgentIDs) ?? []
         milestones = try container.decodeIfPresent(Set<OnboardingMilestone>.self, forKey: .milestones) ?? []
         skippedTasks = try container.decodeIfPresent(Set<GettingStartedTask>.self, forKey: .skippedTasks) ?? []
         educationReplayRequested = try container.decodeIfPresent(Bool.self, forKey: .educationReplayRequested) ?? false

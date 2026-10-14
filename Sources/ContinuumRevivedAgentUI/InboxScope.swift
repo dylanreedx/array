@@ -20,10 +20,11 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     case all
     case project(String)
     case workspace(String)
-    /// Whichever workspace is on screen (confidence pass, sidebar stream): the
-    /// DEFAULT, so out of the box the list is the agents whose tiles you can see,
-    /// and it follows a workspace switch. Resolved by the view against the name
-    /// the host hands it; unresolved (no host), it filters nothing.
+    /// Stable workspace identity; the name is presentation only.
+    case workspaceID(UUID, String)
+    /// Whichever workspace is on screen: the default scope, following the host's
+    /// stable workspace ID across switches. A legacy name is used only when the
+    /// host has no ID; with neither fact available, it filters nothing.
     case currentWorkspace
 
     /// The word on the popup entry. A project or workspace shows its own NAME and
@@ -33,7 +34,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         switch self {
         case .all: return InboxScope.allTitle
         case .currentWorkspace: return InboxScope.currentWorkspaceTitle
-        case .project(let name), .workspace(let name): return name
+        case .project(let name), .workspace(let name), .workspaceID(_, let name): return name
         }
     }
 
@@ -50,6 +51,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case .currentWorkspace: return "current"
         case .project(let name): return "project:\(name)"
         case .workspace(let name): return "workspace:\(name)"
+        case .workspaceID(let id, _): return "workspace-id:\(id.uuidString.lowercased())"
         }
     }
 
@@ -72,6 +74,9 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         switch storageValue[storageValue.startIndex..<separator] {
         case "project": self = .project(name)
         case "workspace": self = .workspace(name)
+        case "workspace-id":
+            guard let id = UUID(uuidString: name) else { return nil }
+            self = .workspaceID(id, id.uuidString)
         default: return nil
         }
     }
@@ -88,6 +93,7 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         case .all, .currentWorkspace: return true
         case .project(let name): return row.projectName == name
         case .workspace(let name): return row.workspaceName == name
+        case .workspaceID(let id, _): return row.workspaceId == id
         }
     }
 
@@ -116,32 +122,48 @@ public enum InboxScope: Equatable, Hashable, Sendable {
     /// under a stale scope is the honest reading, and `AgentInboxView` labels it as
     /// one.
     ///
-    /// KNOWN LIMIT, deliberate: a scope is a NAME, so two open projects that share a
-    /// display name are one entry that matches both. Names are the row's vocabulary
-    /// by P3.1's design (it flattened ids out so the type could be shared with iOS),
-    /// and the failure mode of a shared name is a scope that shows a superset — no
-    /// agent becomes unreachable, which is the property that matters for a filter.
-    /// Pinned by `runInboxScopeEntriesCheck` so it cannot change unnoticed.
+    /// Workspace scopes use stable IDs whenever available. Legacy rows/scopes
+    /// without IDs retain their name-based behavior for compatibility.
     public static func entries(
         for rows: [AgentInboxRow],
         catalog: [InboxScope] = [],
         including selected: InboxScope = .all,
-        currentWorkspace: String? = nil
+        currentWorkspace: String? = nil,
+        currentWorkspaceId: UUID? = nil
     ) -> [InboxScope] {
         var projectNames = rows.compactMap(\.projectName)
-        var workspaceNames = rows.compactMap(\.workspaceName)
+        var workspaceNames = rows.filter { $0.workspaceId == nil }.compactMap(\.workspaceName)
+        let rowWorkspacePairs: [(UUID, String)] = rows.compactMap { row in
+            guard let id = row.workspaceId, let name = row.workspaceName else { return nil }
+            return (id, name)
+        }
+        var workspacesById: [UUID: String] = Dictionary(
+            rowWorkspacePairs, uniquingKeysWith: { first, _ in first })
         for scope in catalog {
             switch scope {
             case .project(let name): projectNames.append(name)
             case .workspace(let name): workspaceNames.append(name)
+            case .workspaceID(let id, let name): workspacesById[id] = name
             case .all, .currentWorkspace: break
             }
         }
         // "This workspace" leads when the host knows which one is on screen.
-        var entries = (currentWorkspace == nil ? [] : [InboxScope.currentWorkspace]) + [InboxScope.all]
+        let idWorkspaceEntries: [InboxScope] = workspacesById.map {
+            InboxScope.workspaceID($0.key, $0.value)
+        }
+        let sortedIDWorkspaceEntries: [InboxScope] = idWorkspaceEntries.sorted { left, right in
+            let order = left.title.localizedCaseInsensitiveCompare(right.title)
+            return order == .orderedSame
+                ? left.storageValue < right.storageValue
+                : order == .orderedAscending
+        }
+        var entries: [InboxScope] =
+            (currentWorkspace == nil && currentWorkspaceId == nil ? [] : [.currentWorkspace])
+            + [.all]
             + names(projectNames).map(InboxScope.project)
+            + sortedIDWorkspaceEntries
             + names(workspaceNames).map(InboxScope.workspace)
-        if !entries.contains(selected) { entries.append(selected) }
+        if !entries.contains(where: { $0.storageValue == selected.storageValue }) { entries.append(selected) }
         return entries
     }
 
@@ -163,12 +185,16 @@ public enum InboxScope: Equatable, Hashable, Sendable {
         rows: [AgentInboxRow],
         scope: InboxScope,
         openAgentId: UUID? = nil,
-        currentWorkspace: String? = nil
+        currentWorkspace: String? = nil,
+        currentWorkspaceId: UUID? = nil
     ) -> [AgentInboxRow] {
         let resolved: InboxScope
         if scope == .currentWorkspace {
-            guard let currentWorkspace else { return rows }
-            resolved = .workspace(currentWorkspace)
+            if let currentWorkspaceId {
+                resolved = .workspaceID(currentWorkspaceId, currentWorkspace ?? currentWorkspaceId.uuidString)
+            } else if let currentWorkspace {
+                resolved = .workspace(currentWorkspace)
+            } else { return rows }
         } else {
             resolved = scope
         }

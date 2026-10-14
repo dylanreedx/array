@@ -95,7 +95,11 @@ public struct InboxSpineMetrics: Equatable, Sendable {
 
     /// How much taller than a card a row is, given where it sits in the tree.
     public func trailingGap(_ nesting: InboxNesting) -> Double {
-        nesting.endsGroup ? endGap : 0
+        // Root rows are separate groups even when they have no children. Give
+        // root-to-root transitions the same terminator as the end of a child
+        // group, so top-level agents have a wider rhythm than siblings.
+        if nesting.depth == 0 && nesting.nextDepth == 0 { return endGap }
+        return nesting.endsGroup ? endGap : 0
     }
 }
 

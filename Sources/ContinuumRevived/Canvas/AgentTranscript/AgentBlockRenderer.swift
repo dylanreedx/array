@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedCore
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
@@ -15,6 +16,7 @@ enum AgentRenderAction {
     case openLocalFile(blockID: AgentNodeID, destination: String)
     case openDiff(blockID: AgentNodeID)
     case retry(blockID: AgentNodeID)
+    case contextFullRecovery(blockID: AgentNodeID, action: AgentContextFullRecovery.Action)
     case submitResponse(requestID: String, value: String)
     case previewImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
     case copyImage(blockID: AgentNodeID, attachmentID: AgentImageAttachmentID)
@@ -299,6 +301,28 @@ struct AgentImageResourceProvider: @unchecked Sendable {
     }
 }
 
+/// Running tool durations belong to one rendered transcript. The same semantic
+/// node ID may appear in a resumed or forked transcript, so this state is owned
+/// by the transcript list and shared only with its renderer contexts.
+final class AgentToolClockScope {
+    private var starts: [AgentNodeID: Date] = [:]
+
+    @discardableResult
+    func startIfNeeded(blockID: AgentNodeID, at now: Date) -> Date {
+        if let started = starts[blockID] { return started }
+        starts[blockID] = now
+        return now
+    }
+
+    func clear(blockID: AgentNodeID) {
+        starts[blockID] = nil
+    }
+
+    func startDate(for blockID: AgentNodeID) -> Date? {
+        starts[blockID]
+    }
+}
+
 /// Everything a block renderer may learn about its host. In particular, this
 /// type deliberately has no AgentSupervisor, parser, document owner, or concrete
 /// storage path resolver. Host-local media capability is injected explicitly via
@@ -315,6 +339,9 @@ struct AgentRenderContext {
     /// It is part of the context, not a global, precisely so that it cannot
     /// bleed: a renderer has no other way to learn it.
     var pageZoom: AgentPageZoom = .default
+    /// Live tool-duration state. The transcript list injects its stable scope so
+    /// rebuilt contexts retain one owner across zoom and appearance changes.
+    var toolClockScope = AgentToolClockScope()
     var imageResources: AgentImageResourceProvider = .unavailable
     /// C10: `AgentReferenceRenderer`'s seam for a live status, deliberately
     /// outside the semantic document (see `AgentReferenceStatusSource`).

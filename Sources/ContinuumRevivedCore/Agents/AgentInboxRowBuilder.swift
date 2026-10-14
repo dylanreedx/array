@@ -142,7 +142,7 @@ public enum AgentInboxRowBuilder {
     /// absent from its block to a ROOT. Every subagent of a closed parent became a
     /// stray top-level row, which is also what made the next agent "look like a
     /// sub agent" (2026-09-22). Here each child takes its topmost present
-    /// ancestor's lifecycle, its Finishing fact and its workspace, so a group is
+    /// ancestor's lifecycle, its Background fact and its workspace, so a group is
     /// always drawn in one section, under one scope, as one block.
     ///
     /// A child whose parent is not in the list at all keeps its own placement:
@@ -163,12 +163,16 @@ public enum AgentInboxRowBuilder {
         return rows.map { row in
             guard row.parentId != nil, let root = topmostAncestor(of: row) else { return row }
             let workspaceName = root.workspaceName ?? row.workspaceName
+            let workspaceId = root.workspaceId ?? row.workspaceId
+            let closingSince = row.closingSince ?? root.closingSince
             guard row.lifecycle != root.lifecycle
-                    || row.closingSince != root.closingSince
-                    || row.workspaceName != workspaceName else { return row }
+                    || row.closingSince != closingSince
+                    || row.workspaceName != workspaceName
+                    || row.workspaceId != workspaceId else { return row }
             return row.followingParent(
-                lifecycle: root.lifecycle, closingSince: root.closingSince,
-                workspaceName: workspaceName)
+                lifecycle: root.lifecycle, closingSince: closingSince,
+                workspaceName: workspaceName,
+                workspaceId: workspaceId)
         }
     }
 
@@ -247,6 +251,7 @@ public enum AgentInboxRowBuilder {
             // P3.8: the scope dropdown filters by project OR workspace, and the
             // filter is pure, so the row has to carry the name. Nothing draws it.
             workspaceName: context?.workspaceName,
+            workspaceId: context?.workspaceId,
             state: state,
             // P3.3/P6.4 own read-state. It is local desktop state stored beside
             // the agent record; the compatibility argument cannot erase a newer
@@ -294,7 +299,8 @@ public enum AgentInboxRowBuilder {
             terminalIsUnread: record.map {
                 ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
             } ?? false,
-            closingSince: closingSince
+            closingSince: closingSince,
+            hasLiveRunner: observedFacts.hasLiveRunner
         )
     }
 

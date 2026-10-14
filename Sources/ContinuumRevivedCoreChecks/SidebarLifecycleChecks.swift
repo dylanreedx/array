@@ -45,23 +45,23 @@ func runSidebarLifecycleChecks() {
     }
 
     // 2 · The rung. Idle + close intent → History, dated by the intent. Busy +
-    // close intent → still active, and Finishing.
+    // close intent → still active, and Background.
     let idleFacts = AgentLifecycleFacts()
     let busyFacts = AgentLifecycleFacts(hasLiveRunner: true)
     expect(closing.lifecycle(facts: idleFacts, now: now) == .archived(at: closing.closeRequestedAt!),
            "an idle agent whose tile was closed is History — got \(closing.lifecycle(facts: idleFacts, now: now))")
     expect(closing.closingSince(facts: idleFacts, now: now) == nil,
-           "an idle closed agent is not 'Finishing' — it has finished")
+           "an idle closed agent is not Background — it has finished")
     expect(closing.lifecycle(facts: busyFacts, now: now) == .active,
            "a WORKING agent whose tile was closed stays live until its turn ends")
     expect(closing.closingSince(facts: busyFacts, now: now) == closing.closeRequestedAt,
-           "…and reads Finishing, counted from the close")
+           "…and reads Background, counted from the close")
     let pendingFacts = AgentLifecycleFacts(attentionIsYours: true)
     expect(closing.lifecycle(facts: pendingFacts, now: now) == .active,
            "a closed agent holding a question for you is never buried in History")
     let childBlocked = AgentLifecycleFacts(descendantBlockers: .sessionRunning)
     expect(closing.closingSince(facts: childBlocked, now: now) != nil,
-           "a closed parent whose subagent is still working is Finishing, not History")
+           "a closed parent whose subagent is still working is Background, not History")
 
     // 3 · R3: a binding nothing can find is a closed window — but only for a
     // record that HAS a tile, and the date is when it last did anything.
@@ -70,12 +70,12 @@ func runSidebarLifecycleChecks() {
     expect(lost.lifecycle(facts: unreachable, now: now) == .archived(at: lost.lastActivityAt),
            "a record naming a tile no document holds derives closed — got \(lost.lifecycle(facts: unreachable, now: now))")
     expect(lost.lifecycle(facts: AgentLifecycleFacts(hasLiveRunner: true, tileUnreachable: true), now: now) == .active,
-           "…unless it is working, when it is Finishing")
+           "…unless it is working, when it is Background")
     let headless = record("headless", tile: nil)
     expect(headless.lifecycle(facts: unreachable, now: now) == .active,
            "a headless agent has no tile to lose — never derived closed")
 
-    // 4 · R2: children follow their topmost present ancestor — section, Finishing
+    // 4 · R2: children follow their topmost present ancestor — section, Background
     // and workspace — and a child with no parent in the list keeps its own.
     let parentId = UUID(), childId = UUID(), grandchildId = UUID(), orphanId = UUID()
     func row(_ id: UUID, parent: UUID?, lifecycle: InboxLifecycle,
@@ -98,18 +98,36 @@ func runSidebarLifecycleChecks() {
            "a grandchild follows the ROOT, not just its parent")
     expect(byId[orphanId]?.lifecycle == .active,
            "a child whose parent is absent keeps its own lifecycle — nothing to follow, nothing lost")
-    let finishingPlaced = AgentInboxRowBuilder.placingChildrenWithParents([
+    let backgroundPlaced = AgentInboxRowBuilder.placingChildrenWithParents([
         row(parentId, parent: nil, lifecycle: .active, closingSince: closedAt, workspace: "Alpha"),
         row(childId, parent: parentId, lifecycle: .active, workspace: "Alpha"),
     ])
-    expect(finishingPlaced.last?.closingSince == closedAt && finishingPlaced.last?.variant == .slim,
-           "a Finishing parent's child draws slim with it")
+    expect(backgroundPlaced.last?.closingSince == closedAt && backgroundPlaced.last?.variant == .slim,
+           "a Background parent's child draws slim with it")
     expect(row(parentId, parent: nil, lifecycle: .active, closingSince: closedAt, workspace: nil)
-            .presentationLabel == AgentStatusVocabulary.finishing,
-           "a Finishing row says Finishing")
+            .presentationLabel == AgentStatusVocabulary.background,
+           "a Background row says Background")
 
-    print("SidebarLifecycle: closeRequestedAt round-trips and decodes absent; idle close → History, busy close → Finishing; "
-          + "an unreachable binding derives closed (never a headless one); children follow their root's section, Finishing and workspace")
+    let childClosedAt = now.addingTimeInterval(-5)
+    let childKeepsClose = AgentInboxRowBuilder.placingChildrenWithParents([
+        row(parentId, parent: nil, lifecycle: .active, workspace: "Alpha"),
+        row(childId, parent: parentId, lifecycle: .active,
+            closingSince: childClosedAt, workspace: "Alpha"),
+    ])
+    expect(childKeepsClose.last?.closingSince == childClosedAt
+           && childKeepsClose.last?.variant == .slim,
+           "a child's own Background close stamp survives an open parent")
+    let childCloseWins = AgentInboxRowBuilder.placingChildrenWithParents([
+        row(parentId, parent: nil, lifecycle: .active,
+            closingSince: closedAt, workspace: "Alpha"),
+        row(childId, parent: parentId, lifecycle: .active,
+            closingSince: childClosedAt, workspace: "Alpha"),
+    ])
+    expect(childCloseWins.last?.closingSince == childClosedAt,
+           "a child's own Background timestamp survives a parent's close stamp")
+
+    print("SidebarLifecycle: closeRequestedAt round-trips and decodes absent; idle close → History, busy close → Background; "
+          + "an unreachable binding derives closed (never a headless one); children follow their root's section and workspace, preserving their own Background close stamps")
 }
 
 /// R4: one unreadable project root must not fail every project's listing.

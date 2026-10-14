@@ -425,8 +425,12 @@ public struct PiEventTranslator {
         case "error", "failed", "failure":
             pendingRunOutcome = .failed
             // pi carries the provider's failure on the assistant message.
-            pendingRunErrorMessage = AgentFailureText.providerMessage(message["errorMessage"] as? String)
-                ?? rawReason
+            let errorMessage = message["errorMessage"] as? String
+            pendingRunErrorMessage = AgentContextFullRecovery.isContextFull(
+                provider: "pi",
+                candidates: [errorMessage, rawReason])
+                ? AgentContextFullRecovery.canonicalErrorMessage
+                : (AgentFailureText.providerMessage(errorMessage) ?? rawReason)
         case "aborted", "interrupted":
             pendingRunOutcome = .interrupted
             pendingRunErrorMessage = nil

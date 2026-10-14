@@ -32,9 +32,13 @@ func runAgentPresenceChecks() async throws {
     if wants("refusals") { summary.append(try await AgentPresenceChecks.checkRefusalsSayWhyEveryTime(originalPath: originalPath)) }
     if wants("failures") { summary.append(try await AgentPresenceChecks.checkFailuresSayWhatHappened(originalPath: originalPath)) }
     if wants("silence") { summary.append(try await AgentPresenceChecks.checkSilenceIsModelled(originalPath: originalPath)) }
-    if wants("tools") { summary.append(try await AgentPresenceChecks.checkLongToolsStayHonest(originalPath: originalPath)) }
+    if wants("tools") {
+        summary.append(try AgentPresenceChecks.checkToolClockScopeIsTranscriptLocal())
+        summary.append(try await AgentPresenceChecks.checkLongToolsStayHonest(originalPath: originalPath))
+    }
     if wants("land") { summary.append(try await AgentPresenceChecks.checkOwnActionsVisiblyLand(originalPath: originalPath)) }
     if wants("n1") { summary.append(try await AgentPresenceChecks.checkUnsolicitedTurnAfterStopSettles()) }
+    if wants("background") { summary.append(try await AgentPresenceChecks.checkMirroredBackgroundChildLifetime()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -585,7 +589,197 @@ enum AgentPresenceChecks {
         return "an unsolicited turn after a Stop that ended without a result settled as process-lost instead of Working forever"
     }
 
+
+    /// A parent's result is a turn boundary, not the end of a persistent
+    /// Claude session's background child. Exercise the real bound-runner path.
+    static func checkMirroredBackgroundChildLifetime() async throws -> String {
+        final class BackgroundRunner: AgentSteeringRunning, AgentIdleExitReporting, @unchecked Sendable {
+            private let lock = NSLock()
+            private let gate = DispatchSemaphore(value: 0)
+            private var background = true
+            private var alive = true
+            private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
+            var acceptsSteerNow: Bool { false }
+            var hasBackgroundWork: Bool { lock.withLock { background } }
+            var keepsSessionAliveBetweenTurns: Bool { true }
+            var canAcceptAnotherTurn: Bool { lock.withLock { alive } }
+            var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+            func steer(_ prompt: AgentPrompt, id: UUID) throws { throw AgentSteerNotAccepted("check") }
+            func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void) {}
+            func interrupt() throws { gate.signal() }
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                onEvent(.turnStarted(threadId: "provider", turnId: "background-parent"))
+                gate.wait()
+                onEvent(.turnCompleted(threadId: "provider", turnId: "background-parent", outcome: .completed, errorMessage: nil))
+            }
+            func finishParent() { gate.signal() }
+            func finishBackground() { lock.withLock { background = false } }
+            func markSessionDead() { lock.withLock { alive = false } }
+            func stop() { lock.withLock { alive = false }; gate.signal() }
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+            func observeIdleExit(_ handler: @escaping @Sendable (Int32, String?, Bool) -> Void) {
+                lock.withLock { idleExitHandler = handler }
+            }
+            func exitWhileIdle() {
+                let handler = lock.withLock { () -> (@Sendable (Int32, String?, Bool) -> Void)? in
+                    alive = false
+                    return idleExitHandler
+                }
+                handler?(0, nil, true)
+            }
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-background-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func child(_ supervisor: AgentSupervisor, _ parent: AgentID, _ key: String) throws -> AgentID {
+            guard let id = supervisor.handleSpawnRequest(SpawnRequest(
+                role: "general-purpose", prompt: "background witness", isolated: false,
+                sourceItemID: key, observedOnly: true), from: parent) else {
+                throw Failure(description: "presence: background child was not adopted")
+            }
+            supervisor.qaDeliver(.turnStarted(threadId: "child", turnId: key), to: id)
+            return id
+        }
+        for mode in ["child-result", "idle-exit", "idle-reap", "no-background", "settings-change", "clear", "dead-reuse", "stop-all"] {
+            let runner = BackgroundRunner()
+            if mode == "no-background" { runner.finishBackground() }
+            let supervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: root.appendingPathComponent(mode)),
+                makeRunner: { _ in runner }, idleRunnerTimeout: mode == "idle-reap" ? 0.08 : 60)
+            defer { supervisor.stopAll() }
+            let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+                harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            try expect(supervisor.send("parent", to: parent), "\(mode): parent refused")
+            try await eventually("\(mode): parent did not start") { supervisor.turnSnapshot(for: parent)?.state == .working }
+            let id = try child(supervisor, parent, "child-\(mode)")
+            runner.finishParent()
+            try await eventually("\(mode): parent did not reach idle") { !supervisor.isRunning(parent) }
+            if mode == "no-background" {
+                try expect(supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted,
+                    "parent without background work must close an unfinished mirrored child")
+                continue
+            }
+            try expect(supervisor.turnSnapshot(for: id)?.state == .working
+                       && supervisor.records[id]?.latestTerminalEvent == nil,
+                "\(mode): a persistent parent's result interrupted its still-running background child")
+            switch mode {
+            case "child-result":
+                supervisor.qaDeliver(.turnCompleted(threadId: "child", turnId: "child-\(mode)",
+                    outcome: .completed, errorMessage: nil), to: id)
+                try expect(supervisor.records[id]?.latestTerminalEvent?.outcome == .succeeded,
+                    "the background child's real completion must remain succeeded")
+            case "idle-exit":
+                runner.exitWhileIdle()
+                try await eventually("matching idle session exit did not interrupt the mirrored child") {
+                    supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted
+                }
+                let newer = try child(supervisor, parent, "child-after-exit")
+                runner.exitWhileIdle()
+                // DispatchQueue.main delivery must have had a chance to arrive.
+                try await Task.sleep(for: .milliseconds(80))
+                try expect(supervisor.turnSnapshot(for: newer)?.state == .working,
+                    "a stale exited session callback interrupted a newer mirrored child")
+            case "settings-change":
+                try expect(!supervisor.setProviderSettings(agentID: parent, thinking: "low")
+                           && runner.canAcceptAnotherTurn
+                           && supervisor.turnSnapshot(for: id)?.state == .working,
+                    "unchanged provider settings must preserve the owning session and background child")
+                try expect(supervisor.setProviderSettings(agentID: parent, thinking: "medium"),
+                    "the actual provider effort change was refused")
+                try expect(!runner.canAcceptAnotherTurn
+                           && supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted,
+                    "provider settings killed the persistent session but left its background child working")
+                let newer = try child(supervisor, parent, "child-after-settings")
+                try expect(supervisor.setProviderSettings(agentID: parent, thinking: "high")
+                           && supervisor.turnSnapshot(for: newer)?.state == .working,
+                    "a settings change with no pooled session must not interrupt a newer child")
+            case "clear":
+                let invocation = AgentCommandInvocation(descriptorID: "array:clear", name: "clear", surface: .array)
+                try expect(await supervisor.accept(.providerCommand(invocation), for: parent) == .accepted,
+                    "the actual /clear command was refused")
+                try expect(!runner.canAcceptAnotherTurn
+                           && supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted
+                           && supervisor.records[id]?.parentAgentID == nil,
+                    "/clear killed and detached the persistent session's child without interrupting it")
+                let newer = try child(supervisor, parent, "child-after-clear")
+                try expect(await supervisor.accept(.providerCommand(invocation), for: parent) == .accepted
+                           && supervisor.turnSnapshot(for: newer)?.state == .working,
+                    "/clear with no pooled session must not interrupt a newer child")
+            case "dead-reuse":
+                runner.markSessionDead()
+                try expect(supervisor.send("replacement turn", to: parent),
+                    "replacement turn after a dead idle session was refused")
+                try expect(supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted,
+                    "discarding an unusable pooled session left its background child working")
+            case "stop-all":
+                supervisor.stopAll()
+                try expect(!runner.canAcceptAnotherTurn
+                           && supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted,
+                    "stopAll killed the pooled session but left its background child working")
+            default:
+                try await Task.sleep(for: .milliseconds(220))
+                try expect(runner.canAcceptAnotherTurn && supervisor.turnSnapshot(for: id)?.state == .working,
+                    "idle reap must defer while the runner reports background work")
+                runner.finishBackground()
+                try await eventually("actual idle reap did not close the unfinished mirrored child") {
+                    !runner.canAcceptAnotherTurn && supervisor.records[id]?.latestTerminalEvent?.outcome == .interrupted
+                }
+            }
+        }
+        return "persistent Claude children survive a parent result, settle on their own result, and interrupt only on an owning session exit/reap or a result without background work"
+    }
+
     // MARK: - P1-5 — the status line stays honest through long and failed tools
+
+    static func checkToolClockScopeIsTranscriptLocal() throws -> String {
+        guard let blockID = AgentNodeID(rawValue: "reused-node-after-resume") else {
+            throw Failure(description: "tool clock witness needs a valid reused node ID")
+        }
+        let firstTranscript = AgentToolClockScope()
+        let forkedTranscript = AgentToolClockScope()
+        let firstStart = Date(timeIntervalSince1970: 1_000)
+        let forkedStart = Date(timeIntervalSince1970: 2_000)
+        let realClock = ToolRowLiveClock.now
+        ToolRowLiveClock.now = { firstStart }
+        let firstRow = ToolCallView(frame: .zero)
+        let forkedRow = ToolCallView(frame: .zero)
+        defer {
+            ToolRowLiveClock.shared.remove(firstRow)
+            ToolRowLiveClock.shared.remove(forkedRow)
+            ToolRowLiveClock.now = realClock
+        }
+        var firstContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        firstContext.toolClockScope = firstTranscript
+        var forkedContext = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        forkedContext.toolClockScope = forkedTranscript
+        let runningPayload = AgentToolCallPayload(name: "Bash", summary: "Running", status: .inProgress)
+
+        firstRow.apply(blockID: blockID, payload: runningPayload, context: firstContext)
+        try expect(firstRow.tickLiveClock(at: firstStart.addingTimeInterval(12))
+                   && firstRow.statusLabel.stringValue.contains("12s"),
+                   "a rendered tool clock advances from the first running observation")
+        ToolRowLiveClock.now = { forkedStart }
+        forkedRow.apply(blockID: blockID, payload: runningPayload, context: forkedContext)
+        try expect(forkedRow.tickLiveClock(at: forkedStart.addingTimeInterval(12))
+                   && forkedRow.statusLabel.stringValue.contains("12s"),
+                   "the same node ID in another transcript renders its own elapsed time")
+
+        ToolRowLiveClock.now = { firstStart.addingTimeInterval(12) }
+        try expect(firstRow.tickLiveClock(at: ToolRowLiveClock.now()),
+                   "the first running row remains registered with the shared ticker")
+        try expect(firstRow.statusLabel.stringValue.contains("12s"),
+                   "re-rendering time advances from the first transcript's start")
+        let completedPayload = AgentToolCallPayload(name: "Bash", summary: "Done", status: .completed)
+        firstRow.apply(blockID: blockID, payload: completedPayload, context: firstContext)
+        try expect(!firstRow.tickLiveClock(at: firstStart.addingTimeInterval(24)),
+                   "settling the first transcript stops its rendered clock")
+        try expect(forkedRow.tickLiveClock(at: forkedStart.addingTimeInterval(12)),
+                   "settling one transcript leaves the other row registered and running")
+        try expect(forkedRow.statusLabel.stringValue.contains("12s"),
+                   "the forked row still reads elapsed time after its sibling settles")
+        return "two rendered rows with one reused node ID kept independent clocks; settling one left the other row and its elapsed time live"
+    }
 
     static func toolRows(in view: NSView) -> [ToolCallView] {
         var found: [ToolCallView] = []

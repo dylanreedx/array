@@ -774,6 +774,26 @@ public actor AgentComposerDraftStore {
         return message
     }
 
+    /// One durable transaction: compaction precedes the exact failed prompt,
+    /// before later follow-ups. An app exit can never replay the prompt alone.
+    public func enqueueContextRecovery(
+        text: String, imageAttachments: [AgentComposerDraftImageAttachment],
+        fileReferences: [AgentComposerDraftFileReference], for agentID: AgentID
+    ) {
+        let compaction = AgentComposerQueuedCompaction(operationID: UUID(), focus: nil, queuedAt: clock.now())
+        let prompt = AgentComposerQueuedMessage(text: text, imageAttachments: imageAttachments,
+            fileReferences: fileReferences, queuedAt: clock.now())
+        var current = loadQueue(for: agentID)
+        let boundary: AgentComposerQueuedWorkItem
+        if let index = current.firstIndex(where: { if case .compaction = $0 { return true }; return false }) {
+            // Preserve a native compaction already queued at the threshold,
+            // including any user focus; retry must follow that boundary once.
+            boundary = current.remove(at: index)
+        } else { boundary = .compaction(compaction) }
+        current.insert(contentsOf: [boundary, .prompt(prompt)], at: 0)
+        persistQueue(current, for: agentID)
+    }
+
     /// Read-only, in submission order. Never mutates the queue.
     public func queuedMessages(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
         loadQueue(for: agentID).compactMap {

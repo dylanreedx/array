@@ -213,10 +213,10 @@ final class ToolCallView: NSView {
         // S3: a running row carries its own live clock ("◐ 1m 12s"), on one
         // shared 1 Hz tick for every running row, so a long bash visibly lives.
         if payload.status.agentToolIsTerminal {
-            Self.runningSince[blockID] = nil
+            context.toolClockScope.clear(blockID: blockID)
             ToolRowLiveClock.shared.remove(self)
         } else {
-            if Self.runningSince[blockID] == nil { Self.runningSince[blockID] = ToolRowLiveClock.now() }
+            context.toolClockScope.startIfNeeded(blockID: blockID, at: ToolRowLiveClock.now())
             ToolRowLiveClock.shared.add(self)
             tickLiveClock(at: ToolRowLiveClock.now())
         }
@@ -514,10 +514,6 @@ final class ToolCallView: NSView {
         return "\(duration) \(presentation.glyph)"
     }
 
-    /// When each running row was first seen running, by block — rows are
-    /// recycled, the clock is the block's. Entries leave when the row settles.
-    static var runningSince: [AgentNodeID: Date] = [:]
-
     /// "◐ 12s" for a running row; the plain "◐ In progress" for its first second.
     static func runningStatusText(status: AgentItemStatus, elapsed: TimeInterval) -> String {
         let presentation = status.agentToolStatusPresentation
@@ -532,7 +528,7 @@ final class ToolCallView: NSView {
     @discardableResult
     func tickLiveClock(at now: Date) -> Bool {
         guard let blockID, !status.agentToolIsTerminal,
-              let since = Self.runningSince[blockID] else { return false }
+              let since = context.toolClockScope.startDate(for: blockID) else { return false }
         let text = Self.runningStatusText(status: status, elapsed: now.timeIntervalSince(since))
         if statusLabel.stringValue != text {
             statusLabel.stringValue = text

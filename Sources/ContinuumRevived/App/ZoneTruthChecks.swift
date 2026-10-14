@@ -505,6 +505,8 @@ enum ZoneTruthChecks {
         let strandedIds = (harmonyShaped + selectusShaped).map(\.0)
         let owner = Dictionary(uniqueKeysWithValues:
             harmonyShaped.map { ($0.0, Fixture.projectA1) } + selectusShaped.map { ($0.0, Fixture.projectA2) })
+        let originalCanvasA1 = try ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!).loadCanvas()
+        let originalCanvasA2 = try ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA2]!).loadCanvas()
 
         try fixture.mount()
         var m = try fixture.requireMounted("stranded")
@@ -515,6 +517,15 @@ enum ZoneTruthChecks {
         try expect(offer.contains("4 copies of tiles in \u{201C}Cedar\u{201D} are left alone"),
                    "classify: copies of another project's tiles, and an agent tile whose session is another "
                    + "project's, must be left alone and said so; the notification reads \(offer)")
+        var duplicateOffers = 0
+        let deliverOffer = m.runtime.onStrandedTilesFound
+        m.runtime.onStrandedTilesFound = { recoverable, leftAlone in
+            duplicateOffers += 1
+            deliverOffer?(recoverable, leftAlone)
+        }
+        m.runtime.classifyStrandedTiles()
+        try expect(duplicateOffers == 0 && m.delegate.qaWorkspaceManagementMessage == offer,
+                   "classify: mounting the same stranded content again must not replace or repeat its notification")
         for id in strandedIds + [otherWorkspaceTile] {
             try expect(m.canvas.tileRecord(for: id) == nil, "classify: tile \(id) must not be placed before the user accepts")
         }
@@ -585,6 +596,39 @@ enum ZoneTruthChecks {
                        && m.runtime.document.zones.allSatisfy { $0.zoneId != disk(Fixture.projectA1)[id]?.zoneId },
                        "recover: copy \(id) must stay untouched on disk")
         }
+
+        // A genuinely resolved interval clears the prior content fingerprint.
+        // Reintroducing the same durable fixture within this SAME runtime must
+        // raise a fresh offer; a lifetime Set of every fingerprint would suppress
+        // this recurrence forever.
+        let projectA1Store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+        let projectA2Store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
+        // Keep the successfully recovered disk state so the recurrence fixture
+        // can be restored before the remount durability assertions below.
+        let recoveredCanvasA1 = try projectA1Store.loadCanvas()
+        let recoveredCanvasA2 = try projectA2Store.loadCanvas()
+        let leftAloneSet = Set(leftAloneIds)
+        var canvasWithoutCopies = try projectA1Store.loadCanvas()
+        canvasWithoutCopies.tiles.removeAll { leftAloneSet.contains($0.id) }
+        try projectA1Store.saveCanvas(canvasWithoutCopies)
+        m.runtime.classifyStrandedTiles()
+        try expect(m.runtime.strandedTiles.isEmpty && m.runtime.strandedLeftAlone.isEmpty,
+                   "resolve: removing the duplicate records should leave no stranded content")
+        let offersBeforeRecurrence = duplicateOffers
+        try projectA1Store.saveCanvas(originalCanvasA1)
+        try projectA2Store.saveCanvas(originalCanvasA2)
+        m.runtime.classifyStrandedTiles()
+        try expect(duplicateOffers == offersBeforeRecurrence + 1,
+                   "recur: the same stranded-content fingerprint must be offered again after a resolved interval")
+        try expect((m.delegate.qaWorkspaceManagementMessage ?? "").contains("7 tiles are hidden"),
+                   "recur: the repeated incident must restore its actionable recovery notice")
+
+        // The recurrence probe above deliberately rewrites the durable fixtures
+        // to their pre-recovery bytes. Restore the recovered snapshots so the
+        // following remount checks the actual recovery output, including the
+        // WORLD frame of tile 67E202, rather than the adversarial recurrence data.
+        try projectA1Store.saveCanvas(recoveredCanvasA1)
+        try projectA2Store.saveCanvas(recoveredCanvasA2)
 
         try fixture.remount(crash: false)
         m = try fixture.requireMounted("stranded remount")

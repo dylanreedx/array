@@ -192,6 +192,10 @@ final class WorkspaceRuntime {
         document.bringZoneToFront(placement.zoneId)
         document.lastActiveZoneId = placement.zoneId
         try persistWorkspaceDocument()
+        // A newly committed project zone must support creation immediately.
+        // The durable active id alone does not acquire its controller or spawner.
+        _ = setActiveZone(placement.zoneId, reason: .explicit)
+        ensureZoneLayer(forZone: placement.zoneId)
     }
 
     /// `deletingTileIds` are tiles the user asked to delete along with the zone.
@@ -1227,11 +1231,110 @@ final class WorkspaceRuntime {
     /// supervisor). Nil in production only before the supervisor exists.
     var agentProjectForTile: ((UUID) -> UUID?)?
 
+    private struct StrandedFileStamp: Equatable {
+        let byteCount: UInt64?
+        let modifiedAt: Date?
+        let fileNumber: UInt64?
+
+        init(url: URL) {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            byteCount = (attributes?[.size] as? NSNumber).map { $0.uint64Value }
+            modifiedAt = attributes?[.modificationDate] as? Date
+            fileNumber = (attributes?[.systemFileNumber] as? NSNumber).map { $0.uint64Value }
+        }
+    }
+
+    private struct CachedStrandedCanvas {
+        let stamp: StrandedFileStamp
+        /// `nil` means the file was unreadable; an empty array means it was absent.
+        let tiles: [Tile]?
+    }
+
+    private struct CachedStrandedWorkspace {
+        let stamp: StrandedFileStamp
+        let document: WorkspaceDocument?
+    }
+
+    private struct StrandedNoticeFingerprint: Hashable {
+        struct Recoverable: Hashable {
+            let projectId: UUID
+            let tileIds: [UUID]
+        }
+        struct LeftAlone: Hashable {
+            let projectId: UUID
+            let count: Int
+            let elsewhere: [UUID]
+        }
+        let recoverable: [Recoverable]
+        let leftAlone: [LeftAlone]
+
+        init(_ found: (recoverable: [UUID: [Tile]], leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)])) {
+            recoverable = found.recoverable.map { projectId, tiles in
+                Recoverable(projectId: projectId, tileIds: tiles.map(\.id).sorted { $0.uuidString < $1.uuidString })
+            }.sorted { $0.projectId.uuidString < $1.projectId.uuidString }
+            leftAlone = found.leftAlone.map { projectId, value in
+                LeftAlone(projectId: projectId, count: value.count,
+                          elsewhere: value.elsewhere.sorted { $0.uuidString < $1.uuidString })
+            }.sorted { $0.projectId.uuidString < $1.projectId.uuidString }
+        }
+
+        var isEmpty: Bool { recoverable.isEmpty && leftAlone.isEmpty }
+    }
+
+    /// Repeated mounts/switches see the same snapshots. File stamps keep the
+    /// first classification current without decoding every workspace and canvas
+    /// on the main thread again; writes by this runtime explicitly invalidate.
+    private var strandedCanvasSnapshots: [String: CachedStrandedCanvas] = [:]
+    private var strandedWorkspaceSnapshots: [UUID: CachedStrandedWorkspace] = [:]
+    private var reportedStrandedFingerprints: [UUID: StrandedNoticeFingerprint] = [:]
+
+    private func cachedStrandedTiles(at root: URL) -> [Tile]? {
+        let store = ProjectStore(projectRoot: root)
+        let url = store.layout.canvasFile
+        let path = url.standardizedFileURL.path
+        let stamp = StrandedFileStamp(url: url)
+        if let cached = strandedCanvasSnapshots[path], cached.stamp == stamp { return cached.tiles }
+        do {
+            let tiles = try store.tryLoadCanvas()?.tiles ?? []
+            strandedCanvasSnapshots[path] = CachedStrandedCanvas(stamp: stamp, tiles: tiles)
+            return tiles
+        } catch {
+            strandedCanvasSnapshots[path] = CachedStrandedCanvas(stamp: stamp, tiles: nil)
+            return nil
+        }
+    }
+
+    private func invalidateStrandedCanvasSnapshot(at root: URL) {
+        let path = ProjectStore(projectRoot: root).layout.canvasFile.standardizedFileURL.path
+        strandedCanvasSnapshots.removeValue(forKey: path)
+    }
+
+    private func cachedStrandedWorkspace(_ id: UUID) -> WorkspaceDocument? {
+        // QA loaders are intentionally live seams and may synthesize different
+        // documents without changing a backing file, so never cache their output.
+        if _workspaceDocumentLoader != nil { return try? loadWorkspaceDocument(workspaceId: id) }
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let store = WorkspaceStore(workspaceId: id, applicationSupportDirectory: appSupport)
+        let url = store.layout.canvasFile
+        let stamp = StrandedFileStamp(url: url)
+        if let cached = strandedWorkspaceSnapshots[id], cached.stamp == stamp { return cached.document }
+        let document: WorkspaceDocument?
+        do { document = try store.tryLoad() } catch { document = nil }
+        strandedWorkspaceSnapshots[id] = CachedStrandedWorkspace(stamp: stamp, document: document)
+        return document
+    }
+
     func classifyStrandedTiles() {
         let found = findStrandedTiles()
         strandedTiles = found.recoverable
         strandedLeftAlone = found.leftAlone
-        if !found.recoverable.isEmpty || !found.leftAlone.isEmpty {
+        let fingerprint = StrandedNoticeFingerprint(found)
+        if fingerprint.isEmpty {
+            // A later recurrence is a new incident, even if its tile ids happen
+            // to match a notice that was already resolved in this runtime.
+            reportedStrandedFingerprints.removeValue(forKey: workspaceId)
+        } else if reportedStrandedFingerprints[workspaceId] != fingerprint {
+            reportedStrandedFingerprints[workspaceId] = fingerprint
             onStrandedTilesFound?(found.recoverable, found.leftAlone)
         }
     }
@@ -1240,7 +1343,7 @@ final class WorkspaceRuntime {
         guard let appRegistry = try? registryStore.loadOrEmpty() else { return ([:], [:]) }
         var registeredZoneIds = Set(document.zones.map(\.zoneId))
         for entry in appRegistry.workspaces where entry.id != workspaceId {
-            if let other = try? loadWorkspaceDocument(workspaceId: entry.id) {
+            if let other = cachedStrandedWorkspace(entry.id) {
                 registeredZoneIds.formUnion(other.zones.map(\.zoneId))
             }
         }
@@ -1248,11 +1351,13 @@ final class WorkspaceRuntime {
         // project's file is a copy unless the evidence says it is ours alone.
         var roots: [UUID: URL] = [:]
         var idsByProject: [UUID: Set<UUID>] = [:]
+        var tilesByProject: [UUID: [Tile]] = [:]
         for entry in appRegistry.projects where !entry.missing {
             let root = URL(fileURLWithPath: entry.rootPath, isDirectory: true)
             roots[entry.id] = root
-            if let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas() {
-                idsByProject[entry.id] = Set(canvas.tiles.map(\.id))
+            if let tiles = cachedStrandedTiles(at: root) {
+                tilesByProject[entry.id] = tiles
+                idsByProject[entry.id] = Set(tiles.map(\.id))
             }
         }
         func evidence(_ tile: Tile, belongsTo projectId: UUID) -> Bool {
@@ -1273,10 +1378,8 @@ final class WorkspaceRuntime {
         var leftAlone: [UUID: (count: Int, elsewhere: Set<UUID>)] = [:]
         for projectId in Set(document.zones.compactMap(\.projectId)) where
             !document.zones.filter({ $0.projectId == projectId }).allSatisfy({ foreignZoneIds.contains($0.zoneId) }) {
-            guard let root = roots[projectId],
-                  let canvas = try? ProjectStore(projectRoot: root).tryLoadCanvas()
-            else { continue }
-            for tile in canvas.tiles {
+            guard let root = roots[projectId], let tiles = tilesByProject[projectId] else { continue }
+            for tile in tiles {
                 guard let zoneId = tile.zoneId, !registeredZoneIds.contains(zoneId) else { continue }
                 var elsewhere = Set(idsByProject.filter { $0.key != projectId && $0.value.contains(tile.id) }.keys)
                 if let agentProject = agentProjectForTile?(tile.id), agentProject != projectId {
@@ -1360,6 +1463,7 @@ final class WorkspaceRuntime {
             guard var canvas = try controller.projectStore.tryLoadCanvas() else { continue }
             canvas.tiles = canvas.tiles.map { moved[$0.id] ?? $0 }
             try controller.projectStore.saveCanvas(canvas)
+            invalidateStrandedCanvasSnapshot(at: controller.projectRoot)
 
             var placement = ZonePlacement(
                 zoneId: newZoneId,
@@ -1380,6 +1484,9 @@ final class WorkspaceRuntime {
         let after = findStrandedTiles()
         strandedTiles = after.recoverable
         strandedLeftAlone = after.leftAlone
+        if StrandedNoticeFingerprint(after).isEmpty {
+            reportedStrandedFingerprints.removeValue(forKey: workspaceId)
+        }
         return recovered
     }
 
@@ -1399,8 +1506,23 @@ final class WorkspaceRuntime {
     /// that rediscovers it does not repeat the message.
     private var reportedUnreadableProjectIds: Set<UUID> = []
 
+    private func wireCanvasFailureReporting(for controller: ZoneRuntimeController) {
+        controller.onCanvasUnavailable = { [weak self, weak controller] projectId, error in
+            guard let self else { return }
+            if let controller {
+                self.reportCanvasUnavailable(projectId: projectId, controller: controller, error: error)
+            } else {
+                self.reportZoneProjectUnavailableOnce(projectId: projectId, error: error)
+            }
+        }
+    }
+
     private func reportCanvasUnavailable(projectId: UUID, controller: ZoneRuntimeController, error: Error) {
         controller.markCanvasUnavailable(error)
+        reportZoneProjectUnavailableOnce(projectId: projectId, error: error)
+    }
+
+    private func reportZoneProjectUnavailableOnce(projectId: UUID, error: Error) {
         guard reportedUnreadableProjectIds.insert(projectId).inserted else { return }
         onZoneProjectUnavailable?(projectId, error)
     }
@@ -1487,6 +1609,7 @@ final class WorkspaceRuntime {
         // live too, but rebuilding their spawners on every arming change is work
         // for tiles nobody can see.
         for controller in mountedControllers {
+            wireCanvasFailureReporting(for: controller)
             let spawner = makeSpawner(for: controller, canvasView: canvasView)
             if controller === active {
                 controller.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
@@ -1986,6 +2109,7 @@ final class WorkspaceRuntime {
     private func saveWorkspaceDocument(_ document: WorkspaceDocument, workspaceId: UUID) throws {
         if let override = _workspaceDocumentSaver {
             try override(workspaceId, document)
+            strandedWorkspaceSnapshots.removeValue(forKey: workspaceId)
             return
         }
         // The mounted workspace's saver, so this write supersedes any pending
@@ -2004,6 +2128,7 @@ final class WorkspaceRuntime {
         try controller.flush(through: generation)
         qaLastAcknowledgedWorkspaceGeneration = controller.acknowledgedGeneration
         lifecycleObserver?(.saveGenerationAcknowledged(generation))
+        strandedWorkspaceSnapshots.removeValue(forKey: workspaceId)
     }
 
     // MARK: - Workspace Switch (T09, `.plans/70` S5)
@@ -2394,12 +2519,36 @@ final class WorkspaceRuntime {
         return protected
     }
 
+    /// Runtime callbacks can arrive while a warm workspace owns detached layers.
+    /// Resolve only the owning project: the mounted canvas belongs to another workspace.
+    func parkedTileRecord(for tileId: UUID, projectId: UUID) -> Tile? {
+        warmScenes.flatMap(\.layers).first(where: {
+            $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }
+        })?.tiles.first { $0.id == tileId }
+    }
+
+    func parkedTileView(for tileId: UUID, projectId: UUID) -> TileNSView? {
+        warmScenes.flatMap(\.layers).first(where: {
+            $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }
+        })?.tileViews[tileId]
+    }
+
+    @discardableResult
+    func replaceParkedTileView(for tileId: UUID, projectId: UUID,
+                               makeView: (Tile) -> TileNSView) -> Bool {
+        guard let layer = warmScenes.flatMap(\.layers).first(where: {
+            $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }
+        }), let tile = layer.tiles.first(where: { $0.id == tileId }) else { return false }
+        layer.tileViews[tileId]?.retireFromScene()
+        layer.tileViews[tileId] = makeView(tile)
+        return true
+    }
+
     /// Enforce the WKWebView cap across the UNION of live browser tiles in ALL live zones.
     func enforceBrowserRuntimeBudget() {
-        // Mounted only: a warm workspace's web views are kept alive on purpose,
-        // and evicting one would install its snapshot tile into a canvas that is
-        // not showing it.
-        let liveControllers = mountedControllers
+        // One process-wide cap includes parked workspaces. Their detached
+        // layers must be updated directly, never through the mounted canvas.
+        let liveControllers = registry.liveControllers
         let liveTileIds: [UUID] = liveControllers.flatMap { $0.browserRuntimes.map(\.tileId) }
         let protected = currentProtectedBrowserTileIds()
         let evictIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
@@ -2408,7 +2557,29 @@ final class WorkspaceRuntime {
                   let runtime = controller.browserRuntimes.first(where: { $0.tileId == tileId }),
                   let spawner = controller.tileSpawner else { continue }
             do {
-                try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: AppDelegate.browserBudgetSnapshotImage())
+                if let layer = warmScenes.flatMap(\.layers).first(where: {
+                    $0.placement.projectId == controller.project.id && $0.tiles.contains { $0.id == tileId }
+                }), let index = layer.tiles.firstIndex(where: { $0.id == tileId }) {
+                    var tile = layer.tiles[index]
+                    try spawner.writeBrowserTileSnapshotOrThrow(for: runtime, parkedTile: tile,
+                        parkedView: layer.tileViews[tileId] as? BrowserTileNSView)
+                    tile.runtimeRef = nil
+                    if !runtime.title.isEmpty { tile.title = runtime.title }
+                    var persisted = try controller.projectStore.loadCanvas()
+                    if let persistedIndex = persisted.tiles.firstIndex(where: { $0.id == tileId }) {
+                        persisted.tiles[persistedIndex].runtimeRef = nil
+                        persisted.tiles[persistedIndex].title = tile.title
+                        try controller.projectStore.saveCanvas(persisted)
+                    }
+                    layer.tileViews[tileId]?.retireFromScene()
+                    layer.tiles[index] = tile
+                    // Remount's runtime hydrator recognizes descriptors and
+                    // restores this browser from its persisted tab snapshot.
+                    layer.tileViews[tileId] = DescriptorTileNSView(tile: tile)
+                    runtime.terminate(policy: .force)
+                } else {
+                    try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: AppDelegate.browserBudgetSnapshotImage())
+                }
                 controller.browserRuntimes.removeAll { $0.id == runtime.id }
                 browserRuntimeBudget.unregister(tileId: tileId)
             } catch {

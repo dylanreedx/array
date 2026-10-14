@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedAgentUI
 
 /// Go-live Phase 4: the first-run window. Shown once when the app boots on a
 /// fresh profile (empty registry), and reopenable any time from
@@ -33,6 +34,7 @@ final class OnboardingPanel {
         let locate: () -> String?
     }
 
+    var onCreateZone: (() -> Void)?
     var onOpenTile: ((String) -> Void)?
     var onClose: (() -> Void)?
     var onRecheck: (() -> Void)?
@@ -43,6 +45,7 @@ final class OnboardingPanel {
     private var previousKeyWindow: NSWindow?
     private var statusLabels: [String: NSTextField] = [:]
     private var guidanceLabels: [String: NSTextField] = [:]
+    private var probeRows: [String: NSView] = [:]
     private var connectButtons: [String: NSButton] = [:]
 
     init(probes: [Probe]) {
@@ -288,11 +291,11 @@ final class OnboardingPanel {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
 
-        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 600))
+        let root = OnboardingContentView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 600))
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier("onboarding-panel-root")
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
+        root.applyTokens()
         panel.contentView = root
 
         let stack = NSStackView()
@@ -324,12 +327,12 @@ final class OnboardingPanel {
         ])
 
         let intro = NSTextField(wrappingLabelWithString:
-            "Array is a spatial workspace for coding agents: projects, agents, terminals, and browsers share one canvas, so parallel work stays visible instead of stacking up in hidden tabs.")
+            "A workspace is your desk. Zones are areas on it, each working in a project. Run Claude, Codex or Pi side by side, with your tools nearby.")
         intro.font = NSFont.systemFont(ofSize: 13)
         stack.addArrangedSubview(intro)
         intro.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
 
-        let envHeader = NSTextField(labelWithString: "Environment")
+        let envHeader = NSTextField(labelWithString: "Environment · only items needing attention")
         envHeader.font = NSFont.boldSystemFont(ofSize: 13)
         stack.addArrangedSubview(envHeader)
 
@@ -370,6 +373,7 @@ final class OnboardingPanel {
             guidanceLabels[probe.id] = guidance
             row.addArrangedSubview(guidance)
 
+            probeRows[probe.id] = row
             stack.addArrangedSubview(row)
         }
 
@@ -380,11 +384,14 @@ final class OnboardingPanel {
         recheck.bezelStyle = .rounded
         let skipStarter = NSButton(title: "Skip Starter Layout", target: self, action: #selector(skipStarterPressed(_:)))
         skipStarter.bezelStyle = .rounded
-        let done = NSButton(title: "Done", target: self, action: #selector(donePressed(_:)))
+        let start = NSButton(title: "Make your first zone…", target: self, action: #selector(createZonePressed(_:)))
+        start.bezelStyle = .rounded
+        let done = NSButton(title: "Explore the canvas", target: self, action: #selector(donePressed(_:)))
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
         footer.addArrangedSubview(recheck)
         footer.addArrangedSubview(skipStarter)
+        footer.addArrangedSubview(start)
         footer.addArrangedSubview(done)
         stack.addArrangedSubview(footer)
 
@@ -396,8 +403,13 @@ final class OnboardingPanel {
         // The Re-check moment is exactly when a provider login just happened
         // — re-probe the model catalogue too (throttled; inert in QA).
         AgentModelCatalog.shared.requestRefresh()
+        let locations = Dictionary(uniqueKeysWithValues: probes.compactMap { probe in probe.locate().map { (probe.id, $0) } })
+        let ids = Set(probes.map(\.id))
         for probe in probes {
-            let located = probe.locate()
+            let located = locations[probe.id]
+            let authID = "\(probe.id)-auth"
+            let needsSignIn = located != nil && ids.contains(authID) && locations[authID] == nil
+            probeRows[probe.id]?.isHidden = located != nil && !needsSignIn
             guard let status = statusLabels[probe.id], let guidance = guidanceLabels[probe.id] else { continue }
             if let located {
                 status.stringValue = "✓"
@@ -428,6 +440,11 @@ final class OnboardingPanel {
         onSkipStarter?()
     }
 
+    @objc private func createZonePressed(_ sender: Any?) {
+        close()
+        onCreateZone?()
+    }
+
     @objc private func donePressed(_ sender: Any?) {
         close()
     }
@@ -443,6 +460,7 @@ final class OnboardingPanel {
     func statusTextForQA(_ id: String) -> String? { statusLabels[id]?.stringValue }
     func guidanceTextForQA(_ id: String) -> String? { guidanceLabels[id]?.stringValue }
     func connectButtonForQA(_ id: String) -> NSButton? { connectButtons[id] }
+    func rowVisibleForQA(_ id: String) -> Bool { probeRows[id]?.isHiddenOrHasHiddenAncestor == false }
     func recheckForQA() { refreshStatuses() }
 
     enum SelfCheckError: Error, CustomStringConvertible {
@@ -493,11 +511,13 @@ final class OnboardingPanel {
             init(_ path: String?) { self.path = path }
         }
         let claudeLocation = MutableLocation("/qa/bin/claude")
+        let claudeAuthLocation = MutableLocation(nil)
         let codexLocation = MutableLocation(nil)
         let authLocation = MutableLocation(nil)
         let probes = [
             Probe(id: "claude", title: "Claude Code", detail: "agent", missingGuidance: "Install: install-claude",
                   connectProfileId: "claude", locate: { claudeLocation.path }),
+            Probe(id: "claude-auth", title: "Claude sign-in", detail: "auth", missingGuidance: "Run claude to sign in", connectProfileId: nil, locate: { claudeAuthLocation.path }),
             Probe(id: "codex", title: "Codex", detail: "agent", missingGuidance: "Install: install-codex",
                   connectProfileId: "codex", locate: { codexLocation.path }),
             Probe(id: "pi-auth", title: "Claude models (pi ▸ anthropic)", detail: "auth",
@@ -528,6 +548,10 @@ final class OnboardingPanel {
         }
         guard panel.connectButtonForQA("tmux") == nil else {
             throw SelfCheckError.message("tmux must not offer a connect tile")
+        }
+
+        guard panel.rowVisibleForQA("claude"), panel.connectButtonForQA("claude")?.isHiddenOrHasHiddenAncestor == false else {
+            throw SelfCheckError.message("installed but signed-out Claude must retain a visible enabled CLI sign-in route")
         }
 
         // Live re-check: codex "gets installed" and the provider "gets signed
@@ -565,6 +589,12 @@ final class OnboardingPanel {
         try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
         try? rep.representation(using: .png, properties: [:])?.write(to: artifactDir.appendingPathComponent("panel.png"))
 
+        claudeAuthLocation.path = "signed in"
+        panel.recheckForQA()
+        guard !panel.rowVisibleForQA("claude"), !panel.rowVisibleForQA("claude-auth") else {
+            throw SelfCheckError.message("fully satisfied binary and auth rows must disappear from problems-only setup")
+        }
+
         let windowNumber = panel.panelWindowNumberForQA
         panel.close()
         if let windowNumber, NSApp.windows.contains(where: { $0.windowNumber == windowNumber && $0.isVisible }) {
@@ -595,5 +625,20 @@ final class OnboardingPanel {
               !piDetail.contains("fallback"), !piDetail.contains("luxury") else {
             throw SelfCheckError.message("the pi row must describe strict independent ownership, got \(live[piIdx].detail)")
         }
+    }
+}
+
+/// Shared token-themed native welcome surface, also rendered by appearance QA.
+final class OnboardingContentView: NSView, TokenThemed {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        applyTokens()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }
+    func applyTokens() { layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self) }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 }

@@ -58,6 +58,7 @@ enum SidebarTruthChecks {
     static let lostAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A6")!)
     static let secondIdleAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A7")!)
     static let settledAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A8")!)
+    static let backgroundStopAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000A9")!)
     static let otherAgent = AgentID(rawValue: UUID(uuidString: "5D000000-0000-4000-8000-0000000000B1")!)
 
     static let idleTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E1")!
@@ -67,6 +68,7 @@ enum SidebarTruthChecks {
     /// bug, a second install or a crash before the save took away.
     static let lostTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E6")!
     static let secondIdleTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E7")!
+    static let backgroundStopTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000E9")!
     static let otherTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000F1")!
 
     static func run() async throws {
@@ -80,7 +82,8 @@ enum SidebarTruthChecks {
         try unreadableRootIsolation(world)
         try oneRowHeaderMakesAnAgent(world)
         print("sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
-              + "agent's closed tile drew slim as Finishing, kept running, and left for History "
+              + "agent's closed tile drew slim as Background, kept running, offered Bring back "
+              + "to canvas and Stop, restored through the live reveal path, and left for History "
               + "by itself when its turn ended; a closed parent took its subagents with it; a "
               + "record naming a tile no canvas holds was never drawn live; with another "
               + "project's agent listing unreadable, a close still reached the list; an agent-"
@@ -146,6 +149,7 @@ enum SidebarTruthChecks {
                 agentTile(busyTile, "busy", x: 400, zone: zoneA),
                 agentTile(parentTile, "parent", x: 760, zone: zoneA),
                 agentTile(secondIdleTile, "second idle", x: 1_120, zone: zoneA),
+                agentTile(backgroundStopTile, "background stop", x: 1_480, zone: zoneA),
             ],
             groups: [], lastActiveTileId: nil))
         try storeB.saveCanvas(CanvasState(
@@ -202,6 +206,7 @@ enum SidebarTruthChecks {
             record(childTwo, "child two", project: projectA, root: rootA, tile: nil, parent: parentAgent, age: 290),
             record(lostAgent, "lost agent", project: projectA, root: rootA, tile: lostTile, age: 200),
             record(secondIdleAgent, "second idle agent", project: projectA, root: rootA, tile: secondIdleTile, age: 150),
+            record(backgroundStopAgent, "background stop agent", project: projectA, root: rootA, tile: backgroundStopTile, age: 140),
             record(otherAgent, "other agent", project: projectB, root: rootB, tile: otherTile, age: 100),
         ] {
             try agentStore.upsert(value)
@@ -392,13 +397,86 @@ enum SidebarTruthChecks {
                    "W2: closing the tile must NOT stop the agent's turn (P2A.5)")
         try expect(world.supervisor.records[busyAgent]?.closeRequestedAt != nil,
                    "W2: closing a busy agent's tile must record the close at once — closeRequestedAt is nil")
-        let finishing = inbox.drawnRowForQA(id: busyAgent.rawValue)
-        try expect(block(world, busyAgent) == "live" && finishing?.variant == .slim,
-                   "W2: a closed tile whose agent is still working must draw SLIM (not a full card) while it finishes — block \(String(describing: block(world, busyAgent))), variant \(String(describing: finishing?.variant))")
-        try expect(finishing?.presentationLabel == AgentStatusVocabulary.finishing,
-                   "W2: …and say Finishing — got \(String(describing: finishing?.presentationLabel))")
-        try expect(inbox.elapsedLabelsForQA.contains { $0.hasPrefix("\(AgentStatusVocabulary.finishing) · ") },
-                   "W2: the drawn slim row must paint 'Finishing · <time>' — got \(inbox.elapsedLabelsForQA)")
+        let backgroundRow = inbox.drawnRowForQA(id: busyAgent.rawValue)
+        try expect(block(world, busyAgent) == "live" && backgroundRow?.variant == .slim,
+                   "W2: a closed tile whose agent is still working must draw SLIM (not a full card) while it runs in the background — block \(String(describing: block(world, busyAgent))), variant \(String(describing: backgroundRow?.variant))")
+        try expect(backgroundRow?.presentationLabel == AgentStatusVocabulary.background,
+                   "W2: the source row retains its Background label — got \(String(describing: backgroundRow?.presentationLabel))")
+        try expect(backgroundRow?.hasLiveRunner == true,
+                   "W2: the Background row carries the supervisor's live-runner fact even if its last status sample is stale")
+        try expect(inbox.elapsedLabelsForQA.contains { $0.hasPrefix("Background · ") },
+                   "W2: the drawn slim row must paint 'Background · <time>' — got \(inbox.elapsedLabelsForQA)")
+        try expect(inbox.hoverRowForQA(id: busyAgent.rawValue),
+                   "W2: the background row must expose its hover actions")
+        let backgroundActions = inbox.hoverActionsForQA(id: busyAgent.rawValue)
+        try expect(backgroundActions?.shown == true
+                   && backgroundActions?.titles == ["Bring back to canvas", "Stop"],
+                   "W2: the running background row offers Bring back to canvas and Stop — got \(String(describing: backgroundActions))")
+        for width in [CGFloat(220), 280, 320] {
+            world.window.setContentSize(NSSize(width: width, height: 1_000))
+            world.window.contentView?.layoutSubtreeIfNeeded()
+            inbox.layoutForQA()
+            guard let geometry = inbox.rowGeometryForQA(id: busyAgent.rawValue),
+                  let cell = geometry.elementFrames["cell"],
+                  let title = geometry.elementFrames["title"],
+                  let restore = geometry.elementFrames["bringBackAction"],
+                  let stop = geometry.elementFrames["stopAction"] else {
+                throw Failure(message: "W2: Background and both actions must materialize at \(width)pt")
+            }
+            // AppKit can include a fractional alignment outset in converted
+            // button bounds even though both controls have 20pt width constraints.
+            try expect(restore.width >= 20 && restore.width <= 22
+                       && stop.width >= 20 && stop.width <= 22
+                       && cell.contains(restore) && cell.contains(stop)
+                       && title.maxX <= stop.minX && stop.maxX <= restore.minX,
+                       "W2: at \(width)pt the title and two 20pt actions keep distinct hit lanes — title \(title), stop \(stop), restore \(restore), cell \(cell)")
+        }
+        world.window.setContentSize(NSSize(width: 300, height: 1_000))
+        world.window.contentView?.layoutSubtreeIfNeeded()
+        inbox.layoutForQA()
+        let originalLayoutCommit = world.canvas.onLayoutCommitted
+        var restoreLayoutCommitCount = 0
+        var restoreLayoutCommitAccepted = 0
+        var restoreLayoutCommitFailures = 0
+        world.canvas.onLayoutCommitted = { transaction in
+            restoreLayoutCommitCount += 1
+            let accepted = originalLayoutCommit?(transaction) ?? false
+            if accepted { restoreLayoutCommitAccepted += 1 }
+            else { restoreLayoutCommitFailures += 1 }
+            return accepted
+        }
+        try expect(inbox.hoverRowForQA(id: busyAgent.rawValue)
+                   && inbox.clickBackgroundBringBackForQA(id: busyAgent.rawValue),
+                   "W2: Bring back to canvas must use the live row action")
+        world.canvas.onLayoutCommitted = originalLayoutCommit
+        // Closing detached the agent from its view, so Bring back creates and
+        // binds a fresh tile id; the old canvas id is not the identity contract.
+        guard let restoredBusyTile = world.supervisor.records[busyAgent]?.tileId else {
+            throw Failure(message: "W2: Bring back must bind the running agent to a restored tile")
+        }
+        try expect(restoredBusyTile != busyTile
+                   && world.canvas.tileRecord(for: busyTile) == nil
+                   && world.canvas.tileRecord(for: restoredBusyTile)?.kind == .managedAgent
+                   && world.supervisor.agent(forTile: restoredBusyTile) == busyAgent
+                   && world.supervisor.records[busyAgent]?.closeRequestedAt == nil
+                   && world.supervisor.isRunning(busyAgent),
+                   "W2: restoring must re-create the canvas tile, clear closeRequestedAt, and keep the turn running")
+        let liveRestoredTile = world.canvas.tilesInWorldFrames(forProjectId: world.projectA)
+            .first { $0.id == restoredBusyTile }
+        let persistedRestoredTile = try ProjectStore(projectRoot: world.rootA)
+            .loadCanvas().tiles.first { $0.id == restoredBusyTile }
+        try expect(restoreLayoutCommitAccepted > 0 && restoreLayoutCommitFailures == 0
+                   && liveRestoredTile?.frame == persistedRestoredTile?.frame,
+                   "W2: Bring back must persist its auto-layout transaction after saving the new tile — attempts \(restoreLayoutCommitCount), accepted \(restoreLayoutCommitAccepted), rejected \(restoreLayoutCommitFailures), live \(String(describing: liveRestoredTile?.frame)), saved \(String(describing: persistedRestoredTile?.frame))")
+        world.canvas.onTileCloseRequested?(restoredBusyTile)
+        try expect(world.canvas.tileRecord(for: restoredBusyTile) == nil
+                   && world.supervisor.records[busyAgent]?.closeRequestedAt != nil
+                   && world.supervisor.isRunning(busyAgent),
+                   "W2: closing the restored tile starts Background again without stopping the turn")
+        inbox.layoutForQA()
+        try expect(inbox.hoverRowForQA(id: busyAgent.rawValue)
+                   && inbox.isRowActionWiredForQA(.stopAgent),
+                   "W2: Stop must remain wired on the re-backgrounded row")
 
         // The turn ends. NOTHING here refreshes the sidebar: the row must leave by
         // itself, pushed by the supervisor's own turn seam.
@@ -408,13 +486,48 @@ enum SidebarTruthChecks {
         _ = runner.emit(.turnCompleted(threadId: "truth", turnId: "t1", outcome: .completed, errorMessage: nil))
         runner.releaseRunAfterStop()
         let left = await waitUntil(timeout: 5, pollInterval: 0.05, {
-            !world.supervisor.isRunning(busyAgent) && block(world, busyAgent) != "live"
+            !world.supervisor.isRunning(busyAgent)
+                && world.supervisor.records[busyAgent]?.closeRequestedAt != nil
+                && block(world, busyAgent) != "live"
         })
         try expect(left,
-                   "W2: when the turn ended the Finishing row must leave the live list by itself — still drawn \(String(describing: block(world, busyAgent))), running \(world.supervisor.isRunning(busyAgent))")
+                   "W2: when the turn ended the Background row must leave the live list by itself — still drawn \(String(describing: block(world, busyAgent))), running \(world.supervisor.isRunning(busyAgent))")
         if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
         try expect(block(world, busyAgent) == "history",
                    "W2: …and be found in History — drawn \(String(describing: block(world, busyAgent)))")
+        guard let historyActions = inbox.hoverActionsForQA(id: busyAgent.rawValue) else {
+            throw Failure(message: "W2: the History row must materialize for its Stop-action check")
+        }
+        try expect(!historyActions.titles.contains("Stop"),
+                   "W2: after the runner ends, its History row must not offer Stop")
+
+        // W3 · Stop is a live action too, with no test-only supervisor shortcut.
+        try expect(world.supervisor.send("stop from background", to: backgroundStopAgent),
+                   "setup: the second agent must accept a turn for the Stop action")
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+            world.supervisor.isRunning(backgroundStopAgent) && world.runners.byAgent[backgroundStopAgent] != nil
+        }) else { throw Failure(message: "setup: the second agent's turn never started") }
+        world.app.qaRefreshAgentSurfaces()
+        world.canvas.onTileCloseRequested?(backgroundStopTile)
+        world.app.qaRefreshAgentSurfaces()
+        try expect(inbox.hoverRowForQA(id: backgroundStopAgent.rawValue)
+                   && inbox.clickBackgroundStopForQA(id: backgroundStopAgent.rawValue),
+                   "W3: Stop must dispatch from the visible Background action")
+        world.runners.byAgent[backgroundStopAgent]?.releaseRunAfterStop()
+        let stopped = await waitUntil(timeout: 5, pollInterval: 0.05, {
+            !world.supervisor.isRunning(backgroundStopAgent)
+                && block(world, backgroundStopAgent) == "history"
+        })
+        try expect(stopped && world.supervisor.records[backgroundStopAgent]?.closeRequestedAt != nil
+                   && block(world, backgroundStopAgent) != "live",
+                   "W3: Stop ends the running background turn and lets the closed row leave the live list")
+        try expect(block(world, backgroundStopAgent) == "history",
+                   "W3: the stopped agent moves to History")
+        guard let stoppedActions = inbox.hoverActionsForQA(id: backgroundStopAgent.rawValue) else {
+            throw Failure(message: "W3: the History row must materialize for its Stop-action check")
+        }
+        try expect(!stoppedActions.titles.contains("Stop"),
+                   "W3: the stopped agent's History row must not offer Stop")
 
         // W4 · a parent with two observed children. Closing the parent's tile
         // takes the group: no child may be left behind as a top-level row.
@@ -440,6 +553,17 @@ enum SidebarTruthChecks {
                        "W4: …nested under its parent there, not promoted to a root")
         }
         try expect(block(world, parentAgent) == "history", "W4: the parent itself is in History")
+        try expect(inbox.disclosureTitleForQA(id: parentAgent.rawValue)?.contains("2") == true,
+                   "W4: the nested parent disclosure must show its child count — got \(inbox.disclosureTitleForQA(id: parentAgent.rawValue) ?? "<missing>")")
+        guard let parentGroup = inbox.groupBackgroundForQA(id: parentAgent.rawValue) else {
+            throw Failure(message: "W4: parent and child must materialize their shared group background")
+        }
+        let childGroups = [childOne, childTwo].compactMap {
+            inbox.groupBackgroundForQA(id: $0.rawValue)
+        }
+        try expect(parentGroup.visible && parentGroup.roundsTop
+                   && childGroups.contains(where: { $0.visible && $0.roundsBottom }),
+                   "W4: the shared group surface must begin at the parent and round below its last child — parent \(parentGroup), children \(childGroups)")
     }
 
     // MARK: - W6: one unreadable root must not freeze the list

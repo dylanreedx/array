@@ -6,12 +6,14 @@ import ContinuumRevivedCore
 /// never grants progress for being shown or clicked.
 @MainActor
 final class CanvasGettingStartedView: NSVisualEffectView {
+    var onAddAgent: (() -> Void)?
+    var onAddTerminal: (() -> Void)?
     var onOpenCommandCenter: (() -> Void)?
     var onShowZoneActions: (() -> Void)?
     var onSkipTask: ((GettingStartedTask) -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "Getting Started")
-    private let subtitleLabel = NSTextField(labelWithString: "Three quick, real actions")
+    private let subtitleLabel = NSTextField(labelWithString: "Four quick, real actions")
     private let taskStack = NSStackView()
     private var rows: [GettingStartedTask: GettingStartedTaskRowView] = [:]
 
@@ -53,13 +55,15 @@ final class CanvasGettingStartedView: NSVisualEffectView {
             root.widthAnchor.constraint(equalToConstant: 356),
         ])
 
-        for task in GettingStartedTask.allCases {
+        for task in GettingStartedTask.launchTasks {
             let row = GettingStartedTaskRowView(task: task)
             row.onPrimaryAction = { [weak self] task in
                 switch task {
                 case .openCommandCenter: self?.onOpenCommandCenter?()
                 case .personalizeZone: self?.onShowZoneActions?()
-                case .navigate: break
+                case .secondAgent: self?.onAddAgent?()
+                case .addTerminal: self?.onAddTerminal?()
+                case .dragToolbar, .navigate: break
                 }
             }
             row.onSkip = { [weak self] task in self?.onSkipTask?(task) }
@@ -78,24 +82,25 @@ final class CanvasGettingStartedView: NSVisualEffectView {
         navKeymap: NavKeymap
     ) {
         let command = commandCenterShortcut ?? "the top-bar button"
-        let hold = Self.modifierDisplay(navKeymap.leaderHoldModifier)
+        rows[.secondAgent]?.configure(
+            title: "Run a second agent",
+            detail: "Give another agent a task. Keep both in view.",
+            state: state(for: .secondAgent, in: progress), primaryTitle: "Add"
+        )
+        rows[.addTerminal]?.configure(
+            title: "Add a terminal",
+            detail: "Your shell lives beside your agents. ⌘T adds one.",
+            state: state(for: .addTerminal, in: progress), primaryTitle: "Add"
+        )
         rows[.openCommandCenter]?.configure(
-            title: "Open Command Center",
+            title: "Try Command Center",
             detail: "Use the top bar or \(command).",
-            state: state(for: .openCommandCenter, in: progress),
-            primaryTitle: "Open"
+            state: state(for: .openCommandCenter, in: progress), primaryTitle: "Open"
         )
-        rows[.navigate]?.configure(
-            title: "Navigate",
-            detail: "Hold \(hold) to jump; then \(navKeymap.leader.displayString), move, Return.",
-            state: state(for: .navigate, in: progress),
-            primaryTitle: nil
-        )
-        rows[.personalizeZone]?.configure(
-            title: "Personalize the Zone",
-            detail: "Rename, choose a color, and inspect Project/Home.",
-            state: state(for: .personalizeZone, in: progress),
-            primaryTitle: "Show"
+        rows[.dragToolbar]?.configure(
+            title: "Drag the toolbar",
+            detail: "Move its handle anywhere. It snaps to the edges.",
+            state: state(for: .dragToolbar, in: progress), primaryTitle: nil
         )
         isHidden = !Self.shouldPresent(progress)
         invalidateIntrinsicContentSize()
@@ -111,7 +116,7 @@ final class CanvasGettingStartedView: NSVisualEffectView {
         case .waitingForEnvironment, .creating, .complete, .skipped:
             return true
         case .notStarted, .ineligible:
-            return progress.needsIntro || progress.educationReplayRequested
+            return progress.needsIntro || progress.firstProjectId != nil || progress.educationReplayRequested
         }
     }
 

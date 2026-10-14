@@ -11,6 +11,8 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
     private let postTokens: Int?
     private let postPrecision: AgentCompactionTokenPrecision
     private let trailingReading: Int?
+    private let firstTurnContextFull: Bool
+    private var observationHandler: (@Sendable (AgentRuntimeObservation) -> Void)?
     private var firstRun = true
     private var compactionOnEvent: (@Sendable (AgentRuntimeEvent) -> Void)?
     private(set) var operations: [String] = []
@@ -21,7 +23,8 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
         supportsFocus: Bool = true,
         postTokens: Int? = 20_000,
         postPrecision: AgentCompactionTokenPrecision = .exact,
-        trailingReading: Int? = nil
+        trailingReading: Int? = nil,
+        firstTurnContextFull: Bool = false
     ) {
         firstTurnGate = blockFirstTurn ? DispatchSemaphore(value: 0) : nil
         self.result = result
@@ -29,6 +32,7 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
         self.postTokens = postTokens
         self.postPrecision = postPrecision
         self.trailingReading = trailingReading
+        self.firstTurnContextFull = firstTurnContextFull
     }
 
     var compactionCapabilities: AgentCompactionCapabilities {
@@ -43,12 +47,14 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
             defer { firstRun = false }
             return firstRun
         }
+        lock.withLock { observationHandler }?(.threadId("script-context-thread"))
         let turnID = UUID().uuidString
         onEvent(.turnStarted(threadId: "provider", turnId: turnID))
         if shouldWait { firstTurnGate?.wait() }
         onEvent(.turnCompleted(
             threadId: "provider", turnId: turnID,
-            outcome: .completed, errorMessage: nil))
+            outcome: shouldWait && firstTurnContextFull ? .failed : .completed,
+            errorMessage: shouldWait && firstTurnContextFull ? AgentContextFullRecovery.canonicalErrorMessage : nil))
     }
 
     func compact(
@@ -95,7 +101,9 @@ private final class CompactionScriptRunner: AgentRunning, AgentCompactionRunning
     func stop() { firstTurnGate?.signal() }
     func releaseFirstTurn() { firstTurnGate?.signal() }
     func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
-    func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+    func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {
+        lock.withLock { observationHandler = handler }
+    }
     func snapshotOperations() -> [String] { lock.withLock { operations } }
     /// A late frame from the finished compaction operation's callback — the
     /// shape the epoch stamp used to guard. The runner-generation token must
@@ -121,9 +129,212 @@ func runAgentCompactionUIChecks() async throws {
         throw Failure(description: message)
     }
 
+    // The same native error renderer must expose the same three recovery
+    // choices regardless of which translator produced the canonical marker.
+    var recoveryActions: [AgentRenderAction] = []
+    let recoveryContext = AgentRenderContext(
+        actions: AgentRenderActions { recoveryActions.append($0) },
+        tokens: .transcript,
+        appearance: .dark)
+    let contextFullBlock = AgentBlock(
+        id: AgentNodeID(rawValue: "context-full-recovery")!,
+        revision: 1,
+        kind: .error,
+        payload: .error(.init(message: AgentContextFullRecovery.canonicalErrorMessage)))
+    let contextFullRenderer = ErrorNoticeRenderer(kind: .error)
+    let contextFullHeight = contextFullRenderer.measure(
+        block: contextFullBlock, width: 320, context: recoveryContext)
+    let contextFullView = contextFullRenderer.makeView() as! AgentErrorNoticeView
+    contextFullView.frame = NSRect(x: 0, y: 0, width: 320, height: contextFullHeight)
+    contextFullRenderer.update(view: contextFullView, block: contextFullBlock, context: recoveryContext)
+    contextFullView.layoutSubtreeIfNeeded()
+    guard !contextFullView.compactRetryButton.isHidden,
+          !contextFullView.forkSummaryButton.isHidden,
+          !contextFullView.copyTranscriptButton.isHidden,
+          contextFullView.retryButton.isHidden,
+          contextFullView.copyButton.isHidden,
+          contextFullView.copyTranscriptButton.frame.maxY <= contextFullView.bounds.maxY + 0.5 else {
+        throw Failure(description: "context-full error did not show the shared bounded recovery controls")
+    }
+    contextFullView.compactRetryButton.performClick(nil)
+    contextFullView.forkSummaryButton.performClick(nil)
+    contextFullView.copyTranscriptButton.performClick(nil)
+    guard recoveryActions.count == 3,
+          case .contextFullRecovery(blockID: contextFullBlock.id, action: .compactAndRetry) = recoveryActions[0],
+          case .contextFullRecovery(blockID: contextFullBlock.id, action: .forkWithSummary) = recoveryActions[1],
+          case .contextFullRecovery(blockID: contextFullBlock.id, action: .copyTranscript) = recoveryActions[2] else {
+        throw Failure(description: "context-full recovery controls did not dispatch their three scoped intents")
+    }
+
+    // The ring itself becomes actionable at the same 75% warning state it
+    // already renders. Keep the execution route at the tile/session boundary.
+    let warningContext = AgentRadialContextMeterPresentation(
+        state: .warning, fraction: 0.80, label: "80%", accessibilityLabel: "Context window 80 percent used.",
+        detailText: "80 percent used", warningMarker: "⚠︎")
+    let warningPresentation = AgentCompactStatusPresentation(
+        location: .init(symbolName: "house", text: "project root", accessibilityLabel: "Home and Where: project root.", detailText: "project root", isExternal: false),
+        activity: .silent(detailText: "Activity phase: idle."),
+        context: warningContext,
+        quotas: [], cost: nil,
+        enabledElements: [.location, .activity, .contextMeter])
+    let compactRow = AgentCompactStatusRowView()
+    compactRow.frame = NSRect(x: 0, y: 0, width: 420, height: AgentCompactStatusRowView.preferredHeight)
+    var compactRequested = false
+    compactRow.onCompactContextRequested = { compactRequested = true }
+    compactRow.apply(warningPresentation)
+    compactRow.layoutSubtreeIfNeeded()
+    guard compactRow.qaCompactContextButtonVisible,
+          compactRow.qaCompactContextButtonEnabled else {
+        throw Failure(description: "warning context reading did not expose the native Compact action")
+    }
+    compactRow.qaPerformCompactContextAction()
+    guard compactRequested else {
+        throw Failure(description: "native Compact action did not reach the row callback")
+    }
+    let normalPresentation = AgentCompactStatusPresentation(
+        location: warningPresentation.location,
+        activity: warningPresentation.activity,
+        context: AgentRadialContextMeterPresentation(
+            state: .known, fraction: 0.50, label: "50%", accessibilityLabel: "Context window 50 percent used.",
+            detailText: "50 percent used", warningMarker: nil),
+        quotas: [], cost: nil, enabledElements: warningPresentation.enabledElements)
+    compactRow.apply(normalPresentation)
+    guard !compactRow.qaCompactContextButtonVisible else {
+        throw Failure(description: "native Compact action remained visible below the warning threshold")
+    }
+
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("array-compaction-ui-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
+
+    // Array's compaction meter must never promote a bundled denominator to
+    // provider-stated memory. Otherwise a future table update is shadowed.
+    do {
+        let provenanceRoot = root.appendingPathComponent("meter-provenance")
+        let bundled = AgentContextWindowResolver.bundledWindows()
+        guard let model = bundled.keys.sorted().first(where: { $0.hasPrefix("anthropic/") }),
+              let originalWindow = bundled[model] else {
+            throw Failure(description: "meter provenance requires a shipped Claude model window")
+        }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: provenanceRoot),
+            makeRunner: { _ in CompactionScriptRunner() })
+        defer { supervisor.stopAll() }
+        supervisor.qaContextAutoCompactionThreshold = { nil }
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+            harness: .claudeCode, model: model, thinking: "low")
+        supervisor.qaDeliver(.contextWindowUpdated(threadId: "provenance", snapshot: AgentContextWindowSnapshot(
+            usedTokens: 10_000, maxTokens: nil, observedAt: Date(),
+            source: .providerSessionStats, freshness: .live)), to: id)
+        guard supervisor.contextWindowSnapshot(for: id)?.windowResolutionSource == .bundled,
+              supervisor.records[id]?.providerContextWindows[model] == nil else {
+            throw Failure(description: "initial provider usage must resolve the shipped window without remembering a provider window")
+        }
+        supervisor.qaDeliver(.compactionChanged(threadId: "provenance", event: AgentCompactionLifecycleEvent(
+            operationID: UUID(), boundaryID: "provenance-boundary", phase: .succeeded, trigger: .providerAutomatic,
+            beforeTokens: AgentCompactionTokenReading(10_000, precision: .exact),
+            afterTokens: AgentCompactionTokenReading(1_000, precision: .exact), provider: "script")), to: id)
+        guard supervisor.records[id]?.providerContextWindows[model] == nil else {
+            throw Failure(description: "Array's published compaction meter falsely remembered its bundled window as provider-stated")
+        }
+        let updatedWindow = originalWindow + 1_024
+        let nextTable = AgentContextWindowResolver(applicationSupportDirectory: provenanceRoot,
+            bundledWindows: [model: updatedWindow])
+        let updated = nextTable.resolve(harness: .claudeCode, model: model)
+        guard updated.tokens == updatedWindow, updated.source == .bundled else {
+            throw Failure(description: "Array's published meter shadowed a future bundled-window update with false provider memory")
+        }
+        let statedWindow = originalWindow + 2_048
+        supervisor.qaDeliver(.contextWindowUpdated(threadId: "provenance", snapshot: AgentContextWindowSnapshot(
+            usedTokens: 2_000, maxTokens: statedWindow, observedAt: Date(),
+            source: .providerSessionStats, freshness: .live)), to: id)
+        guard supervisor.records[id]?.providerContextWindows[model] == statedWindow,
+              nextTable.resolve(harness: .claudeCode, model: model).tokens == statedWindow,
+              nextTable.resolve(harness: .claudeCode, model: model).source == .remembered else {
+            throw Failure(description: "a genuine provider-stated window must remain remembered above bundled windows")
+        }
+    }
+
+    for harness in AgentHarness.allCases {
+        // The provider compacts in the same actor beat after a critical reading,
+        // before Array's queued automatic request gets its turn. Old-epoch work
+        // must not compact the freshly compacted context a second time.
+        let epochRoot = root.appendingPathComponent("epoch-\(harness.rawValue)")
+        let epochRunner = CompactionScriptRunner()
+        let epochSupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: epochRoot), makeRunner: { _ in epochRunner },
+            submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: epochRoot, debounceInterval: 0))
+        epochSupervisor.qaContextAutoCompactionThreshold = { 0.90 }
+        var automaticConsiderationFinished = false
+        epochSupervisor.qaDidFinishAutomaticContextCompaction = { automaticConsiderationFinished = true }
+        let epochConfig = AgentModelConfig.resolvedFromDefaults(harness: harness)
+        let epochID = epochSupervisor.spawn(role: nil, prompt: nil, cwd: root,
+            harness: harness, model: epochConfig.model, thinking: epochConfig.thinking)
+        guard epochSupervisor.send("epoch seed", to: epochID) else {
+            throw Failure(description: "\(harness) epoch witness seed refused")
+        }
+        try await expectEventually("\(harness) epoch witness seed did not settle") {
+            !epochSupervisor.isRunning(epochID) && epochRunner.snapshotOperations() == ["run:epoch seed"]
+        }
+        epochSupervisor.qaDeliver(.contextWindowUpdated(threadId: "epoch", snapshot: AgentContextWindowSnapshot(
+            usedTokens: 95_000, maxTokens: 100_000, observedAt: Date(),
+            source: .providerSessionStats, freshness: .live)), to: epochID)
+        epochSupervisor.qaDeliver(.compactionChanged(threadId: "epoch", event: AgentCompactionLifecycleEvent(
+            operationID: UUID(), boundaryID: "provider-epoch", phase: .succeeded, trigger: .providerAutomatic,
+            beforeTokens: AgentCompactionTokenReading(95_000, precision: .exact),
+            afterTokens: AgentCompactionTokenReading(20_000, precision: .exact), provider: "script")), to: epochID)
+        try await expectEventually("\(harness) automatic request did not finish its actor beat") {
+            automaticConsiderationFinished
+        }
+        guard epochSupervisor.records[epochID]?.contextEpoch == 1,
+              epochRunner.snapshotOperations() == ["run:epoch seed"] else {
+            throw Failure(description: "\(harness) stale automatic request compacted a new provider epoch")
+        }
+
+        let recoveryRoot = root.appendingPathComponent("recovery-\(harness.rawValue)")
+        let recoveryRunner = CompactionScriptRunner(firstTurnContextFull: true)
+        let recoveryStore = AgentComposerDraftStore(applicationSupportDirectory: recoveryRoot, debounceInterval: 0)
+        let recoverySupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: recoveryRoot), makeRunner: { _ in recoveryRunner },
+            submissionRecoveryStore: recoveryStore,
+            transcriptStore: AgentTranscriptStore(root: recoveryRoot.appendingPathComponent("transcripts")))
+        let configuration = AgentModelConfig.resolvedFromDefaults(harness: harness)
+        let recoveryID = recoverySupervisor.spawn(role: nil, prompt: nil, cwd: root,
+            harness: harness, model: configuration.model, thinking: configuration.thinking)
+        guard recoverySupervisor.send("preserve original request", to: recoveryID) else {
+            throw Failure(description: "\(harness) recovery original prompt refused")
+        }
+        try await expectEventually("\(harness) context-full terminal never settled") {
+            !recoverySupervisor.isRunning(recoveryID) && recoverySupervisor.isQueuePaused(for: recoveryID)
+        }
+        _ = await recoveryStore.enqueueMessage(text: "later follow-up", for: recoveryID)
+        guard await recoverySupervisor.recoverContextFull(.compactAndRetry, for: recoveryID) == recoveryID else {
+            throw Failure(description: "\(harness) compact and retry refused")
+        }
+        try await expectEventually("\(harness) compact/retry lost or reordered the original request") {
+            recoveryRunner.snapshotOperations() == ["run:preserve original request", "compact",
+                "run:preserve original request", "run:later follow-up"]
+        }
+        try await expectEventually("\(harness) compact/retry did not finish") {
+            !recoverySupervisor.isRunning(recoveryID)
+        }
+        guard await recoverySupervisor.recoverContextFull(.compactAndRetry, for: recoveryID) == nil else {
+            throw Failure(description: "\(harness) stale context-full retry ran after a later successful turn")
+        }
+        recoverySupervisor.qaDeliver(.turnCompleted(threadId: "recovery", turnId: "new-limit",
+            outcome: .failed, errorMessage: AgentContextFullRecovery.canonicalErrorMessage), to: recoveryID)
+        guard let continued = await recoverySupervisor.recoverContextFull(.forkWithSummary, for: recoveryID),
+              continued != recoveryID, recoverySupervisor.records[recoveryID] != nil,
+              recoverySupervisor.records[continued]?.harness == harness else {
+            throw Failure(description: "\(harness) summary recovery must preserve the old session and harness")
+        }
+        try await expectEventually("\(harness) summary session did not finish") {
+            !recoverySupervisor.isRunning(continued)
+        }
+        guard recoveryRunner.snapshotOperations().last?.contains("preserve original request") == true else {
+            throw Failure(description: "\(harness) summary session lost the original task context")
+        }
+    }
+
     let runner = CompactionScriptRunner(blockFirstTurn: true, trailingReading: 20_500)
     let draftStore = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
     let supervisor = AgentSupervisor(

@@ -16,7 +16,17 @@ func runOnboardingProgressChecks() throws {
 
     progress.skipTask(.personalizeZone)
     expect(progress.isTaskResolved(.personalizeZone), "a task can be independently skipped")
-    expect(!progress.hasPendingGettingStartedTasks, "completed and skipped tasks resolve the checklist")
+    expect(progress.hasPendingGettingStartedTasks, "legacy completed tasks cannot invent the new launch milestones")
+    let firstStarted = UUID()
+    progress.demonstrateAgentStarted(firstStarted)
+    progress.demonstrateAgentStarted(firstStarted)
+    expect(!progress.isTaskComplete(.secondAgent), "repeated turns from one agent cannot complete second agent task")
+    progress.demonstrateAgentStarted(UUID())
+    expect(progress.isTaskComplete(.secondAgent), "two distinct agents really starting completes second agent task")
+    progress.demonstrate(.terminalAdded)
+    progress.demonstrate(.toolbarDragged)
+    expect(!progress.hasPendingGettingStartedTasks, "new real creation, command and drag evidence resolves launch checklist")
+    expect(GettingStartedTask.launchTasks == [.secondAgent, .addTerminal, .openCommandCenter, .dragToolbar], "launch checklist contains the requested four tasks")
 
     let firstProject = UUID()
     let zone = UUID()
@@ -29,7 +39,7 @@ func runOnboardingProgressChecks() throws {
         agentTileId: agent
     )
     progress.replayEducation()
-    expect(progress.milestones.isEmpty && progress.skippedTasks.isEmpty, "replay clears education state")
+    expect(progress.startedAgentIDs.isEmpty && progress.milestones.isEmpty && progress.skippedTasks.isEmpty, "replay clears education state")
     expect(progress.educationReplayRequested, "replay explicitly reopens the live checklist")
     expect(progress.firstProjectId == firstProject, "replay preserves first-project identity")
     expect(progress.starter.zoneId == zone && progress.starter.agentTileId == agent,
@@ -57,6 +67,7 @@ func runOnboardingProgressChecks() throws {
     expect(migrated.schemaVersion == OnboardingProgress.currentSchemaVersion, "legacy progress upgrades its schema version")
     expect(migrated.skippedTasks.isEmpty && !migrated.educationReplayRequested,
            "new education fields get safe migration defaults")
+    expect(migrated.startedAgentIDs.isEmpty, "legacy progress cannot invent agents that ran")
     expect(migrated.milestones == [.commandCenterOpened], "legacy demonstrated behavior survives migration")
 
     let suite = "array.onboardingProgressChecks.\(UUID().uuidString)"

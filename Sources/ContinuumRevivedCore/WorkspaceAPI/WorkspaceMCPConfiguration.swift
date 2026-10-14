@@ -102,7 +102,6 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
             + environment.keys.sorted().map { key in
                 "mcp_servers.array_workspace.env.\(key)=\(Self.tomlString(environment[key] ?? ""))"
             }
-            + ["developer_instructions=\(Self.tomlString(Self.agentGuidance))"]
     }
 
     private static func tomlString(_ value: String) -> String {

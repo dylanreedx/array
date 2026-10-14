@@ -671,9 +671,16 @@ public struct ClaudeEventTranslator {
         let subtype = object["subtype"] as? String
         var errorMessage: String?
         if isError {
-            errorMessage = AgentFailureText.providerMessage(object["result"] as? String)
-                ?? (subtype == "success" || subtype == nil
-                    ? "Claude Code reported an error without details." : subtype)
+            let result = object["result"] as? String
+            if AgentContextFullRecovery.isContextFull(
+                provider: "claude",
+                candidates: [subtype, result]) {
+                errorMessage = AgentContextFullRecovery.canonicalErrorMessage
+            } else {
+                errorMessage = AgentFailureText.providerMessage(result)
+                    ?? (subtype == "success" || subtype == nil
+                        ? "Claude Code reported an error without details." : subtype)
+            }
         }
         events.append(.turnCompleted(
             threadId: threadId,

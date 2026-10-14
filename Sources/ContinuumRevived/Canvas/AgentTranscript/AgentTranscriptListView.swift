@@ -200,6 +200,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// disclosure key; this opaque owner token prevents state crossing lists.
     private let disclosureStateStore = DisclosureStateStore()
     private let disclosureOwnerID: AgentID
+    private let toolClockScope = AgentToolClockScope()
     private var toolDetailAgentID: AgentID?
     /// Observations parked before their `.itemStarted` arrives (pi publishes
     /// out of order, and `.plans/45` S2 gives every tool BOTH a `.toolActivity`
@@ -1556,6 +1557,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     private func contextWithDisclosureState(_ context: AgentRenderContext) -> AgentRenderContext {
         var context = context
+        context.toolClockScope = toolClockScope
         context.actions = disclosureStateStore.renderActions(
             for: disclosureOwnerID,
             perform: context.actions.perform,

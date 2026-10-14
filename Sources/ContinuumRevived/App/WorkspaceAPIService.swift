@@ -256,7 +256,7 @@ final class WorkspaceAPIService {
         case .agentFind:
             return findAgents(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
         case .agentInspect:
-            return inspectAgent(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, canvas: canvas)
+            return inspectAgent(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, canvas: canvas, isCancelled: isCancelled)
         case .canvasQuery:
             return canvasQuery(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
         case .canvasApply:
@@ -471,6 +471,10 @@ final class WorkspaceAPIService {
                 requestId: promptId, agentId: agentId, agentDisplayName: record.displayName,
                 checkout: target.handle, checkoutDisplayName: target.displayName,
                 op: .artifactOpen, relativePath: relativePath))
+            if isCancelled() {
+                remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .artifactOpen, outcome: "cancelledBeforeEffect"))
+                return .cancelled(result: nil)
+            }
             // The prompt ran arbitrary UI; the policy may have flipped meanwhile.
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
                 return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools were disabled for this agent.", approvalRequestId: promptId))

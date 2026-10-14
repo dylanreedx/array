@@ -53,6 +53,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     private let elapsedLabel = NSTextField(labelWithString: "")
     private let contextMeter = AgentRadialContextMeterView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
     private let contextLabel = NSTextField(labelWithString: "")
+    private let compactContextButton: NSButton = {
+        let button = NSButton(title: "Compact", target: nil, action: nil)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.setButtonType(.momentaryPushIn)
+        button.toolTip = "Compact the context window"
+        button.setAccessibilityLabel("Compact context")
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }()
     /// Absorbs the row's leftover width.
     ///
     /// Without it `locationGroup` was the only low-hugging view, so it swallowed
@@ -76,6 +87,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     private var configuration: AgentCompactStatusRowConfiguration
     private var thinkingIndicatorIsAnimating = false
     var onActionMenuRequested: ((NSButton) -> Void)?
+    /// Routed by the tile to the session owner when the user requests an early
+    /// context compaction from a warning/critical reading.
+    var onCompactContextRequested: (() -> Void)?
 
     // Every constant that follows the page zoom is held rather than baked into an
     // activated anchor a later rung could not reach.
@@ -99,7 +113,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // reading, and wrapping a circle in a capsule reads as two nested
         // containers for one number. The pills exist to group a label with a
         // value; the ring has no label to group.
-        contextGroup = NSStackView(views: [contextMeter, contextLabel])
+        contextGroup = NSStackView(views: [contextMeter, contextLabel, compactContextButton])
         quotaGroup = NSStackView(views: [])
         rootStack = NSStackView(views: [])
         super.init(frame: frameRect)
@@ -210,6 +224,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         locationGroup.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(10), for: .horizontal)
         actionButton.target = self
         actionButton.action = #selector(showActions(_:))
+        compactContextButton.target = self
+        compactContextButton.action = #selector(compactContext(_:))
+        compactContextButton.isHidden = true
 
         activityGroup.orientation = .horizontal
         activityGroup.alignment = .centerY
@@ -378,8 +395,10 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             "Agent compact status. \(next.location.accessibilityLabel)\(spokenActivity)\(spokenContext)\(spokenQuotas)\(spokenCost)")
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
-        // only the single location-action control is separately reachable.
-        setAccessibilityChildren([actionButton])
+        // only actionable controls are separately reachable.
+        var accessibilityActions: [NSView] = [actionButton]
+        if !compactContextButton.isHidden { accessibilityActions.append(compactContextButton) }
+        setAccessibilityChildren(accessibilityActions)
         updateThinkingLifecycle()
         applyTokens()
     }
@@ -420,6 +439,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         // Whole groups follow their own toggles.
         locationGroup.isHidden = !enabled.contains(.location)
         contextGroup.isHidden = !enabled.contains(.contextMeter)
+        compactContextButton.isHidden = !enabled.contains(.contextMeter)
+            || !Self.contextCanBeCompacted(next.context.state)
         if !enabled.contains(.activity) { activityGroup.isHidden = true }
         droppedElements = []
         applyOverflow()
@@ -432,6 +453,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         invalidateIntrinsicContentSize()
         rootStack.needsLayout = true
         needsLayout = true
+    }
+
+    private static func contextCanBeCompacted(_ state: AgentRadialContextMeterState) -> Bool {
+        state == .warning || state == .critical
+    }
+
+    @objc private func compactContext(_ sender: NSButton) {
+        guard let presentation, Self.contextCanBeCompacted(presentation.context.state) else { return }
+        onCompactContextRequested?()
     }
 
     /// Hides the elements that do not fit, lowest priority first.
@@ -760,6 +790,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaLocationIconHasImage: Bool { locationIcon.image != nil }
     var qaActivityIconHasImage: Bool { activityIcon.image != nil }
     var qaContextMeterSide: CGFloat { contextMeter.qaIntrinsicSide }
+    var qaCompactContextButtonVisible: Bool { !compactContextButton.isHidden }
+    var qaCompactContextButtonEnabled: Bool { compactContextButton.isEnabled }
+    func qaPerformCompactContextAction() { compactContextButton.performClick(nil) }
     var qaAccessibilityLabel: String { accessibilityLabel() ?? "" }
     var qaAccessibilityChildrenCount: Int { accessibilityChildren()?.count ?? 0 }
     var qaLocationActionButtonAccessibilityLabel: String { actionButton.accessibilityLabel() ?? "" }
