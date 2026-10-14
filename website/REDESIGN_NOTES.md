@@ -103,3 +103,15 @@ The verification machine used Node 25.9.0 and emitted the expected engine warnin
 - Keep Companion marked Coming soon until the product status changes separately.
 - Preserve the current DMG URL and `public/appcast.xml` unless a release task explicitly changes them.
 - Update `DESIGN_SYSTEM.md` for permanent rules and this file for meaningful implementation history.
+
+## Preview frame and practical layout pass
+
+The screen now assembles within a rounded Mac preview frame with a small bezel, center notch and top-right window controls. Actual screen bounds expand to fill the viewport during the tour, then contract into the preview at the end. Camera, cursor and focus geometry share the current canvas bounds. The caption stays inside the frame.
+
+The layout sequence shows cursor approach before press/selection, held titlebar dragging and diagonal corner resizing. Main/editor moves retain native neighbor spacing; a witnessed zero-gap post-swap contact and subsequent resize jump were repaired. Editor grows 560→800px (mobile 330→470), main agent 430→550px with a shorter transcript frame, and terminal 300→480px. All dimensions are seekable in reverse.
+
+The story now focuses on Claude Code and Codex. Known native context rings show explicit illustrative usage fixtures of 12%, 18%, 8%, rather than an unknown state. Guided provider choices contain those two providers; the reusable interactive component retains its existing provider support.
+
+Validation: 90 unit tests, 60 local Chromium/WebKit checks, production build and Astro diagnostics pass (zero errors/warnings/hints). New frame/gesture checks fail against the previous public release. Screenshot matrix covers 1440×960, 390×844 and 320×568 in both engines, with no script errors, document overflow or clipped active tile frames. Historical snapshot and configured Apple destination fixture tests were excluded from the normal production build run. Evidence is in `.plans/72-launch-night/qa/frame-motion/`.
+
+All six Lighthouse runs (three mobile, three desktop) scored 100 in performance, accessibility, best practices and SEO, with zero layout shift and blocking time. Mobile LCP was about 1.37s; desktop about 0.33s.

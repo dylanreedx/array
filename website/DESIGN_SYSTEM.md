@@ -16,9 +16,9 @@ These instructions supersede the older interactive-device sequence below for the
 
 ## Full canvas and native tile pass
 
-- The demo grows into the full viewport canvas with its native 46px topbar, 280px desktop sidebar and 28px shortcut rail. No inset rounded window or heading strip.
+- The demo grows into the full viewport canvas with its native 46px topbar, 280px desktop sidebar and 28px shortcut rail. It expands geometrically from an inset rounded Mac preview and contracts back at the end, with a small bezel, center notch and top-right window controls.
 - Five supporting hero articles become two agents, a board, an editor and a terminal; the sixth reserved article appears through native agent creation. Use native sources for their chrome, typography, status icons, controls and spacing; preserve original hero copy and compact navigation.
-- Independent staggered elastic landings finish by `.26`. Focus and camera settle before typing. After checks, drag the main tile into a neighboring slot with immediate baseline-relative push, a latched exchange and a separate stationary snap target, then move and resize the editor.
+- Independent staggered elastic landings finish by `.26`. Focus and camera settle before typing. After checks, drag the main tile into a neighboring slot with immediate baseline-relative push, a latched exchange and a separate stationary snap target, then move the editor and practically resize the editor, agent and terminal. Cursor approach precedes selection; held press follows the actual titlebar/corner.
 - The native three-node working glyph runs at the transcript tail even when scrolling pauses. Pause it for completed agents, Reduced Motion, hidden documents and offscreen scenes. Do not duplicate it in the compact activity row.
 - Settled text uses 2D transforms without persistent layer promotion. Keep task details outside the zoomed world. Mobile source preserves preformatted lines and scrolls inside its editor while retaining the titlebar.
 - Reduced Motion presents six readable cards in normal flow, including all board lanes. No video or React hydration.
@@ -88,7 +88,7 @@ Native radii follow the checked-in `12 → 10 → 8 → 6` ladder. Marketing por
 | 0.84 to 0.94 | Companion | Companion advances with the shared pending approval. |
 | 0.94 to 1.00 | Ready | Companion docks, Mac returns forward, and the interactive reducer unlocks. |
 
-Scroll progress is calculated once per animation frame. Only transform, opacity, and masking properties respond to progress. Reduced Motion removes the pinned track and renders a settled composition.
+Scroll progress is calculated once per animation frame. Camera and float poses use transforms. Native drag/resize and the preview frame change actual bounds; camera and cursor measure those same bounds. Reduced Motion removes the pinned track and renders a settled composition.
 
 ## Device presentation
 

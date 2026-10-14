@@ -13,6 +13,8 @@ export type AgentEvent =
   | { type: 'config-changed'; agentId: string; field: 'provider' | 'model' | 'effort'; value: string }
   | { type: 'agent-stopped' | 'agent-restarted'; agentId: string };
 
+type AgentProvider = 'Codex' | 'Claude Code' | 'Pi';
+
 export interface AgentTileProps {
   state: DemoState;
   dispatch: Dispatch<DemoAction>;
@@ -20,6 +22,7 @@ export interface AgentTileProps {
   onEvent?: (event: AgentEvent) => void;
   className?: string;
   previewStatus?: string;
+  availableProviders?: readonly AgentProvider[];
 }
 
 const providerModels: Record<string, string[]> = {
@@ -28,6 +31,14 @@ const providerModels: Record<string, string[]> = {
   Pi: ['GPT-5.6 Sol', 'GPT-5.6 Luna', 'GPT-5.6 Terra'],
 };
 const effortLevels = ['Low', 'Medium', 'High'];
+
+// Guided workspace values are deterministic scene data, not live provider
+// telemetry. Keep these low enough to reflect a healthy known meter state.
+const previewContextUsage: Record<string, number> = {
+  stabilize: 12,
+  verify: 18,
+  audit: 8,
+};
 
 const statusLabel: Record<AgentStatus, string> = {
   idle: 'Idle', starting: 'Starting', working: 'Working', needsAttention: 'Needs attention', stopped: 'Stopped', done: 'Done',
@@ -44,7 +55,7 @@ function elapsedLabel(seconds: number) {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
-export function AgentTile({ state, dispatch, agentId, onEvent, className = '', previewStatus }: AgentTileProps) {
+export function AgentTile({ state, dispatch, agentId, onEvent, className = '', previewStatus, availableProviders }: AgentTileProps) {
   const agent = state.agents[agentId];
   const approval = state.approval.agentId === agentId ? state.approval : null;
   const rootRef = useRef<HTMLElement>(null);
@@ -81,6 +92,8 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '', p
   const displayedStatus = observedPresentation?.status ?? agent?.status ?? 'idle';
   const displayedLabel = observedPresentation?.label ?? previewStatus ?? statusLabel[displayedStatus];
   const active = displayedStatus === 'working' || displayedStatus === 'starting';
+  const contextUsage = previewContextUsage[agentId] ?? 12;
+  const providerChoices = availableProviders ?? Object.keys(providerModels) as AgentProvider[];
   useEffect(() => {
     if (!active) {
       setElapsedSeconds(0);
@@ -227,9 +240,14 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '', p
           </span>
           <span data-demo-agent-label="true">{displayedLabel}{active ? ` · ${elapsedLabel(elapsedSeconds)}` : ''}</span>
         </span>
-        <span className={styles.context} aria-label="Context window usage unknown">
-          <span className={styles.contextRing} data-demo-context-ring="true" role="img" aria-label="Context usage unknown"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8.9"/><text x="10" y="13">?</text></svg></span>
-          <span>unknown</span>
+        <span className={styles.context} aria-label={`Illustrative context window usage ${contextUsage} percent`}>
+          <span className={styles.contextRing} data-demo-context-ring="true" data-context-percent={contextUsage} role="img" aria-label={`Illustrative context usage ${contextUsage} percent`}>
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle className={styles.contextTrack} cx="10" cy="10" r="8.9" />
+              <circle className={styles.contextProgress} cx="10" cy="10" r="8.9" style={{ strokeDasharray: `${2 * Math.PI * 8.9}`, strokeDashoffset: `${2 * Math.PI * 8.9 * (1 - contextUsage / 100)}` }} />
+            </svg>
+          </span>
+          <span>{contextUsage}%</span>
         </span>
       </div>
 
@@ -249,7 +267,7 @@ export function AgentTile({ state, dispatch, agentId, onEvent, className = '', p
       <div className={styles.config} aria-label="Next turn settings">
         <div className={styles.configControl}>
           <button type="button" className={styles.configTrigger} aria-label="Provider" aria-haspopup="listbox" aria-expanded={openConfig === 'provider'} data-interaction-id={`agent-provider-${agent.id}`} onClick={() => setOpenConfig(openConfig === 'provider' ? null : 'provider')}><ProviderMark provider={agent.provider} /><span>{agent.provider}</span><Glyph name="chevronDown" /></button>
-          <div className={`${styles.configMenu} ${styles.providerMenu}`} role="listbox" aria-label="Choose provider" data-demo-menu="provider" hidden={openConfig !== 'provider'} aria-hidden={openConfig !== 'provider'}>{Object.keys(providerModels).map((provider) => <button type="button" role="option" aria-selected={agent.provider === provider} data-selected={agent.provider === provider ? 'true' : undefined} data-demo-provider-option={provider} key={provider} onClick={() => changeConfig('provider', provider)}><ProviderMark provider={provider} /><span>{provider}</span>{agent.provider === provider && <Glyph name="check" />}</button>)}</div>
+          <div className={`${styles.configMenu} ${styles.providerMenu}`} role="listbox" aria-label="Choose provider" data-demo-menu="provider" hidden={openConfig !== 'provider'} aria-hidden={openConfig !== 'provider'}>{providerChoices.map((provider) => <button type="button" role="option" aria-selected={agent.provider === provider} data-selected={agent.provider === provider ? 'true' : undefined} data-demo-provider-option={provider} key={provider} onClick={() => changeConfig('provider', provider)}><ProviderMark provider={provider} /><span>{provider}</span>{agent.provider === provider && <Glyph name="check" />}</button>)}</div>
         </div>
         <div className={styles.configControl}>
           <button type="button" className={styles.configTrigger} aria-label="Model" aria-haspopup="listbox" aria-expanded={openConfig === 'model'} data-interaction-id={`agent-model-${agent.id}`} onClick={() => setOpenConfig(openConfig === 'model' ? null : 'model')}><span>{agent.model}</span><Glyph name="chevronDown" /></button>

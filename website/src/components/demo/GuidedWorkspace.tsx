@@ -39,7 +39,9 @@ export default function GuidedWorkspace() {
   };
   for (const id of agentOrder) {
     stateAgents[id] = {
-      ...stateAgents[id], model: id === 'verify' ? 'Opus 5.5' : 'GPT-5.6 Sol', status: 'idle', summary: 'Ready for a task.',
+      ...stateAgents[id],
+      provider: id === 'verify' ? 'Claude Code' : 'Codex',
+      model: id === 'verify' ? 'Opus 5.5' : 'GPT-5.6 Sol', status: 'idle', summary: 'Ready for a task.',
       transcript: (stateAgents[id].transcript.some(entry => entry.kind === 'user') ? stateAgents[id].transcript : [{ id: `${id}-prompt`, kind: 'user' as const, text: '' }, ...stateAgents[id].transcript]).map(entry => ({ ...entry, text:
         entry.kind === 'user' ? 'Waiting for a task.' :
         entry.kind === 'assistant' ? `Ready. Type a prompt below to run ${id === 'verify' ? 'Opus 5.5' : 'GPT-5.6 Sol'} in this tile.` :
@@ -69,7 +71,7 @@ export default function GuidedWorkspace() {
           data-demo-tool={tileId === 'stabilize' ? tileId : undefined}
           data-demo-approval={tileId === 'verify' ? tileId : undefined}
         >
-          <AgentTile state={state} dispatch={noOpDispatch} agentId={tileId} previewStatus="Ready" />
+          <AgentTile state={state} dispatch={noOpDispatch} agentId={tileId} previewStatus="Ready" availableProviders={['Codex', 'Claude Code']} />
         </div>
       );
     }
@@ -82,6 +84,12 @@ export default function GuidedWorkspace() {
     <section className={styles.scene} aria-label="Illustrative Array workspace" data-guided-scene data-assembly-pin>
       <div className={`${styles.stage} ${islandStyles.stage}`} data-assembly-stage aria-hidden="true" inert>
         <div className={styles.window} data-guided-window data-demo-viewport data-mac-workspace>
+          <div className={styles.deviceChrome} data-demo-device-chrome aria-hidden="true">
+            <span data-demo-window-control="close" />
+            <span data-demo-window-control="minimize" />
+            <span data-demo-window-control="maximize" />
+            <span data-demo-window-notch />
+          </div>
           <header className={styles.topbar} data-assembly-chrome="topbar">
             <span className={styles.brandMark} aria-hidden="true"><img src="/array-mark.svg" alt="" /></span>
             <strong className={styles.workspaceName}>Array</strong>
@@ -165,7 +173,12 @@ export default function GuidedWorkspace() {
                           {renderContent(tile.id)}
 
                         </div>
-                        <span className={styles.resizeHandle} data-demo-resize-handle={tile.id} aria-hidden="true" />
+                        <span
+                          className={styles.resizeHandle}
+                          data-demo-resize-handle={tile.id}
+                          data-demo-target={tile.id === 'stabilize' ? 'stabilize-resize' : tile.id === 'shell' ? 'shell-resize' : undefined}
+                          aria-hidden="true"
+                        />
                       </article>
                   ))}
                 </div>
@@ -200,6 +213,7 @@ export default function GuidedWorkspace() {
         </div>
         <div className={styles.scriptedCursor} data-demo-cursor aria-hidden="true">
           <Glyph name="cursor" />
+          <svg viewBox="0 0 20 20" data-demo-cursor-resize><path d="M2 2h7L6.8 4.2l9 9L18 11v7h-7l2.2-2.2-9-9L2 9Z" /></svg>
           <span data-demo-cursor-press />
         </div>
       </div>

@@ -225,7 +225,7 @@ test('golden flow creates a native agent before focus, typing and send', async (
 });
 test('golden flow provider marks, menu anchor and square context rings match the native tile', async ({ page }) => {
   await page.goto('/');
-  for (const [id, mark] of [['stabilize', 'openai'], ['verify', 'anthropic'], ['audit', 'pi']] as const) {
+  for (const [id, mark] of [['stabilize', 'openai'], ['verify', 'anthropic'], ['audit', 'openai']] as const) {
     await expect(page.locator(`[data-assembly-surface=${id}] > header [data-provider-mark=${mark}]`)).toHaveCount(1);
   }
   await seek(page, .49);
@@ -243,6 +243,13 @@ test('golden flow provider marks, menu anchor and square context rings match the
     await seek(page, progress);
     const ring = page.locator(`[data-assembly-surface=${id}] [data-demo-context-ring]`);
     await expect(ring).toHaveCount(1);
+    const percent = { stabilize: 12, verify: 18, audit: 8 }[id];
+    await expect(ring).toHaveAttribute('data-context-percent', String(percent));
+    await expect(ring).toHaveAttribute('aria-label', `Illustrative context usage ${percent} percent`);
+    const fill = await ring.locator('circle').last().evaluate(el => {
+      const style = getComputedStyle(el); return 1 - parseFloat(style.strokeDashoffset) / parseFloat(style.strokeDasharray);
+    });
+    expect(fill).toBeCloseTo(percent / 100, 3);
     const geometry = await ring.evaluate(el => {
       const r = el.getBoundingClientRect(), style = getComputedStyle(el);
       return { width: r.width, height: r.height, localWidth: parseFloat(style.width), localHeight: parseFloat(style.height), flexShrink: style.flexShrink };
@@ -333,7 +340,7 @@ test('the native workspace takes over the viewport with a full-height sidebar an
     expect(Math.abs(geometry.window.y)).toBeLessThanOrEqual(1);
     expect(geometry.window.width).toBeCloseTo(geometry.viewport.width, 0);
     expect(geometry.window.height).toBeCloseTo(geometry.viewport.height, 0);
-    expect(parseFloat(geometry.radius)).toBe(0);
+    expect(parseFloat(geometry.radius)).toBeLessThan(.01);
     expect(geometry.topbar.height).toBeCloseTo(46, 0);
     expect(geometry.rail.height).toBeCloseTo(28, 0);
     expect(geometry.sidebar.width).toBeCloseTo(280, 0);
@@ -344,6 +351,99 @@ test('the native workspace takes over the viewport with a full-height sidebar an
     expect(geometry.canvas.bottom).toBeCloseTo(geometry.rail.y, 0);
   }
 });
+test('workspace frame grows from the inset preview and shrinks again on reverse seek', async ({ page }) => {
+  await page.goto('/');
+  const frame = () => page.locator('[data-guided-window]').evaluate(el => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, radius: parseFloat(getComputedStyle(el).borderTopLeftRadius), viewportWidth: innerWidth, viewportHeight: innerHeight };
+  });
+  await seek(page, .18);
+  const preview = await frame();
+  expect(preview.x).toBeGreaterThan(0);
+  expect(preview.y).toBeGreaterThan(0);
+  expect(preview.width).toBeLessThan(preview.viewportWidth);
+  expect(preview.height).toBeLessThan(preview.viewportHeight);
+  expect(preview.radius).toBeGreaterThan(0);
+  await seek(page, .22);
+  const growing = await frame();
+  expect(growing.width).toBeGreaterThan(preview.width);
+  expect(growing.height).toBeGreaterThan(preview.height);
+  await seek(page, .26);
+  const full = await frame();
+  expect(full.width).toBeGreaterThan(growing.width);
+  expect(full.height).toBeGreaterThan(growing.height);
+  expect(full.x).toBeCloseTo(0, 0);
+  expect(full.y).toBeCloseTo(0, 0);
+  await seek(page, 1);
+  const final = await frame();
+  expect(final.width).toBeLessThan(full.width);
+  expect(final.height).toBeLessThan(full.height);
+  expect(final.radius).toBeGreaterThan(0);
+  await seek(page, .22);
+  expect(await frame()).toEqual(growing);
+  await seek(page, .18);
+  expect(await frame()).toEqual(preview);
+});
+for (const width of [1440, 390]) {
+  test(`native drag presses and three resize corners follow live geometry at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 1440 ? 960 : 844 });
+    await page.goto('/');
+    const cursor = page.locator('[data-demo-cursor]');
+    const assertCursorInside = async (selector: string) => {
+      const target = await page.locator(selector).boundingBox();
+      // The authored cursor tip is the translate origin, rather than the center
+      // of its decorative arrow and press halo bounding box.
+      const tip = await cursor.evaluate(el => {
+        const r = el.getBoundingClientRect(); return { x: r.x, y: r.y };
+      });
+      expect(tip.x).toBeGreaterThanOrEqual(target!.x - 1);
+      expect(tip.x).toBeLessThanOrEqual(target!.x + target!.width + 1);
+      expect(tip.y).toBeGreaterThanOrEqual(target!.y - 1);
+      expect(tip.y).toBeLessThanOrEqual(target!.y + target!.height + 1);
+    };
+    for (const [approach, pressed, id] of [[.868, .89, 'stabilize'], [.906, .916, 'browser']] as const) {
+      await seek(page, approach);
+      await expect(cursor).toHaveAttribute('data-pressed', 'false');
+      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+      await seek(page, pressed);
+      await expect(cursor).toHaveAttribute('data-pressed', 'true');
+      await expect(page.locator(`[data-assembly-surface=${id}]`)).toHaveAttribute('data-demo-dragging', 'true');
+      await assertCursorInside(`[data-demo-drag-handle=${id}]`);
+    }
+    const readout = page.locator('[data-demo-resize-readout]');
+    const states: Array<{ progress: number; frame: number[]; readout: string | null }> = [];
+    for (const [progress, id] of [[.94, 'browser'], [.965, 'stabilize'], [.981, 'shell']] as const) {
+      await seek(page, progress);
+      const tile = page.locator(`[data-assembly-surface=${id}]`);
+      await expect(tile).toHaveAttribute('data-demo-resizing', 'true');
+      await expect(cursor).toHaveAttribute('data-pressed', 'true');
+      await expect(cursor).toHaveAttribute('data-gesture', 'resize');
+      await expect(cursor.locator('[data-demo-cursor-resize]')).toBeVisible();
+      await expect(cursor.locator(':scope > svg').first()).toBeHidden();
+      await assertCursorInside(`[data-demo-resize-handle=${id}]`);
+      await expect(readout).toBeVisible();
+      await expect(readout).toHaveAttribute('data-demo-resize-tile', id);
+      const frame = await tile.evaluate(el => [parseFloat((el as HTMLElement).style.width), parseFloat((el as HTMLElement).style.height)]);
+      await expect(readout).toHaveText(`${Math.round(frame[0])} × ${Math.round(frame[1] - 24)}`);
+      states.push({ progress, frame, readout: await readout.textContent() });
+    }
+    for (const state of states.reverse()) {
+      await seek(page, state.progress);
+      await expect(readout).toHaveText(state.readout!);
+    }
+    for (const progress of [.902, .95, .966, .985]) {
+      await seek(page, progress);
+      const gaps = await page.locator('[data-guided-world]').evaluate(world => {
+        const tile = (id: string) => world.querySelector<HTMLElement>(`[data-assembly-surface=${id}]`)!;
+        const main = tile('stabilize'), audit = tile('audit'), shell = tile('shell');
+        return [audit.offsetLeft - (main.offsetLeft + main.offsetWidth), shell.offsetLeft - (audit.offsetLeft + audit.offsetWidth)];
+      });
+      for (const gap of gaps) expect(gap, `native 8px tile spacing at ${progress}`).toBeGreaterThanOrEqual(7);
+    }
+    await seek(page, .99);
+    await expect(readout).toBeHidden();
+  });
+}
 test('camera and tile motion continue within the narrated beats', async ({ page }) => {
   await page.goto('/');
   for (const points of [[.34, .36, .40], [.49, .53, .57], [.62, .64, .67], [.77, .80, .84]]) {
@@ -455,8 +555,8 @@ for (const width of [390, 320]) {
     await seek(page, .49);
     const providerSelector = '[data-assembly-surface=verify] [data-demo-menu=provider]';
     await expect(page.locator(providerSelector)).toBeVisible();
-    await expect(page.locator(`${providerSelector} [data-demo-provider-option]`)).toHaveCount(3);
-    for (const provider of ['Codex', 'Claude Code', 'Pi']) {
+    await expect(page.locator(`${providerSelector} [data-demo-provider-option]`)).toHaveCount(2);
+    for (const provider of ['Codex', 'Claude Code']) {
       const selector = `${providerSelector} [data-demo-provider-option="${provider}"]`;
       const option = page.locator(selector);
       await expect(option).toBeVisible();

@@ -1,6 +1,6 @@
 
-export const WORLD_WIDTH = 1880;
-export const WORLD_HEIGHT = 1150;
+export const WORLD_WIDTH = 2060;
+export const WORLD_HEIGHT = 1320;
 export type DemoStep = 'landing' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
 export type DemoAgent = 'stabilize' | 'verify' | 'audit';
 export type DemoTile = DemoAgent | 'browser' | 'shell' | 'note';
@@ -9,11 +9,11 @@ export const STEPS = [
   { id: 'landing', start: 0, end: .27, focus: { x: 900, y: 575 }, caption: 'Your project and its supporting tiles land together.' },
   { id: 'creation', start: .27, end: .38, focus: { x: 285, y: 365 }, caption: 'Choose a model. Create an agent beside the work.' },
   { id: 'task', start: .38, end: .445, focus: { x: 285, y: 365 }, caption: 'Focus the new agent, then give it a task.' },
-  { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude, Codex, and Pi work in parallel.' },
+  { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude and Codex work in parallel.' },
   { id: 'approval', start: .595, end: .73, focus: { x: 740, y: 350 }, caption: 'Review the next action before it runs.' },
   { id: 'verification', start: .73, end: .86, focus: { x: 470, y: 895 }, caption: 'Move from the board to the code, and follow the checks.' },
-  { id: 'layout', start: .86, end: .96, focus: { x: 1250, y: 905 }, caption: 'Drag tiles into place. Resize the editor to fit the work.' },
-  { id: 'overview', start: .96, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
+  { id: 'layout', start: .86, end: .985, focus: { x: 1250, y: 905 }, caption: 'Rearrange the canvas. Give each tile the space its work needs.' },
+  { id: 'overview', start: .985, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
 ] as const;
 export const DEMO_TEXT = {
   stabilize: 'Fix zone placement. Keep tiles aligned while zooming.',
@@ -21,7 +21,7 @@ export const DEMO_TEXT = {
   audit: 'Review the native spacing, colors, and canvas controls.',
 } as const;
 export type CreationStage = 'absent' | 'command' | 'models' | 'spawning' | 'focused' | 'sent';
-export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | null;
+export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
 export interface TileFrameSnapshot {
   x: number; y: number; width: number; height: number; visible: boolean; selected: boolean; zIndex: number;
   drag: { active: boolean; lift: number; rotation: number; scaleX: number; scaleY: number };
@@ -44,11 +44,11 @@ export interface GuidedSnapshot {
   cursorTarget: CursorTarget;
   menuTarget: 'creation-agent' | 'creation-model' | 'verify-provider' | null;
   snapPreview: { tile: DemoTile; x: number; y: number; width: number; height: number; opacity: number; scale: number } | null;
-  resizeReadout: { width: number; height: number } | null;
+  resizeReadout: { tile: DemoTile; width: number; height: number } | null;
   boardProgress: number;
   boardDetail: boolean;
   editorProgress: number;
-  cursor: Point & { visible: boolean; pressed: boolean };
+  cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
   menu: 'provider' | 'toolbar' | 'models' | null;
@@ -97,21 +97,24 @@ const CAMERA: readonly CameraFrame[] = [
   { p: .812, x: 1220, y: 875, kind: 'editor', mobileX: 1090 },
   { p: .84, x: 1520, y: 325, kind: 'terminal' },
   { p: .855, x: 1520, y: 325, kind: 'terminal' },
-  { p: .875, x: 730, y: 400, kind: 'parallel', mobileX: 360, mobileY: 366 },
-  { p: .905, x: 750, y: 410, kind: 'parallel', mobileX: 765, mobileY: 370 },
-  { p: .925, x: 1250, y: 905, kind: 'editor', mobileX: 1110 },
-  { p: .96, x: 1280, y: 880, kind: 'editor', mobileX: 1130 },
-  { p: .985, x: 900, y: 575, kind: 'overview' },
-  { p: 1, x: 900, y: 575, kind: 'overview' },
+  { p: .873, x: 730, y: 400, kind: 'parallel', mobileX: 285, mobileY: 365 },
+  { p: .902, x: 750, y: 410, kind: 'parallel', mobileX: 765, mobileY: 370 },
+  { p: .923, x: 1250, y: 905, kind: 'editor', mobileX: 1135 },
+  { p: .95, x: 1370, y: 970, kind: 'editor', mobileX: 1205, mobileY: 970 },
+  { p: .957, x: 825, y: 305, kind: 'agent' },
+  { p: .970, x: 825, y: 305, kind: 'agent' },
+  { p: .976, x: 1696, y: 370, kind: 'terminal' },
+  { p: .985, x: 1696, y: 370, kind: 'terminal' },
+  { p: 1, x: 1030, y: 660, kind: 'overview' },
 ];
 function cameraAt(p: number, width: number, height: number) {
   const mobile = width < 700;
   const fit = Math.min(width / WORLD_WIDTH, height / WORLD_HEIGHT) * .96;
   const scaleFor = (frame: CameraFrame) => {
     if (frame.kind === 'overview') return fit;
-    const span = mobile ? frame.kind === 'board' ? 330 : frame.kind === 'editor' ? 390 : frame.p <= .46 || (frame.p >= .875 && frame.p <= .905) ? 470 : 410
-      : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? 650 : 680;
-    const vertical = mobile ? frame.p <= .46 ? 650 : 540 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540;
+    const span = mobile ? frame.p >= .957 && frame.p <= .970 ? 620 : frame.p >= .976 ? 560 : frame.kind === 'board' ? 330 : frame.kind === 'editor' ? frame.p >= .923 ? 550 : 390 : frame.p <= .46 || (frame.p >= .873 && frame.p <= .902) || (frame.p >= .957 && frame.p <= .970) ? 470 : 410
+      : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? frame.p >= .923 ? 900 : 650 : 680;
+    const vertical = mobile ? frame.p >= .923 ? 740 : frame.p <= .46 ? 650 : 540 : frame.p >= .923 ? 740 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540;
     return Math.min(width / span, height / vertical) * (frame.zoom ?? 1);
   };
   const end = CAMERA.findIndex(frame => frame.p > p);
@@ -127,8 +130,8 @@ function cameraAt(p: number, width: number, height: number) {
     y: mix(ay, by, t) + (distance ? (bx - ax) / distance * arc : 0) };
   let scale = mix(scaleFor(a), scaleFor(b), t);
   if (mobile) {
-    if (p >= .875 && p <= .905) {
-      const drag = smooth(between(p, .865, .905));
+    if (p >= .873 && p <= .902) {
+      const drag = smooth(between(p, .873, .902));
       center.x = mix(70, 550, drag) + 215;
       center.y = mix(90, 95, drag) + 275;
     }
@@ -147,21 +150,23 @@ function focusAt(p: number): DemoTile | null {
   if (p >= .735 && p < .775) return 'note';
   if (p >= .78 && p < .82) return 'browser';
   if (p >= .82 && p < .86) return 'shell';
-  if (p >= .865 && p < .905) return 'stabilize';
-  if (p >= .905 && p < .96) return 'browser';
+  if (p >= .873 && p < .902) return 'stabilize';
+  if (p >= .909 && p < .923 || p >= .93 && p < .95) return 'browser';
+  if (p >= .957 && p < .970) return 'stabilize';
+  if (p >= .976 && p < .985) return 'shell';
   return null;
 }
 function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): Record<DemoTile, TileFrameSnapshot> {
   const neutral = { active: false, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 };
   const base = (id: DemoTile, x: number, y: number, width: number, height: number): TileFrameSnapshot => ({ x, y, width, height,
     visible: id !== 'stabilize' || p >= .34, selected: id === selected, zIndex: id === selected ? 20 : 2, drag: { ...neutral } });
-  const mainDrag = smooth(between(p, .865, .905));
+  const mainDrag = smooth(between(p, .873, .902));
   const mainX = mix(70, 550, mainDrag);
   // CanvasAutoLayoutEngine.solveMemberMove: baseline-relative minimal pushes,
   // then an origin exchange when the active center enters verify's old slot.
   // Invert the smooth pointer path to keep the latch seekable and continuous.
   const latchFraction = (550 - 430 / 2 - 70) / 480;
-  const latchTime = .865 + .04 * (.5 - Math.sin(Math.asin(1 - 2 * latchFraction) / 3));
+  const latchTime = .873 + .029 * (.5 - Math.sin(Math.asin(1 - 2 * latchFraction) / 3));
   const gap = 8; // TileGapResolver.defaultGap.
   const pushX = Math.min(mainX, 550 - 430 / 2);
   const pushedVerify = Math.max(550, pushX + 430 + gap);
@@ -170,18 +175,25 @@ function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): 
   const swapRaw = between(p, latchTime, latchTime + .008);
   const swap = 1 - Math.pow(1 - swapRaw, 3); // Passive 110ms ease-out, projected onto scroll.
 
-  const editorDrag = smooth(between(p, .905, .925));
-  const resize = between(p, .93, .96); // Pointer-owned live dimensions, no spring.
+  const editorDrag = smooth(between(p, .909, .923));
+  const resize = between(p, .93, .95);
+  const mainResize = between(p, .957, .970);
+  const shellResize = between(p, .976, .985);
+  const mainWidth = mix(430, 550, mainResize);
+  const auditX = Math.max(mix(pushedAudit, 988, swap), mainResize > 0 ? 550 + mainWidth + gap : 980);
+  const shellX = Math.max(mix(pushedShell, 1370, swap), mainResize > 0 ? auditX + 340 + gap : 1370);
+  const shellHeight = mix(470, 560, shellResize);
+  const editorY = Math.max(mix(680, 690, editorDrag), shellResize > 0 ? 90 + shellHeight + gap : 680); // Pointer-owned live dimensions, no spring.
   const frames: Record<DemoTile, TileFrameSnapshot> = {
-    stabilize: base('stabilize', mainX, mix(90, 95, mainDrag), 430, 550),
+    stabilize: base('stabilize', mainX, mix(90, 95, mainDrag), mainWidth, mix(550, 420, mainResize)),
     verify: base('verify', mix(pushedVerify, 70, swap), 90, 380, 470),
-    audit: base('audit', mix(pushedAudit, 980, swap), 90, 340, 450),
-    shell: base('shell', mix(pushedShell, 1370, swap), 90, 300, 470),
+    audit: base('audit', auditX, 90, 340, 450),
+    shell: base('shell', shellX, 90, mix(300, 480, shellResize), shellHeight),
     note: base('note', 70, 680, 800, 430),
-    browser: base('browser', mix(920, 970, editorDrag), mix(680, 690, editorDrag), mix(mobile ? 330 : 560, mobile ? 350 : 620, resize), mix(430, 390, resize)),
+    browser: base('browser', mix(920, 970, editorDrag), editorY, mix(mobile ? 330 : 560, mobile ? 470 : 800, resize), mix(430, 560, resize)),
   };
-  frames.stabilize.drag.active = p >= .865 && p < .905;
-  frames.browser.drag.active = p >= .905 && p < .925;
+  frames.stabilize.drag.active = p >= .873 && p < .902;
+  frames.browser.drag.active = p >= .909 && p < .923;
   return frames;
 }
 function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>): Record<DemoTile, TileMotion> {
@@ -204,9 +216,11 @@ function targetAt(p: number): CursorTarget {
   if (p >= .735 && p < .775) return 'board-placement';
   if (p >= .775 && p < .82) return 'editor-line';
   if (p >= .82 && p < .86) return 'shell-input';
-  if (p >= .865 && p < .905) return 'stabilize-header';
-  if (p >= .905 && p < .93) return 'editor-header';
-  if (p >= .93 && p < .96) return 'editor-resize';
+  if (p >= .86 && p < .903) return 'stabilize-header';
+  if (p >= .903 && p < .923) return 'editor-header';
+  if (p >= .923 && p < .95) return 'editor-resize';
+  if (p >= .95 && p < .970) return 'stabilize-resize';
+  if (p >= .970 && p < .985) return 'shell-resize';
   return null;
 }
 /** A complete seekable state: reverse/direct jumps never accumulate animation. */
@@ -220,20 +234,24 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const tileFrames = frameSnapshots(p, width < 700, selectedTile);
   const creationStage: CreationStage = p < .27 ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
   const ghostFrame = tileFrames.stabilize;
+  const resizing: DemoTile | null = p >= .93 && p < .95 ? 'browser' : p >= .957 && p < .970 ? 'stabilize' : p >= .976 && p < .985 ? 'shell' : null;
+  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
+  const approach = approaches.find(([start, end]) => p >= start && p < end);
+  const held = tileFrames.stabilize.drag.active || tileFrames.browser.drag.active || !!resizing;
   return {
     progress: p, step: step.id, caption: step.caption,
-    heroOpacity: 1 - between(p, 0, .18), chromeOpacity: between(p, .10, .26), takeover: smooth(between(p, .08, .26)),
+    heroOpacity: 1 - between(p, 0, .18), chromeOpacity: smooth(between(p, .10, .18)), takeover: smooth(between(p, .08, .26)),
     camera: cameraAt(p, width, height), tiles: tileMotions(tileFrames), tileFrames,
     mainCreated: p >= .34, selectedTile, focusedTile,
     creation: { stage: creationStage, query: creationStage === 'command' ? type('Agent', p, .272, .285) : '', provider: 'Codex', model: 'GPT-5.6 Sol' },
     cursorTarget: reducedMotion ? null : targetAt(p),
     menuTarget: creationStage === 'command' ? 'creation-agent' : creationStage === 'models' ? 'creation-model' : p >= .47 && p < .505 ? 'verify-provider' : null,
-    snapPreview: !reducedMotion && p >= .875 && p < .905 ? { tile: 'stabilize', x: 550, y: 95, width: ghostFrame.width, height: ghostFrame.height,
-      opacity: smooth(between(p, .875, .88)), scale: mix(.96, 1, smooth(between(p, .875, .88))) } : null,
-    resizeReadout: !reducedMotion && p >= .93 && p < .96 ? { width: Math.round(tileFrames.browser.width), height: Math.round(tileFrames.browser.height - 24) } : null,
+    snapPreview: !reducedMotion && p >= .88 && p < .902 ? { tile: 'stabilize', x: 550, y: 95, width: ghostFrame.width, height: ghostFrame.height,
+      opacity: smooth(between(p, .88, .885)), scale: mix(.96, 1, smooth(between(p, .88, .885))) } : null,
+    resizeReadout: !reducedMotion && resizing ? { tile: resizing, width: Math.round(tileFrames[resizing].width), height: Math.round(tileFrames[resizing].height - 24) } : null,
     boardProgress: between(p, .735, .845), boardDetail: !reducedMotion && p >= .755 && p < .775, editorProgress: between(p, .775, .82),
-    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .96,
-      pressed: [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
+    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .985, approach: approach ? smooth(between(p, approach[0], approach[1])) : 1, fromTarget: approach?.[2] ?? null,
+      pressed: held || [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
     typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
     status: { stabilize: p < .435 ? 'Ready' : p < .855 ? 'Working' : 'Complete',
       verify: p < .56 ? 'Ready' : p < .595 ? 'Working' : p < .68 ? 'Needs approval' : p < .855 ? 'Working' : 'Passed',
