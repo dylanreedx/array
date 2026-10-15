@@ -21,10 +21,7 @@ enum ChoiceIcon: Equatable {
             source = CanvasSymbolImage.image(named: name)
         case .provider(let model):
             if model == "pi" {
-                source = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-                    ("π" as NSString).draw(in: rect, withAttributes: [.font: NSFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: NSColor.black])
-                    return true
-                }
+                source = BrandMark96.load("pi")
             } else {
                 source = BrandMark96.mark(forModel: model) ?? CanvasSymbolImage.image(named: "cpu")
             }

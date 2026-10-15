@@ -102,6 +102,26 @@ enum WorkspaceChromePolishChecks {
         try expect(choices.qaVisibleIconIDs == Set(footer.harnessButton.items.map(\.id)), "harness option icons are not rendered")
         try expect(ProviderModelGrouping.groups(from: footer.modelButton.items).flatMap(\.models).allSatisfy { $0.icon?.image() != nil }, "model picker projection lost provider icons")
         try expect(footer.harnessButton.selectedIcon?.image() != nil && footer.modelButton.selectedIcon?.image() != nil, "closed harness/model selectors need icons")
+        // Pi is drawn with pi's own three-block mark, never the math symbol π.
+        func pixels(_ image: NSImage?) -> Data? {
+            guard let image, let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8,
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            image.draw(in: NSRect(x: 0, y: 0, width: 36, height: 36))
+            NSGraphicsContext.restoreGraphicsState()
+            return rep.representation(using: .png, properties: [:])
+        }
+        let piMark = BrandMark96.load("pi")
+        try expect(piMark != nil, "the Pi brand mark is not bundled (BrandMarks/pi.svg)")
+        guard let piOption = footer.harnessButton.items.first(where: { $0.id == AgentHarness.pi.rawValue }) else {
+            throw Failure(description: "harness picker has no Pi option")
+        }
+        let piMarkTemplate = (piMark?.copy() as? NSImage).map { $0.isTemplate = true; return $0 }
+        try expect(pixels(piOption.icon?.image()) == pixels(piMarkTemplate),
+                   "the Pi harness icon is not pi's brand mark (it draws the math symbol π)")
         let artifact = URL(fileURLWithPath: "qa-runs/chrome-polish", isDirectory: true)
         try FileManager.default.createDirectory(at: artifact, withIntermediateDirectories: true)
         func capture(_ view: NSView, name: String) throws {

@@ -23,6 +23,7 @@ nothing here does.
 | `xai-light.svg` | xAI / Grok | light | `46e9e816…107f3566` | none — renamed only |
 | `xai-dark.svg` | xAI / Grok | dark | `a2d3a91c…132c4128` | none — renamed only |
 | `gemini.svg` | Google / Gemini | single (masked, own gradient) | `9433d6ef…edc36760` | none — renamed only |
+| `pi.svg` | Pi (pi coding agent) | single (`fill="#111111"`, painted as a template) | `f204d9d5…89f78775` | none — copied from `website/public/provider-pi.svg` (2026-10-13), replacing the π character |
 
 No file has been edited. Renaming to a semantic key is the only change.
 

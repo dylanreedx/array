@@ -123,7 +123,7 @@ cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 ditto "$CORE_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CORE_RESOURCE_BUNDLE"
 ditto "$APP_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$APP_RESOURCE_BUNDLE"
 mkdir -p "$OUTPUT/Contents/Resources/BrandMarks"
-for mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
+for mark in anthropic.svg gemini.svg openai-light.svg pi.svg xai-light.svg; do
   [[ -f "$BRAND_MARK_SOURCE/$mark" ]] || { echo "brand mark not found: $mark" >&2; exit 1; }
   cp "$BRAND_MARK_SOURCE/$mark" "$OUTPUT/Contents/Resources/BrandMarks/$mark"
 done

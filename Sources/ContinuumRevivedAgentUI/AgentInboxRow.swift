@@ -752,7 +752,7 @@ public enum AgentProviderGlyph {
         case "openai", "openai-codex": return "◈"
         case "anthropic": return "✦"
         case "google": return "✧"
-        case "pi": return "π"
+        case "pi": return "◇"  // never the math symbol; the image cell paints pi's own mark
         default: return "◇"
         }
     }

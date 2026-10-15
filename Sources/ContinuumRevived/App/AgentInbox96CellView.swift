@@ -215,6 +215,8 @@ enum BrandMark96 {
             key = "xai-light"
         case let p where p.hasPrefix("google"), let p where p.hasPrefix("gemini"):
             key = "gemini"
+        case let p where p == "pi" || p.hasPrefix("pi-"):
+            key = "pi"
         case let p where p.hasPrefix("gpt") || p.hasPrefix("o1") || p.hasPrefix("o3"):
             key = "openai-light"
         case let p where p.hasPrefix("opus") || p.hasPrefix("sonnet")

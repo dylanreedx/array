@@ -137,7 +137,7 @@ assert_eq "14.0" "$minimum_system" "LSMinimumSystemVersion"
 [[ -n "$bundle_short_version" ]] || { echo "FAIL: missing short version" >&2; exit 1; }
 [[ -n "$bundle_version" ]] || { echo "FAIL: missing bundle version" >&2; exit 1; }
 [[ -f "$RESOURCES/${icon_file%.icns}.icns" || -f "$RESOURCES/$icon_file" ]] || { echo "FAIL: missing icon resource for $icon_file" >&2; exit 1; }
-for brand_mark in anthropic.svg gemini.svg openai-light.svg xai-light.svg; do
+for brand_mark in anthropic.svg gemini.svg openai-light.svg pi.svg xai-light.svg; do
   [[ -s "$RESOURCES/BrandMarks/$brand_mark" ]] \
     || { echo "FAIL: missing provider brand mark $brand_mark" >&2; exit 1; }
 done
