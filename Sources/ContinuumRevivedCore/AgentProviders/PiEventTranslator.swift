@@ -424,13 +424,16 @@ public struct PiEventTranslator {
         switch rawReason.lowercased() {
         case "error", "failed", "failure":
             pendingRunOutcome = .failed
-            // pi carries the provider's failure on the assistant message.
+            // pi carries the provider's failure on the assistant message. The
+            // stopReason itself ("error") is no explanation, so when the text
+            // is withheld (I5) the card says so in words instead.
             let errorMessage = message["errorMessage"] as? String
             pendingRunErrorMessage = AgentContextFullRecovery.isContextFull(
                 provider: "pi",
                 candidates: [errorMessage, rawReason])
                 ? AgentContextFullRecovery.canonicalErrorMessage
-                : (AgentFailureText.providerMessage(errorMessage) ?? rawReason)
+                : (AgentFailureText.providerMessage(errorMessage)
+                    ?? "Pi ended the turn with a provider error.")
         case "aborted", "interrupted":
             pendingRunOutcome = .interrupted
             pendingRunErrorMessage = nil

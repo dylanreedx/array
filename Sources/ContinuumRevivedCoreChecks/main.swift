@@ -99,6 +99,14 @@ if CommandLine.arguments.contains("--agent-compaction-check") {
     Foundation.exit(0)
 }
 
+// The session-log readers alone (no tmux, no crash witnesses), for iterating on
+// relaunch hydration. The full run still includes this section.
+if CommandLine.arguments.contains("--transcript-rehydration-check") {
+    runTranscriptRehydrationChecks()
+    print("TranscriptRehydrationChecks passed")
+    Foundation.exit(0)
+}
+
 // CX-01 (`.plans/59`): targeted arms so the two new sections can run without the
 // process-spawning legs of the full run.
 if CommandLine.arguments.contains("--workspace-api-contract-check") {
@@ -131,6 +139,12 @@ if CommandLine.arguments.contains("--workspace-mcp-check") {
 // load-sensitive legs ahead of it in the full run.
 if CommandLine.arguments.contains("--pi-rpc-transport-check") {
     runPiRpcTransportChecks()
+    Foundation.exit(0)
+}
+// A provider refusal (model not on the user's plan) read "error" on the card.
+// Standalone: the bare CoreChecks run is KNOWN-RED.
+if CommandLine.arguments.contains("--pi-provider-failure-check") {
+    runPiProviderFailureChecks()
     Foundation.exit(0)
 }
 // CX-01 Phase 2a: agent.find / agent.inspect contracts and the pure ranker.
