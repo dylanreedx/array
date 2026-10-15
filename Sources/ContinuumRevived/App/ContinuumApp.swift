@@ -1182,6 +1182,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--floating-toolbar-agent-spawn-check") {
+            do {
+                _ = NSApplication.shared
+                try FloatingToolbarAgentSpawnChecks.run()
+                print("ContinuumRevivedFloatingToolbarAgentSpawnChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
@@ -10766,13 +10777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let toolbar = FloatingToolbarHostView(terminalProfiles: {
                 LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
             }, onSelection: { [weak self] selection in
-                guard let self else { return }
-                switch selection {
-                case .fanOutQueueSelection: _ = self.performPaletteAction(.fanOutQueueSelection)
-                case let .palette(action): _ = self.performPaletteAction(action)
-                case let .terminalProfile(id): _ = self.spawnTerminalFromProfile(id, trigger: "toolbar:terminal")
-                case let .agentHarness(harness): _ = self.spawnManagedAgentForHarness(harness)
-                }
+                self?.handleFloatingToolbarSelection(selection)
             })
             toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
             toolbar.zoneDrawing = canvasView
@@ -14443,6 +14448,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @objc func createBrowserFromMenu(_ sender: Any?) { _ = performPaletteAction(.newBrowser) }
     @objc func createFileTreeFromMenu(_ sender: Any?) { _ = performPaletteAction(.openFileTree) }
 
+    /// Every choice the in-canvas creation toolbar makes. A named method rather
+    /// than the closure body so `--floating-toolbar-agent-spawn-check` drives the
+    /// exact dispatch `FloatingToolbarHostView.onSelection` reaches in production.
+    func handleFloatingToolbarSelection(_ selection: FloatingToolbarHostView.Selection) {
+        switch selection {
+        case .fanOutQueueSelection: _ = performPaletteAction(.fanOutQueueSelection)
+        case let .palette(action): _ = performPaletteAction(action)
+        case let .terminalProfile(id): _ = spawnTerminalFromProfile(id, trigger: "toolbar:terminal")
+        case let .agentHarness(harness): _ = spawnManagedAgentForHarness(harness)
+        }
+    }
+
     /// Explicit provider choice belongs to this new agent, never global Settings.
     @discardableResult
     private func spawnManagedAgentForHarness(_ harness: AgentHarness) -> Bool {
@@ -14499,7 +14516,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // seam — the palette closes on dispatch either way, so it has to speak.
             return false
         case let .failure(error):
+            // Said where the person looks, like the refusal above: this path
+            // failed silently while the toolbar showed "SpawnError error 2".
             fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
+            presentSpawnRefusal(error.localizedDescription)
             return false
         }
     }
@@ -17285,9 +17305,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runtime.document.zones.first(where: { $0.zoneId == armed && $0.projectId != nil })
             }
         }
+        // The last rung is the canvas's BOOT zone, written once when the canvas is
+        // built and never by a workspace switch. It only answers while the mounted
+        // document still contains it: in any other workspace it names a zone that
+        // is not on screen, and creation "scoped" there installed into no layer and
+        // failed with SpawnError.canvasUnavailable instead of asking for a project.
+        let bootZone = canvasView?.activeZone.flatMap { zone -> ZonePlacement? in
+            guard zone.projectId != nil else { return nil }
+            guard let runtime = workspaceRuntime else { return zone }
+            return runtime.document.zones.contains(where: { $0.zoneId == zone.zoneId }) ? zone : nil
+        }
         let zonePlacement = canvasView?.activeProjectZonePlacement
             ?? armedFromDocument
-            ?? canvasView?.activeZone.flatMap { $0.projectId == nil ? nil : $0 }
+            ?? bootZone
         let zoneScope: CreationScope? = zonePlacement.flatMap { zone in
             guard let projectId = zone.projectId, let projectRoot = root(for: projectId) else { return nil }
             return CreationScope(projectId: projectId, projectRoot: projectRoot, homeRelativePath: zone.homeRelativePath, source: .zone, zoneId: zone.zoneId)
@@ -17376,8 +17406,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // — spawning into a DEPARTED project. Give it somewhere to land
                 // first. This one insertion is what repairs terminal, managed agent
                 // and file tree in an empty workspace, not just note and browser.
-                if workspaceRuntime?.controller(for: selection.project.id) == nil {
+                //
+                // The test is a ZONE in the mounted document, not a live controller:
+                // a project kept warm by another workspace has a controller and no
+                // zone here, and spawning into it installed into no layer
+                // (SpawnError.canvasUnavailable). A project another workspace owns
+                // is offered that workspace instead; if nothing gives it a zone
+                // here, nothing is spawned — the offer or the error has spoken.
+                @MainActor func projectZoneId() -> UUID? {
+                    workspaceRuntime?.document.zones.first(where: { $0.projectId == selection.project.id })?.zoneId
+                }
+                if projectZoneId() == nil {
                     addProjectZone(projectId: selection.project.id)
+                }
+                guard projectZoneId() != nil else {
+                    projectHomePicker = nil
+                    return
                 }
                 // T3 (`.plans/47`): the pick has to ARM, not just apply once.
                 //
@@ -17395,11 +17439,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // applies to this spawn; a zone's default Home changes through
                 // "Change Home…", matching `homeRelativePath`'s documented rule
                 // that changing it never retargets what already exists.
-                if let zoneId = workspaceRuntime?.document.zones
-                    .first(where: { $0.projectId == selection.project.id })?.zoneId {
+                var armedScope = scope
+                if let zoneId = projectZoneId() {
                     workspaceRuntime?.setActiveZone(zoneId, reason: .explicit)
+                    // Name the zone in the scope too, so the spawn frames and
+                    // installs against it and builds its layer if it has none.
+                    armedScope.zoneId = zoneId
                 }
-                explicitCreationScopeOverride = scope
+                explicitCreationScopeOverride = armedScope
                 defer { explicitCreationScopeOverride = nil }
                 projectHomePicker = nil
                 action()
@@ -17535,6 +17582,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA: press the presented project/Home picker's row for `projectId` (and
     /// folder, when `homeRelativePath` is set), reaching the real `onConfirm`.
     /// False when no picker is presented or it does not offer that project.
+    var qaIsCreationScopePickerPresented: Bool { projectHomePicker != nil }
+
+    /// QA: answer the "already in another workspace" offer without an NSAlert.
+    /// The provider receives the OWNING workspace's id.
+    func qaSetProjectWorkspaceConflictSwitchProvider(_ provider: @escaping (UUID) -> Bool) {
+        projectWorkspaceConflictSwitchProvider = { provider($0.workspaceId) }
+    }
+
     func qaConfirmProjectHomePicker(projectId: UUID, homeRelativePath: String?) -> Bool {
         projectHomePicker?.qaConfirm(projectId: projectId, relativePath: homeRelativePath) ?? false
     }

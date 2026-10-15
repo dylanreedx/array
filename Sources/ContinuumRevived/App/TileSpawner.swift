@@ -20,11 +20,27 @@ final class TileSpawner {
         case failure(Error)
     }
 
-    enum SpawnError: Error {
+    enum SpawnError: Error, LocalizedError {
         case canvasUnavailable
         case invalidPaneId(String)
         case agentLaunchSelectionRequired
         case noteIndexMissing(UUID)
+
+        /// Shown verbatim in the workspace notification. Without it Foundation
+        /// bridged these to "The operation couldn't be completed.
+        /// (ContinuumRevived.TileSpawner.SpawnError error 2.)".
+        var errorDescription: String? {
+            switch self {
+            case .canvasUnavailable:
+                return "Nothing was created: the zone it was meant for isn't on the canvas. Click a zone, or choose a project, and try again."
+            case let .invalidPaneId(paneId):
+                return "Nothing was created: the terminal pane \(paneId) couldn't be found."
+            case .agentLaunchSelectionRequired:
+                return "Nothing was created: choose an agent and model in Settings → Agents first."
+            case .noteIndexMissing:
+                return "That note couldn't be found in this project's notes."
+            }
+        }
     }
 
     struct AnnotatedProfile {

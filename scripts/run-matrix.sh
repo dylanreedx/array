@@ -480,6 +480,10 @@ run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
 run_app_check .build/debug/Array --floating-toolbar-check
+# 0.7.27: the toolbar's agent menu, through the boot mount, in every zone of a
+# multi-project workspace and in a fresh workspace after a switch, where the
+# stale boot zone made every choice fail with "SpawnError error 2".
+run_app_check .build/debug/Array --floating-toolbar-agent-spawn-check
 # Ordered HERE, ahead of the KNOWN-RED restore leg below: this script is
 # `set -euo pipefail` with bare calls, so it aborts at the first red leg and
 # everything after it never runs. A witness the gate cannot reach never runs at all.
