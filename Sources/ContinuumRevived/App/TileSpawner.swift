@@ -1800,16 +1800,28 @@ final class TileSpawner {
     /// outlive its model.
     func spawnManagedAgentForSelectedModel(
         _ selection: String?,
-        defaults: UserDefaults = .standard,
+        defaults injectedDefaults: UserDefaults? = nil,
         announceRefusal: @MainActor (String) -> Void = TileSpawner.announceManagedAgentModelRefusal,
         wire: (UUID, AgentLaunchSelection) -> Void
     ) -> ManagedAgentSelectionOutcome {
+        // The spawner's OWN defaults unless a caller names others. Defaulting to
+        // `.standard` here meant File > New > Agent ignored the suite a check had
+        // injected through `spawnerDefaults` and read whatever the shared domain held.
+        let defaults = injectedDefaults ?? self.defaults
         guard let launchSelection = AgentModelConfig.launchSelection(model: selection, defaults: defaults), AgentModelConfig.validates(launchSelection) else {
-            // `resolved` returns nil only for a non-nil selection outside the
-            // catalogue, so this is always a real id someone picked.
-            let refused = selection ?? ""
-            announceRefusal(Self.managedAgentModelRefusalMessage(for: refused))
-            return .refusedModel(refused)
+            guard let selection else {
+                // No explicit choice: File > New > Agent, or ⌘K's plain New Agent.
+                // What was refused is the SETTINGS default, which a narrowed live
+                // catalogue or a harness switch can leave behind. It is named, not
+                // substituted: strict selection never runs a model nobody chose.
+                let harness = AgentHarnessConfig.resolved(defaults: defaults)
+                let configured = defaults.string(forKey: AgentModelConfig.modelKey)
+                    ?? AgentModelConfig.defaultModel(for: harness) ?? ""
+                announceRefusal(Self.managedAgentDefaultModelRefusalMessage(model: configured, harness: harness))
+                return .refusedModel(configured)
+            }
+            announceRefusal(Self.managedAgentModelRefusalMessage(for: selection))
+            return .refusedModel(selection)
         }
         switch spawnManagedAgent(launchSelection: launchSelection) {
         case let .spawned(tileId):
@@ -1831,6 +1843,18 @@ final class TileSpawner {
 
     static func managedAgentModelRefusalMessage(for selection: String) -> String {
         "New agent refused: \(selection) is no longer offered by the model catalogue (a live model probe narrowed it while the command center was open) — no tile and no agent were created. Reopen the command center and choose from the current list."
+    }
+
+    static func managedAgentDefaultModelRefusalMessage(model: String, harness: AgentHarness) -> String {
+        let fix = "no tile and no agent were created. Choose a \(harness.rawValue) model in Settings → Agents, or check Help → Environment Setup."
+        guard !model.isEmpty else {
+            return "New agent refused: \(harness.rawValue) has not offered any model yet — \(fix)"
+        }
+        guard AgentModelConfig.modelOptions(for: harness).contains(model),
+              AgentHarnessConfig.isProviderCompatible(model: model, harness: harness) else {
+            return "New agent refused: the default model \(model) is not offered by \(harness.rawValue) — \(fix)"
+        }
+        return "New agent refused: \(harness.rawValue) is not ready to run \(model) — \(fix)"
     }
 
     /// A tile for an agent that ALREADY EXISTS — revealing a tileless agent from the
@@ -2069,6 +2093,32 @@ final class TileSpawner {
 
         try expect(refusals.count == 2,
                    "an accepted spawn spoke a refusal: \(refusals)")
+
+        // MARK: 4b · a Settings default the harness does not offer is NAMED, not blank
+
+        // The preview app's real state on 2026-10-15: harness Pi, default model an
+        // anthropic id Pi never offers. File > New > Agent passes no selection, and
+        // the refusal used to read "New agent refused:  is no longer offered…" —
+        // an empty name, blaming a command center nobody had opened.
+        let departedDefault = "anthropic/claude-opus-5"
+        try expect(!AgentModelConfig.modelOptions(for: .pi).contains(departedDefault),
+                   "the Pi QA catalogue offers \(departedDefault); this witness is testing nothing")
+        defaults.set(departedDefault, forKey: AgentModelConfig.modelKey)
+        let tilesBeforeDefaultRefusal = canvas.canvasState.tiles.count
+        let wiredBeforeDefaultRefusal = wired.count
+        let defaultRefused = spawner.spawnManagedAgentForSelectedModel(
+            nil,
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case let .refusedModel(defaultRefusedID) = defaultRefused, defaultRefusedID == departedDefault else {
+            throw CheckError(description: "a Settings default outside the harness catalogue must be refused and named, never substituted: \(defaultRefused)")
+        }
+        try expect(canvas.canvasState.tiles.count == tilesBeforeDefaultRefusal && wired.count == wiredBeforeDefaultRefusal,
+                   "a refused Settings default still built a tile or wired a record")
+        try expect(refusals.count == 3 && refusals[2].contains(departedDefault)
+                   && refusals[2].contains(AgentHarness.pi.rawValue) && refusals[2].contains("Settings"),
+                   "the refusal must name the departed default, its harness, and where to fix it: \(refusals)")
 
         // MARK: 5 · and production still goes through both witnessed seams
 

@@ -470,7 +470,14 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         button.selectedID = current
         button.onSelection = { [weak self] item in
             guard let self else { return }
-            field.setValue(.string(item.id), in: self.defaults)
+            // Validated against the harness snapshot the picker is SHOWING, not
+            // `field`'s options: those were frozen when the schema was built, so
+            // after a harness switch or a catalogue refresh `setValue` rejected the
+            // pick and stored the Claude seed instead. Re-picking the ⚠ row of an
+            // incompatible stored model writes nothing; it stays visibly invalid.
+            let harness = AgentHarnessConfig.resolved(defaults: self.defaults)
+            guard AgentModelCatalog.shared.snapshot(for: harness).models.contains(item.id) else { return }
+            self.defaults.set(item.id, forKey: AgentModelConfig.modelKey)
             self.notifySettingsChanged(for: field)
         }
         modelPickerButtonForQA = button
@@ -1321,10 +1328,14 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             guard let picker = panel.modelPickerButtonForQA else {
                 throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: default-model picker missing")
             }
-            guard picker.items.map(\.id) == AgentModelConfig.modelOptions else {
+            // The catalogue of the harness THIS panel's defaults select. The bare
+            // `modelOptions` reads the shared standard domain, so a harness another
+            // leg left there made this diverge in the matrix and pass alone.
+            let panelModelOptions = AgentModelConfig.modelOptions(for: AgentHarnessConfig.resolved(defaults: defaults))
+            guard picker.items.map(\.id) == panelModelOptions else {
                 throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picker items diverge from the catalogue")
             }
-            if let target = AgentModelConfig.modelOptions.last {
+            if let target = panelModelOptions.last {
                 _ = picker.chooseForQA(id: target)
                 guard defaults.string(forKey: AgentModelConfig.modelKey) == target else {
                     throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picker choice did not write \(AgentModelConfig.modelKey)")
@@ -1415,6 +1426,16 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                   defaults.string(forKey: AgentModelConfig.modelKey) == "anthropic/claude-y" else {
                 throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: Pi snapshot leaked another harness or rewrote the incompatible model")
             }
+            // …and the model the person then PICKS under the new harness is the one
+            // stored. The panel's schema was built once, against the harness and
+            // catalogue of the moment it opened, and the pick used to be validated
+            // against that frozen list: a Pi model was "not an option" and the
+            // write fell back to the Claude seed — a Settings default the Pi
+            // harness never offers, which File > New > Agent then refuses.
+            guard panel.modelPickerButtonForQA?.chooseForQA(id: "google/gemini-z") == true,
+                  defaults.string(forKey: AgentModelConfig.modelKey) == "google/gemini-z" else {
+                throw SettingsPanelSelfCheckError.sectionFieldsNotRendered("agents: picking a Pi model after switching harness stored \(defaults.string(forKey: AgentModelConfig.modelKey) ?? "nil") instead of google/gemini-z")
+            }
             AgentModelCatalog.shared.resetForQA()
         }
 
@@ -1461,31 +1482,20 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Drives the real keybind-edit path: capture → persist → re-resolve →
-    /// live-apply hook → row re-render. Uses an isolated suite and scrubs/
-    /// restores the global-domain `continuum.keymap.*`/`continuum.tileKeymap.*`
-    /// keys so a developer machine's overrides cannot leak into the suite's
-    /// search list.
+    /// live-apply hook → row re-render. Uses a suite that answers only from itself,
+    /// so global-domain `continuum.keymap.*`/`continuum.tileKeymap.*` overrides
+    /// cannot leak in and NSGlobalDomain is never rewritten to scrub them.
     static func runKeybindEditSelfCheck() throws {
         func fail(_ m: String) -> KeybindEditSelfCheckError { .message(m) }
 
         let suite = "continuum.keybindEdit.selfcheck.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else {
+        // Answers only from itself: a plain suite inherits NSGlobalDomain, and this
+        // check used to scrub keymap overrides by rewriting every app's shared
+        // preferences from a snapshot, and restore them, every run.
+        guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
             throw fail("could not create isolated UserDefaults suite")
         }
-
-        // Scrub keymap overrides out of the global domain (which the suite
-        // inherits) and restore them on exit.
-        let globalDomainName = UserDefaults.globalDomain
-        let originalGlobalDomain = defaults.persistentDomain(forName: globalDomainName) ?? [:]
-        var scrubbed = originalGlobalDomain
-        for key in scrubbed.keys where key.hasPrefix("continuum.keymap.") || key.hasPrefix("continuum.tileKeymap.") {
-            scrubbed.removeValue(forKey: key)
-        }
-        defaults.setPersistentDomain(scrubbed, forName: globalDomainName)
-        defer {
-            defaults.setPersistentDomain(originalGlobalDomain, forName: globalDomainName)
-            defaults.removePersistentDomain(forName: suite)
-        }
+        defer { defaults.removePersistentDomain(forName: suite) }
 
         let sections = SettingsSchema.sections()
         let baseKeymap = NavKeymap.resolve(defaults: defaults, warn: { _ in })
