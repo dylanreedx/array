@@ -60,7 +60,7 @@
 }
 
 /* One continuous stage: floating surfaces settle before the narrated camera tour. */
-.living-assembly[data-guided-demo] { height: 680svh; }
+.living-assembly[data-guided-demo] { height: 970svh; }
 [data-guided-demo] .hero-copy { opacity: var(--demo-hero-opacity, 1); }
 body:has([data-guided-demo]) .production-header {
   opacity: var(--demo-nav-opacity, 1);
