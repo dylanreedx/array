@@ -34,6 +34,7 @@ enum ManagedAgentPageZoomChecks {
     }
 
     static func run() throws {
+        try checkCompactActionFitsTheStatusRowAtEveryRung()
         try checkStepGeometryAtTwoTileSizes()
         try checkOuterChromeAndModelAreUntouched()
         try checkHitTargetsFollowTheirControls()
@@ -191,6 +192,110 @@ enum ManagedAgentPageZoomChecks {
 
     private static let steps = AgentPageZoom.steps.map(AgentPageZoom.init(percent:))
 
+    // MARK: - 0. The warning row's Compact action fits at every rung
+
+    /// The compact status row at warning context carries a Compact action. At
+    /// narrow widths and small rungs it must give way — never push the row past
+    /// its own edge. Asserted on the RENDERED frames of every visible view in
+    /// the row, for both orders a real tile produces: the rung arriving before
+    /// the reading, and the rung changing under a row already showing it at an
+    /// unchanged width.
+    private static func checkCompactActionFitsTheStatusRowAtEveryRung() throws {
+        let warning = AgentCompactStatusPresentation(
+            location: .init(
+                symbolName: "arrow.triangle.branch", text: "array-feature-branch",
+                accessibilityLabel: "Home and Where: array-feature-branch.",
+                detailText: "array-feature-branch", isExternal: false),
+            activity: .init(
+                phase: .running, symbolName: "terminal", text: "Running", elapsedText: "1m 12s",
+                accessibilityLabel: "Activity: running.", detailText: "Activity phase: running.",
+                showsThinkingIndicator: false),
+            context: AgentRadialContextMeterPresentation(
+                state: .warning, fraction: 0.82, label: "82%",
+                accessibilityLabel: "Context window 82 percent used.",
+                detailText: "82 percent used", warningMarker: "⚠︎"),
+            quotas: [], cost: nil,
+            enabledElements: [.location, .activity, .contextMeter])
+
+        // An NSButton's own title field is AppKit's: the inline bezel lays it
+        // out 4pt wider than the button on each side (the Location actions
+        // "⋯" does the same) while its glyphs stay inside. The row owns the
+        // button's frame, not that private subview.
+        func visibleDescendants(of view: NSView) -> [NSView] {
+            view.subviews.filter { !$0.isHidden }.flatMap { child in
+                [child] + (child is NSButton ? [] : visibleDescendants(of: child))
+            }
+        }
+
+        func assertFits(_ row: AgentCompactStatusRowView, _ label: String) throws {
+            row.layoutSubtreeIfNeeded()
+            for view in visibleDescendants(of: row) {
+                let frame = view.convert(view.bounds, to: row)
+                guard frame.width > 0 else { continue }
+                try expect(
+                    frame.minX >= row.bounds.minX - 0.5 && frame.maxX <= row.bounds.maxX + 0.5,
+                    "\(label): \(type(of: view)) escapes the compact status row "
+                    + "(\(frame.minX)…\(frame.maxX) vs 0…\(row.bounds.width))")
+            }
+            let labels = (row.accessibilityChildren() ?? []).compactMap { ($0 as? NSButton)?.accessibilityLabel() }
+            if row.qaDroppedElements.contains(.contextMeter) {
+                // The ring went, so its action went with it — never an
+                // invisible control still announced to VoiceOver.
+                try expect(
+                    !row.qaCompactContextButtonVisible && labels == ["Location actions"],
+                    "\(label): the context meter was dropped but its Compact action is still "
+                    + "exposed (visible \(row.qaCompactContextButtonVisible), children \(labels))")
+                return
+            }
+            try expect(
+                row.qaCompactContextButtonVisible && row.qaCompactContextButtonEnabled,
+                "\(label): the warning row kept its meter but lost its Compact action")
+            guard let frame = row.qaCompactContextButtonFrame else {
+                throw fail("\(label): the visible Compact button has no frame in the row")
+            }
+            try expect(
+                frame.width > 0 && row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame),
+                "\(label): the Compact button sits outside the row (\(frame) vs \(row.bounds))")
+            try expect(
+                labels == ["Location actions", "Compact context"],
+                "\(label): the warning row exposes \(labels) instead of Location actions + Compact context")
+        }
+
+        var sawIconOnly = false
+        var sawTitled = false
+        for width in [CGFloat(260), 275, 300, 320, 341, 360, 420, 560] {
+            for zoom in steps {
+                let label = "compact row \(Int(width))pt @\(zoom.percent)%"
+                // Rung first, then the reading.
+                let row = AgentCompactStatusRowView()
+                row.applyPageZoom(zoom)
+                row.frame = NSRect(
+                    x: 0, y: 0, width: width, height: AgentCompactStatusRowView.preferredHeight(zoom: zoom))
+                row.apply(warning)
+                try assertFits(row, label)
+                if row.qaCompactContextButtonVisible {
+                    if row.qaCompactContextButtonIsIconOnly { sawIconOnly = true } else { sawTitled = true }
+                }
+
+                // Reading first at 100%, then the rung changes at this width.
+                let rezoomed = AgentCompactStatusRowView()
+                rezoomed.frame = NSRect(
+                    x: 0, y: 0, width: width, height: AgentCompactStatusRowView.preferredHeight)
+                rezoomed.apply(warning)
+                rezoomed.layoutSubtreeIfNeeded()
+                rezoomed.applyPageZoom(zoom)
+                // The tile's row-height constraint does this in production; the
+                // width — the dimension under test — is left alone.
+                rezoomed.setFrameSize(NSSize(
+                    width: width, height: AgentCompactStatusRowView.preferredHeight(zoom: zoom)))
+                try assertFits(rezoomed, "\(label) (rezoomed in place)")
+            }
+        }
+        // Both shapes are reached, or the sweep did not exercise the give-way.
+        try expect(sawIconOnly, "no width/rung reduced the Compact action to its icon")
+        try expect(sawTitled, "no width/rung showed the titled Compact action")
+    }
+
     // MARK: - 1. Six-step geometry, two tile sizes, no clipping at 150%
 
     private static func checkStepGeometryAtTwoTileSizes() throws {
@@ -202,6 +307,21 @@ enum ManagedAgentPageZoomChecks {
             guard let transcript = tile.qaTranscriptForChecks else {
                 throw fail("\(label): no transcript")
             }
+            // A warning reading, so the status row's Compact action is ON SCREEN
+            // for every rung of the sweep below rather than hidden in it.
+            let now = Date()
+            let root = URL(fileURLWithPath: "/Users/qa/Projects/continuum", isDirectory: true)
+            tile.qaApplyCompactStatusFacts(
+                .init(turn: .active(startedAt: now.addingTimeInterval(-72), stream: .commandOutput,
+                                    streamStartedAt: now.addingTimeInterval(-72))),
+                location: AgentLocationSnapshot(
+                    home: AgentHome(projectId: nil, projectRoot: root, checkoutRoot: root),
+                    whereDirectory: root.appendingPathComponent("Sources/ContinuumRevived", isDirectory: true)),
+                contextWindow: AgentContextWindowSnapshot(
+                    usedTokens: 105_000, maxTokens: 128_000, observedAt: now,
+                    source: .providerSessionStats, freshness: .live),
+                now: now)
+            var sweptCompactAction = false
 
             var headerHeights: [CGFloat] = []
             var composeInsets: [CGFloat] = []
@@ -249,8 +369,21 @@ enum ManagedAgentPageZoomChecks {
                     + "\(transcript.qaPageZoomPercent)% / layout \(transcript.qaLayoutPageZoomPercent)%"
                 )
 
+                let statusRow = tile.qaCompactStatusRow
+                try expect(
+                    statusRow.qaContextState == .warning,
+                    "\(label) @\(zoom.percent)%: the status row is not showing the warning reading")
+                if statusRow.qaCompactContextButtonVisible { sweptCompactAction = true }
+
                 // No horizontal overflow, at ANY rung. A view wider than the box
                 // that clips it is content the reader cannot reach.
+                //
+                // A HIDDEN view is not content: it draws nothing and takes no
+                // hits. NSStackView keeps a hidden arranged subview attached at
+                // whatever frame it last had, so sweeping it reports geometry the
+                // reader never sees — a hidden Compact button still at its
+                // `NSButton(title:)` size, parked at its group's origin, read as
+                // 2.5pt past the tile at 80%.
                 //
                 // The comparison is against each view's NEAREST CLIPPING
                 // ancestor, not always the content root, and a subtree inside a
@@ -260,7 +393,8 @@ enum ManagedAgentPageZoomChecks {
                 // else — the header, the composer, every rail, every transcript
                 // row — has to fit.
                 var examined = 0
-                for view in descendants(of: tile.qaPageZoomContentRoot) where view.superview != nil {
+                for view in descendants(of: tile.qaPageZoomContentRoot)
+                where view.superview != nil && !view.isHiddenOrHasHiddenAncestor {
                     var clipper: NSView = tile.qaPageZoomContentRoot
                     var scrollsHorizontally = false
                     var walker: NSView? = view.superview
@@ -293,6 +427,10 @@ enum ManagedAgentPageZoomChecks {
                     "\(label) @\(zoom.percent)%: the transcript grew a horizontal scroller"
                 )
             }
+
+            try expect(
+                sweptCompactAction,
+                "\(label): no rung showed the warning row's Compact action, so the sweep never covered it")
 
             // Strictly monotonic in the rung — the whole point of the ladder.
             for (index, metrics) in [

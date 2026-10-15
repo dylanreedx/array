@@ -694,7 +694,12 @@ enum UIProbeGeometry {
                         try require(row.qaAccessibilityLabel.contains("Home") && row.qaAccessibilityLabel.contains("Where") && row.qaAccessibilityLabel.contains("Activity:") && row.qaAccessibilityLabel.contains("Context"),
                                     "compact status row AX label dropped one semantic fact at \(name); label was \"\(row.qaAccessibilityLabel)\"")
                     }
-                    let expectsCompactAction = presentation.context.state == .warning || presentation.context.state == .critical
+                    // The Compact action belongs to the ring: offered at
+                    // warning/critical, and gone with the ring when the width
+                    // pass drops it — never an invisible control still
+                    // announced to VoiceOver.
+                    let contextCanCompact = presentation.context.state == .warning || presentation.context.state == .critical
+                    let expectsCompactAction = contextCanCompact && !row.qaDroppedElements.contains(.contextMeter)
                     let expectedActionLabels = expectsCompactAction ? ["Location actions", "Compact context"] : ["Location actions"]
                     let actionChildren = (row.accessibilityChildren() ?? []).compactMap { $0 as? NSButton }
                     try require(row.qaAccessibilityChildrenCount == expectedActionLabels.count
@@ -710,7 +715,10 @@ enum UIProbeGeometry {
                         row.qaPerformCompactContextAction()
                         try require(requestedCompaction, "accessible Compact action did not invoke its callback")
                     } else {
-                        try require(!row.qaCompactContextButtonVisible, "ordinary context exposed a Compact action")
+                        try require(!row.qaCompactContextButtonVisible,
+                                    contextCanCompact
+                                        ? "a dropped context meter left its Compact action exposed at \(width)/\(name)"
+                                        : "ordinary context exposed a Compact action")
                     }
                     if presentation.activity.showsThinkingIndicator {
                         try require(row.qaThinkingSlotVisible, "compact status row hid injected thinking indicator while active")

@@ -396,9 +396,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         setAccessibilityHelp(toolTip)
         // Parent owns the combined Home/Where/What/activity/context announcement;
         // only actionable controls are separately reachable.
-        var accessibilityActions: [NSView] = [actionButton]
-        if !compactContextButton.isHidden { accessibilityActions.append(compactContextButton) }
-        setAccessibilityChildren(accessibilityActions)
+        updateActionAccessibilityChildren()
         updateThinkingLifecycle()
         applyTokens()
     }
@@ -444,6 +442,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         if !enabled.contains(.activity) { activityGroup.isHidden = true }
         droppedElements = []
         applyOverflow()
+        updateActionAccessibilityChildren()
         // An empty group must leave the layout entirely, not sit in it at 0x0.
         // A zero-size visible view is what `--ui-geometry-check` flags, and it is
         // right to: a stack view with no visible arranged subview still claims a
@@ -453,6 +452,33 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         invalidateIntrinsicContentSize()
         rootStack.needsLayout = true
         needsLayout = true
+    }
+
+    /// Only controls on screen are separately reachable. Re-run after every
+    /// width pass, because that pass can drop the ring and its action with it.
+    private func updateActionAccessibilityChildren() {
+        var accessibilityActions: [NSView] = [actionButton]
+        if !compactContextButton.isHidden { accessibilityActions.append(compactContextButton) }
+        setAccessibilityChildren(accessibilityActions)
+    }
+
+    /// The Compact action's two shapes: titled when the row has room, the
+    /// symbol alone when the titled ring would not fit. The accessibility label
+    /// and tooltip are the same in both.
+    private func setCompactContextButtonIconOnly(_ iconOnly: Bool) {
+        if iconOnly {
+            compactContextButton.image = CanvasSymbolImage.image(
+                named: "arrow.down.right.and.arrow.up.left",
+                pointSize: CGFloat(pageZoom.scaled(11)), weight: .semibold)
+            compactContextButton.imagePosition = .imageOnly
+        } else {
+            compactContextButton.image = nil
+            compactContextButton.imagePosition = .noImage
+        }
+    }
+
+    private var compactContextButtonIsIconOnly: Bool {
+        compactContextButton.imagePosition == .imageOnly
     }
 
     private static func contextCanBeCompacted(_ state: AgentRadialContextMeterState) -> Bool {
@@ -474,8 +500,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// width change.
     private func applyOverflow() {
         guard let presentation else { return }
+        setCompactContextButtonIconOnly(false)
+        // The policy charges one `spacing` between survivors. The row also
+        // carries `flexibleSpacer`, an arranged view of its own: one more gap
+        // into it and `Space.l` (not `spacing`) out of it. Uncharged, the
+        // budget was 12pt short at 100% and a 275pt warning row laid out
+        // 276.5pt (`--managed-agent-page-zoom-check`). `Space.l` is at least
+        // `spacing`, so charging it covers the spacer whether or not anything
+        // follows it.
         let available = bounds.width - Self.rootInsets(zoom: pageZoom).left
             - Self.rootInsets(zoom: pageZoom).right
+            - rootStack.customSpacing(after: flexibleSpacer)
         guard available > 0 else { return }
 
         var widths: [AgentStatusElement: CGFloat] = [:]
@@ -493,19 +528,33 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             }
         }
 
-        let kept = AgentStatusOverflowPolicy.fitting(
-            presentation.enabledElements,
-            widths: widths,
-            available: available,
-            spacing: rootStack.spacing,
-            locationFloor: CGFloat(pageZoom.scaled(48)))
+        func fitting() -> [AgentStatusElement] {
+            AgentStatusOverflowPolicy.fitting(
+                presentation.enabledElements,
+                widths: widths,
+                available: available,
+                spacing: rootStack.spacing,
+                locationFloor: CGFloat(pageZoom.scaled(48)))
+        }
+        var kept = fitting()
+        // The Compact action gives way before the ring does: its title goes
+        // first, and only a ring that still cannot fit as meter + reading +
+        // symbol is dropped — taking its action with it.
+        if !kept.contains(.contextMeter), !compactContextButton.isHidden,
+           presentation.enabledElements.contains(.contextMeter) {
+            setCompactContextButtonIconOnly(true)
+            widths[.contextMeter] = contextGroup.fittingSize.width
+            kept = fitting()
+        }
         let dropped = Set(presentation.enabledElements).subtracting(kept)
         droppedElements = dropped
 
         for element in dropped {
             switch element {
             case .activity: activityGroup.isHidden = true
-            case .contextMeter: contextGroup.isHidden = true
+            case .contextMeter:
+                contextGroup.isHidden = true
+                compactContextButton.isHidden = true
             case .location: break  // never dropped; it truncates instead
             default: quotaPills[element]?.isHidden = true
             }
@@ -582,6 +631,11 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         if let presentation {
             applySymbol(presentation.location.symbolName, to: locationIcon)
             applySymbol(presentation.activity.symbolName, to: activityIcon)
+            // Every width the last pass measured was at the old rung. A rung
+            // change at an unchanged width never reaches `setFrameSize`, so
+            // re-run the pass here: at 150% a 300pt row otherwise kept a ring
+            // sized at 100% and laid out 372pt of content.
+            applyQuotaElements(presentation)
         }
         invalidateIntrinsicContentSize()
         rootStack.needsLayout = true
@@ -793,6 +847,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaCompactContextButtonVisible: Bool { !compactContextButton.isHidden }
     var qaCompactContextButtonEnabled: Bool { compactContextButton.isEnabled }
     func qaPerformCompactContextAction() { compactContextButton.performClick(nil) }
+    var qaCompactContextButtonFrame: NSRect? { frame(of: compactContextButton) }
+    var qaCompactContextButtonIsIconOnly: Bool { compactContextButtonIsIconOnly }
     var qaAccessibilityLabel: String { accessibilityLabel() ?? "" }
     var qaAccessibilityChildrenCount: Int { accessibilityChildren()?.count ?? 0 }
     var qaLocationActionButtonAccessibilityLabel: String { actionButton.accessibilityLabel() ?? "" }
