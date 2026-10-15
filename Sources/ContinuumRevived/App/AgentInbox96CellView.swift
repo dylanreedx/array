@@ -333,6 +333,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// height, so the list has to derive it before it answers `heightOfRow` — one
     /// value, computed once, used by both.
     private var nesting: InboxNesting = .none
+    /// Where the PARENT row's disclosure control ends, in the parent card's own
+    /// x. The control carries its child count ("▾ 2"), so it can reach past the
+    /// lane into the next indent level; a child's title must clear it.
+    private var parentDisclosureTrailing: CGFloat = 0
 
     /// The row height this anatomy needs: the card, plus the gap that separates it
     /// from the next one. Every band is always drawn, which is the entire point of
@@ -460,6 +464,31 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard nesting != self.nesting else { return }
         self.nesting = nesting
         needsLayout = true
+    }
+
+    /// Tell a child row how far its parent's disclosure control reaches — see
+    /// `disclosureTrailing(for:childCount:)`. 0 for a root or an undrawn parent.
+    func setParentDisclosureTrailing(_ trailing: CGFloat) {
+        guard trailing != parentDisclosureTrailing else { return }
+        parentDisclosureTrailing = trailing
+        needsLayout = true
+    }
+
+    /// The disclosure control's square, and the lane it is centred in.
+    private static let disclosureSide: CGFloat = 14
+    private static var disclosureLaneX: CGFloat {
+        (CGFloat(AgentInboxView.indentPerLevel) - disclosureSide) / 2
+    }
+    private static let sizingDisclosure = InboxDisclosureButton()
+
+    /// Where a row's disclosure control ends, in its own card's x: the lane
+    /// offset plus the control's real width for this glyph and count. ONE
+    /// function for the parent's own frame and for the clearance its children
+    /// keep, so the two cannot disagree.
+    static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
+        guard disclosure != .none else { return 0 }
+        sizingDisclosure.show(disclosure, childCount: childCount)
+        return disclosureLaneX + max(disclosureSide, sizingDisclosure.fittingSize.width)
     }
 
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -880,15 +909,24 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // reported defect: the second group under the first read as nested inside
         // it. Centred on `spineX(depth)` instead, it is the head of its own
         // descender and 11 pt clear of any child title.
-        if !disclosureButton.isHidden {
-            let side: CGFloat = 14
-            let lane = CGFloat(AgentInboxView.indentPerLevel)
-            let laneX = (lane - side) / 2
-            let controlWidth = max(side, disclosureButton.fittingSize.width)
+        if !disclosureButton.isHidden, let shown {
+            let side = Self.disclosureSide
+            let laneX = Self.disclosureLaneX
+            let trailing = Self.disclosureTrailing(
+                for: shown.disclosure, childCount: shown.rollup?.children ?? 0)
             disclosureButton.frame = inCard(NSRect(
                 x: laneX, y: (card.bounds.height - side) / 2,
-                width: controlWidth, height: side))
-            textLeft = max(textLeft, laneX + controlWidth + CGFloat(Space.s))
+                width: trailing - laneX, height: side))
+            textLeft = max(textLeft, trailing + CGFloat(Space.s))
+        }
+        // A CHILD'S TITLE CLEARS ITS PARENT'S CONTROL. One indent level is 16pt
+        // and a counted control ("▾ 2") is wider than its lane, so without this a
+        // child's words start within 5pt of the parent's count and read as part
+        // of it. The parent's control ends at `parentDisclosureTrailing` in the
+        // parent card's x, which is one indent to the left of this card's.
+        if nesting.depth > 0, parentDisclosureTrailing > 0 {
+            textLeft = max(textLeft, parentDisclosureTrailing + CGFloat(Space.m)
+                - CGFloat(AgentInboxView.indentPerLevel))
         }
 
         var bandY = proposal.insetV

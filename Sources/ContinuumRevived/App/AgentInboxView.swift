@@ -2739,6 +2739,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
+            // How far the drawn parent's counted triangle reaches, so this row's
+            // title can clear it. Same inputs the parent's own cell is given.
+            var parentTrailing: CGFloat = 0
+            if model.depth > 0, let parentId = model.parentId,
+               let parent = rows.first(where: { $0.id == parentId }) {
+                parentTrailing = AgentInbox96CellView.disclosureTrailing(
+                    for: disclosure(for: parent),
+                    childCount: rollupsByParent[parentId]?.children ?? 0)
+            }
+            redesigned.setParentDisclosureTrailing(parentTrailing)
             let nudgeTarget = settleNudgePhaseVisible ? settleNudgeTargetID(now: renderNow) : nil
             redesigned.showSettleNudge(nudgeTarget == model.id) { [weak self] in
                 guard let self else { return }
@@ -4937,6 +4947,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         (0..<tableView.numberOfRows)
             .filter { rowIndex(forTableRow: $0) != nil }
             .map { Double(tableView.rect(ofRow: $0).height - tableView.intercellSpacing.height) }
+    }
+    /// Where each agent row sits in the tree, index-aligned with `rowHeightsForQA`:
+    /// a group's last row (and a root followed by a root) is laid out taller by
+    /// the trailing gap its cell reserves below the content.
+    var rowNestingsForQA: [InboxNesting] {
+        (0..<tableView.numberOfRows)
+            .filter { rowIndex(forTableRow: $0) != nil }
+            .map { nesting(atTableRow: $0) }
     }
 
     /// The actual width AppKit handed the row column, not the requested host

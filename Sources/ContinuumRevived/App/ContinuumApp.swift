@@ -32741,8 +32741,15 @@ extension AppDelegate {
         // comparing the table against the function that set it would assert nothing.
         let height = parked.rowHeightsForQA[index]
         if wanted == .slim {
-            try expect(abs(height - AgentInboxView.slimRowHeight) < 0.5,
-                       "'\(row.title)' is a \(wanted.rawValue), so it is \(AgentInboxView.slimRowHeight)pt tall — laid out at \(height)pt")
+            // Sidebar nesting (held 0.7.26 work): a slim row that ends a group,
+            // or a root followed by a root, carries the same trailing gap a card
+            // does, reserved BELOW its 36pt content.
+            let nesting = parked.rowNestingsForQA[index]
+            let gap = AgentInbox96CellView.trailingGap(for: nesting)
+            try expect(gap == 0 || gap == AgentInbox96CellView.spineMetrics.endGap,
+                       "'\(row.title)' trailing gap must be none or the group-end gap — got \(gap)pt for \(nesting)")
+            try expect(abs(height - (AgentInboxView.slimRowHeight + gap)) < 0.5,
+                       "'\(row.title)' is a \(wanted.rawValue), so it is \(AgentInboxView.slimRowHeight)pt tall plus its \(gap)pt group-end gap — laid out at \(height)pt")
         } else {
             // P0.4: a card's height is no longer pinned to the fixed constant —
             // P2.3 derives it from drawn content, and a gate that calls today's
@@ -32869,8 +32876,11 @@ extension AppDelegate {
     let settledIdx = live.rows.count - 1
     try expect(live.rowVariantsForQA[settledIdx] == .slim,
                "a settled row collapses — got \(live.rowVariantsForQA[settledIdx].rawValue)")
-    try expect(abs(live.rowHeightsForQA[settledIdx] - AgentInboxView.slimRowHeight) < 0.5,
-               "…and the TABLE must take the new height, not just the new view — laid out at \(live.rowHeightsForQA[settledIdx])pt, wanted \(AgentInboxView.slimRowHeight)pt")
+    // Plus the trailing gap its nesting earns (a promoted root ends its group),
+    // the same room a card carries — the slim content itself is still 36pt.
+    let settledGap = AgentInbox96CellView.trailingGap(for: live.rowNestingsForQA[settledIdx])
+    try expect(abs(live.rowHeightsForQA[settledIdx] - (AgentInboxView.slimRowHeight + settledGap)) < 0.5,
+               "…and the TABLE must take the new height, not just the new view — laid out at \(live.rowHeightsForQA[settledIdx])pt, wanted \(AgentInboxView.slimRowHeight + settledGap)pt")
     try expect(live.relativeTimesForQA[settledIdx] == "5m ago",
                "…and it says when it ended — got '\(live.relativeTimesForQA[settledIdx])'")
 
@@ -33237,7 +33247,11 @@ extension AppDelegate {
     // a comparison against the same row a moment earlier, not against the fixed
     // constant, so P2.3's content-derived heights do not re-pin this gate.
     let preFoldIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
+    // Less the trailing gap its nesting earns: folding turns the parent into a
+    // root followed by a root, which earns the group-end gap BELOW the card. The
+    // card itself is what must not grow.
     let preFoldHeight = waiting.rowHeightsForQA[preFoldIndex]
+        - AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[preFoldIndex])
     try expect(waiting.clickDisclosureForQA(id: parentRow.id), "fold the group that is waiting")
     waiting.layoutForQA()
     let waitingIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
@@ -33248,8 +33262,10 @@ extension AppDelegate {
     // meta line rather than taking a fourth one, so the row height must not have moved
     // and the label must still be laid out with room in it. Asserted numerically —
     // the runbook forbids certifying a rendering by eye.
-    try expect(waiting.rowHeightsForQA[waitingIndex] == preFoldHeight,
-               "a rollup must not change the card's height — \(waiting.rowHeightsForQA[waitingIndex])pt, was \(preFoldHeight)pt before the fold")
+    let foldedCardHeight = waiting.rowHeightsForQA[waitingIndex]
+        - AgentInbox96CellView.trailingGap(for: waiting.rowNestingsForQA[waitingIndex])
+    try expect(foldedCardHeight == preFoldHeight,
+               "a rollup must not change the card's height — \(foldedCardHeight)pt, was \(preFoldHeight)pt before the fold")
 
     // AND THE HALF THAT IS NOT A RENDERING: SETTLING THE PARENT IS REFUSED while
     // something under it is blocked or running. Through the production predicates the
@@ -33517,29 +33533,46 @@ extension AppDelegate {
     }
     try expect((worstClearance ?? 0) >= Space.m,
                "no disclosure control comes within \(Space.m)pt of a deeper row's title — worst clearance \(worstClearance ?? 0)pt")
-    // 6 · THE GROUP ENDS IN SPACE AS WELL AS IN INK. The last row of a group is
-    // taller than a card; the unrelated root is exactly a card.
+    // 6 · THE GROUP ENDS IN SPACE AS WELL AS IN INK. A row that opens a deeper
+    // level ends nothing and is exactly one card pitch. The last row of a group is
+    // taller by the terminator gap — and so, since the held 0.7.26 sidebar rhythm,
+    // is a top-level agent: roots are separate groups even with no children
+    // (`InboxSpineMetrics.trailingGap`), so the unrelated root carries the gap too.
     // Measured BETWEEN rows, so the table's own intercell spacing cannot be mistaken
-    // for the terminator: the claim is that a group's last row keeps more room than a
-    // row that ends nothing, and that is a difference.
+    // for the terminator: every claim below is a difference against the row that
+    // ends nothing.
     let cardPitch = AgentInbox96CellView.rowHeight(for: .production)
+    let plainCandidate = treeDepths.indices.first(where: {
+        $0 > 0 && $0 + 1 < treeDepths.count && treeDepths[$0 + 1] > treeDepths[$0]
+    })
+    try expect(plainCandidate != nil,
+               "the tree fixture must hold a child that opens a deeper level — depths \(treeDepths)")
+    let plainRow = plainCandidate!
+    let plainHeight = Double(treeRowRects[plainRow].height)
     let lastMemberHeight = Double(treeRowRects[siblingRow - 1].height)
     let siblingHeight = Double(siblingRect.height)
-    try expect(abs((lastMemberHeight - siblingHeight) - Space.s) <= 0.5,
-               "a group's last row keeps \(Space.s)pt more room than a row that ends nothing — \(lastMemberHeight)pt against \(siblingHeight)pt")
-    try expect(abs(siblingHeight - (cardPitch + AgentInboxView.rowSpacing)) <= 0.5,
-               "…and that row is exactly one card pitch — \(siblingHeight)pt, wanted \(cardPitch + AgentInboxView.rowSpacing)pt")
-    try expect(abs(Double(treeCardFrames[siblingRow - 1]!.height) - Double(treeCardFrames[siblingRow]!.height)) <= 0.5,
-               "…and that room is UNDER the card, never inside it — \(treeCardFrames[siblingRow - 1]!.height)pt against \(treeCardFrames[siblingRow]!.height)pt")
+    try expect(abs(plainHeight - (cardPitch + AgentInboxView.rowSpacing)) <= 0.5,
+               "a row that ends nothing is exactly one card pitch — \(plainHeight)pt, wanted \(cardPitch + AgentInboxView.rowSpacing)pt")
+    try expect(abs((lastMemberHeight - plainHeight) - Space.s) <= 0.5,
+               "a group's last row keeps \(Space.s)pt more room than a row that ends nothing — \(lastMemberHeight)pt against \(plainHeight)pt")
+    try expect(abs((siblingHeight - plainHeight) - Space.s) <= 0.5,
+               "…and an unrelated root is one card pitch plus the same \(Space.s)pt root gap — \(siblingHeight)pt against \(plainHeight)pt")
+    let treeCardHeights = (0...siblingRow).compactMap { treeCardFrames[$0].map { Double($0.height) } }
+    try expect(treeCardHeights.count == siblingRow + 1
+                && treeCardHeights.allSatisfy { abs($0 - treeCardHeights[0]) <= 0.5 },
+               "…and that room is UNDER the card, never inside it — card heights \(treeCardHeights)")
     // 7 · FOLDING TAKES THE WHOLE CONNECTOR WITH IT. A lane left behind would point
-    // at rows that are no longer there.
+    // at rows that are no longer there. What is left is two roots, and each keeps
+    // exactly the root gap the nesting rules give a root over a root — no more (no
+    // stale group terminator) and no less.
     try expect(tree.clickDisclosureForQA(id: treeRoot.id), "the group must fold")
     tree.layoutForQA()
     try expect(tree.spinePaintingForQA.isEmpty,
                "a folded list draws no connector at all — got \(tree.spinePaintingForQA.count) segments")
-    try expect(tree.tableRowRectsForQA.allSatisfy {
-        abs(Double($0.height) - (cardPitch + AgentInboxView.rowSpacing)) <= 0.5 },
-               "…and no row keeps a terminator gap for a group that is not open — \(tree.tableRowRectsForQA.map(\.height))")
+    let foldedHeights = tree.tableRowRectsForQA.map { Double($0.height) }
+    try expect(foldedHeights.count == 2
+                && foldedHeights.allSatisfy { abs(($0 - plainHeight) - Space.s) <= 0.5 },
+               "…and each folded root is one card pitch plus the \(Space.s)pt root gap — \(foldedHeights), a row that ends nothing is \(plainHeight)pt")
     try expect(tree.clickDisclosureForQA(id: treeRoot.id), "unfold it again")
     tree.layoutForQA()
     try expect(tree.spinePaintingForQA.count == treePainting.count,
