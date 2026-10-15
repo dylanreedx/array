@@ -12,7 +12,7 @@ Try the interactive walkthrough at [arrayapp.dev](https://arrayapp.dev). Array i
 
 ## Build from source
 
-Array is a native macOS app and requires macOS 14 or newer, Swift 6.2 or newer, and a macOS `GhosttyKit.xcframework` built from a [Ghostty source checkout](https://github.com/ghostty-org/ghostty). The framework is not included in this repository.
+Array is a native macOS app built with SwiftPM (there is no Xcode project). It requires macOS 14 or newer, Swift 6.2 or newer, and a macOS `GhosttyKit.xcframework` built from a [Ghostty source checkout](https://github.com/ghostty-org/ghostty). The framework is not included in this repository.
 
 1. Install Xcode or the Xcode Command Line Tools with Swift 6.2 or newer.
 2. Build GhosttyKit by following the Ghostty project's macOS development instructions.
@@ -44,7 +44,7 @@ Development builds use Array Dev's separate app data and leave the production ap
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository workflow. Open a [GitHub issue](https://github.com/dylanreedx/array/issues) for bugs or suggestions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository workflow and [docs/README.md](docs/README.md) for the documentation index. Before sending a change, run the full verification matrix with `scripts/run-matrix.sh` and verify an assembled bundle with `scripts/check-app-bundle.sh`. Open a [GitHub issue](https://github.com/dylanreedx/array/issues) for bugs or suggestions.
 
 ## License
 

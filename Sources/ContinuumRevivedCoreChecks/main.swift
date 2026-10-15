@@ -7807,10 +7807,10 @@ do {
 
     expect(
         sections.map(\.title) == [
-            "General", "Appearance", "Canvas Background", "Canvas & Zones", "Navigation", "Keybindings",
-            "Agents", "Editor", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
+            "General", "Appearance", "Canvas Background", "Toolbar", "Canvas & Zones", "Navigation", "Keybindings",
+            "Agents", "Agent context", "Editor", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
         ],
-        "settings exposes the thirteen product sections in stable order"
+        "settings exposes the fifteen product sections in stable order, got \(sections.map(\.title))"
     )
 
     // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
