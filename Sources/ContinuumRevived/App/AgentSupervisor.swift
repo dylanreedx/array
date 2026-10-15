@@ -19292,24 +19292,13 @@ private func checkPerAgentProviderSettings(
 
     // This section exercises Pi-only contracts (`--model`, `--thinking`, role
     // tools, and Pi's full catalogue). Scope the ambient defaults used by the
-    // production tile to Pi, then restore them exactly; otherwise a developer's
-    // selected Claude/Codex harness changes what this deterministic check means.
-    let standardDefaults = UserDefaults.standard
-    let savedHarness = standardDefaults.object(forKey: AgentHarnessConfig.key)
-    let savedModel = standardDefaults.object(forKey: AgentModelConfig.modelKey)
-    let savedThinking = standardDefaults.object(forKey: AgentModelConfig.thinkingKey)
-    AgentHarnessConfig.store(.pi, defaults: standardDefaults)
-    standardDefaults.set(AgentCatalogQAFixture.pi[0], forKey: AgentModelConfig.modelKey)
-    standardDefaults.set(AgentModelConfig.defaultThinking, forKey: AgentModelConfig.thinkingKey)
-    defer {
-        func restore(_ value: Any?, key: String) {
-            if let value { standardDefaults.set(value, forKey: key) }
-            else { standardDefaults.removeObject(forKey: key) }
-        }
-        restore(savedHarness, key: AgentHarnessConfig.key)
-        restore(savedModel, key: AgentModelConfig.modelKey)
-        restore(savedThinking, key: AgentModelConfig.thinkingKey)
-    }
+    // production tile to Pi; otherwise a developer's selected Claude/Codex
+    // harness changes what this deterministic check means. In-process only: the
+    // save/write/restore this replaces wrote the shared persistent domain, and a
+    // lost race or a killed run left this model there for every later leg.
+    var unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+        harness: .pi, model: AgentCatalogQAFixture.pi[0])
+    defer { unpinAmbientSelection() }
 
     // The picks, chosen to be UNLIKE the defaults in both fields. Guarded, because
     // the whole check turns on that difference.
@@ -19395,6 +19384,9 @@ private func checkPerAgentProviderSettings(
         throw fail("provider-settings: could not open an isolated defaults suite")
     }
     defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+    // The argument-domain pin outranks every suite too, so it is lifted while
+    // this section writes and reads its own suite, and restored straight after.
+    unpinAmbientSelection()
     let movedDefault = "openai-codex/gpt-5.3-codex-spark"
     guard movedDefault != pickedModel, movedDefault != globalDefault.model else {
         throw fail("provider-settings: the moved default \(movedDefault) is not distinct from the pick or the original default")
@@ -19405,6 +19397,8 @@ private func checkPerAgentProviderSettings(
     guard AgentModelConfig.resolvedFromDefaults(defaults: defaults).model == movedDefault else {
         throw fail("provider-settings: the isolated defaults suite did not take the moved default, so this section proves nothing")
     }
+    unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+        harness: .pi, model: AgentCatalogQAFixture.pi[0])
     guard supervisor.providerSettings(for: agentId)?.model == pickedModel,
           try store.load(id: agentId)?.model == pickedModel,
           AgentSupervisor.runnerConfig(for: stored, spawnDepth: 0).model == pickedModel else {

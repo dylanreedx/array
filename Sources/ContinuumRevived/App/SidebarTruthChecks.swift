@@ -278,6 +278,12 @@ enum SidebarTruthChecks {
         for shelf in WorkspaceSidebarConfig.Shelf.allCases {
             defaults.removeObject(forKey: WorkspaceSidebarConfig.shelfKey(shelf))
         }
+        // The header's New agent spawns from the ambient Settings selection. Pin it
+        // to what a fresh install resolves (Claude Code, the catalogue's own seed),
+        // in-process, so a model another leg left in the shared domain cannot refuse it.
+        let unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+            harness: .claudeCode,
+            model: AgentModelCatalog.shared.snapshot(for: .claudeCode).seedModel ?? "")
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 1_000),
@@ -294,6 +300,7 @@ enum SidebarTruthChecks {
             supervisor: supervisor, runners: runners, runtime: runtime,
             browserEngine: browserEngine,
             restoreDefaults: {
+                unpinAmbientSelection()
                 for (shelf, value) in storedShelves {
                     if let value {
                         defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))

@@ -52,6 +52,13 @@ enum AgentTileBindingChecks {
             AgentModelCatalog.shared.resetForQA(snapshot: .init(
                 harness: harness, readiness: .missing, models: [], displayNames: [:], contextWindows: [:]))
         }
+        // The unbound tile's send spawns from the ambient Settings selection. Pin it
+        // to what a fresh install resolves, in-process, so a model another leg left
+        // in the shared defaults domain cannot refuse the one agent this leg starts.
+        let unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+            harness: .claudeCode,
+            model: AgentModelCatalog.shared.snapshot(for: .claudeCode).seedModel ?? "")
+        defer { unpinAmbientSelection() }
 
         let fixture = try Fixture(label: "agent-binding")
         defer { fixture.dispose() }

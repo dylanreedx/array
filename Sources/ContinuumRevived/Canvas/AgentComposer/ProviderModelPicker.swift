@@ -583,16 +583,22 @@ extension ProviderModelButton {
         func expect(_ condition: Bool, _ message: @autoclosure () -> String) throws {
             if !condition { throw SelfCheckError.message(message()) }
         }
+        // FIRST, before anything writes: the owner's agent keys must come out of
+        // this leg exactly as they went in, never rewritten even for a moment.
+        let standardGuard = QAStandardDefaultsGuard(keys: QAStandardDefaultsGuard.agentSelectionKeys)
 
         // Hermetic against ambient harness state. The Agent Harness lives in the
         // standard defaults domain, which is shared across matrix legs and
         // persists on the machine (cfprefsd ignores per-leg isolation), so a
         // leftover .codex/.claudeCode from another leg or an earlier run would
-        // filter the catalogue and make the unfiltered-rail assertions below
-        // flaky. Force the pi baseline (unfiltered) here and clear on exit; the
-        // harness-filter sub-test further down sets its own value explicitly.
-        UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
-        defer { UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key) }
+        // filter the catalogue and make the assertions below flaky. Pin the
+        // fresh-install harness IN-PROCESS (argument domain, never on disk):
+        // removing the key here deleted the owner's real harness choice inside
+        // the prod bundle. The harness-filter sub-test below pins its own.
+        let unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+            harness: .claudeCode,
+            model: AgentModelCatalog.shared.snapshot(for: .claudeCode).seedModel ?? "")
+        defer { unpinAmbientSelection() }
 
         // 1. Pure grouping: order-preserving, fully-qualified split, slashless
         //    ids grouped under "other", display names title-cased.
@@ -782,15 +788,12 @@ extension ProviderModelButton {
         try expect(claudePicker.qaVisibleModelTitles.first == "Opus 5.5",
                    "the claude pane must render the CLI's display names, got \(claudePicker.qaVisibleModelTitles)")
 
-        let priorBackend = UserDefaults.standard.string(forKey: AgentBackendConfig.key)
-        AgentBackendConfig.store(.codex)
+        let unpinCodex = AgentCatalogQAFixture.pinAmbientSelection(
+            harness: .codex,
+            model: AgentModelCatalog.shared.snapshot(for: .codex).seedModel ?? "")
         try expect(AgentModelConfig.modelOptions == ["openai-codex/gpt-a", "openai-codex/gpt-b"],
                    "resolved Codex backend must narrow the live modelOptions, got \(AgentModelConfig.modelOptions)")
-        if let priorBackend {
-            UserDefaults.standard.set(priorBackend, forKey: AgentBackendConfig.key)
-        } else {
-            UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
-        }
+        unpinCodex()
 
         // 7. Footer FILL in the Send row (the recurring effort-picker truncation):
         //    the footer has no intrinsic width, so sharing a row with the Send
@@ -827,5 +830,7 @@ extension ProviderModelButton {
                    "footer collapsed in the Send row (width \(fillFooter.bounds.width)) instead of filling — model/effort truncate")
         try expect(fillFooter.qaFitsCurrentTitles,
                    "footer did not fit its model/effort titles in the Send row (width \(fillFooter.bounds.width)) — the effort picker truncates")
+        let touched = standardGuard.finish()
+        try expect(touched.isEmpty, "the leg wrote the owner's agent keys in the standard defaults domain: \(touched)")
     }
 }

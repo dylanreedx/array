@@ -2134,19 +2134,18 @@ do {
 
     let standardSuite = "continuum-revived-core-checks-standard-\(UUID().uuidString)"
     let legacySuite = "continuum-revived-core-checks-legacy-\(UUID().uuidString)"
-    let standardDefaults = UserDefaults(suiteName: standardSuite)!
-    let legacyDefaults = UserDefaults(suiteName: legacySuite)!
-    let globalDefaults = UserDefaults.standard
-    let globalDomain = UserDefaults.globalDomain
-    let originalGlobalDomain = globalDefaults.persistentDomain(forName: globalDomain) ?? [:]
+    // Suites that answer only from themselves: a plain suite inherits
+    // NSGlobalDomain, and this used to scrub the key by rewriting every app's
+    // shared preferences from a snapshot (the owner's really carries it).
+    let globalGuard = QAStandardDefaultsGuard(keys: [DeleteConfirmPolicy.userDefaultsKey], domainName: UserDefaults.globalDomain)
+    let standardDefaults = QAIsolatedDefaults(isolatedSuiteName: standardSuite)!
+    let legacyDefaults = QAIsolatedDefaults(isolatedSuiteName: legacySuite)!
     defer {
-        globalDefaults.setPersistentDomain(originalGlobalDomain, forName: globalDomain)
         standardDefaults.removePersistentDomain(forName: standardSuite)
         legacyDefaults.removePersistentDomain(forName: legacySuite)
+        let touched = globalGuard.finish()
+        expect(touched.isEmpty, "the delete-policy checks rewrote NSGlobalDomain, if only for a moment: \(touched)")
     }
-    var scrubbedGlobalDomain = originalGlobalDomain
-    scrubbedGlobalDomain.removeValue(forKey: DeleteConfirmPolicy.userDefaultsKey)
-    globalDefaults.setPersistentDomain(scrubbedGlobalDomain, forName: globalDomain)
     standardDefaults.setPersistentDomain([:], forName: standardSuite)
     legacyDefaults.setPersistentDomain([:], forName: legacySuite)
 
@@ -7932,21 +7931,12 @@ do {
     sidebarDefaults.set("320", forKey: WorkspaceSidebarConfig.widthKey)
     expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 320.0, "workspace sidebar width accepts Settings text-field numeric string")
 
-    // Per-field UserDefaults behavior in an isolated suite. A suite still reads
-    // the global domain as a fallback, so scrub the schema keys there for the
-    // "empty defaults" assertions (mirrors the delete-policy check above), then
-    // restore on exit.
+    // Per-field UserDefaults behavior in a suite that answers only from itself. A
+    // plain suite reads the global domain as a fallback, which this used to scrub
+    // by rewriting every app's shared preferences (mirrors the delete-policy check).
     let suiteName = "SettingsSchemaChecks-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    let schemaGlobalDomain = UserDefaults.globalDomain
-    let originalSchemaGlobalDomain = UserDefaults.standard.persistentDomain(forName: schemaGlobalDomain) ?? [:]
-    defer {
-        UserDefaults.standard.setPersistentDomain(originalSchemaGlobalDomain, forName: schemaGlobalDomain)
-        defaults.removePersistentDomain(forName: suiteName)
-    }
-    var scrubbedSchemaGlobalDomain = originalSchemaGlobalDomain
-    for key in fieldKeys { scrubbedSchemaGlobalDomain.removeValue(forKey: key) }
-    UserDefaults.standard.setPersistentDomain(scrubbedSchemaGlobalDomain, forName: schemaGlobalDomain)
+    let defaults = QAIsolatedDefaults(isolatedSuiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
     defaults.removePersistentDomain(forName: suiteName)
 
     for field in allFields {

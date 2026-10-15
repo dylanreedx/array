@@ -55,3 +55,34 @@ public enum AgentCatalogQAFixture {
         "openai-codex/gpt-5.3-codex-spark",
     ]
 }
+
+extension AgentCatalogQAFixture {
+    /// Pin the AMBIENT new-agent selection — what `UserDefaults.standard` answers
+    /// for harness, model and thinking — for the length of a check, and return the
+    /// undo.
+    ///
+    /// A bare `swift build` binary has no bundle id, so its standard domain is
+    /// `Array`: ONE persistent domain shared by every check leg, every worktree and
+    /// every concurrent matrix run on the machine. A leg that saved, wrote and
+    /// restored these keys there left `openai-codex/gpt-5.6-sol` behind once it lost
+    /// a race or died before its `defer`; with the harness key later cleared that is
+    /// a Codex model under Claude Code, and every leg that spawns through the
+    /// ambient defaults refused "New agent refused:  is no longer offered…".
+    ///
+    /// This writes the argument domain, which outranks the persistent one and is
+    /// never written to disk — the same in-process override `--zone-arming-check`
+    /// uses. Inside the pin a write to the standard domain is shadowed, so a check
+    /// that wants a different ambient harness pins again rather than storing one.
+    public static func pinAmbientSelection(
+        harness: AgentHarness,
+        model: String,
+        thinking: String = AgentModelConfig.defaultThinking,
+        defaults: UserDefaults = .standard
+    ) -> () -> Void {
+        QADefaultsPin.pin([
+            AgentHarnessConfig.key: harness.rawValue,
+            AgentModelConfig.modelKey: model,
+            AgentModelConfig.thinkingKey: thinking,
+        ], defaults: defaults)
+    }
+}

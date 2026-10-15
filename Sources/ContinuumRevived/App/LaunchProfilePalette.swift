@@ -222,6 +222,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             ]
         }
         let standardBefore = paletteOwnedStandardValues()
+        // …and the persistent domain itself, watched through every write: the
+        // comparison above reads `.standard` at the end, so it cannot see a write
+        // that a `defer` later restored — which is how the appearance witness
+        // below rewrote the owner's real glassiness inside the prod bundle.
+        let standardGuard = QAStandardDefaultsGuard(keys: Set(paletteOwnedKeys).union([
+            CommandCenterAppearanceConfig.glassinessKey, CommandCenterAppearanceConfig.customOpacityKey,
+        ]))
         // The palette's own state goes to a PRIVATE SUITE, not the user's domain.
         // `check-app-bundle.sh` runs this leg inside the app bundle, so under
         // `--channel prod` the old dance rewrote the real configured agent model — the
@@ -236,19 +243,21 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         // fixture mid-check. Same shape as the other QA suites in this target.
         defer { defaults.removePersistentDomain(forName: suiteName) }
         defaults.set("openai-codex/gpt-5.6-sol", forKey: AgentModelConfig.modelKey)
-        // Glassiness is the one key that stays on the standard domain:
-        // `CommandCenterSurfaceView.applyAppearance` reads it there itself, so the
-        // appearance witness below cannot be redirected without threading defaults
-        // into the view too. It is save/restored, as before — and it is an appearance
-        // preference, not the owner's model choice.
-        let previousGlassiness = standard.object(forKey: CommandCenterAppearanceConfig.glassinessKey)
-        let previousCustomOpacity = standard.object(forKey: CommandCenterAppearanceConfig.customOpacityKey)
-        defer {
-            if let previousGlassiness { standard.set(previousGlassiness, forKey: CommandCenterAppearanceConfig.glassinessKey) }
-            else { standard.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey) }
-            if let previousCustomOpacity { standard.set(previousCustomOpacity, forKey: CommandCenterAppearanceConfig.customOpacityKey) }
-            else { standard.removeObject(forKey: CommandCenterAppearanceConfig.customOpacityKey) }
+        // Glassiness is read from the standard domain by
+        // `CommandCenterSurfaceView.applyAppearance` itself, so the appearance
+        // witness below pins it IN-PROCESS (argument domain, never on disk). The
+        // save/write/restore this replaces rewrote the owner's real glassiness for
+        // the length of the run whenever this leg ran inside the prod bundle.
+        var unpinAppearance: () -> Void = {}
+        func pinAppearance(_ glassiness: CommandCenterGlassiness) {
+            unpinAppearance()
+            unpinAppearance = QADefaultsPin.pin([
+                CommandCenterAppearanceConfig.glassinessKey: glassiness.rawValue,
+                CommandCenterAppearanceConfig.customOpacityKey: CommandCenterAppearanceConfig.defaultCustomOpacity,
+            ])
         }
+        pinAppearance(CommandCenterAppearanceConfig.defaultGlassiness)
+        defer { unpinAppearance() }
         let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
         let hostView = NSView(frame: host.contentRect(forFrameRect: host.frame))
         host.contentView = hostView
@@ -308,17 +317,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let surface = palette.paletteView as? CommandCenterSurfaceView else {
             throw PaletteSelfCheckError.failed("missing command-center surface for appearance witness")
         }
-        standard.set(CommandCenterGlassiness.solid.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        pinAppearance(.solid)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: false, opacity: 1) else {
             throw PaletteSelfCheckError.failed("Solid did not produce an opaque, blur-free command center")
         }
-        standard.set(CommandCenterGlassiness.frosted.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        pinAppearance(.frosted)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.84) else {
             throw PaletteSelfCheckError.failed("Frosted did not produce the 84% default command center")
         }
-        standard.set(CommandCenterGlassiness.glass.rawValue, forKey: CommandCenterAppearanceConfig.glassinessKey)
+        pinAppearance(.glass)
         surface.reapplyAppearanceForQA()
         guard surface.appearanceSnapshotForQA == .init(usesBlur: true, opacity: 0.72) else {
             throw PaletteSelfCheckError.failed("Glass did not produce the 72% command center")
@@ -332,7 +341,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             throw PaletteSelfCheckError.failed("command-center token fill did not change across light/dark appearances")
         }
         host.appearance = nil
-        standard.removeObject(forKey: CommandCenterAppearanceConfig.glassinessKey)
+        pinAppearance(CommandCenterAppearanceConfig.defaultGlassiness)
         palette.close()
 
         host.setContentSize(NSSize(width: 360, height: 260))
@@ -479,6 +488,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             throw PaletteSelfCheckError.failed(
                 "this check wrote the palette's own state into the USER's defaults domain \(paletteOwnedKeys): \(standardBefore) -> \(standardAfter). check-app-bundle.sh runs this leg inside the app bundle, so under --channel prod one of those keys is the owner's configured agent model."
             )
+        }
+        let touched = standardGuard.finish()
+        guard touched.isEmpty else {
+            throw PaletteSelfCheckError.failed("this check wrote the owner's standard defaults domain, if only for a moment: \(touched)")
         }
     }
 

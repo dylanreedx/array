@@ -4504,21 +4504,20 @@ enum ContinuumApp {
         let key = DeleteConfirmPolicy.userDefaultsKey
         let standardSuite = "con113-standard-\(UUID().uuidString)"
         let legacySuite = "con113-legacy-\(UUID().uuidString)"
-        guard let standard = UserDefaults(suiteName: standardSuite),
-              let legacy = UserDefaults(suiteName: legacySuite) else {
+        // A plain suite falls back to NSGlobalDomain, so a policy stored THERE leaks
+        // into every "missing" assertion below. This leg runs inside the prod
+        // bundle, and it used to scrub the key by rewriting the owner's whole global
+        // domain (every app's shared preferences) from a snapshot, twice — and the
+        // owner's global domain really does carry this key. Suites that answer only
+        // from themselves need no scrubbing at all.
+        guard let standard = QAIsolatedDefaults(isolatedSuiteName: standardSuite),
+              let legacy = QAIsolatedDefaults(isolatedSuiteName: legacySuite) else {
             throw SelfCheckError("could not open isolated defaults domains")
         }
-        let globalDefaults = UserDefaults.standard
-        let globalDomain = UserDefaults.globalDomain
-        let originalGlobalDomain = globalDefaults.persistentDomain(forName: globalDomain) ?? [:]
         defer {
-            globalDefaults.setPersistentDomain(originalGlobalDomain, forName: globalDomain)
             standard.removePersistentDomain(forName: standardSuite)
             legacy.removePersistentDomain(forName: legacySuite)
         }
-        var scrubbedGlobalDomain = originalGlobalDomain
-        scrubbedGlobalDomain.removeValue(forKey: key)
-        globalDefaults.setPersistentDomain(scrubbedGlobalDomain, forName: globalDomain)
         standard.setPersistentDomain([:], forName: standardSuite)
         legacy.setPersistentDomain([:], forName: legacySuite)
 
@@ -14481,7 +14480,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // model leave no tile and no agent, instead of scanning this file for the
         // guard's text (which pinned the call, not the refusal: a reviewer swapped
         // the guard for `?? resolvedFromDefaults()` and the check stayed green).
-        switch spawner.spawnManagedAgentForSelectedModel(model, wire: { tileId, providerSettings in
+        // The refusal is SHOWN, in the workspace notification: File > New > Agent and
+        // ⌘K both close on dispatch, and a beep plus a stderr line is invisible in a
+        // GUI app — the person heard a beep and saw nothing happen.
+        switch spawner.spawnManagedAgentForSelectedModel(model, announceRefusal: { [weak self] message in
+            self?.presentSpawnRefusal(message)
+        }, wire: { tileId, providerSettings in
             wireManagedAgentTile(tileId, initialLaunchSelection: providerSettings)
         }) {
         case let .spawned(tileId, providerSettings):
@@ -14491,8 +14495,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
             return modelApplied
         case .refusedModel:
-            // Already beeped and named itself on stderr, inside the seam — the
-            // palette closes on dispatch either way, so the refusal has to speak.
+            // Already shown (workspace notification), beeped and logged, inside the
+            // seam — the palette closes on dispatch either way, so it has to speak.
             return false
         case let .failure(error):
             fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
@@ -18965,6 +18969,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.createAgentFromMenu(nil)
         let newlyDroppedAgents = app.agentSupervisor.records.filter { !beforeFreshDropAgents.contains($0.key) }
         try expect(newlyDroppedAgents.count == 1 && newlyDroppedAgents.first?.value.projectId == freshProject.id, "Menu Agent must create exactly one agent in the unregistered dropped project without manual activation")
+        // A Settings default the harness does not offer (Pi never offers an
+        // anthropic id) is refused where the person can SEE it: the workspace
+        // notification names the model. It used to be a beep and a stderr line
+        // reading "New agent refused:  is no longer offered…" — empty name.
+        let departedDefault = "anthropic/claude-opus-5"
+        defaults.set(AgentHarness.pi.rawValue, forKey: AgentHarnessConfig.key)
+        defaults.set(departedDefault, forKey: AgentModelConfig.modelKey)
+        let beforeRefusedAgents = app.agentSupervisor.records.count
+        app.createAgentFromMenu(nil)
+        try expect(app.agentSupervisor.records.count == beforeRefusedAgents, "A Settings default the harness does not offer must create no agent")
+        try expect(app.qaWorkspaceManagementMessage?.contains(departedDefault) == true && app.qaWorkspaceManagementMessage?.contains(AgentHarness.pi.rawValue) == true,
+                   "File > New > Agent's refusal must be shown in the workspace notification and name the model and harness; it shows \(app.qaWorkspaceManagementMessage ?? "nothing")")
         print("fresh-install: empty workspace, cancel keeps window, Finder folder creates project zone, creation scope and opt-in discovery")
     }
 
@@ -22135,12 +22151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // === Multi-zone integration phase (T07) ===
         // maxLive=2 via production resolveMaxLive(): set standard UserDefaults BEFORE
         // constructing WorkspaceRuntime so its budget init reads 2.
-        let mzPrevBudget = UserDefaults.standard.object(forKey: BrowserRuntimeBudget.defaultsKey)
-        UserDefaults.standard.set("2", forKey: BrowserRuntimeBudget.defaultsKey)
-        defer {
-            if let prev = mzPrevBudget { UserDefaults.standard.set(prev, forKey: BrowserRuntimeBudget.defaultsKey) }
-            else { UserDefaults.standard.removeObject(forKey: BrowserRuntimeBudget.defaultsKey) }
-        }
+        // In-process (argument domain, never on disk): not the owner's real budget.
+        let unpinMZBudget = QADefaultsPin.pin([BrowserRuntimeBudget.defaultsKey: "2"])
+        defer { unpinMZBudget() }
 
         // Two project directories, stores, and canvases.
         let dirA = FileManager.default.temporaryDirectory
@@ -22826,12 +22839,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         // Override BrowserRuntimeBudget to maxLive: 1.
-        let budgetPrevValue = UserDefaults.standard.object(forKey: BrowserRuntimeBudget.defaultsKey)
-        UserDefaults.standard.set("1", forKey: BrowserRuntimeBudget.defaultsKey)
-        defer {
-            if let prev = budgetPrevValue { UserDefaults.standard.set(prev, forKey: BrowserRuntimeBudget.defaultsKey) }
-            else { UserDefaults.standard.removeObject(forKey: BrowserRuntimeBudget.defaultsKey) }
-        }
+        // In-process (argument domain, never on disk): not the owner's real budget.
+        let unpinBudget = QADefaultsPin.pin([BrowserRuntimeBudget.defaultsKey: "1"])
+        defer { unpinBudget() }
 
         let budgetRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("budget factory not expected") })
         budgetRegistry.register(controllerA, for: projectPa)
@@ -23470,23 +23480,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if !condition() { throw CheckError.failed(message) }
         }
 
-        let legacyDefaults = UserDefaults(suiteName: DeleteConfirmPolicy.legacyDefaultsDomain)
-        let savedDefaultBrowserURL = UserDefaults.standard.object(forKey: DefaultBrowserURL.userDefaultsKey)
-        let savedLegacyDefaultBrowserURL = legacyDefaults?.object(forKey: DefaultBrowserURL.userDefaultsKey)
-        UserDefaults.standard.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
-        legacyDefaults?.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
-        defer {
-            if let savedDefaultBrowserURL {
-                UserDefaults.standard.set(savedDefaultBrowserURL, forKey: DefaultBrowserURL.userDefaultsKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
-            }
-            if let savedLegacyDefaultBrowserURL {
-                legacyDefaults?.set(savedLegacyDefaultBrowserURL, forKey: DefaultBrowserURL.userDefaultsKey)
-            } else {
-                legacyDefaults?.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
-            }
-        }
+        // "Never configured" means the fallback URL. Pinned in-process (argument
+        // domain, never on disk); the pin also outranks the legacy domain, so this no
+        // longer deletes and restores the owner's URL in both real domains.
+        let unpinDefaultBrowserURL = QADefaultsPin.pin([DefaultBrowserURL.userDefaultsKey: DefaultBrowserURL.fallback])
+        defer { unpinDefaultBrowserURL() }
 
         let fileManager = FileManager.default
         let tempRoot = fileManager.temporaryDirectory
@@ -23646,14 +23644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let fakeTmuxPath = tempRoot.appendingPathComponent("fake-tmux").path
         defaults.set(fakeTmuxPath, forKey: TmuxPersistenceConfig.pathKey)
 
-        let previousDeletePolicy = UserDefaults.standard.string(forKey: DeleteConfirmPolicy.userDefaultsKey)
-        UserDefaults.standard.set(DeleteConfirmPolicy.never.rawValue, forKey: DeleteConfirmPolicy.userDefaultsKey)
+        // In-process (argument domain, never on disk): not the owner's real policy.
+        let unpinDeletePolicy = QADefaultsPin.pin([DeleteConfirmPolicy.userDefaultsKey: DeleteConfirmPolicy.never.rawValue])
         defer {
-            if let previousDeletePolicy {
-                UserDefaults.standard.set(previousDeletePolicy, forKey: DeleteConfirmPolicy.userDefaultsKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: DeleteConfirmPolicy.userDefaultsKey)
-            }
+            unpinDeletePolicy()
             defaults.removePersistentDomain(forName: defaultsSuiteName)
         }
 

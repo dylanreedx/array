@@ -63,14 +63,25 @@ enum ChoiceGeometryChecks {
     ]
 
     static func run() throws {
-        UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key)
-        defer { UserDefaults.standard.removeObject(forKey: AgentBackendConfig.key) }
+        // FIRST, before anything writes: the owner's agent keys must come out of
+        // this leg exactly as they went in, never rewritten even for a moment.
+        let standardGuard = QAStandardDefaultsGuard(keys: QAStandardDefaultsGuard.agentSelectionKeys)
+        // Hermetic against ambient harness state, in-process only: deleting the key
+        // here deleted the owner's real harness choice inside the prod bundle.
+        let unpinAmbientSelection = AgentCatalogQAFixture.pinAmbientSelection(
+            harness: .claudeCode,
+            model: AgentModelCatalog.shared.snapshot(for: .claudeCode).seedModel ?? "")
+        defer { unpinAmbientSelection() }
 
         try checkMeasuredCellInset()
         try checkPopoverRowsDrawTheirTitles()
         try checkTriggerKeepsItsTitleAtIntrinsicWidth()
         try checkFooterDoesNotCondenseWithSurplusWidth()
         try checkCatalogRefreshRerunsTheFitDecision()
+        let touched = standardGuard.finish()
+        guard touched.isEmpty else {
+            throw CheckError.message("the leg wrote the owner's agent keys in the standard defaults domain: \(touched)")
+        }
     }
 
     // MARK: - 1. The cell inset is a measurement, not a guess
