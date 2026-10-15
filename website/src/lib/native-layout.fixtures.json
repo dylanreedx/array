@@ -1,0 +1,1847 @@
+{
+  "provenance": {
+    "source": "Sources/ContinuumRevivedCore/CanvasAutoLayoutEngine.swift",
+    "generator": "website/scripts/native-layout-fixtures.py",
+    "method": "The script extracts the named Swift declarations, relaxes only access modifiers so the standalone CLI driver can call them, compiles a temporary harness, and serializes its outputs. Function bodies are unchanged; no expected frame values are hand-authored.",
+    "nativeFunctions": [
+      "resizeMembers",
+      "solveMemberMove",
+      "settleMembers",
+      "pushAxis",
+      "propagatePushes",
+      "absorb",
+      "contactPlacement",
+      "valid",
+      "isGapAdjacent",
+      "clampIntoContent",
+      "overlapsOrUnderGap",
+      "squaredDistance",
+      "uuidLess"
+    ],
+    "idOrdering": "Fixture labels are sorted and assigned UUIDs in the same order so native UUID-string ordering matches TypeScript string ordering."
+  },
+  "gap": 8.0,
+  "content": {
+    "x": 66,
+    "y": 103,
+    "width": 1616,
+    "height": 999
+  },
+  "scenarios": [
+    {
+      "active": "a-stabilize",
+      "baseline": {
+        "a-stabilize": {
+          "height": 550,
+          "width": 430,
+          "x": 70,
+          "y": 90
+        },
+        "b-verify": {
+          "height": 470,
+          "width": 380,
+          "x": 550,
+          "y": 90
+        },
+        "c-audit": {
+          "height": 450,
+          "width": 340,
+          "x": 980,
+          "y": 90
+        },
+        "d-shell": {
+          "height": 470,
+          "width": 300,
+          "x": 1370,
+          "y": 90
+        },
+        "e-note": {
+          "height": 430,
+          "width": 800,
+          "x": 70,
+          "y": 680
+        },
+        "f-browser": {
+          "height": 430,
+          "width": 560,
+          "x": 920,
+          "y": 680
+        }
+      },
+      "content": {
+        "height": 999,
+        "width": 1616,
+        "x": 66,
+        "y": 103
+      },
+      "id": "guided-main-drag",
+      "moves": {
+        "backtrack-outside-band": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 200,
+            "y": 103
+          },
+          "latch": null,
+          "latchedInput": "b-verify",
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 200,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 638,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1026,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1374,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 638,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1026,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1374,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 218,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 1026,
+              "y": 581
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 200,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 638,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1026,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1374,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 218,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 1026,
+              "y": 581
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 200,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 638,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1026,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1374,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 200,
+            "y": 90
+          },
+          "snapped": null,
+          "valid": true
+        },
+        "latched-follow-through": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 550,
+            "y": 103
+          },
+          "latch": "b-verify",
+          "latchedInput": "b-verify",
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 650,
+              "y": 95
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 70,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 162,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 988,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1336,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 180,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 988,
+              "y": 661
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 550,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 162,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 988,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1336,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 180,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 988,
+              "y": 661
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 550,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 70,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 650,
+            "y": 95
+          },
+          "snapped": null,
+          "valid": true
+        },
+        "pre-push": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 300,
+            "y": 103
+          },
+          "latch": null,
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 300,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 646,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1034,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1382,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 738,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1126,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1382,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 226,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 1034,
+              "y": 581
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 300,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 738,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1126,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1382,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 226,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 1034,
+              "y": 581
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 300,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 646,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1034,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1382,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 300,
+            "y": 90
+          },
+          "snapped": null,
+          "valid": true
+        },
+        "return-home": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 70,
+            "y": 103
+          },
+          "latch": null,
+          "latchedInput": "b-verify",
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 938,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1286,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 130,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 938,
+              "y": 581
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 938,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1286,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 130,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 938,
+              "y": 581
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 70,
+            "y": 90
+          },
+          "snapped": null,
+          "valid": true
+        },
+        "slot-enter": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 550,
+            "y": 103
+          },
+          "latch": "b-verify",
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 430,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 70,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 162,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 988,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1336,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 180,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 988,
+              "y": 661
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 550,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 162,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 988,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1336,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 180,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 988,
+              "y": 661
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 550,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 70,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 920,
+              "y": 680
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 430,
+            "y": 90
+          },
+          "snapped": null,
+          "valid": true
+        }
+      },
+      "resizes": {}
+    },
+    {
+      "active": "f-browser",
+      "baseline": {
+        "a-stabilize": {
+          "height": 550,
+          "width": 430,
+          "x": 70,
+          "y": 90
+        },
+        "b-verify": {
+          "height": 470,
+          "width": 380,
+          "x": 550,
+          "y": 90
+        },
+        "c-audit": {
+          "height": 450,
+          "width": 340,
+          "x": 980,
+          "y": 90
+        },
+        "d-shell": {
+          "height": 470,
+          "width": 300,
+          "x": 1370,
+          "y": 90
+        },
+        "e-note": {
+          "height": 430,
+          "width": 800,
+          "x": 70,
+          "y": 680
+        },
+        "f-browser": {
+          "height": 430,
+          "width": 560,
+          "x": 920,
+          "y": 680
+        }
+      },
+      "content": {
+        "height": 999,
+        "width": 1616,
+        "x": 66,
+        "y": 103
+      },
+      "id": "guided-editor-drag",
+      "moves": {
+        "browser-drag": {
+          "committedFrames": null,
+          "destination": {
+            "height": 430,
+            "width": 560,
+            "x": 984,
+            "y": 581
+          },
+          "latch": null,
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 970,
+              "y": 690
+            }
+          },
+          "passiveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 661
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 103
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 103
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 103
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 103
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 661
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 984,
+              "y": 581
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 550,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 980,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1370,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 680
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 970,
+              "y": 690
+            }
+          },
+          "requested": {
+            "height": 430,
+            "width": 560,
+            "x": 970,
+            "y": 690
+          },
+          "snapped": null,
+          "valid": true
+        }
+      },
+      "resizes": {}
+    },
+    {
+      "active": "a-stabilize",
+      "baseline": {
+        "a-stabilize": {
+          "height": 550,
+          "width": 430,
+          "x": 80,
+          "y": 110
+        },
+        "b-verify": {
+          "height": 470,
+          "width": 380,
+          "x": 540,
+          "y": 110
+        },
+        "c-audit": {
+          "height": 450,
+          "width": 340,
+          "x": 950,
+          "y": 110
+        },
+        "d-shell": {
+          "height": 470,
+          "width": 300,
+          "x": 1320,
+          "y": 110
+        }
+      },
+      "content": {
+        "height": 999,
+        "width": 1616,
+        "x": 66,
+        "y": 103
+      },
+      "id": "unequal-width-row",
+      "moves": {
+        "unequal-cascade": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 540,
+            "y": 110
+          },
+          "latch": "b-verify",
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 385,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 80,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 950,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1320,
+              "y": 110
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 152,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 978,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1326,
+              "y": 110
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 540,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 152,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 978,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1326,
+              "y": 110
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 540,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 80,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 950,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1320,
+              "y": 110
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 385,
+            "y": 110
+          },
+          "snapped": null,
+          "valid": true
+        },
+        "unequal-slot-swap": {
+          "committedFrames": null,
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 540,
+            "y": 110
+          },
+          "latch": "b-verify",
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 490,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 80,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 950,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1320,
+              "y": 110
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 152,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 978,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1326,
+              "y": 110
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 540,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 152,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 978,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1326,
+              "y": 110
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 540,
+              "y": 110
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 80,
+              "y": 110
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 950,
+              "y": 110
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1320,
+              "y": 110
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 490,
+            "y": 110
+          },
+          "snapped": null,
+          "valid": true
+        }
+      },
+      "resizes": {}
+    },
+    {
+      "active": "a-main",
+      "baseline": {
+        "a-main": {
+          "height": 550,
+          "width": 430,
+          "x": 80,
+          "y": 120
+        },
+        "b-verify": {
+          "height": 470,
+          "width": 380,
+          "x": 518,
+          "y": 120
+        },
+        "c-audit": {
+          "height": 450,
+          "width": 340,
+          "x": 906,
+          "y": 120
+        },
+        "d-shell": {
+          "height": 470,
+          "width": 300,
+          "x": 1254,
+          "y": 120
+        },
+        "e-board": {
+          "height": 430,
+          "width": 800,
+          "x": 80,
+          "y": 678
+        },
+        "f-editor": {
+          "height": 430,
+          "width": 560,
+          "x": 888,
+          "y": 678
+        }
+      },
+      "content": {
+        "height": 999,
+        "width": 1616,
+        "x": 66,
+        "y": 103
+      },
+      "id": "native-resize-members",
+      "moves": {},
+      "resizes": {
+        "editor-width-and-height": {
+          "active": "f-editor",
+          "frames": {
+            "a-main": {
+              "height": 550,
+              "width": 430,
+              "x": 80,
+              "y": 120
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 518,
+              "y": 120
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 906,
+              "y": 120
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1254,
+              "y": 120
+            },
+            "e-board": {
+              "height": 430,
+              "width": 800,
+              "x": 80,
+              "y": 678
+            },
+            "f-editor": {
+              "height": 560,
+              "width": 800,
+              "x": 888,
+              "y": 678
+            }
+          },
+          "requested": {
+            "height": 560,
+            "width": 800,
+            "x": 888,
+            "y": 678
+          }
+        },
+        "main-width-and-height": {
+          "active": "a-main",
+          "frames": {
+            "a-main": {
+              "height": 420,
+              "width": 550,
+              "x": 80,
+              "y": 120
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 638,
+              "y": 120
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1026,
+              "y": 120
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1374,
+              "y": 120
+            },
+            "e-board": {
+              "height": 430,
+              "width": 800,
+              "x": 80,
+              "y": 678
+            },
+            "f-editor": {
+              "height": 430,
+              "width": 560,
+              "x": 888,
+              "y": 678
+            }
+          },
+          "requested": {
+            "height": 420,
+            "width": 550,
+            "x": 80,
+            "y": 120
+          }
+        },
+        "shell-width-and-height": {
+          "active": "d-shell",
+          "frames": {
+            "a-main": {
+              "height": 550,
+              "width": 430,
+              "x": 80,
+              "y": 120
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 518,
+              "y": 120
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 906,
+              "y": 120
+            },
+            "d-shell": {
+              "height": 560,
+              "width": 480,
+              "x": 1254,
+              "y": 120
+            },
+            "e-board": {
+              "height": 430,
+              "width": 800,
+              "x": 80,
+              "y": 678
+            },
+            "f-editor": {
+              "height": 430,
+              "width": 560,
+              "x": 888,
+              "y": 688
+            }
+          },
+          "requested": {
+            "height": 560,
+            "width": 480,
+            "x": 1254,
+            "y": 120
+          }
+        }
+      }
+    },
+    {
+      "active": "a-stabilize",
+      "baseline": {
+        "a-stabilize": {
+          "height": 550,
+          "width": 430,
+          "x": 70,
+          "y": 90
+        },
+        "b-verify": {
+          "height": 470,
+          "width": 380,
+          "x": 508,
+          "y": 90
+        },
+        "c-audit": {
+          "height": 450,
+          "width": 340,
+          "x": 896,
+          "y": 90
+        },
+        "d-shell": {
+          "height": 470,
+          "width": 300,
+          "x": 1244,
+          "y": 90
+        },
+        "e-note": {
+          "height": 430,
+          "width": 800,
+          "x": 70,
+          "y": 648
+        },
+        "f-browser": {
+          "height": 430,
+          "width": 560,
+          "x": 878,
+          "y": 648
+        }
+      },
+      "content": {
+        "height": 1230,
+        "width": 1970,
+        "x": 66,
+        "y": 79
+      },
+      "id": "native-honor-snap-reflow",
+      "moves": {
+        "raw-main-snaps-home": {
+          "committedFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 648
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 878,
+              "y": 648
+            }
+          },
+          "destination": {
+            "height": 550,
+            "width": 430,
+            "x": 70,
+            "y": 90
+          },
+          "latch": null,
+          "latchedInput": null,
+          "liveFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 260,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 698,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 1086,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1434,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 648
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 878,
+              "y": 648
+            }
+          },
+          "passiveFrames": {
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 648
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 878,
+              "y": 648
+            }
+          },
+          "releaseFrames": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 648
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 878,
+              "y": 648
+            }
+          },
+          "releaseSource": {
+            "a-stabilize": {
+              "height": 550,
+              "width": 430,
+              "x": 70,
+              "y": 90
+            },
+            "b-verify": {
+              "height": 470,
+              "width": 380,
+              "x": 508,
+              "y": 90
+            },
+            "c-audit": {
+              "height": 450,
+              "width": 340,
+              "x": 896,
+              "y": 90
+            },
+            "d-shell": {
+              "height": 470,
+              "width": 300,
+              "x": 1244,
+              "y": 90
+            },
+            "e-note": {
+              "height": 430,
+              "width": 800,
+              "x": 70,
+              "y": 648
+            },
+            "f-browser": {
+              "height": 430,
+              "width": 560,
+              "x": 878,
+              "y": 648
+            }
+          },
+          "requested": {
+            "height": 550,
+            "width": 430,
+            "x": 260,
+            "y": 90
+          },
+          "snapped": {
+            "height": 550,
+            "width": 430,
+            "x": 70,
+            "y": 90
+          },
+          "valid": true
+        }
+      },
+      "resizes": {}
+    }
+  ]
+}

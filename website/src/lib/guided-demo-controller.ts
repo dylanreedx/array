@@ -4,7 +4,6 @@ import { guidedSnapshot, type DemoTile, type DemoAgent } from './guided-demo';
 const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
-const type = (text: string, p: number, a: number, b: number) => text.slice(0, Math.floor(text.length * between(p, a, b)));
 
 export function installGuidedDemo() {
   const root = document.querySelector<HTMLElement>('[data-guided-demo]');
@@ -32,6 +31,12 @@ export function installGuidedDemo() {
   const boardDetails = nodes<HTMLElement>('[data-demo-board-detail]');
   const text = (node: HTMLElement, value: string) => { if (node.textContent !== value) node.textContent = value; };
   const write = (p: number) => {
+    // Resize the screen itself before measuring its canvas. Camera, native UI,
+    // focus border and cursor therefore share one coordinate system throughout
+    // the preview → full-screen → preview transition.
+    const frame = reduced.matches ? 0 : smooth(between(p, .10, .18)) * (1 - smooth(between(p, .18, .26))) + smooth(between(p, .985, 1));
+    root.style.setProperty('--demo-frame', String(frame));
+    root.dataset.demoFramed = String(frame > .001);
     const snapshot = guidedSnapshot(p, { width: pin.clientWidth || innerWidth, height: pin.clientHeight || innerHeight, reducedMotion: reduced.matches });
     root.dataset.demoProgress = String(snapshot.progress);
     root.dataset.demoStep = snapshot.step;
@@ -66,7 +71,7 @@ export function installGuidedDemo() {
       tile.dataset.demoCreated = String(tile.dataset.assemblySurface !== 'stabilize' || snapshot.mainCreated);
       tile.dataset.demoVisible = String(frame.visible);
       tile.dataset.demoDragging = String(frame.drag.active);
-      tile.dataset.demoResizing = String(tile.dataset.assemblySurface === 'browser' && !!snapshot.resizeReadout);
+      tile.dataset.demoResizing = String(tile.dataset.assemblySurface === snapshot.resizeReadout?.tile);
       tile.dataset.demoFocused = String(snapshot.focusedTile === tile.dataset.assemblySurface);
       tile.style.setProperty('--demo-tile-x', `${motion.x}px`);
       tile.style.setProperty('--demo-tile-y', `${motion.y}px`);
@@ -77,7 +82,11 @@ export function installGuidedDemo() {
       tile.dataset.demoEmphasis = String(motion.emphasis);
     }
     const zone = root.querySelector<HTMLElement>('[data-assembly-chrome="zone-runtime"]');
-    if (zone) zone.style.width = `${Math.max(1664, ...Object.values(snapshot.tileFrames).filter(frame => frame.visible).map(frame => frame.x + frame.width + 24 - 42))}px`;
+    if (zone) {
+      const frames = Object.values(snapshot.tileFrames).filter(frame => frame.visible);
+      zone.style.width = `${Math.max(1664, ...frames.map(frame => frame.x + frame.width + 24 - 42))}px`;
+      zone.style.height = `${Math.max(1081, ...frames.map(frame => frame.y + frame.height + 24 - 45))}px`;
+    }
     for (const card of boardCards) {
       const range: Record<string, [number, number]> = { placement: [.74, .77], approval: [.755, .81], tests: [.78, .845] };
       const [start, end] = range[card.dataset.demoBoardCard ?? 'placement'] ?? range.placement;
@@ -176,12 +185,15 @@ export function installGuidedDemo() {
         ['Complete', 'Passed'].includes(value) ? '✓ Completed' : ready ? '○ Pending' : '◐ In progress');
     }
     const outline = root.querySelector<SVGSVGElement>('[data-demo-focus-outline]');
+    const moving = Object.values(snapshot.tileFrames).some(frame => frame.drag.active);
     const focusId = snapshot.approval === 'waiting' ? 'verify' : snapshot.focusedTile;
     const focusTile = focusId ? tiles.find(tile => tile.dataset.assemblySurface === focusId) : null;
     if (outline) {
       const frame = focusTile?.getBoundingClientRect();
       const canvasRect = pin.getBoundingClientRect();
-      const visible = !snapshot.reducedMotion && snapshot.progress >= .34 && !!frame && frame.right > canvasRect.left && frame.left < canvasRect.right && frame.bottom > canvasRect.top && frame.top < canvasRect.bottom;
+      // During a move the destination ghost is the placement cue. Marching ants
+      // belong to ordinary focus/attention, never to the dragged tile's body.
+      const visible = !moving && !snapshot.reducedMotion && snapshot.progress >= .34 && !!frame && frame.right > canvasRect.left && frame.left < canvasRect.right && frame.bottom > canvasRect.top && frame.top < canvasRect.bottom;
       outline.style.display = visible ? 'block' : 'none';
       outline.dataset.demoFocusTarget = focusId ?? '';
       outline.dataset.attention = String(snapshot.approval === 'waiting');
@@ -210,23 +222,24 @@ export function installGuidedDemo() {
     const readout = root.querySelector<HTMLElement>('[data-demo-resize-readout]');
     if (readout) {
       readout.hidden = !snapshot.resizeReadout;
+      readout.dataset.demoResizeTile = snapshot.resizeReadout?.tile ?? '';
       if (snapshot.resizeReadout) {
-        const frame = snapshot.tileFrames.browser;
+        const frame = snapshot.tileFrames[snapshot.resizeReadout.tile];
         text(readout, `${snapshot.resizeReadout.width} × ${snapshot.resizeReadout.height}`);
         readout.style.left = `${Math.min(pin.clientWidth - 100, snapshot.camera.x + (frame.x + frame.width) * snapshot.camera.scale + 12)}px`;
         readout.style.top = `${Math.min(pin.clientHeight - 65, snapshot.camera.y + (frame.y + frame.height) * snapshot.camera.scale + 12)}px`;
       }
     }
-    const shell = root.querySelector<HTMLElement>('[data-assembly-surface="shell"]');
-    if (shell) {
-      const command = shell.querySelector<HTMLElement>('code[data-type="prompt"]');
-      const result = shell.querySelector<HTMLElement>('code[data-type="success"]');
-      const detail = shell.querySelector<HTMLElement>('code[data-type="output"]');
-      const input = shell.querySelector<HTMLInputElement>('input');
-      if (command) text(command, snapshot.progress < .835 ? '$ swift build' : '$ swift test');
-      if (result) text(result, snapshot.progress < .835 ? 'Build complete!' : snapshot.progress < .855 ? 'Running CanvasSceneEditTests…' : '18 checks passed · 0 failures');
-      if (detail) text(detail, snapshot.progress < .835 ? 'Ready for the next command.' : snapshot.progress < .855 ? 'Checking world and zone-local frames.' : 'Tile positions preserved.');
-      if (input) input.value = snapshot.progress >= .82 && snapshot.progress < .835 ? type('swift test', snapshot.progress, .82, .835) : '';
+    const terminal = root.querySelector<HTMLElement>('[data-demo-terminal]');
+    if (terminal) {
+      for (const line of terminal.querySelectorAll<HTMLElement>('[data-term-line]')) line.hidden = Number(line.dataset.termLine) >= snapshot.terminal.lines;
+      const typed = terminal.querySelector<HTMLElement>('[data-term-typed]');
+      if (typed) text(typed, snapshot.terminal.typed);
+      const live = terminal.querySelector<HTMLElement>('[data-term-cursor="live"]');
+      if (live) live.hidden = snapshot.terminal.phase === 'running' || snapshot.terminal.phase === 'done';
+      const final = terminal.querySelector<HTMLElement>('[data-term-final]');
+      if (final) final.hidden = snapshot.terminal.phase !== 'done';
+      terminal.scrollTop = terminal.scrollHeight; // A terminal keeps its newest line in view.
     }
     for (const node of captions) text(node, snapshot.caption);
     for (const node of menus) {
@@ -277,17 +290,27 @@ export function installGuidedDemo() {
         'editor-line': '[data-demo-editor-line="14"]', 'shell-input': '[data-interaction-id="shell-input"]',
         'stabilize-header': '[data-demo-drag-handle="stabilize"]', 'editor-header': '[data-demo-drag-handle="browser"]',
         'editor-resize': '[data-demo-resize-handle="browser"]',
+        'stabilize-resize': '[data-demo-resize-handle="stabilize"]',
+        'shell-resize': '[data-demo-resize-handle="shell"]',
       };
       const targetSelector = snapshot.cursorTarget ? targetSelectors[snapshot.cursorTarget] : null;
       const target = targetSelector ? root.querySelector<HTMLElement>(targetSelector)?.getBoundingClientRect() : null;
       if (target?.width) {
         // Geometry comes from the actual control, including the moving titlebar
         // and the live resize corner. Direct seeks do not retain stale targets.
-        x = target.left + (snapshot.cursorTarget?.endsWith('header') ? Math.min(100, target.width * .3) : target.width / 2) - (origin?.left ?? 0);
-        y = target.top + target.height / 2 - (origin?.top ?? 0);
+        const targetX = target.left + (snapshot.cursorTarget?.endsWith('header') ? Math.min(100, target.width * .3) : target.width / 2) - (origin?.left ?? 0);
+        const targetY = target.top + target.height / 2 - (origin?.top ?? 0);
+        const from = snapshot.cursor.fromTarget ? root.querySelector<HTMLElement>(targetSelectors[snapshot.cursor.fromTarget])?.getBoundingClientRect() : null;
+        if (from?.width) {
+          x = from.left + (snapshot.cursor.fromTarget?.endsWith('header') ? Math.min(100, from.width * .3) : from.width / 2) - (origin?.left ?? 0);
+          y = from.top + from.height / 2 - (origin?.top ?? 0);
+        }
+        x += (targetX - x) * snapshot.cursor.approach;
+        y += (targetY - y) * snapshot.cursor.approach;
       }
       node.style.transform = `translate(${x}px, ${y}px)`;
       node.dataset.pressed = String(snapshot.cursor.pressed);
+      node.dataset.gesture = snapshot.cursorTarget?.endsWith('resize') && snapshot.cursor.approach > .99 ? 'resize' : 'pointer';
     }
     for (const node of presses) {
       node.style.animation = 'none';

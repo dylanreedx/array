@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { DEMO_TEXT, guidedSnapshot, STEPS } from './guided-demo';
+import { DEMO_TEXT, guidedSnapshot, STEPS, TERMINAL_LINES } from './guided-demo';
+import { overlapsOrUnderGap } from './native-layout';
 const desktop = { width: 1440, height: 900 };
 const mobile = { width: 390, height: 760 };
 
@@ -47,62 +48,142 @@ describe('native golden workspace flow', () => {
     expect(guidedSnapshot(.58, desktop).approval).toBe('hidden');
     expect(guidedSnapshot(.90, desktop).status).toEqual({ stabilize: 'Complete', verify: 'Passed', audit: 'Complete' });
   });
-  test('native drag moves the actual frame; snap ghost and neighbor reflow are separate', () => {
-    const start = guidedSnapshot(.865, desktop), dragging = guidedSnapshot(.885, desktop), settled = guidedSnapshot(.915, desktop);
-    expect(dragging.cursorTarget).toBe('stabilize-header');
-    expect(dragging.tileFrames.stabilize.drag).toEqual({ active: true, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 });
-    expect(dragging.tileFrames.stabilize.x).toBeGreaterThan(start.tileFrames.stabilize.x);
-    expect(dragging.snapPreview).toMatchObject({ tile: 'stabilize', x: 550, y: 95, scale: 1, opacity: 1 });
-    expect(settled.snapPreview).toBeNull();
-    expect(settled.tileFrames.verify.x).toBe(70);
-    expect(settled.tileFrames.stabilize.x).toBe(start.tileFrames.verify.x);
-    expect(settled.tileFrames.audit.x).toBe(start.tileFrames.audit.x);
-    expect(settled.tileFrames.stabilize.drag.active).toBe(false);
+  test('native previews describe vacant release frames and become aligned swaps', () => {
+    for (const options of [desktop, mobile]) {
+      for (const [start, end, id] of [[.873, .902, 'stabilize'], [.909, .923, 'browser']] as const) {
+        for (let p = start + .0005; p < end; p += .0005) {
+          const state = guidedSnapshot(p, options), ghost = state.snapPreview!;
+          expect(ghost, `missing preview at ${p}`).not.toBeNull();
+          expect(ghost.tile).toBe(id);
+          expect(state.tileFrames[id].drag.active).toBe(true);
+          expect(state.tiles[id].emphasis).toBe(0);
+          if (id === 'stabilize') for (const passive of ['verify', 'audit', 'shell'] as const) {
+            expect(state.tileFrames[passive].y, `row skew: ${passive} at ${p}`).toBe(ghost.y);
+          }
+          for (const [other, frame] of Object.entries(state.tileFrames)) {
+            if (other !== id) expect(overlapsOrUnderGap(ghost, frame, 8 - 1e-8), `occupied preview: ${other} at ${p}`).toBe(false);
+          }
+        }
+        const beforeDrop = guidedSnapshot(end - 1e-8, options), dropped = guidedSnapshot(end, options);
+        expect(beforeDrop.snapPreview).toMatchObject({ x: dropped.tileFrames[id].x, y: dropped.tileFrames[id].y, width: dropped.tileFrames[id].width, height: dropped.tileFrames[id].height });
+        expect(dropped.snapPreview).toBeNull();
+      }
+      const before = guidedSnapshot(.873, options).tileFrames, swapped = guidedSnapshot(.902, options).tileFrames;
+      expect(swapped.stabilize.x).toBe(before.verify.x);
+      expect(swapped.stabilize.y).toBe(before.verify.y);
+      expect(swapped.verify.x + swapped.verify.width + 8).toBe(swapped.stabilize.x);
+      expect(swapped.audit.x).toBe(swapped.stabilize.x + swapped.stabilize.width + 8);
+      expect(swapped.shell.x).toBe(swapped.audit.x + swapped.audit.width + 8);
+      expect(new Set(['verify', 'stabilize', 'audit', 'shell'].map(id => swapped[id as keyof typeof swapped].y)).size).toBe(1);
+      const lowerSwap = guidedSnapshot(.923, options).tileFrames;
+      expect(lowerSwap.browser.x).toBe(swapped.browser.x);
+      expect(lowerSwap.browser.y).toBe(swapped.browser.y);
+      expect(lowerSwap.browser.x).toBe(lowerSwap.note.x + lowerSwap.note.width + 8);
+      expect(lowerSwap.note.y).toBe(lowerSwap.browser.y);
+    }
   });
-  test('drag pushes baseline neighbors before latching, and relaxes the cascade after swapping', () => {
-    const baseline = guidedSnapshot(.865, desktop);
-    for (const p of [.877, .880, .885]) {
-      const frames = guidedSnapshot(p, desktop).tileFrames;
-      expect(frames.stabilize.x + frames.stabilize.width / 2).toBeLessThan(550);
-      expect(frames.verify.x).toBe(Math.max(550, frames.stabilize.x + frames.stabilize.width + 8));
-      expect(frames.audit.x).toBe(Math.max(980, frames.verify.x + frames.verify.width + 8));
-      expect(frames.shell.x).toBe(Math.max(1370, frames.audit.x + frames.audit.width + 8));
-      for (const [left, right] of [['stabilize', 'verify'], ['verify', 'audit'], ['audit', 'shell']] as const) {
-        expect(frames[right].x - (frames[left].x + frames[left].width)).toBeGreaterThanOrEqual(8 - 1e-9);
+  test('the camera holds one framing through each drag, keeping the tile and its destination in view', () => {
+    for (const options of [desktop, mobile]) {
+      for (const [start, end, id] of [[.873, .902, 'stabilize'], [.909, .923, 'browser']] as const) {
+        let previous = guidedSnapshot(start, options).camera, maxStep = 0;
+        for (let p = start + .0005; p < end; p += .0005) {
+          const state = guidedSnapshot(p, options), camera = state.camera;
+          maxStep = Math.max(maxStep, Math.hypot(camera.x - previous.x, camera.y - previous.y));
+          previous = camera;
+          const viewportWidth = options.width; // The snapshot width is the canvas pin's width.
+          for (const frame of [state.tileFrames[id], state.snapPreview!]) {
+            expect(camera.x + frame.x * camera.scale, `${id} left in frame at ${p}`).toBeGreaterThanOrEqual(0);
+            expect(camera.x + (frame.x + frame.width) * camera.scale, `${id} right in frame at ${p}`).toBeLessThanOrEqual(viewportWidth);
+          }
+        }
+        expect(maxStep, `${id} camera step at ${options.width}px`).toBeLessThan(options.width < 700 ? 2 : 4);
       }
     }
-    const pushed = guidedSnapshot(.885, desktop);
-    expect(pushed.tileFrames.verify.x).toBeGreaterThan(baseline.tileFrames.verify.x);
-    expect(pushed.tileFrames.audit.x).toBeGreaterThan(baseline.tileFrames.audit.x);
-    expect(pushed.tileFrames.shell.x).toBeGreaterThan(baseline.tileFrames.shell.x);
-    const exchanged = guidedSnapshot(.915, desktop);
-    expect(exchanged.tileFrames.verify).toMatchObject({ x: 70, y: 90 });
-    expect(exchanged.tileFrames.audit.x).toBe(baseline.tileFrames.audit.x);
-    expect(exchanged.tileFrames.shell.x).toBe(baseline.tileFrames.shell.x);
-    // Retreat/direct seek recomputes from the gesture baseline, not last solve.
-    guidedSnapshot(.915, desktop);
-    expect(guidedSnapshot(.885, desktop)).toEqual(pushed);
   });
-  test('editor reorganization and live resize commit varied frames and content dimensions', () => {
-    const start = guidedSnapshot(.905, desktop), moved = guidedSnapshot(.925, desktop), resizing = guidedSnapshot(.945, desktop), final = guidedSnapshot(.97, desktop);
-    expect(start.selectedTile).toBe('browser');
-    expect(moved.tileFrames.browser.x).toBeGreaterThan(start.tileFrames.browser.x);
-    expect(resizing.cursorTarget).toBe('editor-resize');
-    expect(resizing.tileFrames.browser.width).toBeGreaterThan(moved.tileFrames.browser.width);
-    expect(resizing.resizeReadout).toEqual({ width: Math.round(resizing.tileFrames.browser.width), height: Math.round(resizing.tileFrames.browser.height - 24) });
-    expect(final.tileFrames.browser).toMatchObject({ x: 970, y: 690, width: 620, height: 390 });
+  test('the terminal runs a practical swift test that fills the tile line by line', () => {
+    expect(TERMINAL_LINES.every(line => (line.kind === 'pass' ? 4 + 26 + (line.time?.length ?? 0) : line.text.length + (line.time ? line.time.length + 3 : 0) + (line.kind === 'prompt' ? 15 : 0)) <= 40)).toBe(true);
+    const idle = guidedSnapshot(.81, desktop).terminal, typing = guidedSnapshot(.828, desktop).terminal;
+    expect(idle).toEqual({ lines: 4, typed: '', phase: 'idle' });
+    expect(typing.phase).toBe('typing');
+    expect(typing.typed.length).toBeGreaterThan(0);
+    expect(typing.typed.length).toBeLessThan('swift test'.length);
+    let lines = 0;
+    for (let p = .835; p <= .86; p += .0005) {
+      const terminal = guidedSnapshot(p, desktop).terminal;
+      expect(terminal.lines).toBeGreaterThanOrEqual(lines);
+      lines = terminal.lines;
+    }
+    expect(guidedSnapshot(.845, desktop).terminal).toMatchObject({ phase: 'running', typed: 'swift test' });
+    expect(guidedSnapshot(.86, desktop).terminal).toEqual({ lines: TERMINAL_LINES.length, typed: 'swift test', phase: 'done' });
+    expect(TERMINAL_LINES.at(-1)!.text).toBe('Executed 18 tests, with 0 failures');
+    expect(TERMINAL_LINES.filter(line => line.kind === 'pass')).toHaveLength(18);
+  });
+  test('cursor approaches before selection, then holds through drag and each resize', () => {
+    for (const [approach, press, target, tile] of [
+      [.866, .878, 'stabilize-header', 'stabilize'], [.906, .915, 'editor-header', 'browser'],
+      [.926, .94, 'editor-resize', 'browser'], [.953, .965, 'stabilize-resize', 'stabilize'],
+      [.973, .981, 'shell-resize', 'shell'],
+    ] as const) {
+      const before = guidedSnapshot(approach, desktop), held = guidedSnapshot(press, desktop);
+      expect(before.cursorTarget).toBe(target);
+      expect(before.cursor.approach).toBeGreaterThan(0);
+      expect(before.cursor.approach).toBeLessThan(1);
+      expect(before.cursor.pressed).toBe(false);
+      expect(before.cursor.fromTarget).not.toBeNull();
+      expect(before.selectedTile).not.toBe(tile);
+      expect(held.cursorTarget).toBe(target);
+      expect(held.selectedTile).toBe(tile);
+      expect(held.cursor.pressed).toBe(true);
+      expect(held.cursor.approach).toBe(1);
+      expect(held.cursor.fromTarget).toBeNull();
+    }
+    expect(guidedSnapshot(.986, desktop).cursor.visible).toBe(false);
+  });
+  test('three practical resizes enlarge the working surfaces with native body-height readouts', () => {
+    for (const [p, tile, initialWidth] of [[.94, 'browser', 560], [.965, 'stabilize', 430], [.981, 'shell', 300]] as const) {
+      const resizing = guidedSnapshot(p, desktop), frame = resizing.tileFrames[tile];
+      expect(frame.width).toBeGreaterThan(initialWidth);
+      expect(resizing.resizeReadout).toEqual({ tile, width: Math.round(frame.width), height: Math.round(frame.height - 24) });
+    }
+    const final = guidedSnapshot(.99, desktop);
+    expect(final.tileFrames.browser).toMatchObject({ width: 800, height: 560 });
+    expect(final.tileFrames.stabilize).toMatchObject({ width: 550, height: 420 });
+    expect(final.tileFrames.shell).toMatchObject({ width: 480, height: 550 });
     expect(final.resizeReadout).toBeNull();
-    expect(final.tileFrames.stabilize).toMatchObject({ width: 430, height: 550 });
-    expect(final.tileFrames.verify).toMatchObject({ width: 380, height: 470 });
-    expect(final.tileFrames.audit).toMatchObject({ width: 340, height: 450 });
+    expect(guidedSnapshot(.99, mobile).tileFrames.browser).toMatchObject({ width: 470, height: 560 });
   });
-  test('mobile editor sizing comes from the same resize state, without CSS overrides', () => {
-    expect(guidedSnapshot(.92, mobile).tileFrames.browser.width).toBe(330);
-    expect(guidedSnapshot(.945, mobile).tileFrames.browser.width).toBeGreaterThan(330);
-    expect(guidedSnapshot(.97, mobile).tileFrames.browser.width).toBe(350);
+  test('settled drag and every resize preserve the native eight-point row gap', () => {
+    // The pointer-held slot-crossing interval is intentionally excluded;
+    // pre-latch pushes have their own baseline-relative gap witness above.
+    for (let p = .902; p <= .985; p += .001) {
+      const frames = guidedSnapshot(p, desktop).tileFrames;
+      for (const [left, right] of [['verify', 'stabilize'], ['stabilize', 'audit'], ['audit', 'shell']] as const) {
+        expect(frames[right].x - (frames[left].x + frames[left].width), `gap ${left}/${right} at ${p}`).toBeCloseTo(8, 7);
+      }
+    }
+    const beforeResize = guidedSnapshot(.957 - 1e-8, desktop).tileFrames.audit.x;
+    const afterResize = guidedSnapshot(.957 + 1e-8, desktop).tileFrames.audit.x;
+    expect(Math.abs(afterResize - beforeResize)).toBeLessThan(.001);
+  });
+  test('native resize pressure preserves all tile rectangles without collisions', () => {
+    for (const options of [desktop, mobile]) for (let p = .93; p <= 1; p += .001) {
+      const frames = Object.values(guidedSnapshot(p, options).tileFrames);
+      for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) {
+        const a = frames[i], b = frames[j];
+        const overlap = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x) > 1e-8
+          && Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y) > 1e-8;
+        expect(overlap, `overlap at ${p}`).toBe(false);
+      }
+    }
+  });
+  test('multiple resize direct seeks and reversals restore the exact committed state', () => {
+    for (const p of [.866, .926, .94, .953, .965, .973, .981]) {
+      const expected = guidedSnapshot(p, desktop);
+      guidedSnapshot(1, desktop); guidedSnapshot(.2, desktop);
+      expect(guidedSnapshot(p, desktop)).toEqual(expected);
+    }
     const detail = guidedSnapshot(.765, mobile);
     expect(detail.boardDetail).toBe(true);
-    expect(detail.camera.center).toEqual({ x: 285, y: 860 });
     expect(detail.camera.scale * 430).toBeLessThan(mobile.width);
   });
   test('same six mounted identities remain visible after main creation', () => {

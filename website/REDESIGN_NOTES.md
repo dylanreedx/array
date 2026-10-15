@@ -103,3 +103,33 @@ The verification machine used Node 25.9.0 and emitted the expected engine warnin
 - Keep Companion marked Coming soon until the product status changes separately.
 - Preserve the current DMG URL and `public/appcast.xml` unless a release task explicitly changes them.
 - Update `DESIGN_SYSTEM.md` for permanent rules and this file for meaningful implementation history.
+
+## Preview frame and practical layout pass
+
+The screen now assembles within a rounded Mac preview frame with a small bezel, center notch and top-right window controls. Actual screen bounds expand to fill the viewport during the tour, then contract into the preview at the end. Camera, cursor and focus geometry share the current canvas bounds. The caption stays inside the frame.
+
+The layout sequence shows cursor approach before press/selection, held titlebar dragging and diagonal corner resizing. Main/editor moves retain native neighbor spacing; a witnessed zero-gap post-swap contact and subsequent resize jump were repaired. Editor grows 560→800px (mobile 330→470), main agent 430→550px with a shorter transcript frame, and terminal 300→480px. All dimensions are seekable in reverse.
+
+The story now focuses on Claude Code and Codex. Known native context rings show explicit illustrative usage fixtures of 12%, 18%, 8%, rather than an unknown state. Guided provider choices contain those two providers; the reusable interactive component retains its existing provider support.
+
+Validation: 90 unit tests, 60 local Chromium/WebKit checks, production build and Astro diagnostics pass (zero errors/warnings/hints). New frame/gesture checks fail against the previous public release. Screenshot matrix covers 1440×960, 390×844 and 320×568 in both engines, with no script errors, document overflow or clipped active tile frames. Historical snapshot and configured Apple destination fixture tests were excluded from the normal production build run. Evidence is in `.plans/72-launch-night/qa/frame-motion/`.
+
+All six Lighthouse runs (three mobile, three desktop) scored 100 in performance, accessibility, best practices and SEO, with zero layout shift and blocking time. Mobile LCP was about 1.37s; desktop about 0.33s.
+
+## Predicted drag destination correction
+
+The move highlight now belongs to the future committed frame. The moving tile has no marching focus border or blue emphasis during titlebar dragging. Both the agent move and editor move render a separate stationary destination ghost before arrival, hide it at mouse-up, and commit the same rectangle. Mobile framing includes both the moving tile and its predicted destination.
+
+Source inspected: `TileNSView.mouseDragged`/`mouseUp`, `CanvasNSView.showDragGhost`, and `DragGhostOverlayView`. The web ghost follows the native 2px accent border at 90% opacity, 6px radius, 6% fill, topmost overlay with cursor above it, and brief .96→1 entrance. The narrated layout supplies deterministic resolved destinations; this scene does not reproduce the full arbitrary-pointer `MagneticPlacement.resolve` solver.
+
+Validation: 91 unit tests and 64 Chromium/WebKit browser checks pass, including rendered preview bounds ahead of the tile, no dragged focus outline, preview-to-commit geometry, and reverse scrolling. All four new destination cases failed against the preceding public deployment. Astro diagnostics and production build pass. Screens cover 1832×944, 1440×960, 390×844 and 320×568 in both engines. Evidence is in `qa/drag-destination/` under the launch QA directory.
+
+All six Lighthouse runs score100 in all four categories, with CLS0 and TBT0.
+
+## Native layout logic in the browser
+
+Replaced authored preview coordinates, neighbor offsets and post-swap positions with a reusable TypeScript port of `CanvasAutoLayoutEngine.swift`. `native-layout.ts` computes baseline-relative pushes, swap latches, contact candidates, pinned settle and directional resize pressure. `guided-layout.ts` supplies only the input scene and narrated pointer gestures. The ghost and passive tiles come from the same predicted release, so the preview is vacant and unequal-width swaps finish aligned with exact8px gaps. The native mouse-up sequence includes a second move solve at the snapped frame before settling; a witnessed mid-drag row displacement caught that missing step.
+
+The initial rows compact before the drag. The editor demonstrates contact snapping, then editor, agent and terminal resizes use the source pressure solver. Terminal finishes at480×550. Authored task contents and pointer inputs remain fixtures; the entire arbitrary-pointer magnetic resolver is not replicated.
+
+Validation:115 unit tests, including26 native-layout tests and comparisons against9 move/3 resize outputs generated from actual compiled Swift method bodies. Astro check reports zero errors, warnings and hints; production build passes.64 local Chromium/WebKit checks pass, including occupied-preview and row-alignment cases that fail on the previous public release. Screenshot sweeps cover1832×944,1440×960,390×844 and320×568 in both engines. All six Lighthouse cold runs score100 in all four categories, with zero CLS and TBT. Evidence: `.plans/72-launch-night/qa/native-web-layout/`. Historical checkpoint and configured Apple destination fixture tests are excluded from the normal production-build browser run.

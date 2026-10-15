@@ -1,0 +1,23 @@
+/* Ghostty-style surface: 11px/15px mono fits the 300pt tile (longest line is
+   37 columns) without wrapping; the scrollback keeps its newest line in view. */
+.terminal {
+  height: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  overflow: hidden;
+  color: #c9d1d9;
+  background: #0c0f12;
+  font: 11px/15px "SFMono-Regular", "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+  font-variant-ligatures: none;
+}
+.line { white-space: pre; overflow: hidden; }
+.line[hidden] { display: none; }
+.line[data-kind="out"] { color: #c9d1d9; }
+.line[data-kind="dim"], .dim { color: #6e7681; }
+.line[data-kind="ok"] { color: #79d79c; }
+.cwd { color: #5fa8ff; }
+.branch { color: #b392f0; }
+.caret, .pass { color: #79d79c; }
+.suite { color: #5fa8ff; }
+.cursor { display: inline-block; width: .6em; height: 13px; vertical-align: -2px; background: #c9d1d9; }
+.cursor[hidden] { display: none; }

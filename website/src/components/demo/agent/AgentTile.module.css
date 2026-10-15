@@ -119,8 +119,9 @@
 .context { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: auto; color: var(--muted, #afb6c2); font: 10px/14px var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
 .contextRing { display: block; width: 20px; height: 20px; flex: 0 0 20px; }
 .contextRing svg { display: block; width: 20px; height: 20px; overflow: visible; }
-.contextRing circle { fill: none; stroke: var(--separator, #2e343e); stroke-width: 2.2px; stroke-dasharray: 1.6 2.2; }
-.contextRing text { fill: var(--muted, #afb6c2); font: 700 9px/1 system-ui, sans-serif; text-anchor: middle; }
+.contextRing circle { fill: none; stroke-width: 2.2px; }
+.contextTrack { stroke: var(--separator, #2e343e); }
+.contextProgress { stroke: var(--done, #4fd07a); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 10px 10px; }
 
 .composer { grid-area: composer; display: block; margin: 0 12px 4px; padding: 3px; background: var(--app-overlay, #232935); border: .5px solid var(--border, #7a8290); border-radius: 9px; }
 .composer textarea { display: block; box-sizing: border-box; width: 100%; min-width: 0; min-height: 35px; max-height: 136px; resize: none; padding: 8px; color: var(--text, var(--app-text, #f2f4f8)); background: transparent; border: 0; outline: none; font-size: 12px; line-height: 17px; }

@@ -1,6 +1,7 @@
+import { guidedLayout } from './guided-layout';
 
-export const WORLD_WIDTH = 1880;
-export const WORLD_HEIGHT = 1150;
+export const WORLD_WIDTH = 2060;
+export const WORLD_HEIGHT = 1320;
 export type DemoStep = 'landing' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
 export type DemoAgent = 'stabilize' | 'verify' | 'audit';
 export type DemoTile = DemoAgent | 'browser' | 'shell' | 'note';
@@ -9,11 +10,11 @@ export const STEPS = [
   { id: 'landing', start: 0, end: .27, focus: { x: 900, y: 575 }, caption: 'Your project and its supporting tiles land together.' },
   { id: 'creation', start: .27, end: .38, focus: { x: 285, y: 365 }, caption: 'Choose a model. Create an agent beside the work.' },
   { id: 'task', start: .38, end: .445, focus: { x: 285, y: 365 }, caption: 'Focus the new agent, then give it a task.' },
-  { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude, Codex, and Pi work in parallel.' },
+  { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude and Codex work in parallel.' },
   { id: 'approval', start: .595, end: .73, focus: { x: 740, y: 350 }, caption: 'Review the next action before it runs.' },
   { id: 'verification', start: .73, end: .86, focus: { x: 470, y: 895 }, caption: 'Move from the board to the code, and follow the checks.' },
-  { id: 'layout', start: .86, end: .96, focus: { x: 1250, y: 905 }, caption: 'Drag tiles into place. Resize the editor to fit the work.' },
-  { id: 'overview', start: .96, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
+  { id: 'layout', start: .86, end: .985, focus: { x: 1250, y: 905 }, caption: 'Rearrange the canvas. Give each tile the space its work needs.' },
+  { id: 'overview', start: .985, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
 ] as const;
 export const DEMO_TEXT = {
   stabilize: 'Fix zone placement. Keep tiles aligned while zooming.',
@@ -21,7 +22,7 @@ export const DEMO_TEXT = {
   audit: 'Review the native spacing, colors, and canvas controls.',
 } as const;
 export type CreationStage = 'absent' | 'command' | 'models' | 'spawning' | 'focused' | 'sent';
-export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | null;
+export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
 export interface TileFrameSnapshot {
   x: number; y: number; width: number; height: number; visible: boolean; selected: boolean; zIndex: number;
   drag: { active: boolean; lift: number; rotation: number; scaleX: number; scaleY: number };
@@ -44,11 +45,12 @@ export interface GuidedSnapshot {
   cursorTarget: CursorTarget;
   menuTarget: 'creation-agent' | 'creation-model' | 'verify-provider' | null;
   snapPreview: { tile: DemoTile; x: number; y: number; width: number; height: number; opacity: number; scale: number } | null;
-  resizeReadout: { width: number; height: number } | null;
+  resizeReadout: { tile: DemoTile; width: number; height: number } | null;
   boardProgress: number;
   boardDetail: boolean;
   editorProgress: number;
-  cursor: Point & { visible: boolean; pressed: boolean };
+  cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget };
+  terminal: { lines: number; typed: string; phase: 'idle' | 'typing' | 'running' | 'done' };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
   menu: 'provider' | 'toolbar' | 'models' | null;
@@ -61,6 +63,42 @@ const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
 const mix = (a: number, b: number, p: number) => a + (b - a) * p;
 const type = (text: string, p: number, a: number, b: number) => text.slice(0, Math.floor(text.length * between(p, a, b)));
+type TerminalLine = { at: number; kind: 'prompt' | 'out' | 'dim' | 'ok' | 'suite' | 'pass'; text: string; time?: string };
+const passLine = (at: number, name: string, time: string): TerminalLine => ({ at, kind: 'pass', text: name, time });
+/** The build terminal: a believable `swift test`, revealed line by line with scroll. */
+export const TERMINAL_LINES: readonly TerminalLine[] = [
+  { at: 0, kind: 'prompt', text: 'swift build' },
+  { at: 0, kind: 'out', text: 'Building for debugging...' },
+  { at: 0, kind: 'dim', text: '[1287/1287] Linking ContinuumRevived' },
+  { at: 0, kind: 'ok', text: 'Build complete!', time: '41.37s' },
+  { at: .8355, kind: 'out', text: 'Building for debugging...' },
+  { at: .8365, kind: 'dim', text: '[14/14] Linking ContinuumRevivedTests' },
+  { at: .8375, kind: 'ok', text: 'Build complete!', time: '3.84s' },
+  { at: .8385, kind: 'suite', text: 'CanvasSceneEditTests' },
+  passLine(.8393, 'worldFrameRoundTrip', '0.004s'),
+  passLine(.8400, 'zoneLocalPreservesWorld', '0.003s'),
+  passLine(.8406, 'dragKeepsGapContact', '0.012s'),
+  passLine(.8413, 'latchedSwapIsExact', '0.007s'),
+  passLine(.8419, 'neighboursYieldOnPush', '0.009s'),
+  passLine(.8426, 'resizeKeepsEightPointGap', '0.006s'),
+  passLine(.8433, 'settleAlignsRowTops', '0.005s'),
+  passLine(.8439, 'previewTracksCandidate', '0.008s'),
+  passLine(.8446, 'releaseLandsOnPreview', '0.004s'),
+  passLine(.8452, 'zoomKeepsTilesAligned', '0.011s'),
+  passLine(.8459, 'hydrationKeepsFrames', '0.010s'),
+  passLine(.8466, 'persistCoversThenReplaces', '0.006s'),
+  { at: .8472, kind: 'ok', text: '12 passed', time: '0.085s' },
+  { at: .8480, kind: 'suite', text: 'ZoneLayerFrameTests' },
+  passLine(.8487, 'worldToZoneLocalIsExact', '0.002s'),
+  passLine(.8492, 'movedZoneKeepsMembers', '0.005s'),
+  passLine(.8497, 'membershipNeverCrosses', '0.004s'),
+  passLine(.8502, 'departedZoneSettles', '0.007s'),
+  passLine(.8507, 'layerOwnsTilesOnly', '0.003s'),
+  passLine(.8512, 'chromeFollowsZoneMove', '0.010s'),
+  { at: .8517, kind: 'ok', text: '6 passed', time: '0.031s' },
+  { at: .8525, kind: 'ok', text: 'Executed 18 tests, with 0 failures' },
+];
+const TERMINAL_COMMAND = { start: .82, typed: .835, done: .8525 } as const;
 const cursorFrames: ReadonlyArray<readonly [number, number, number]> = [
   [.28, 260, 480], [.31, 260, 480], [.38, 410, 500], [.43, 700, 45],
   [.46, 700, 45], [.49, 830, 160], [.51, 690, 480], [.56, 850, 500],
@@ -76,7 +114,7 @@ function cursorAt(p: number): Point {
   return { x: mix(ax, bx, t), y: mix(ay, by, t) };
 }
 type CameraKind = 'overview' | 'agent' | 'parallel' | 'board' | 'editor' | 'terminal';
-type CameraFrame = { p: number; x: number; y: number; kind: CameraKind; zoom?: number; mobileX?: number; mobileY?: number };
+type CameraFrame = { p: number; x: number; y: number; kind: CameraKind; span?: number; vertical?: number; zoom?: number; mobileX?: number; mobileY?: number };
 // The camera keeps moving within a beat, with gentle arcs across long moves.
 // Readable action moments use smaller paths; they do not become static holds.
 const CAMERA: readonly CameraFrame[] = [
@@ -97,26 +135,43 @@ const CAMERA: readonly CameraFrame[] = [
   { p: .812, x: 1220, y: 875, kind: 'editor', mobileX: 1090 },
   { p: .84, x: 1520, y: 325, kind: 'terminal' },
   { p: .855, x: 1520, y: 325, kind: 'terminal' },
-  { p: .875, x: 730, y: 400, kind: 'parallel', mobileX: 360, mobileY: 366 },
-  { p: .905, x: 750, y: 410, kind: 'parallel', mobileX: 765, mobileY: 370 },
-  { p: .925, x: 1250, y: 905, kind: 'editor', mobileX: 1110 },
-  { p: .96, x: 1280, y: 880, kind: 'editor', mobileX: 1130 },
-  { p: .985, x: 900, y: 575, kind: 'overview' },
-  { p: 1, x: 900, y: 575, kind: 'overview' },
+
 ];
+function makeLayoutCamera(mobile: boolean): CameraFrame[] {
+  const focus = (at: number, id: DemoTile, kind: CameraKind, span?: number): CameraFrame => {
+    const frame = guidedLayout(at, mobile).frames[id];
+    return { p: at, x: frame.x + frame.width / 2, y: frame.y + frame.height / 2, kind, span, vertical: 740 };
+  };
+  const pair = (at: number, ids: DemoTile[], span: number): CameraFrame => {
+    const layout = guidedLayout(at, mobile), frames = ids.map(id => layout.frames[id]);
+    if (layout.preview) frames.push(layout.preview);
+    const left = Math.min(...frames.map(f => f.x)), right = Math.max(...frames.map(f => f.x + f.width));
+    const top = Math.min(...frames.map(f => f.y)), bottom = Math.max(...frames.map(f => f.y + f.height));
+    return { p: at, x: (left + right) / 2, y: (top + bottom) / 2, kind: 'parallel', span, vertical: 740 };
+  };
+  return [...CAMERA,
+    pair(.873, ['stabilize', 'verify'], 1040), pair(.902, ['stabilize', 'verify'], 1040),
+    pair(.909, ['browser', 'note'], 1500), pair(.923, ['browser', 'note'], 1500),
+    focus(.93, 'browser', 'editor', mobile ? 550 : 900), focus(.95, 'browser', 'editor', mobile ? 550 : 900),
+    focus(.957, 'stabilize', 'agent', mobile ? 620 : 680), focus(.970, 'stabilize', 'agent', mobile ? 620 : 680),
+    focus(.976, 'shell', 'terminal', mobile ? 560 : 680), focus(.985, 'shell', 'terminal', mobile ? 560 : 680),
+    { p: 1, x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, kind: 'overview' as const }];
+}
+const layoutCameras = [makeLayoutCamera(false), makeLayoutCamera(true)];
 function cameraAt(p: number, width: number, height: number) {
   const mobile = width < 700;
   const fit = Math.min(width / WORLD_WIDTH, height / WORLD_HEIGHT) * .96;
+  const camera = layoutCameras[mobile ? 1 : 0];
   const scaleFor = (frame: CameraFrame) => {
     if (frame.kind === 'overview') return fit;
-    const span = mobile ? frame.kind === 'board' ? 330 : frame.kind === 'editor' ? 390 : frame.p <= .46 || (frame.p >= .875 && frame.p <= .905) ? 470 : 410
-      : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? 650 : 680;
-    const vertical = mobile ? frame.p <= .46 ? 650 : 540 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540;
+    const span = frame.span ?? (mobile ? frame.kind === 'board' ? 330 : frame.kind === 'editor' ? 390 : frame.p <= .46 ? 470 : 410
+      : frame.kind === 'parallel' ? 1300 : frame.kind === 'board' ? 850 : frame.kind === 'editor' ? 650 : 680);
+    const vertical = frame.vertical ?? (mobile ? frame.p <= .46 ? 650 : 540 : ['agent', 'parallel'].includes(frame.kind) ? 660 : 540);
     return Math.min(width / span, height / vertical) * (frame.zoom ?? 1);
   };
-  const end = CAMERA.findIndex(frame => frame.p > p);
-  const a = CAMERA[Math.max(0, end < 0 ? CAMERA.length - 1 : end - 1)];
-  const b = end < 0 ? a : CAMERA[end];
+  const end = camera.findIndex(frame => frame.p > p);
+  const a = camera[Math.max(0, end < 0 ? camera.length - 1 : end - 1)];
+  const b = end < 0 ? a : camera[end];
   const raw = between(p, a.p, Math.max(a.p + .00001, b.p));
   const t = smooth(raw);
   const ax = mobile ? a.mobileX ?? a.x : a.x, ay = mobile ? a.mobileY ?? a.y : a.y;
@@ -127,11 +182,6 @@ function cameraAt(p: number, width: number, height: number) {
     y: mix(ay, by, t) + (distance ? (bx - ax) / distance * arc : 0) };
   let scale = mix(scaleFor(a), scaleFor(b), t);
   if (mobile) {
-    if (p >= .875 && p <= .905) {
-      const drag = smooth(between(p, .865, .905));
-      center.x = mix(70, 550, drag) + 215;
-      center.y = mix(90, 95, drag) + 275;
-    }
     const detail = smooth(between(p, .751, .755)) * (1 - smooth(between(p, .775, .779)));
     center.x = mix(center.x, 285, detail);
     center.y = mix(center.y, 860, detail);
@@ -147,46 +197,23 @@ function focusAt(p: number): DemoTile | null {
   if (p >= .735 && p < .775) return 'note';
   if (p >= .78 && p < .82) return 'browser';
   if (p >= .82 && p < .86) return 'shell';
-  if (p >= .865 && p < .905) return 'stabilize';
-  if (p >= .905 && p < .96) return 'browser';
+  if (p >= .873 && p < .902) return 'stabilize';
+  if (p >= .909 && p < .923 || p >= .93 && p < .95) return 'browser';
+  if (p >= .957 && p < .970) return 'stabilize';
+  if (p >= .976 && p < .985) return 'shell';
   return null;
 }
 function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): Record<DemoTile, TileFrameSnapshot> {
-  const neutral = { active: false, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 };
-  const base = (id: DemoTile, x: number, y: number, width: number, height: number): TileFrameSnapshot => ({ x, y, width, height,
-    visible: id !== 'stabilize' || p >= .34, selected: id === selected, zIndex: id === selected ? 20 : 2, drag: { ...neutral } });
-  const mainDrag = smooth(between(p, .865, .905));
-  const mainX = mix(70, 550, mainDrag);
-  // CanvasAutoLayoutEngine.solveMemberMove: baseline-relative minimal pushes,
-  // then an origin exchange when the active center enters verify's old slot.
-  // Invert the smooth pointer path to keep the latch seekable and continuous.
-  const latchFraction = (550 - 430 / 2 - 70) / 480;
-  const latchTime = .865 + .04 * (.5 - Math.sin(Math.asin(1 - 2 * latchFraction) / 3));
-  const gap = 8; // TileGapResolver.defaultGap.
-  const pushX = Math.min(mainX, 550 - 430 / 2);
-  const pushedVerify = Math.max(550, pushX + 430 + gap);
-  const pushedAudit = Math.max(980, pushedVerify + 380 + gap);
-  const pushedShell = Math.max(1370, pushedAudit + 340 + gap);
-  const swapRaw = between(p, latchTime, latchTime + .008);
-  const swap = 1 - Math.pow(1 - swapRaw, 3); // Passive 110ms ease-out, projected onto scroll.
-
-  const editorDrag = smooth(between(p, .905, .925));
-  const resize = between(p, .93, .96); // Pointer-owned live dimensions, no spring.
-  const frames: Record<DemoTile, TileFrameSnapshot> = {
-    stabilize: base('stabilize', mainX, mix(90, 95, mainDrag), 430, 550),
-    verify: base('verify', mix(pushedVerify, 70, swap), 90, 380, 470),
-    audit: base('audit', mix(pushedAudit, 980, swap), 90, 340, 450),
-    shell: base('shell', mix(pushedShell, 1370, swap), 90, 300, 470),
-    note: base('note', 70, 680, 800, 430),
-    browser: base('browser', mix(920, 970, editorDrag), mix(680, 690, editorDrag), mix(mobile ? 330 : 560, mobile ? 350 : 620, resize), mix(430, 390, resize)),
-  };
-  frames.stabilize.drag.active = p >= .865 && p < .905;
-  frames.browser.drag.active = p >= .905 && p < .925;
-  return frames;
+  const layout = guidedLayout(p, mobile);
+  return Object.fromEntries(Object.entries(layout.frames).map(([id, frame]) => [id, {
+    ...frame, visible: id !== 'stabilize' || p >= .34, selected: id === selected,
+    zIndex: id === selected ? 20 : 2,
+    drag: { active: layout.moving === id, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 },
+  }])) as Record<DemoTile, TileFrameSnapshot>;
 }
 function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>): Record<DemoTile, TileMotion> {
   return Object.fromEntries(Object.entries(frames).map(([id, frame]) => [id,
-    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected ? 1 : 0 },
+    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected && !frame.drag.active ? 1 : 0 },
   ])) as Record<DemoTile, TileMotion>;
 }
 function targetAt(p: number): CursorTarget {
@@ -204,9 +231,11 @@ function targetAt(p: number): CursorTarget {
   if (p >= .735 && p < .775) return 'board-placement';
   if (p >= .775 && p < .82) return 'editor-line';
   if (p >= .82 && p < .86) return 'shell-input';
-  if (p >= .865 && p < .905) return 'stabilize-header';
-  if (p >= .905 && p < .93) return 'editor-header';
-  if (p >= .93 && p < .96) return 'editor-resize';
+  if (p >= .86 && p < .903) return 'stabilize-header';
+  if (p >= .903 && p < .923) return 'editor-header';
+  if (p >= .923 && p < .95) return 'editor-resize';
+  if (p >= .95 && p < .970) return 'stabilize-resize';
+  if (p >= .970 && p < .985) return 'shell-resize';
   return null;
 }
 /** A complete seekable state: reverse/direct jumps never accumulate animation. */
@@ -219,27 +248,33 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const selectedTile = focusedTile ?? (p >= .34 && p < .38 ? 'stabilize' : null);
   const tileFrames = frameSnapshots(p, width < 700, selectedTile);
   const creationStage: CreationStage = p < .27 ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
-  const ghostFrame = tileFrames.stabilize;
+  const layout = guidedLayout(p, width < 700);
+  const resizing: DemoTile | null = p >= .93 && p < .95 ? 'browser' : p >= .957 && p < .970 ? 'stabilize' : p >= .976 && p < .985 ? 'shell' : null;
+  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
+  const approach = approaches.find(([start, end]) => p >= start && p < end);
+  const held = tileFrames.stabilize.drag.active || tileFrames.browser.drag.active || !!resizing;
+  const typed = p >= TERMINAL_COMMAND.typed ? 'swift test' : type('swift test', p, TERMINAL_COMMAND.start, TERMINAL_COMMAND.typed);
   return {
     progress: p, step: step.id, caption: step.caption,
-    heroOpacity: 1 - between(p, 0, .18), chromeOpacity: between(p, .10, .26), takeover: smooth(between(p, .08, .26)),
+    heroOpacity: 1 - between(p, 0, .18), chromeOpacity: smooth(between(p, .10, .18)), takeover: smooth(between(p, .08, .26)),
     camera: cameraAt(p, width, height), tiles: tileMotions(tileFrames), tileFrames,
     mainCreated: p >= .34, selectedTile, focusedTile,
     creation: { stage: creationStage, query: creationStage === 'command' ? type('Agent', p, .272, .285) : '', provider: 'Codex', model: 'GPT-5.6 Sol' },
     cursorTarget: reducedMotion ? null : targetAt(p),
     menuTarget: creationStage === 'command' ? 'creation-agent' : creationStage === 'models' ? 'creation-model' : p >= .47 && p < .505 ? 'verify-provider' : null,
-    snapPreview: !reducedMotion && p >= .875 && p < .905 ? { tile: 'stabilize', x: 550, y: 95, width: ghostFrame.width, height: ghostFrame.height,
-      opacity: smooth(between(p, .875, .88)), scale: mix(.96, 1, smooth(between(p, .875, .88))) } : null,
-    resizeReadout: !reducedMotion && p >= .93 && p < .96 ? { width: Math.round(tileFrames.browser.width), height: Math.round(tileFrames.browser.height - 24) } : null,
+    snapPreview: reducedMotion ? null : layout.preview,
+    resizeReadout: !reducedMotion && resizing ? { tile: resizing, width: Math.round(tileFrames[resizing].width), height: Math.round(tileFrames[resizing].height - 24) } : null,
     boardProgress: between(p, .735, .845), boardDetail: !reducedMotion && p >= .755 && p < .775, editorProgress: between(p, .775, .82),
-    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .96,
-      pressed: [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
+    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .985, approach: approach ? smooth(between(p, approach[0], approach[1])) : 1, fromTarget: approach?.[2] ?? null,
+      pressed: held || [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
     typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
     status: { stabilize: p < .435 ? 'Ready' : p < .855 ? 'Working' : 'Complete',
       verify: p < .56 ? 'Ready' : p < .595 ? 'Working' : p < .68 ? 'Needs approval' : p < .855 ? 'Working' : 'Passed',
       audit: p < .605 ? 'Ready' : p < .855 ? 'Reviewing' : 'Complete' },
     menu: creationStage === 'command' ? 'toolbar' : creationStage === 'models' ? 'models' : p >= .47 && p < .505 ? 'provider' : null,
     approval: p < .595 ? 'hidden' : p < .68 ? 'waiting' : 'approved',
+    terminal: { lines: TERMINAL_LINES.filter(line => p >= line.at).length, typed,
+      phase: p >= TERMINAL_COMMAND.done ? 'done' : p >= TERMINAL_COMMAND.typed ? 'running' : p >= TERMINAL_COMMAND.start ? 'typing' : 'idle' },
     tool: p < .435 ? 'Tools appear here as the agent works.' : p < .82 ? 'Read CanvasNSView.swift · Inspect zone placement' : p < .855 ? 'Running canvas checks…' : 'Canvas checks passed · Tile positions preserved',
     reducedMotion,
   };

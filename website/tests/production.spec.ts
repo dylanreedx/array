@@ -155,15 +155,18 @@ test('story visibly types, opens the provider choice, requests approval and comp
   await expect(page.locator('[data-demo-approval] [aria-label="Pending approval"]')).toBeVisible();
   expect(await demoSnapshot(page)).toEqual(waiting);
   await seek(page, .825);
+  // The command is typed inline at the prompt, as in a real terminal; there is no input bar.
   const shellInput = page.locator('[data-interaction-id="shell-input"]');
-  await expect(shellInput).toHaveValue(/^swi/);
-  expect((await shellInput.inputValue()).length).toBeLessThan('swift test'.length);
+  await expect(page.locator('[data-assembly-surface=shell] input')).toHaveCount(0);
+  await expect(shellInput).toHaveText(/^swi/);
+  expect((await shellInput.textContent())!.length).toBeLessThan('swift test'.length);
   await seek(page, .83);
-  await expect(shellInput).toHaveValue(/^swift/);
+  await expect(shellInput).toHaveText(/^swift/);
   await seek(page, .845);
-  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('Running CanvasSceneEditTests');
+  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('CanvasSceneEditTests');
+  await expect(page.locator('[data-assembly-surface=shell]')).not.toContainText('Executed 18 tests', { useInnerText: true });
   await seek(page, .90);
-  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('18 checks passed');
+  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('Executed 18 tests, with 0 failures', { useInnerText: true });
   const finished = await demoSnapshot(page);
   expect(finished.statuses).toEqual(['Done', 'Done', 'Done']);
   expect(finished.tool).toContain('Canvas checks passed');
@@ -225,7 +228,7 @@ test('golden flow creates a native agent before focus, typing and send', async (
 });
 test('golden flow provider marks, menu anchor and square context rings match the native tile', async ({ page }) => {
   await page.goto('/');
-  for (const [id, mark] of [['stabilize', 'openai'], ['verify', 'anthropic'], ['audit', 'pi']] as const) {
+  for (const [id, mark] of [['stabilize', 'openai'], ['verify', 'anthropic'], ['audit', 'openai']] as const) {
     await expect(page.locator(`[data-assembly-surface=${id}] > header [data-provider-mark=${mark}]`)).toHaveCount(1);
   }
   await seek(page, .49);
@@ -243,6 +246,13 @@ test('golden flow provider marks, menu anchor and square context rings match the
     await seek(page, progress);
     const ring = page.locator(`[data-assembly-surface=${id}] [data-demo-context-ring]`);
     await expect(ring).toHaveCount(1);
+    const percent = { stabilize: 12, verify: 18, audit: 8 }[id];
+    await expect(ring).toHaveAttribute('data-context-percent', String(percent));
+    await expect(ring).toHaveAttribute('aria-label', `Illustrative context usage ${percent} percent`);
+    const fill = await ring.locator('circle').last().evaluate(el => {
+      const style = getComputedStyle(el); return 1 - parseFloat(style.strokeDashoffset) / parseFloat(style.strokeDasharray);
+    });
+    expect(fill).toBeCloseTo(percent / 100, 3);
     const geometry = await ring.evaluate(el => {
       const r = el.getBoundingClientRect(), style = getComputedStyle(el);
       return { width: r.width, height: r.height, localWidth: parseFloat(style.width), localHeight: parseFloat(style.height), flexShrink: style.flexShrink };
@@ -316,6 +326,64 @@ test('golden flow drag, neighbor reflow and resize are deterministic on reverse 
   expect(await frames()).toEqual(before);
   await assertTileContinuity(page);
 });
+for (const width of [1440, 390]) {
+  test(`drag preview is a vacant native placement and releases into that placement at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 });
+    await page.goto('/');
+    const ghost = page.locator('[data-demo-snap-preview]');
+    const prediction = () => ghost.evaluate(el => {
+      const world = document.querySelector<HTMLElement>('[data-guided-world]')!, scale = Number(world.dataset.cameraScale);
+      const style = (el as HTMLElement).style, origin = (el as HTMLElement).offsetParent!.getBoundingClientRect(), worldRect = world.getBoundingClientRect();
+      // Camera data records its center; recover world coordinates from the
+      // actual containing block without the native preview's spring scale.
+      return { x: (parseFloat(style.left) + origin.left - worldRect.left) / scale,
+        y: (parseFloat(style.top) + origin.top - worldRect.top) / scale,
+        width: parseFloat(style.width) / scale, height: parseFloat(style.height) / scale };
+    });
+    for (const [samples, beforeRelease, release, id] of [
+      [[.875, .8775, .884, .895], .9019, .902, 'stabilize'],
+      [[.911, .916, .921], .9228, .923, 'browser'],
+    ] as const) {
+      for (const progress of samples) {
+        await seek(page, progress);
+        await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+        await expect(ghost).toBeVisible();
+        const preview = await prediction();
+        if (id === 'stabilize') expect.soft(preview.y, `native row top at ${progress}`).toBeCloseTo(90, 0);
+        const passive = await page.locator('[data-guided-world] [data-assembly-surface]').evaluateAll((tiles, moving) => tiles
+          .filter(el => (el as HTMLElement).dataset.assemblySurface !== moving && (el as HTMLElement).dataset.demoVisible !== 'false')
+          .map(el => { const tile = el as HTMLElement; return { id: tile.dataset.assemblySurface,
+            x: parseFloat(tile.style.left), y: parseFloat(tile.style.top), width: parseFloat(tile.style.width), height: parseFloat(tile.style.height) }; }), id);
+        for (const tile of passive) {
+          if (id === 'stabilize' && ['verify', 'audit', 'shell'].includes(tile.id!))
+            expect.soft(tile.y, `passive row ${tile.id} at ${progress}`).toBeCloseTo(90, 0);
+          const overlapX = Math.min(preview.x + preview.width, tile.x + tile.width) - Math.max(preview.x, tile.x);
+          const overlapY = Math.min(preview.y + preview.height, tile.y + tile.height) - Math.max(preview.y, tile.y);
+          expect.soft(overlapX <= .5 || overlapY <= .5, `preview overlaps passive ${tile.id} at ${progress}: ${overlapX} × ${overlapY}`).toBe(true);
+        }
+      }
+      await seek(page, beforeRelease);
+      await expect(ghost).toBeVisible();
+      const finalPreview = await prediction();
+      await seek(page, release + .0005);
+      await expect(ghost).toBeHidden();
+      const committed = await page.locator(`[data-assembly-surface=${id}]`).evaluate(el => {
+        const s = (el as HTMLElement).style; return { x: parseFloat(s.left), y: parseFloat(s.top), width: parseFloat(s.width), height: parseFloat(s.height) };
+      });
+      for (const key of ['x', 'y', 'width', 'height'] as const) expect.soft(finalPreview[key], `release ${id}.${key}`).toBeCloseTo(committed[key], 0);
+      if (id === 'stabilize') {
+        const row = await page.locator('[data-guided-world]').evaluate(world => ['stabilize', 'verify', 'audit', 'shell'].map(id => {
+          const el = world.querySelector<HTMLElement>(`[data-assembly-surface=${id}]`)!;
+          return { id, x: parseFloat(el.style.left), y: parseFloat(el.style.top), width: parseFloat(el.style.width) };
+        }).sort((a, b) => a.x - b.x));
+        for (const tile of row) expect.soft(tile.y, `released row ${tile.id}`).toBeCloseTo(90, 0);
+        for (let i = 1; i < row.length; i++) expect.soft(row[i].x - row[i - 1].x - row[i - 1].width, `native contact ${row[i - 1].id}→${row[i].id}`).toBeCloseTo(8, 0);
+      }
+      await seek(page, samples[0]);
+      await expect(ghost).toBeVisible();
+    }
+  });
+}
 test('the native workspace takes over the viewport with a full-height sidebar and canvas', async ({ page }) => {
   await page.goto('/');
   for (const progress of [.26, .64, .80]) {
@@ -333,7 +401,7 @@ test('the native workspace takes over the viewport with a full-height sidebar an
     expect(Math.abs(geometry.window.y)).toBeLessThanOrEqual(1);
     expect(geometry.window.width).toBeCloseTo(geometry.viewport.width, 0);
     expect(geometry.window.height).toBeCloseTo(geometry.viewport.height, 0);
-    expect(parseFloat(geometry.radius)).toBe(0);
+    expect(parseFloat(geometry.radius)).toBeLessThan(.01);
     expect(geometry.topbar.height).toBeCloseTo(46, 0);
     expect(geometry.rail.height).toBeCloseTo(28, 0);
     expect(geometry.sidebar.width).toBeCloseTo(280, 0);
@@ -344,6 +412,113 @@ test('the native workspace takes over the viewport with a full-height sidebar an
     expect(geometry.canvas.bottom).toBeCloseTo(geometry.rail.y, 0);
   }
 });
+test('workspace frame grows from the inset preview and shrinks again on reverse seek', async ({ page }) => {
+  await page.goto('/');
+  const frame = () => page.locator('[data-guided-window]').evaluate(el => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height, radius: parseFloat(getComputedStyle(el).borderTopLeftRadius), viewportWidth: innerWidth, viewportHeight: innerHeight };
+  });
+  await seek(page, .18);
+  const preview = await frame();
+  expect(preview.x).toBeGreaterThan(0);
+  expect(preview.y).toBeGreaterThan(0);
+  expect(preview.width).toBeLessThan(preview.viewportWidth);
+  expect(preview.height).toBeLessThan(preview.viewportHeight);
+  expect(preview.radius).toBeGreaterThan(0);
+  await seek(page, .22);
+  const growing = await frame();
+  expect(growing.width).toBeGreaterThan(preview.width);
+  expect(growing.height).toBeGreaterThan(preview.height);
+  await seek(page, .26);
+  const full = await frame();
+  expect(full.width).toBeGreaterThan(growing.width);
+  expect(full.height).toBeGreaterThan(growing.height);
+  expect(full.x).toBeCloseTo(0, 0);
+  expect(full.y).toBeCloseTo(0, 0);
+  await seek(page, 1);
+  const final = await frame();
+  expect(final.width).toBeLessThan(full.width);
+  expect(final.height).toBeLessThan(full.height);
+  expect(final.radius).toBeGreaterThan(0);
+  await seek(page, .22);
+  expect(await frame()).toEqual(growing);
+  await seek(page, .18);
+  expect(await frame()).toEqual(preview);
+});
+for (const width of [1440, 390]) {
+  test(`native drag presses and three resize corners follow live geometry at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 1440 ? 960 : 844 });
+    await page.goto('/');
+    const cursor = page.locator('[data-demo-cursor]');
+    const assertCursorInside = async (selector: string) => {
+      const target = await page.locator(selector).boundingBox();
+      // The authored cursor tip is the translate origin, rather than the center
+      // of its decorative arrow and press halo bounding box.
+      const tip = await cursor.evaluate(el => {
+        const r = el.getBoundingClientRect(); return { x: r.x, y: r.y };
+      });
+      expect(tip.x).toBeGreaterThanOrEqual(target!.x - 1);
+      expect(tip.x).toBeLessThanOrEqual(target!.x + target!.width + 1);
+      expect(tip.y).toBeGreaterThanOrEqual(target!.y - 1);
+      expect(tip.y).toBeLessThanOrEqual(target!.y + target!.height + 1);
+    };
+    for (const [approach, pressed, id] of [[.868, .89, 'stabilize'], [.906, .916, 'browser']] as const) {
+      await seek(page, approach);
+      await expect(cursor).toHaveAttribute('data-pressed', 'false');
+      await expect(page.locator('[data-demo-focus-outline]')).toBeHidden();
+      await seek(page, pressed);
+      await expect(cursor).toHaveAttribute('data-pressed', 'true');
+      await expect(page.locator(`[data-assembly-surface=${id}]`)).toHaveAttribute('data-demo-dragging', 'true');
+      await assertCursorInside(`[data-demo-drag-handle=${id}]`);
+    }
+    // The held tile is pointer-owned: the cursor keeps one grab offset on its
+    // title bar for the whole move rather than sliding along it.
+    for (const [samples, id] of [[[.875, .88, .885, .89, .895, .9], 'stabilize'], [[.911, .915, .919, .922], 'browser']] as const) {
+      const offsets: Array<{ x: number; y: number }> = [];
+      for (const progress of samples) {
+        await seek(page, progress);
+        // Read both rects in one task so they always come from the same written frame.
+        offsets.push(await cursor.evaluate((el, tile) => {
+          const tip = el.getBoundingClientRect(), handle = document.querySelector(`[data-demo-drag-handle=${tile}]`)!.getBoundingClientRect();
+          return { x: tip.x - handle.x, y: tip.y - handle.y };
+        }, id));
+      }
+      for (const offset of offsets) expect(Math.hypot(offset.x - offsets[0].x, offset.y - offsets[0].y), `${id} grab offset`).toBeLessThan(.5);
+    }
+    const readout = page.locator('[data-demo-resize-readout]');
+    const states: Array<{ progress: number; frame: number[]; readout: string | null }> = [];
+    for (const [progress, id] of [[.94, 'browser'], [.965, 'stabilize'], [.981, 'shell']] as const) {
+      await seek(page, progress);
+      const tile = page.locator(`[data-assembly-surface=${id}]`);
+      await expect(tile).toHaveAttribute('data-demo-resizing', 'true');
+      await expect(cursor).toHaveAttribute('data-pressed', 'true');
+      await expect(cursor).toHaveAttribute('data-gesture', 'resize');
+      await expect(cursor.locator('[data-demo-cursor-resize]')).toBeVisible();
+      await expect(cursor.locator(':scope > svg').first()).toBeHidden();
+      await assertCursorInside(`[data-demo-resize-handle=${id}]`);
+      await expect(readout).toBeVisible();
+      await expect(readout).toHaveAttribute('data-demo-resize-tile', id);
+      const frame = await tile.evaluate(el => [parseFloat((el as HTMLElement).style.width), parseFloat((el as HTMLElement).style.height)]);
+      await expect(readout).toHaveText(`${Math.round(frame[0])} × ${Math.round(frame[1] - 24)}`);
+      states.push({ progress, frame, readout: await readout.textContent() });
+    }
+    for (const state of states.reverse()) {
+      await seek(page, state.progress);
+      await expect(readout).toHaveText(state.readout!);
+    }
+    for (const progress of [.902, .95, .966, .985]) {
+      await seek(page, progress);
+      const gaps = await page.locator('[data-guided-world]').evaluate(world => {
+        const tile = (id: string) => world.querySelector<HTMLElement>(`[data-assembly-surface=${id}]`)!;
+        const main = tile('stabilize'), audit = tile('audit'), shell = tile('shell');
+        return [audit.offsetLeft - (main.offsetLeft + main.offsetWidth), shell.offsetLeft - (audit.offsetLeft + audit.offsetWidth)];
+      });
+      for (const gap of gaps) expect(gap, `native 8px tile spacing at ${progress}`).toBeGreaterThanOrEqual(7);
+    }
+    await seek(page, .99);
+    await expect(readout).toBeHidden();
+  });
+}
 test('camera and tile motion continue within the narrated beats', async ({ page }) => {
   await page.goto('/');
   for (const points of [[.34, .36, .40], [.49, .53, .57], [.62, .64, .67], [.77, .80, .84]]) {
@@ -455,8 +630,8 @@ for (const width of [390, 320]) {
     await seek(page, .49);
     const providerSelector = '[data-assembly-surface=verify] [data-demo-menu=provider]';
     await expect(page.locator(providerSelector)).toBeVisible();
-    await expect(page.locator(`${providerSelector} [data-demo-provider-option]`)).toHaveCount(3);
-    for (const provider of ['Codex', 'Claude Code', 'Pi']) {
+    await expect(page.locator(`${providerSelector} [data-demo-provider-option]`)).toHaveCount(2);
+    for (const provider of ['Codex', 'Claude Code']) {
       const selector = `${providerSelector} [data-demo-provider-option="${provider}"]`;
       const option = page.locator(selector);
       await expect(option).toBeVisible();
