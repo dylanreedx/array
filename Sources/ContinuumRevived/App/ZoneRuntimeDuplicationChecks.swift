@@ -139,6 +139,10 @@ enum ZoneRuntimeDuplicationChecks {
             ProjectEntry(id: projectPs, name: "Ps", rootPath: psRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "WA", projectIds: [projectPs], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "WB", projectIds: [], createdAt: now, updatedAt: now)
+        ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 

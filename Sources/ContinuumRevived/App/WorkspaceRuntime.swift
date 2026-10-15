@@ -2873,6 +2873,9 @@ final class WorkspaceRuntime {
             ProjectEntry(id: projectPa, name: "Project A", rootPath: paRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false),
             ProjectEntry(id: projectPb, name: "Project B", rootPath: pbRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false)
         ]
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceW, name: "W", projectIds: [projectPa, projectPb], createdAt: now, updatedAt: now)
+        ]
         try registryStore.save(registry)
 
         // Seed WorkspaceDocument.

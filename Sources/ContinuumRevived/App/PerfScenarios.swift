@@ -3698,6 +3698,8 @@ enum PerfScenarios {
         appRegistry.projects = [ProjectEntry(id: projectId, name: "PerfBudget", rootPath: root.path,
                                              workspaceId: workspaceId, lastOpenedAt: now,
                                              pinned: false, missing: false)]
+        appRegistry.workspaces = [WorkspaceEntry(id: workspaceId, name: "PerfBudget", projectIds: [projectId],
+                                                 createdAt: now, updatedAt: now)]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 

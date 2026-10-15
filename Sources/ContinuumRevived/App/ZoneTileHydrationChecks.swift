@@ -150,6 +150,10 @@ enum ZoneTileHydrationChecks {
             ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWB,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "WA", projectIds: [projectPa], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "WB", projectIds: [projectPb], createdAt: now, updatedAt: now)
+        ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 

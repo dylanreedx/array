@@ -113,6 +113,9 @@ enum InboxRevealProjectChecks {
             ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWA,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "WA", projectIds: [projectPa, projectPb], createdAt: now, updatedAt: now)
+        ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 

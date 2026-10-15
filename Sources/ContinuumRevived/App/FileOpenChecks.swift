@@ -142,6 +142,10 @@ enum FileOpenChecks {
             ProjectEntry(id: projectB, name: "ProjectB", rootPath: rootB.path, workspaceId: workspaceB,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "A", projectIds: [projectA], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "B", projectIds: [projectB], createdAt: now, updatedAt: now)
+        ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 
@@ -1332,6 +1336,8 @@ enum FileOpenChecks {
         appRegistry.projects = [ProjectEntry(id: projectId, name: "Worktree", rootPath: root.path,
                                              workspaceId: workspaceId, lastOpenedAt: now,
                                              pinned: false, missing: false)]
+        appRegistry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Worktree", projectIds: [projectId],
+                                                 createdAt: now, updatedAt: now)]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         if initializeStore { try registryStore.save(appRegistry) }
 

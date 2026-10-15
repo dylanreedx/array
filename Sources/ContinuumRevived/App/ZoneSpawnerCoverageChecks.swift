@@ -138,6 +138,10 @@ enum ZoneSpawnerCoverageChecks {
             ProjectEntry(id: projectPc, name: "Pc", rootPath: pc.root.path, workspaceId: workspaceWB,
                          lastOpenedAt: now, pinned: false, missing: false)
         ]
+        appRegistry.workspaces = [
+            WorkspaceEntry(id: workspaceWA, name: "WA", projectIds: [projectPa, projectPb], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceWB, name: "WB", projectIds: [projectPc], createdAt: now, updatedAt: now)
+        ]
         let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
         try registryStore.save(appRegistry)
 
