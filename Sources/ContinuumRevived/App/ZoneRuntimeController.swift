@@ -61,6 +61,7 @@ final class ZoneRuntimeController {
     /// `managedSessionStore`/`tmuxPathResolver`/`tmuxControlFactory`.
     var sessionObserverReadersOverrideForTesting: SessionObserver.Readers?
     private weak var focusBroker: FocusBroker?
+    var qaAttachedFocusBroker: FocusBroker? { focusBroker }
 
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?

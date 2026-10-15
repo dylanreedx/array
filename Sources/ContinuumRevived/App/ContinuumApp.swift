@@ -18914,6 +18914,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.createAgentFromMenu(nil)
         try expect(app.agentSupervisor.records.count == beforeMenuAgent + 1, "File > New > Agent must create an agent immediately after picker confirmation without manual activation")
         try expect(app.qaCreationSpawnerProjectId == pickedProject.id, "Picker commit must mount the selected project creation spawner")
+        try expect(app.workspaceRuntime?.controller(for: pickedProject.id)?.qaAttachedFocusBroker === app.focusBroker, "Picker-created project must own active controller UI and focus callbacks")
         let afterDrop = try store.loadOrEmpty()
         try expect(afterDrop.projects.count == 1 && app.workspaceRuntime?.document.zones.count == 1, "Folder drop must create one registered project and one zone")
         try expect(app.workspaceRuntime?.document.zones.first?.projectId == afterDrop.projects.first?.id, "Dropped zone project is incoherent")
@@ -18942,6 +18943,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let discoveredRoots = ProjectHomePickerController.discoverProjects(home: home).map { $0.standardizedFileURL.resolvingSymlinksInPath().path }
         let expectedRoot = repo.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
         try expect(discoveredRoots == [expectedRoot], "Opt-in discovery must find exactly the fixture git project; found \(discoveredRoots)")
+        let unregisteredDrop = root.appendingPathComponent("unregistered-drop", isDirectory: true)
+        try fm.createDirectory(at: unregisteredDrop, withIntermediateDirectories: true)
+        let beforeFreshDropProjects = try store.loadOrEmpty().projects.count
+        let beforeFreshDropZones = app.workspaceRuntime?.document.zones.count ?? 0
+        try expect(app.createZoneForDroppedProject(unregisteredDrop, at: CGPoint(x: 1700, y: 100)), "Unregistered Finder folder must create a new project zone")
+        let afterFreshDrop = try store.loadOrEmpty()
+        guard let freshProject = afterFreshDrop.projects.first(where: { URL(fileURLWithPath: $0.rootPath).standardizedFileURL.resolvingSymlinksInPath().path == unregisteredDrop.standardizedFileURL.resolvingSymlinksInPath().path }) else { throw CocoaError(.fileReadUnknown) }
+        try expect(afterFreshDrop.projects.count == beforeFreshDropProjects + 1 && app.workspaceRuntime?.document.zones.count == beforeFreshDropZones + 1, "Unregistered Finder drop must add exactly one project and zone")
+        try expect(app.qaCreationSpawnerProjectId == freshProject.id && app.workspaceRuntime?.controller(for: freshProject.id)?.qaAttachedFocusBroker === app.focusBroker, "Finder-created project must mount its own spawner and active UI ownership")
+        let beforeFreshDropAgents = Set(app.agentSupervisor.records.keys)
+        app.createAgentFromMenu(nil)
+        let newlyDroppedAgents = app.agentSupervisor.records.filter { !beforeFreshDropAgents.contains($0.key) }
+        try expect(newlyDroppedAgents.count == 1 && newlyDroppedAgents.first?.value.projectId == freshProject.id, "Menu Agent must create exactly one agent in the unregistered dropped project without manual activation")
         print("fresh-install: empty workspace, cancel keeps window, Finder folder creates project zone, creation scope and opt-in discovery")
     }
 

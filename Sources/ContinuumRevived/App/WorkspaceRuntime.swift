@@ -190,7 +190,6 @@ final class WorkspaceRuntime {
         }
         document.zones.append(placement)
         document.bringZoneToFront(placement.zoneId)
-        document.lastActiveZoneId = placement.zoneId
         try persistWorkspaceDocument()
         // A newly committed project zone must support creation immediately.
         // The durable active id alone does not acquire its controller or spawner.
@@ -604,6 +603,7 @@ final class WorkspaceRuntime {
         // arms. `activeController` then answers nil for it, creation refuses and
         // offers the picker, and the report below lets the app say why. That is
         // the documented contract — refuse, never land somewhere wrong.
+        let previousProjectId = activeController?.project.id
         if registry.controller(for: zoneProjectId) == nil {
             do {
                 _ = try registry.acquire(projectId: zoneProjectId)
@@ -615,7 +615,6 @@ final class WorkspaceRuntime {
             }
         }
 
-        let previousProjectId = activeController?.project.id
         guard document.lastActiveZoneId != zoneId else {
             // Already armed in the document, but the canvas may still disagree —
             // `setActiveProjectZone` silently no-ops until the layer is installed.
