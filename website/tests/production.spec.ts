@@ -155,15 +155,18 @@ test('story visibly types, opens the provider choice, requests approval and comp
   await expect(page.locator('[data-demo-approval] [aria-label="Pending approval"]')).toBeVisible();
   expect(await demoSnapshot(page)).toEqual(waiting);
   await seek(page, .825);
+  // The command is typed inline at the prompt, as in a real terminal; there is no input bar.
   const shellInput = page.locator('[data-interaction-id="shell-input"]');
-  await expect(shellInput).toHaveValue(/^swi/);
-  expect((await shellInput.inputValue()).length).toBeLessThan('swift test'.length);
+  await expect(page.locator('[data-assembly-surface=shell] input')).toHaveCount(0);
+  await expect(shellInput).toHaveText(/^swi/);
+  expect((await shellInput.textContent())!.length).toBeLessThan('swift test'.length);
   await seek(page, .83);
-  await expect(shellInput).toHaveValue(/^swift/);
+  await expect(shellInput).toHaveText(/^swift/);
   await seek(page, .845);
-  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('Running CanvasSceneEditTests');
+  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('CanvasSceneEditTests');
+  await expect(page.locator('[data-assembly-surface=shell]')).not.toContainText('Executed 18 tests', { useInnerText: true });
   await seek(page, .90);
-  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('18 checks passed');
+  await expect(page.locator('[data-assembly-surface=shell]')).toContainText('Executed 18 tests, with 0 failures', { useInnerText: true });
   const finished = await demoSnapshot(page);
   expect(finished.statuses).toEqual(['Done', 'Done', 'Done']);
   expect(finished.tool).toContain('Canvas checks passed');
@@ -467,6 +470,20 @@ for (const width of [1440, 390]) {
       await expect(cursor).toHaveAttribute('data-pressed', 'true');
       await expect(page.locator(`[data-assembly-surface=${id}]`)).toHaveAttribute('data-demo-dragging', 'true');
       await assertCursorInside(`[data-demo-drag-handle=${id}]`);
+    }
+    // The held tile is pointer-owned: the cursor keeps one grab offset on its
+    // title bar for the whole move rather than sliding along it.
+    for (const [samples, id] of [[[.875, .88, .885, .89, .895, .9], 'stabilize'], [[.911, .915, .919, .922], 'browser']] as const) {
+      const offsets: Array<{ x: number; y: number }> = [];
+      for (const progress of samples) {
+        await seek(page, progress);
+        // Read both rects in one task so they always come from the same written frame.
+        offsets.push(await cursor.evaluate((el, tile) => {
+          const tip = el.getBoundingClientRect(), handle = document.querySelector(`[data-demo-drag-handle=${tile}]`)!.getBoundingClientRect();
+          return { x: tip.x - handle.x, y: tip.y - handle.y };
+        }, id));
+      }
+      for (const offset of offsets) expect(Math.hypot(offset.x - offsets[0].x, offset.y - offsets[0].y), `${id} grab offset`).toBeLessThan(.5);
     }
     const readout = page.locator('[data-demo-resize-readout]');
     const states: Array<{ progress: number; frame: number[]; readout: string | null }> = [];

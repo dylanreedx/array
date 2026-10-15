@@ -4,7 +4,6 @@ import { guidedSnapshot, type DemoTile, type DemoAgent } from './guided-demo';
 const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
-const type = (text: string, p: number, a: number, b: number) => text.slice(0, Math.floor(text.length * between(p, a, b)));
 
 export function installGuidedDemo() {
   const root = document.querySelector<HTMLElement>('[data-guided-demo]');
@@ -231,16 +230,16 @@ export function installGuidedDemo() {
         readout.style.top = `${Math.min(pin.clientHeight - 65, snapshot.camera.y + (frame.y + frame.height) * snapshot.camera.scale + 12)}px`;
       }
     }
-    const shell = root.querySelector<HTMLElement>('[data-assembly-surface="shell"]');
-    if (shell) {
-      const command = shell.querySelector<HTMLElement>('code[data-type="prompt"]');
-      const result = shell.querySelector<HTMLElement>('code[data-type="success"]');
-      const detail = shell.querySelector<HTMLElement>('code[data-type="output"]');
-      const input = shell.querySelector<HTMLInputElement>('input');
-      if (command) text(command, snapshot.progress < .835 ? '$ swift build' : '$ swift test');
-      if (result) text(result, snapshot.progress < .835 ? 'Build complete!' : snapshot.progress < .855 ? 'Running CanvasSceneEditTests…' : '18 checks passed · 0 failures');
-      if (detail) text(detail, snapshot.progress < .835 ? 'Ready for the next command.' : snapshot.progress < .855 ? 'Checking world and zone-local frames.' : 'Tile positions preserved.');
-      if (input) input.value = snapshot.progress >= .82 && snapshot.progress < .835 ? type('swift test', snapshot.progress, .82, .835) : '';
+    const terminal = root.querySelector<HTMLElement>('[data-demo-terminal]');
+    if (terminal) {
+      for (const line of terminal.querySelectorAll<HTMLElement>('[data-term-line]')) line.hidden = Number(line.dataset.termLine) >= snapshot.terminal.lines;
+      const typed = terminal.querySelector<HTMLElement>('[data-term-typed]');
+      if (typed) text(typed, snapshot.terminal.typed);
+      const live = terminal.querySelector<HTMLElement>('[data-term-cursor="live"]');
+      if (live) live.hidden = snapshot.terminal.phase === 'running' || snapshot.terminal.phase === 'done';
+      const final = terminal.querySelector<HTMLElement>('[data-term-final]');
+      if (final) final.hidden = snapshot.terminal.phase !== 'done';
+      terminal.scrollTop = terminal.scrollHeight; // A terminal keeps its newest line in view.
     }
     for (const node of captions) text(node, snapshot.caption);
     for (const node of menus) {

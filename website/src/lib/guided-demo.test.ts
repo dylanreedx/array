@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { DEMO_TEXT, guidedSnapshot, STEPS } from './guided-demo';
+import { DEMO_TEXT, guidedSnapshot, STEPS, TERMINAL_LINES } from './guided-demo';
 import { overlapsOrUnderGap } from './native-layout';
 const desktop = { width: 1440, height: 900 };
 const mobile = { width: 390, height: 760 };
@@ -81,6 +81,42 @@ describe('native golden workspace flow', () => {
       expect(lowerSwap.browser.x).toBe(lowerSwap.note.x + lowerSwap.note.width + 8);
       expect(lowerSwap.note.y).toBe(lowerSwap.browser.y);
     }
+  });
+  test('the camera holds one framing through each drag, keeping the tile and its destination in view', () => {
+    for (const options of [desktop, mobile]) {
+      for (const [start, end, id] of [[.873, .902, 'stabilize'], [.909, .923, 'browser']] as const) {
+        let previous = guidedSnapshot(start, options).camera, maxStep = 0;
+        for (let p = start + .0005; p < end; p += .0005) {
+          const state = guidedSnapshot(p, options), camera = state.camera;
+          maxStep = Math.max(maxStep, Math.hypot(camera.x - previous.x, camera.y - previous.y));
+          previous = camera;
+          const viewportWidth = options.width; // The snapshot width is the canvas pin's width.
+          for (const frame of [state.tileFrames[id], state.snapPreview!]) {
+            expect(camera.x + frame.x * camera.scale, `${id} left in frame at ${p}`).toBeGreaterThanOrEqual(0);
+            expect(camera.x + (frame.x + frame.width) * camera.scale, `${id} right in frame at ${p}`).toBeLessThanOrEqual(viewportWidth);
+          }
+        }
+        expect(maxStep, `${id} camera step at ${options.width}px`).toBeLessThan(options.width < 700 ? 2 : 4);
+      }
+    }
+  });
+  test('the terminal runs a practical swift test that fills the tile line by line', () => {
+    expect(TERMINAL_LINES.every(line => (line.kind === 'pass' ? 4 + 26 + (line.time?.length ?? 0) : line.text.length + (line.time ? line.time.length + 3 : 0) + (line.kind === 'prompt' ? 15 : 0)) <= 40)).toBe(true);
+    const idle = guidedSnapshot(.81, desktop).terminal, typing = guidedSnapshot(.828, desktop).terminal;
+    expect(idle).toEqual({ lines: 4, typed: '', phase: 'idle' });
+    expect(typing.phase).toBe('typing');
+    expect(typing.typed.length).toBeGreaterThan(0);
+    expect(typing.typed.length).toBeLessThan('swift test'.length);
+    let lines = 0;
+    for (let p = .835; p <= .86; p += .0005) {
+      const terminal = guidedSnapshot(p, desktop).terminal;
+      expect(terminal.lines).toBeGreaterThanOrEqual(lines);
+      lines = terminal.lines;
+    }
+    expect(guidedSnapshot(.845, desktop).terminal).toMatchObject({ phase: 'running', typed: 'swift test' });
+    expect(guidedSnapshot(.86, desktop).terminal).toEqual({ lines: TERMINAL_LINES.length, typed: 'swift test', phase: 'done' });
+    expect(TERMINAL_LINES.at(-1)!.text).toBe('Executed 18 tests, with 0 failures');
+    expect(TERMINAL_LINES.filter(line => line.kind === 'pass')).toHaveLength(18);
   });
   test('cursor approaches before selection, then holds through drag and each resize', () => {
     for (const [approach, press, target, tile] of [

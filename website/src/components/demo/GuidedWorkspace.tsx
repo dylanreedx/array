@@ -7,7 +7,7 @@ import { ProviderMark } from './ProviderMark';
 import islandStyles from './DemoIsland.module.css';
 import { NativeBoardTile, NativeBoardDetails, NativeBoardChrome } from './board/NativeBoardTile';
 import { NativeEditorTile, NativeEditorChrome } from './editor/NativeEditorTile';
-import { ShellTile } from './tools/ShellTile';
+import { GuidedTerminal } from './tools/GuidedTerminal';
 import styles from './GuidedWorkspace.module.css';
 
 const worldTiles = [
@@ -76,7 +76,7 @@ export default function GuidedWorkspace() {
       );
     }
     if (tileId === 'browser') return <NativeEditorTile />;
-    if (tileId === 'shell') return <ShellTile state={state} dispatch={noOpDispatch} nextOperation={() => 1} />;
+    if (tileId === 'shell') return <GuidedTerminal />;
     return <NativeBoardTile />;
   };
 

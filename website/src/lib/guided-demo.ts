@@ -50,6 +50,7 @@ export interface GuidedSnapshot {
   boardDetail: boolean;
   editorProgress: number;
   cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget };
+  terminal: { lines: number; typed: string; phase: 'idle' | 'typing' | 'running' | 'done' };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
   menu: 'provider' | 'toolbar' | 'models' | null;
@@ -62,6 +63,42 @@ const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
 const mix = (a: number, b: number, p: number) => a + (b - a) * p;
 const type = (text: string, p: number, a: number, b: number) => text.slice(0, Math.floor(text.length * between(p, a, b)));
+type TerminalLine = { at: number; kind: 'prompt' | 'out' | 'dim' | 'ok' | 'suite' | 'pass'; text: string; time?: string };
+const passLine = (at: number, name: string, time: string): TerminalLine => ({ at, kind: 'pass', text: name, time });
+/** The build terminal: a believable `swift test`, revealed line by line with scroll. */
+export const TERMINAL_LINES: readonly TerminalLine[] = [
+  { at: 0, kind: 'prompt', text: 'swift build' },
+  { at: 0, kind: 'out', text: 'Building for debugging...' },
+  { at: 0, kind: 'dim', text: '[1287/1287] Linking ContinuumRevived' },
+  { at: 0, kind: 'ok', text: 'Build complete!', time: '41.37s' },
+  { at: .8355, kind: 'out', text: 'Building for debugging...' },
+  { at: .8365, kind: 'dim', text: '[14/14] Linking ContinuumRevivedTests' },
+  { at: .8375, kind: 'ok', text: 'Build complete!', time: '3.84s' },
+  { at: .8385, kind: 'suite', text: 'CanvasSceneEditTests' },
+  passLine(.8393, 'worldFrameRoundTrip', '0.004s'),
+  passLine(.8400, 'zoneLocalPreservesWorld', '0.003s'),
+  passLine(.8406, 'dragKeepsGapContact', '0.012s'),
+  passLine(.8413, 'latchedSwapIsExact', '0.007s'),
+  passLine(.8419, 'neighboursYieldOnPush', '0.009s'),
+  passLine(.8426, 'resizeKeepsEightPointGap', '0.006s'),
+  passLine(.8433, 'settleAlignsRowTops', '0.005s'),
+  passLine(.8439, 'previewTracksCandidate', '0.008s'),
+  passLine(.8446, 'releaseLandsOnPreview', '0.004s'),
+  passLine(.8452, 'zoomKeepsTilesAligned', '0.011s'),
+  passLine(.8459, 'hydrationKeepsFrames', '0.010s'),
+  passLine(.8466, 'persistCoversThenReplaces', '0.006s'),
+  { at: .8472, kind: 'ok', text: '12 passed', time: '0.085s' },
+  { at: .8480, kind: 'suite', text: 'ZoneLayerFrameTests' },
+  passLine(.8487, 'worldToZoneLocalIsExact', '0.002s'),
+  passLine(.8492, 'movedZoneKeepsMembers', '0.005s'),
+  passLine(.8497, 'membershipNeverCrosses', '0.004s'),
+  passLine(.8502, 'departedZoneSettles', '0.007s'),
+  passLine(.8507, 'layerOwnsTilesOnly', '0.003s'),
+  passLine(.8512, 'chromeFollowsZoneMove', '0.010s'),
+  { at: .8517, kind: 'ok', text: '6 passed', time: '0.031s' },
+  { at: .8525, kind: 'ok', text: 'Executed 18 tests, with 0 failures' },
+];
+const TERMINAL_COMMAND = { start: .82, typed: .835, done: .8525 } as const;
 const cursorFrames: ReadonlyArray<readonly [number, number, number]> = [
   [.28, 260, 480], [.31, 260, 480], [.38, 410, 500], [.43, 700, 45],
   [.46, 700, 45], [.49, 830, 160], [.51, 690, 480], [.56, 850, 500],
@@ -216,6 +253,7 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
   const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
   const approach = approaches.find(([start, end]) => p >= start && p < end);
   const held = tileFrames.stabilize.drag.active || tileFrames.browser.drag.active || !!resizing;
+  const typed = p >= TERMINAL_COMMAND.typed ? 'swift test' : type('swift test', p, TERMINAL_COMMAND.start, TERMINAL_COMMAND.typed);
   return {
     progress: p, step: step.id, caption: step.caption,
     heroOpacity: 1 - between(p, 0, .18), chromeOpacity: smooth(between(p, .10, .18)), takeover: smooth(between(p, .08, .26)),
@@ -235,6 +273,8 @@ export function guidedSnapshot(value: number, options: { width: number; height: 
       audit: p < .605 ? 'Ready' : p < .855 ? 'Reviewing' : 'Complete' },
     menu: creationStage === 'command' ? 'toolbar' : creationStage === 'models' ? 'models' : p >= .47 && p < .505 ? 'provider' : null,
     approval: p < .595 ? 'hidden' : p < .68 ? 'waiting' : 'approved',
+    terminal: { lines: TERMINAL_LINES.filter(line => p >= line.at).length, typed,
+      phase: p >= TERMINAL_COMMAND.done ? 'done' : p >= TERMINAL_COMMAND.typed ? 'running' : p >= TERMINAL_COMMAND.start ? 'typing' : 'idle' },
     tool: p < .435 ? 'Tools appear here as the agent works.' : p < .82 ? 'Read CanvasNSView.swift · Inspect zone placement' : p < .855 ? 'Running canvas checks…' : 'Canvas checks passed · Tile positions preserved',
     reducedMotion,
   };
