@@ -1727,6 +1727,9 @@ enum ContinuumApp {
             _ = NSApplication.shared
             Task { @MainActor in
                 do {
+                    // The boundary row and live line, driven through the
+                    // supervisor into a real tile for all three harnesses.
+                    try await runAgentCompactionTranscriptChecks()
                     try await runAgentCompactionUIChecks()
                     print("AgentCompactionUIChecks passed")
                     // T5: the supervisor's steering, force-send, interrupt and

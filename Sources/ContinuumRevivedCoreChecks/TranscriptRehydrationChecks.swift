@@ -165,8 +165,12 @@ private func runPiSessionTranscriptParseChecks() {
     // `summary` prose, and never a fabricated post-compaction size or
     // manual/automatic flag pi's session file does not carry.
     let compactionKind = ItemKind.compaction
-    let compactionTitle = AgentCompactionPayload.encodeTitle(preTokens: 26268, postTokens: nil, automaticCompaction: nil)
     let compactionBoundaryID = "pi:t-pi:unknown:26268"
+    // Provider and boundary ride the title as the live translators send them;
+    // the trigger and the manual/automatic flag stay absent, as the file has none.
+    let compactionTitle = AgentCompactionPayload.encodeTitle(
+        preTokens: 26268, postTokens: nil, automaticCompaction: nil,
+        provider: "pi", boundaryID: compactionBoundaryID)
     // Found by SHAPE, not by index: TR-01 adds host-local observation steps
     // ahead of the file-change item, and a positional lookup here would report
     // a missing compaction boundary every time the step list grows.

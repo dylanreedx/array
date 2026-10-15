@@ -619,4 +619,154 @@ private func runCodexAgentRunnerAppServerChecks() {
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }
+
+    // 2f. Manual compaction settles (2026-10-13, preview app: a Codex tile sat
+    // "Working · Thinking" forever after /compact). The frames below are the
+    // REAL codex-cli 0.159.3 app-server sequence for `thread/compact/start`,
+    // captured verbatim (minus `emittedAtMs`, which the fake does not carry):
+    // app-server runs the compaction as its own TURN — `turn/started`, the
+    // `contextCompaction` item, `turn/completed` two milliseconds later. The
+    // runner used to forward that `turn/started`, then return on the item's
+    // completion and shut the transport, dropping the `turn/completed` still
+    // in the pipe — so the supervisor's presence armed a turn nothing ever
+    // closed. Claude's `compact()` forwards only the compaction lifecycle, its
+    // items and meter readings; Codex must match it. The witness replays what
+    // `compact()` forwarded through the same presence reducer the tile reads.
+    do {
+        let thread = "01a13824-f3a1-7281-adf7-2982d6882465"
+        let turn = "01a13825-12be-7782-9fce-96d10cb8ba2f"
+        let item = "01a13825-12d5-7fd0-89d6-b3e61266c758"
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(result: [:]),          // initialize
+                .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read automatic-compaction observation
+                .expectRequest(result: [:]),          // thread/resume
+                .expectRequest(result: [:]),          // thread/compact/start -> {} (measured)
+                .emit(method: "thread/status/changed",
+                      params: ["threadId": thread, "status": ["type": "active", "activeFlags": [String]()]]),
+                .emit(method: "turn/started",
+                      params: ["threadId": thread,
+                               "turn": ["id": turn, "items": [Any](), "itemsView": "notLoaded",
+                                        "status": "inProgress", "error": NSNull(),
+                                        "startedAt": 1791943316, "completedAt": NSNull(), "durationMs": NSNull()]]),
+                .emit(method: "item/started",
+                      params: ["item": ["type": "contextCompaction", "id": item],
+                               "threadId": thread, "turnId": turn, "startedAtMs": 1791943316181]),
+                .emit(method: "thread/tokenUsage/updated",
+                      params: ["threadId": thread, "turnId": turn,
+                               "tokenUsage": [
+                                "total": ["totalTokens": 16155, "inputTokens": 16150, "cachedInputTokens": 13184,
+                                          "cacheWriteInputTokens": 0, "outputTokens": 5, "reasoningOutputTokens": 0],
+                                "last": ["totalTokens": 6072, "inputTokens": 0, "cachedInputTokens": 0,
+                                         "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0],
+                                "modelContextWindow": 475000]],
+                      delayMs: 100),
+                .emit(method: "item/completed",
+                      params: ["item": ["type": "contextCompaction", "id": item],
+                               "threadId": thread, "turnId": turn, "completedAtMs": 1791943325128]),
+                .emit(method: "thread/status/changed",
+                      params: ["threadId": thread, "status": ["type": "idle"]],
+                      delayMs: 2),
+                .emit(method: "turn/completed",
+                      params: ["threadId": thread,
+                               "turn": ["id": turn, "items": [Any](), "itemsView": "notLoaded",
+                                        "status": "completed", "error": NSNull(),
+                                        "startedAt": 1791943316, "completedAt": 1791943325, "durationMs": 8956]]),
+            ],
+            asExecutableNamed: "codex")
+        let fakeDir = script.deletingLastPathComponent()
+
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(fakeDir.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-6.1-sol", cwd: cwd, threadId: thread))
+            let collector = EventCollector()
+            let operationID = UUID()
+            var caught: Error?
+            do {
+                try runner.compact(AgentCompactionRequest(operationID: operationID)) { collector.append($0) }
+            } catch {
+                caught = error
+            }
+            let events = collector.snapshot()
+            var presence = AgentTurnPresence()
+            for event in events { presence.reduce(event, at: Date()) }
+
+            expect(caught == nil,
+                   "runner (compact, app-server): the real 0.159.3 compaction sequence must not throw; got \(String(describing: caught))")
+            expect(events.contains {
+                if case .compactionChanged(_, let lifecycle) = $0 {
+                    return lifecycle.phase == .succeeded && lifecycle.boundaryID == item
+                        && lifecycle.operationID == operationID
+                }
+                return false
+            }, "runner (compact, app-server): the contextCompaction item's completion must settle the operation .succeeded")
+            expect(!presence.isLive,
+                   "runner (compact, app-server): presence fed what compact() forwarded must not be left live; phase \(presence.phase)")
+            expect(!events.contains {
+                switch $0 {
+                case .turnStarted, .turnCompleted: return true
+                default: return false
+                }
+            }, "runner (compact, app-server): app-server's compaction turn must not leak as a user turn — Claude's compact() forwards no turn boundary either")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
+
+    // 2g. A compaction turn that FAILS before its item completes must end the
+    // operation at once. The failed `turn/completed` shape is the measured one
+    // `CodexAppServerParityChecks` pins (`turn.status == "failed"`, `turn.error`
+    // inline); the run used to wait out the 120s compaction timeout instead.
+    do {
+        let thread = "fixture-compact-fail-thread"
+        let turn = "fixture-compact-fail-turn"
+        let (script, fakeRoot) = try! makeFakeAppServer(
+            scenario: [
+                .expectRequest(result: [:]),          // initialize
+                .expectNotification,                  // initialized
+                .expectRequest(result: [:]),          // config/read
+                .expectRequest(result: [:]),          // thread/resume
+                .expectRequest(result: [:]),          // thread/compact/start
+                .emit(method: "turn/started",
+                      params: ["threadId": thread, "turn": ["id": turn, "status": "inProgress"]]),
+                .emit(method: "item/started",
+                      params: ["item": ["type": "contextCompaction", "id": "fixture-compact-fail-item"],
+                               "threadId": thread, "turnId": turn]),
+                .emit(method: "turn/completed",
+                      params: ["threadId": thread,
+                               "turn": ["id": turn, "status": "failed",
+                                        "error": ["code": "usage_limit_exceeded",
+                                                  "message": "You've hit your usage limit."]]],
+                      delayMs: 20),
+            ],
+            asExecutableNamed: "codex")
+        let fakeDir = script.deletingLastPathComponent()
+
+        withEnvironmentOverride([
+            "CONTINUUM_CODEX_TRANSPORT": "app-server",
+            "PATH": "\(fakeDir.path):\(ProcessInfo.processInfo.environment["PATH"] ?? "")",
+        ]) {
+            let runner = CodexAgentRunner(config: .init(model: "gpt-6.1-sol", cwd: cwd, threadId: thread))
+            let collector = EventCollector()
+            let started = Date()
+            var caught: Error?
+            do {
+                try runner.compact(AgentCompactionRequest()) { collector.append($0) }
+            } catch {
+                caught = error
+            }
+            let elapsed = Date().timeIntervalSince(started)
+            var presence = AgentTurnPresence()
+            for event in collector.snapshot() { presence.reduce(event, at: Date()) }
+            expect(caught != nil && elapsed < 10,
+                   "runner (compact failed, app-server): a failed compaction turn must end compact() promptly with an error; threw \(String(describing: caught)) after \(elapsed)s")
+            expect(String(describing: caught!).contains("usage limit"),
+                   "runner (compact failed, app-server): the provider's failure text must reach the error; got \(String(describing: caught!))")
+            expect(!presence.isLive,
+                   "runner (compact failed, app-server): a failed compaction must not leave presence live; phase \(presence.phase)")
+        }
+        try? FileManager.default.removeItem(at: fakeRoot)
+    }
 }

@@ -503,10 +503,28 @@ extension AgentCompactionPayload {
         boundaryID: String? = nil,
         phase: String? = nil,
         trigger: String? = nil,
-        postTokensEstimated: Bool? = nil
+        postTokensEstimated: Bool? = nil,
+        preTokensEstimated: Bool? = nil,
+        errorMessage: String? = nil
     ) -> String {
-        "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "");provider=\(provider ?? "");boundary=\(boundaryID ?? "");phase=\(phase ?? "");trigger=\(trigger ?? "");postEstimated=\(postTokensEstimated.map(String.init) ?? "")"
+        var title = "compaction:pre=\(preTokens.map(String.init) ?? "");post=\(postTokens.map(String.init) ?? "");auto=\(automaticCompaction.map(String.init) ?? "");provider=\(provider ?? "");boundary=\(boundaryID ?? "");phase=\(phase ?? "");trigger=\(trigger ?? "");postEstimated=\(postTokensEstimated.map(String.init) ?? "")"
+        // Appended only when present, so every title minted before these two
+        // fields existed keeps its exact spelling.
+        if let preTokensEstimated { title += ";preEstimated=\(preTokensEstimated)" }
+        // The reason is free text: percent-encoded so a ";" or "=" in it can
+        // never split the wire format.
+        if let errorMessage, !errorMessage.isEmpty,
+           let encoded = errorMessage.addingPercentEncoding(withAllowedCharacters: Self.errorValueAllowed) {
+            title += ";error=\(encoded)"
+        }
+        return title
     }
+
+    private static let errorValueAllowed: CharacterSet = {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: " .,-_()'’…")
+        return allowed
+    }()
 
     public init?(decodingTitle title: String?) {
         guard let title, title.hasPrefix("compaction:") else { return nil }
@@ -518,6 +536,8 @@ extension AgentCompactionPayload {
         var phase: String?
         var trigger: String?
         var postEstimated: Bool?
+        var preEstimated: Bool?
+        var errorMessage: String?
         for pair in title.dropFirst("compaction:".count).split(separator: ";") {
             let parts = pair.split(separator: "=", maxSplits: 1)
             guard parts.count == 2 else { continue }
@@ -530,6 +550,8 @@ extension AgentCompactionPayload {
             case "phase": phase = parts[1].isEmpty ? nil : String(parts[1])
             case "trigger": trigger = parts[1].isEmpty ? nil : String(parts[1])
             case "postEstimated": postEstimated = Bool(String(parts[1]))
+            case "preEstimated": preEstimated = Bool(String(parts[1]))
+            case "error": errorMessage = String(parts[1]).removingPercentEncoding.flatMap { $0.isEmpty ? nil : $0 }
             default: break
             }
         }
@@ -541,7 +563,9 @@ extension AgentCompactionPayload {
             boundaryID: boundaryID,
             phase: phase ?? "succeeded",
             trigger: trigger,
-            postTokensEstimated: postEstimated)
+            preTokensEstimated: preEstimated,
+            postTokensEstimated: postEstimated,
+            errorMessage: errorMessage)
     }
 }
 

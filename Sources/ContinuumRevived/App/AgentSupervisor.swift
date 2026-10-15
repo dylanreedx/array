@@ -1257,6 +1257,13 @@ final class AgentSupervisor {
         activeCompactionOperations.insert(id)
         notifyTurnCapabilitiesChanged(id)
 
+        if let reading = contextWindowSnapshot(for: id), let used = reading.usedTokens, used > 0,
+           reading.contextEpoch == nil || reading.contextEpoch == record.contextEpoch {
+            compactionBeforeReadings[id] = AgentCompactionTokenReading(
+                used, precision: reading.usedTokensEstimated == true ? .estimated : .exact)
+        } else {
+            compactionBeforeReadings[id] = nil
+        }
         let threadId = Self.threadId(for: id)
         deliver(.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
             operationID: request.operationID,
@@ -1290,7 +1297,10 @@ final class AgentSupervisor {
                 }
             } catch {
                 let stopped = error is AgentRunStopped
-                let message = SecretRedactor.redactLocalDiagnostics(String(describing: error))
+                // The runner's own words, not a Swift value such as
+                // `commandFailed(compact: launchFailed(…))`.
+                let message = SecretRedactor.redactLocalDiagnostics(
+                    (error as? AgentRunFailureDescribing)?.userFacingDescription ?? String(describing: error))
                 DispatchQueue.main.async {
                     guard let self, terminal.event == nil else { return }
                     let lifecycle = AgentCompactionLifecycleEvent(
@@ -1328,6 +1338,42 @@ final class AgentSupervisor {
         return true
     }
 
+    /// The meter's reading when a compaction operation began — the last usage
+    /// the provider reported before it. Codex states no before-count for a
+    /// compaction (app-server's `contextCompaction` item carries none), so its
+    /// boundary read "Context compacted manually" while Claude's read
+    /// "27.6k → 2.9k". Only a real provider reading from the current context
+    /// epoch is kept; nothing is ever estimated here.
+    private var compactionBeforeReadings: [AgentID: AgentCompactionTokenReading] = [:]
+
+    /// Fills a boundary's missing before-count from `compactionBeforeReadings`,
+    /// on both the lifecycle event and the transcript item's title. A provider
+    /// that states its own count (Claude, Pi) is never overridden.
+    private func withCompactionBeforeReading(_ event: AgentRuntimeEvent, for id: AgentID) -> AgentRuntimeEvent {
+        guard let before = compactionBeforeReadings[id] else { return event }
+        switch event {
+        case .compactionChanged(let threadId, var lifecycle)
+            where lifecycle.phase == .succeeded && lifecycle.beforeTokens == nil:
+            lifecycle.beforeTokens = before
+            return .compactionChanged(threadId: threadId, event: lifecycle)
+        case let .itemStarted(threadId, itemId, .compaction, title):
+            guard let payload = AgentCompactionPayload(decodingTitle: title),
+                  payload.preTokens == nil, payload.phase == nil || payload.phase == "succeeded" else { return event }
+            return .itemStarted(threadId: threadId, itemId: itemId, kind: .compaction, title: AgentCompactionPayload.encodeTitle(
+                preTokens: before.value,
+                postTokens: payload.postTokens,
+                automaticCompaction: payload.automaticCompaction,
+                provider: payload.provider,
+                boundaryID: payload.boundaryID,
+                phase: payload.phase,
+                trigger: payload.trigger,
+                postTokensEstimated: payload.postTokensEstimated,
+                preTokensEstimated: before.precision == .estimated ? true : nil))
+        default:
+            return event
+        }
+    }
+
     private func finishCompaction(
         _ terminal: AgentCompactionLifecycleEvent?,
         runner: AgentRunning,
@@ -1335,6 +1381,7 @@ final class AgentSupervisor {
         for id: AgentID
     ) {
         guard runnerGenerationTokens[id] == generation, runners[id] === runner else { return }
+        compactionBeforeReadings[id] = nil
         runners[id] = nil
         activeCompactionOperations.remove(id)
         compactingAgents.remove(id)
@@ -1367,7 +1414,10 @@ final class AgentSupervisor {
                 boundaryID: terminal.boundaryID,
                 phase: phase.rawValue,
                 trigger: terminal.trigger.providerValue,
-                postTokensEstimated: terminal.afterTokens?.precision == .estimated)
+                postTokensEstimated: terminal.afterTokens?.precision == .estimated,
+                // Why it did not happen, on every harness: a provider refusing
+                // ("Nothing to compact yet") is ordinary and must say so.
+                errorMessage: phase == .failed ? AgentFailureText.compactionReason(terminal.errorMessage) : nil)
             deliver(.itemStarted(
                 threadId: Self.threadId(for: id), itemId: itemID,
                 kind: .compaction, title: title), to: id)
@@ -7551,6 +7601,7 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        event = withCompactionBeforeReading(event, for: id)
         if case .turnCompleted(_, _, .failed, let error) = event,
            error == AgentContextFullRecovery.canonicalErrorMessage {
             pauseQueue(id, .held)
@@ -10109,11 +10160,16 @@ func runAgentSupervisorChecks() async throws {
     guard constructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("PiAgentRunner is constructed outside AgentSupervisor.swift: \(constructionSites.sorted()) (the supervisor owns the runner; a view that makes its own is a second owner and will double-spawn)")
     }
-    let (claudeConstructionSites, _) = try runnerConstructionSites(typeName: "ClaudeAgentRunner")
+    // The opt-in paid live acceptance check builds tool-less runners for its
+    // own private homes and never attaches a tile, so it is not a second owner.
+    let liveAcceptanceCheck = "App/AgentContextLiveCompactionChecks.swift"
+    let claudeConstructionSites = try runnerConstructionSites(typeName: "ClaudeAgentRunner").sites
+        .subtracting([liveAcceptanceCheck])
     guard claudeConstructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("ClaudeAgentRunner is constructed outside AgentSupervisor.swift: \(claudeConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
-    let (codexConstructionSites, _) = try runnerConstructionSites(typeName: "CodexAgentRunner")
+    let codexConstructionSites = try runnerConstructionSites(typeName: "CodexAgentRunner").sites
+        .subtracting([liveAcceptanceCheck])
     guard codexConstructionSites == ["App/AgentSupervisor.swift"] else {
         throw fail("CodexAgentRunner is constructed outside AgentSupervisor.swift: \(codexConstructionSites.sorted()) (same single-owner rule as PiAgentRunner)")
     }
@@ -10764,14 +10820,18 @@ func checkClearCommandTransaction(
         source: .claudeAssistantUsage, freshness: .live)
     var epochLiveSnapshot = liveSnapshot
     epochLiveSnapshot.contextEpoch = 0
+    // The supervisor stamps which model the window belongs to and where its
+    // size came from (the stated maxTokens), so the cached reading carries both.
+    epochLiveSnapshot.windowResolutionSource = .provider
+    epochLiveSnapshot.contextModel = config.model
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "does-not-matter", snapshot: liveSnapshot), to: parentID)
     guard supervisor.contextWindowSnapshot(for: parentID) == epochLiveSnapshot else {
-        throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache")
+        throw fail("clear-command fixture: the live contextWindowUpdated did not seed the cumulative telemetry cache; got \(String(describing: supervisor.contextWindowSnapshot(for: parentID))), expected \(epochLiveSnapshot)")
     }
     var preClearReplay: [AgentRuntimeEvent] = []
     for await event in supervisor.events(for: parentID) { preClearReplay.append(event); break }
     guard preClearReplay == [.contextWindowUpdated(threadId: "does-not-matter", snapshot: epochLiveSnapshot)] else {
-        throw fail("clear-command fixture: the replay buffer did not carry the delivered event")
+        throw fail("clear-command fixture: the replay buffer did not carry the delivered event; got \(preClearReplay), expected the stamped \(epochLiveSnapshot)")
     }
 
     let invocation = AgentCommandInvocation(descriptorID: "array:clear", name: "clear", surface: .array)
@@ -10815,7 +10875,7 @@ func checkClearCommandTransaction(
     //     both reset — the persisted lastContextWindow (assertion 2) is a
     //     DIFFERENT storage location from this in-memory cache.
     guard supervisor.contextWindowSnapshot(for: parentID) == nil else {
-        throw fail("clear command: the live cumulative context-window cache survived")
+        throw fail("clear command: the live cumulative context-window cache survived; got \(String(describing: supervisor.contextWindowSnapshot(for: parentID))), expected nil")
     }
     // `events(for:)` replays its buffer then stays open on the live stream, so
     // proving "empty" needs a bounded read: deliver one new sentinel and
@@ -10826,11 +10886,14 @@ func checkClearCommandTransaction(
         source: .claudeAssistantUsage, freshness: .live)
     var epochSentinelSnapshot = sentinelSnapshot
     epochSentinelSnapshot.contextEpoch = 0
+    // Delivery stamps the window's model and resolution source (see the fixture above).
+    epochSentinelSnapshot.windowResolutionSource = .provider
+    epochSentinelSnapshot.contextModel = config.model
     supervisor.qaDeliver(.contextWindowUpdated(threadId: "sentinel", snapshot: sentinelSnapshot), to: parentID)
     var firstReplayedAfterClear: AgentRuntimeEvent?
     for await event in supervisor.events(for: parentID) { firstReplayedAfterClear = event; break }
     guard firstReplayedAfterClear == .contextWindowUpdated(threadId: "sentinel", snapshot: epochSentinelSnapshot) else {
-        throw fail("clear command: the replay buffer was not cleared — got \(String(describing: firstReplayedAfterClear)) before the post-clear sentinel")
+        throw fail("clear command: the replay buffer was not cleared — got \(String(describing: firstReplayedAfterClear)) before the post-clear sentinel, expected the sentinel carrying \(epochSentinelSnapshot)")
     }
 
     // 6 · the boundary, as a Tier A notice: the transcript keeps its history.
@@ -13244,10 +13307,14 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
         freshness: .live)
     var epochContextSnapshot = contextSnapshot
     epochContextSnapshot.contextEpoch = 0
+    // The supervisor stamps which model the window belongs to and where its
+    // size came from, so a stale reading can never be shown against another model.
+    epochContextSnapshot.windowResolutionSource = .provider
+    epochContextSnapshot.contextModel = config.model
     supervisor.qaDeliver(.contextWindowUpdated(
         threadId: AgentSupervisor.threadId(for: id), snapshot: contextSnapshot), to: id)
     guard supervisor.contextWindowSnapshot(for: id) == epochContextSnapshot else {
-        throw fail("context-seam: delivered snapshot is returned with the current context epoch")
+        throw fail("context-seam: delivered snapshot is returned with the current context epoch; got \(String(describing: supervisor.contextWindowSnapshot(for: id))), expected \(epochContextSnapshot)")
     }
     for index in 0..<(AgentSupervisor.replayCap + 8) {
         supervisor.qaDeliver(.contentDelta(
@@ -13490,7 +13557,9 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     // be flattened into `.fencedCode` at parse time. Both halves are pinned — the
     // exact roster size, and that no kind is listed twice, which a bare count
     // cannot tell apart from a missing one.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 21,
+    // 22: `.compaction` joined the roster — its renderer had been written and
+    // never registered.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 22,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")

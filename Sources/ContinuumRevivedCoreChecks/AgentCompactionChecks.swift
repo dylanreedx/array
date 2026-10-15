@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
@@ -87,6 +88,51 @@ func runAgentCompactionChecks() {
     expect(codex.translate(line: #"{"method":"thread/compacted","params":{"threadId":"legacy-thread","boundaryId":"legacy-boundary"}}"#).isEmpty,
            "replayed Codex legacy compact notifications must not advance the boundary twice")
 
+    // Codex DOES state its post-compaction size — inside the compaction turn,
+    // before the item completes. Real codex-cli 0.159.3 frames (captured
+    // 2026-10-13, ids kept): the `thread/tokenUsage/updated` between the
+    // `contextCompaction` item's start and completion carries a computed
+    // `last` (input/output 0, `totalTokens` 6072 — codex's recount of the
+    // compacted history, not an API request) and the window. The meter folded
+    // it, then the boundary — carrying no after-count — blanked it, so the
+    // ring read "unknown" from the compaction until the next turn. Folded here
+    // exactly as `AgentSupervisor.deliver` folds them, from the turn-before
+    // reading (16,150 of 475,000).
+    do {
+        var live = CodexAppServerEventTranslator(
+            compactionOperationID: operationID, compactionTrigger: .manual,
+            now: { Date(timeIntervalSinceReferenceDate: 58) })
+        let frames = [
+            #"{"method":"item/started","params":{"item":{"type":"contextCompaction","id":"01a13825-12d5-7fd0-89d6-b3e61266c758"},"threadId":"01a13824-f3a1-7281-adf7-2982d6882465","turnId":"01a13825-12be-7782-9fce-96d10cb8ba2f","startedAtMs":1791943316181},"emittedAtMs":1791943316182}"#,
+            #"{"method":"thread/tokenUsage/updated","params":{"threadId":"01a13824-f3a1-7281-adf7-2982d6882465","turnId":"01a13825-12be-7782-9fce-96d10cb8ba2f","tokenUsage":{"total":{"totalTokens":16155,"inputTokens":16150,"cachedInputTokens":13184,"cacheWriteInputTokens":0,"outputTokens":5,"reasoningOutputTokens":0},"last":{"totalTokens":6072,"inputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0},"modelContextWindow":475000}},"emittedAtMs":1791943325128}"#,
+            #"{"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"01a13825-12d5-7fd0-89d6-b3e61266c758"},"threadId":"01a13824-f3a1-7281-adf7-2982d6882465","turnId":"01a13825-12be-7782-9fce-96d10cb8ba2f","completedAtMs":1791943325128},"emittedAtMs":1791943325129}"#,
+        ]
+        var reading: AgentContextWindowSnapshot? = AgentContextWindowSnapshot(
+            usedTokens: 16_150, maxTokens: 475_000,
+            observedAt: Date(timeIntervalSinceReferenceDate: 50),
+            source: .codexRolloutTokenCount, freshness: .live)
+        var boundary: AgentCompactionLifecycleEvent?
+        for event in live.translate(stream: frames) {
+            switch event {
+            case .contextWindowUpdated(_, let snapshot):
+                reading = AgentContextMeter.reading(
+                    after: snapshot, current: reading, window: snapshot.maxTokens ?? 475_000)
+            case .compactionChanged(_, let lifecycle):
+                if lifecycle.phase == .succeeded { boundary = lifecycle }
+                if let next = AgentContextMeter.reading(after: lifecycle, current: reading, window: 475_000) {
+                    reading = next
+                }
+            default:
+                break
+            }
+        }
+        expect(boundary?.afterTokens == AgentCompactionTokenReading(6072, precision: .estimated),
+               "Codex: the compaction turn's recounted usage must become the boundary's estimated after-count; got \(String(describing: boundary?.afterTokens))")
+        expect(reading?.usedTokens == 6072 && reading?.maxTokens == 475_000
+                && reading?.usedTokensEstimated == true && reading?.compacting != true,
+               "Codex: after compaction the meter must read ≈6,072 of 475,000, not 'unknown'; got used \(String(describing: reading?.usedTokens)) of \(String(describing: reading?.maxTokens))")
+    }
+
     // The error code is the last recovery signal app-server provides when a
     // failed Codex turn reaches its context ceiling. Keep this as a normalized
     // marker so the shared recovery surface can offer the same actions for all
@@ -137,6 +183,52 @@ func runAgentCompactionChecks() {
     expect(AgentContextFullRecovery.actions == [
         .compactAndRetry, .forkWithSummary, .copyTranscript,
     ], "context-full recovery must expose compact/retry, summary fork, and transcript copy")
+
+    // A refused manual compaction says why (2026-10-13, preview app: a Pi tile's
+    // /compact produced a red "Context compaction failed" and nothing else).
+    // These three frames are pi's REAL rpc answer to `compact` on a session
+    // with nothing to summarize, captured verbatim from `pi --mode rpc`.
+    do {
+        var pi = PiEventTranslator(now: { Date(timeIntervalSinceReferenceDate: 58) })
+        let frames = [
+            #"{"type":"compaction_start","reason":"manual"}"#,
+            #"{"type":"compaction_end","reason":"manual","aborted":false,"willRetry":false,"errorMessage":"Compaction failed: Nothing to compact (session too small)"}"#,
+        ]
+        let failed = pi.translate(stream: frames).compactMap { event -> AgentCompactionLifecycleEvent? in
+            if case .compactionChanged(_, let lifecycle) = event, lifecycle.phase == .failed { return lifecycle }
+            return nil
+        }.first
+        expect(failed?.errorMessage == "Compaction failed: Nothing to compact (session too small)",
+               "Pi: compaction_end's errorMessage must ride the failed lifecycle; got \(String(describing: failed?.errorMessage))")
+        expect(AgentFailureText.compactionReason(failed?.errorMessage) == "Nothing to compact yet",
+               "Pi's 'Nothing to compact' refusal must read 'Nothing to compact yet'; got \(String(describing: AgentFailureText.compactionReason(failed?.errorMessage)))")
+        // The rpc `response` frame's error is what reaches a runner's catch path.
+        expect(AgentFailureText.compactionReason(
+            "Pi refused compact: launchFailed(Nothing to compact (session too small))") == "Nothing to compact yet",
+               "a wrapped refusal must still read 'Nothing to compact yet'")
+        expect(AgentFailureText.compactionReason("Compaction failed: Already compacted") == "Nothing new since the last compaction",
+               "pi's 'Already compacted' must say there is nothing new")
+        expect(AgentFailureText.compactionReason("Compaction failed: 429 rate limit exceeded") == "429 rate limit exceeded",
+               "an API failure keeps its words, minus the 'Compaction failed:' wrapper")
+        expect(AgentFailureText.compactionReason("Compaction failed: the model said something private") == nil,
+               "text that is not an API/account failure must not reach the row (I5)")
+        expect(AgentFailureText.compactionReason(nil) == nil && AgentFailureText.compactionReason("  ") == nil,
+               "no reason means no reason")
+
+        // The reason and the pre-count precision survive the title wire format,
+        // including the characters that delimit it.
+        let title = AgentCompactionPayload.encodeTitle(
+            preTokens: 16_150, postTokens: 6_072, automaticCompaction: false, provider: "codex",
+            boundaryID: "b", phase: "failed", trigger: "manual", postTokensEstimated: true,
+            preTokensEstimated: false, errorMessage: "a;b=c · Nothing to compact yet")
+        let decoded = AgentCompactionPayload(decodingTitle: title)
+        expect(decoded?.errorMessage == "a;b=c · Nothing to compact yet" && decoded?.preTokensEstimated == false
+                && decoded?.postTokensEstimated == true && decoded?.phase == "failed" && decoded?.preTokens == 16_150,
+               "compaction title must round-trip error text and estimate flags; got \(String(describing: decoded))")
+        expect(!AgentCompactionPayload.encodeTitle(preTokens: 1, postTokens: 2, automaticCompaction: nil)
+                .contains("error=") ,
+               "a title without a reason must keep its pre-existing spelling")
+    }
 
     print("AgentCompactionChecks passed")
 }

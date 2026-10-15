@@ -85,6 +85,14 @@ public struct CodexAppServerEventTranslator {
     private var activeCompactionBoundaryByThread: [String: String] = [:]
     private var completedCompactionBoundaryIDs: Set<String> = []
     private var legacyCompactionSequenceByThread: [String: Int] = [:]
+    /// Codex states its post-compaction size INSIDE the compaction turn: the
+    /// `thread/tokenUsage/updated` between the `contextCompaction` item's start
+    /// and completion carries a recounted `last` (input/output 0, `totalTokens`
+    /// = its estimate of the compacted history — measured on 0.159.3). Held
+    /// here so the boundary carries it as an estimated after-count; without it
+    /// the boundary blanked the meter to "unknown" until the next turn.
+    private var openCompactionItemByThread: [String: String] = [:]
+    private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -227,6 +235,8 @@ public struct CodexAppServerEventTranslator {
         switch itemType {
         case "contextCompaction":
             activeCompactionBoundaryByThread[threadId] = itemId
+            openCompactionItemByThread[threadId] = itemId
+            recountedCompactionTokensByThread[threadId] = nil
             return [.compactionChanged(threadId: threadId, event: AgentCompactionLifecycleEvent(
                 operationID: compactionOperationID,
                 boundaryID: itemId,
@@ -365,6 +375,10 @@ public struct CodexAppServerEventTranslator {
         switch itemType {
         case "contextCompaction":
             activeCompactionBoundaryByThread[threadId] = itemId
+            let recounted = openCompactionItemByThread[threadId] == itemId
+                ? recountedCompactionTokensByThread[threadId] : nil
+            openCompactionItemByThread[threadId] = nil
+            recountedCompactionTokensByThread[threadId] = nil
             guard completedCompactionBoundaryIDs.insert(Self.compactionBoundaryKey(
                 threadId: threadId, boundaryID: itemId)).inserted else { return [] }
             return [
@@ -373,16 +387,20 @@ public struct CodexAppServerEventTranslator {
                     boundaryID: itemId,
                     phase: .succeeded,
                     trigger: compactionTrigger,
+                    afterTokens: recounted.map { AgentCompactionTokenReading($0, precision: .estimated) },
                     provider: "codex",
                     observedAt: now()
                 )),
                 .itemStarted(threadId: threadId, itemId: itemId, kind: .compaction, title: AgentCompactionPayload.encodeTitle(
                     preTokens: nil,
-                    postTokens: nil,
+                    // The same in-compaction recount the lifecycle carries, so
+                    // the row can read "→ ≈6.1k"; never a number codex did not say.
+                    postTokens: recounted,
                     automaticCompaction: compactionTrigger == .manual ? false : nil,
                     provider: "codex",
                     boundaryID: itemId,
-                    trigger: compactionTrigger.providerValue
+                    trigger: compactionTrigger.providerValue,
+                    postTokensEstimated: recounted == nil ? nil : true
                 )),
                 .itemCompleted(threadId: threadId, itemId: itemId, kind: .compaction, status: .completed),
             ]
@@ -559,7 +577,7 @@ public struct CodexAppServerEventTranslator {
     /// what codex's own context indicator and the rollout path
     /// (`CodexRolloutTelemetry`) read; `total` is cumulative and never reaches
     /// the ring.
-    private func translateTokenUsage(_ params: [String: Any]) -> [AgentRuntimeEvent] {
+    private mutating func translateTokenUsage(_ params: [String: Any]) -> [AgentRuntimeEvent] {
         guard let threadId = params["threadId"] as? String,
               let usage = params["tokenUsage"] as? [String: Any]
         else { return [] }
@@ -575,6 +593,9 @@ public struct CodexAppServerEventTranslator {
         }
         if let last = usage["last"] as? [String: Any],
            let used = Self.intValue(last["totalTokens"]), used > 0 {
+            if openCompactionItemByThread[threadId] != nil {
+                recountedCompactionTokensByThread[threadId] = used
+            }
             events.append(.contextWindowUpdated(threadId: threadId, snapshot: AgentContextWindowSnapshot(
                 usedTokens: used,
                 maxTokens: Self.intValue(usage["modelContextWindow"]).flatMap { $0 > 0 ? $0 : nil },

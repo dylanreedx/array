@@ -47,16 +47,27 @@ public enum ClaudeSessionTranscriptReader {
 
             switch type {
             case "system" where (object["subtype"] as? String) == "compact_boundary":
-                let metadata = object["compact_metadata"] as? [String: Any] ?? [:]
+                // The live stream says `compact_metadata.pre_tokens`; the session
+                // FILE says `compactMetadata.preTokens` (claude 2.1.x, captured
+                // 2026-10-13). Reading only the first dropped every restored count.
+                let metadata = object["compact_metadata"] as? [String: Any]
+                    ?? object["compactMetadata"] as? [String: Any] ?? [:]
                 out.append(NormalizedTranscriptMessage(
                     role: .compaction,
                     countsAsMessage: false,
-                    compactionTokensBefore: intValue(metadata["pre_tokens"]),
-                    compactionTokensAfter: intValue(metadata["post_tokens"]),
+                    compactionTokensBefore: intValue(metadata["pre_tokens"] ?? metadata["preTokens"]),
+                    compactionTokensAfter: intValue(metadata["post_tokens"] ?? metadata["postTokens"]),
                     compactionBoundaryID: object["uuid"] as? String,
                     compactionTrigger: AgentCompactionTrigger(providerValue: metadata["trigger"] as? String),
                     compactionProvider: "claude"))
             case "user":
+                // Claude's own bookkeeping, never something the user said: the
+                // hidden `isMeta` context (a local command's caveat, an expanded
+                // skill body) and the post-compaction summary it feeds the model.
+                // Both render as raw user bubbles if imported.
+                if (object["isMeta"] as? Bool) == true
+                    || (object["isCompactSummary"] as? Bool) == true
+                    || (object["isVisibleInTranscriptOnly"] as? Bool) == true { continue }
                 guard let message = object["message"] as? [String: Any] else { continue }
                 appendUserMessage(message["content"], into: &out)
             case "assistant":
@@ -81,9 +92,8 @@ public enum ClaudeSessionTranscriptReader {
     /// prior tool calls (content is a list of tool_result blocks).
     private static func appendUserMessage(_ content: Any?, into out: inout [NormalizedTranscriptMessage]) {
         if let text = content as? String {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                out.append(NormalizedTranscriptMessage(role: .userPrompt, text: trimmed))
+            if let visible = visiblePromptText(text) {
+                out.append(NormalizedTranscriptMessage(role: .userPrompt, text: visible))
             }
             return
         }
@@ -102,10 +112,39 @@ public enum ClaudeSessionTranscriptReader {
                 continue
             }
         }
-        let trimmed = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            out.append(NormalizedTranscriptMessage(role: .userPrompt, text: trimmed))
+        if let visible = visiblePromptText(promptText) {
+            out.append(NormalizedTranscriptMessage(role: .userPrompt, text: visible))
         }
+    }
+
+    /// What the user actually typed, from a `user` record's text — or nil when
+    /// the record is claude's local-command bookkeeping. A slash command run
+    /// in claude itself is logged as `<command-name>/x</command-name>
+    /// <command-message>…</command-message><command-args>…</command-args>`
+    /// and its output as `<local-command-stdout>`/`<local-command-stderr>`.
+    /// The command reads back as the user typed it (`/x args`); its output is
+    /// not a prompt. `/compact` is dropped outright: its `compact_boundary`
+    /// record already restores as the boundary row, exactly as the live
+    /// compaction does.
+    static func visiblePromptText(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("<local-command-") { return nil }
+        guard trimmed.hasPrefix("<command-name>") || trimmed.hasPrefix("<command-message>") else {
+            return trimmed
+        }
+        func tag(_ name: String) -> String? {
+            guard let open = trimmed.range(of: "<\(name)>"),
+                  let close = trimmed.range(of: "</\(name)>", range: open.upperBound..<trimmed.endIndex)
+            else { return nil }
+            return String(trimmed[open.upperBound..<close.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard var command = tag("command-name"), !command.isEmpty else { return nil }
+        if !command.hasPrefix("/") { command = "/" + command }
+        if command == "/compact" { return nil }
+        let arguments = tag("command-args") ?? ""
+        return arguments.isEmpty ? command : "\(command) \(arguments)"
     }
 
     private static func appendAssistantMessage(

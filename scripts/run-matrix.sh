@@ -413,6 +413,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
+# Standalone for the same reason: the runner half (incl. the real 0.159.3
+# manual-compaction turn, which once left a tile "Working" forever) only ran
+# inside the KNOWN-RED bare CoreChecks run.
+run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 run_leg scripts/capture-cli-fixtures.sh check
 # ST-01. Standalone for the same reason as the compaction leg above: the bare
 # CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
@@ -438,6 +442,10 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # CLI that record the exact argv and stdin frames. Its own arm for the same
 # reason as the one above: the bare CoreChecks run is KNOWN-RED.
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
+# A pi provider refusal (model not on the plan) read "error" on the card. Real
+# captured rpc frames through the translator and projection; own arm because
+# the bare CoreChecks run is KNOWN-RED.
+run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from

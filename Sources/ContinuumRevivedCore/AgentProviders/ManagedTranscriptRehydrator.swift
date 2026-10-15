@@ -310,10 +310,28 @@ public enum ManagedTranscriptRehydrator {
                         },
                         provider: message.compactionProvider ?? "provider"
                     ))))
+                // The same title fields the live translators send, so a
+                // restored boundary reads exactly as the live one did — "manual"
+                // only when the log recorded the trigger, never guessed.
+                let automatic: Bool? = {
+                    switch message.compactionTrigger {
+                    case .manual: return false
+                    case .threshold, .overflowRecovery, .providerAutomatic: return true
+                    case .unknown: return nil
+                    }
+                }()
                 let title = AgentCompactionPayload.encodeTitle(
                     preTokens: message.compactionTokensBefore,
                     postTokens: message.compactionTokensAfter,
-                    automaticCompaction: nil)
+                    automaticCompaction: automatic,
+                    provider: message.compactionProvider,
+                    boundaryID: itemID,
+                    trigger: {
+                        if case .unknown = message.compactionTrigger { return nil }
+                        return message.compactionTrigger.providerValue
+                    }(),
+                    postTokensEstimated: message.compactionTokensAfter == nil
+                        ? nil : (message.compactionAfterEstimated ? true : nil))
                 let compactionKind = ItemKind.compaction
                 steps.append(.event(.itemStarted(
                     threadId: threadId, itemId: itemID, kind: compactionKind, title: title)))

@@ -419,16 +419,43 @@ public final class CodexAgentRunner: @unchecked Sendable {
 
         let completion = DispatchSemaphore(value: 0)
         var terminal: AgentCompactionLifecycleEvent?
+        var compactionTurnFailure: String?
+        var signaled = false
         let transport = CodexAppServerTransport(child: spawned) { [weak self] line in
             guard let self else { return }
             self.queue.sync {
                 for event in self.appServerTranslator.translate(line: line) {
-                    onEvent(event)
-                    if case .compactionChanged(let eventThreadID, let lifecycle) = event,
-                       eventThreadID == threadId,
-                       [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase) {
+                    switch event {
+                    // app-server runs a compaction as its own provider TURN
+                    // (measured on 0.159.3: `turn/started`, the
+                    // `contextCompaction` item, `turn/completed`). That turn is
+                    // this operation, not a user turn: forwarding its start
+                    // armed the tile's presence, and the `turn/completed` that
+                    // follows the item by ~2ms was still in the pipe when the
+                    // transport shut — the tile sat "Working · Thinking"
+                    // forever. Claude's `compact()` forwards no turn boundary
+                    // either; the compaction lifecycle is the terminal.
+                    case .turnStarted:
+                        continue
+                    case .turnCompleted(let eventThreadID, _, _, let errorMessage):
+                        // A compaction turn that ends without its item
+                        // completing ends the operation too, rather than
+                        // waiting out the timeout.
+                        if eventThreadID == threadId, terminal == nil, !signaled {
+                            compactionTurnFailure = errorMessage
+                                ?? "compaction turn ended without a contextCompaction item"
+                            signaled = true
+                            completion.signal()
+                        }
+                        continue
+                    case .compactionChanged(let eventThreadID, let lifecycle)
+                        where eventThreadID == threadId
+                            && [.succeeded, .failed, .cancelled, .indeterminate].contains(lifecycle.phase):
+                        onEvent(event)
                         terminal = lifecycle
-                        completion.signal()
+                        if !signaled { signaled = true; completion.signal() }
+                    default:
+                        onEvent(event)
                     }
                 }
             }
@@ -479,7 +506,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
         try throwStoppedIfRequested(stderr: "")
         guard let terminal else {
-            throw RunError.appServerFailed("contextCompaction completion not observed")
+            throw RunError.appServerFailed(compactionTurnFailure ?? "contextCompaction completion not observed")
         }
         if terminal.phase == .failed {
             throw RunError.appServerFailed(terminal.errorMessage ?? "compaction failed")
