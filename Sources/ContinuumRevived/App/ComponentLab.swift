@@ -73,6 +73,11 @@ enum AgentTranscriptReviewState: String, CaseIterable {
     // turn renders sparse tool rows; this state is the fixture that makes that
     // gap visible to every gate that enumerates review states.
     case realClaudeTurn = "real-claude-turn"
+    // A context compaction boundary, one per provider shape: Claude's exact
+    // before -> after, Codex's bare boundary (it reports no sizes), Pi's
+    // estimated after-size, and a failed attempt. The appearance census sweeps
+    // `CompactionBoundaryView` through this production surface.
+    case compactionBoundary = "compaction-boundary"
 }
 
 /// P4.10 supervised review states: the full-turn composer across its editing and
@@ -582,6 +587,8 @@ enum LabFixtures {
             // Unreachable: handled by the replay early-return above. The
             // replayed document is never assembled from authored blocks.
             assistantBlocks = []
+        case .compactionBoundary:
+            assistantBlocks = [paragraph("compaction-before", [.text("The context is nearly full; compacting before the next step.")])]
         case .recededWork:
             // Settled routine work, which `_DESIGN.md` §11 says should recede and
             // which no renderer currently fades at all.
@@ -653,6 +660,29 @@ enum LabFixtures {
                        reply: "Between each of these three exchanges.")
                 + [queuedFirst, queuedSecond,
                    entry("a4", role: .assistant, blocks: [paragraph("a4-t", [.text("Both queued prompts answered here.")])])])
+        }
+        if state == .compactionBoundary {
+            func boundary(_ suffix: String, _ payload: AgentCompactionPayload) -> AgentEntry {
+                entry(suffix, role: .system, blocks: [AgentBlock(
+                    id: id("\(suffix)-block"), revision: 1, kind: .compaction, payload: .compaction(payload))])
+            }
+            return AgentDocument(version: 1, entries: [
+                user,
+                entry("assistant", role: .assistant, blocks: assistantBlocks),
+                boundary("claude", AgentCompactionPayload(
+                    preTokens: 154_000, postTokens: 22_000, automaticCompaction: false,
+                    provider: "claude", phase: "succeeded", trigger: "manual")),
+                boundary("codex", AgentCompactionPayload(
+                    preTokens: nil, postTokens: nil, automaticCompaction: false,
+                    provider: "codex", phase: "succeeded", trigger: "manual")),
+                boundary("pi", AgentCompactionPayload(
+                    preTokens: 99_000, postTokens: 19_000, automaticCompaction: true,
+                    provider: "pi", phase: "succeeded", trigger: "threshold", postTokensEstimated: true)),
+                boundary("failed", AgentCompactionPayload(
+                    preTokens: nil, postTokens: nil, automaticCompaction: nil,
+                    provider: "pi", phase: "failed", trigger: "manual")),
+                entry("after", role: .assistant, blocks: [paragraph("compaction-after", [.text("Continuing from the compacted context.")])]),
+            ])
         }
         return AgentDocument(version: 1, entries: [user, entry("assistant", role: .assistant, blocks: assistantBlocks)])
     }
@@ -2006,7 +2036,7 @@ enum LabCatalog {
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
             managedAgentLocationStatusCard, managedAgentNarrowLocationTileCard,
-            transcriptReviewCard, composerReviewCard, composerFullVariantCard,
+            transcriptReviewCard, composerReviewCard, composerFullVariantCard, busyComposerReviewCard,
             composerCompactVariantCard, composerProviderControlsCard, throbberCandidateGalleryCard,
             orbitVariationsGalleryCard, tiltedVariationsGalleryCard,
 
@@ -3117,6 +3147,81 @@ enum LabCatalog {
                 AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
             }
         )
+    }
+
+    /// 2026-10-13 owner review — the composer while the agent works, on all
+    /// three harnesses: empty (reads like idle: Stop only, no chord line),
+    /// typed (Steer with its chevron menu beside a compact Stop), one steer
+    /// pending and two follow-ups queued (the pending rail docked at the foot
+    /// of the transcript). Real tiles through the production seams; hover a
+    /// pending row to see its actions. A review surface, not a baselined card.
+    private static var busyComposerReviewCard: LabEntry {
+        let tileSize = NSSize(width: 360, height: 300)
+        let columns = ["Busy, empty", "Busy, typed", "One steering pending", "Two queued pending"]
+        let harnesses: [(AgentHarness, String)] = [
+            (.claudeCode, "anthropic/claude-sonnet-4-5"),
+            (.codex, "openai-codex/gpt-5.4-mini"),
+            (.pi, "openai-codex/gpt-5.4-mini"),
+        ]
+        let gap = CGFloat(Space.l)
+        let captionHeight: CGFloat = 20
+        let size = NSSize(
+            width: CGFloat(columns.count) * (tileSize.width + gap) + gap,
+            height: CGFloat(harnesses.count) * (tileSize.height + captionHeight + gap) + gap)
+        return LabEntry(
+            id: "managed-agent.busy-composer",
+            category: "Managed Agent",
+            title: "Composer While Busy — Steer and Queue",
+            summary: "Busy-empty, busy-typed (Steer + menu), one pending steer and two queued messages docked under the transcript — Claude, Codex and Pi.",
+            content: .reviewSurface(preferredSize: size) {
+                let root = FlippedContainerView(frame: NSRect(origin: .zero, size: size))
+                for (row, (harness, model)) in harnesses.enumerated() {
+                    for (column, title) in columns.enumerated() {
+                        let x = gap + CGFloat(column) * (tileSize.width + gap)
+                        let y = gap + CGFloat(row) * (tileSize.height + captionHeight + gap)
+                        let caption = NSTextField(labelWithString: "\(harness.rawValue) \u{00B7} \(title)")
+                        caption.font = .token(.caption)
+                        caption.textColor = .secondaryLabelColor
+                        caption.frame = NSRect(x: x, y: y, width: tileSize.width, height: captionHeight)
+                        root.addSubview(caption)
+                        let tile = makeBusyComposerTile(harness: harness, model: model, state: column, size: tileSize)
+                        tile.frame.origin = NSPoint(x: x, y: y + captionHeight)
+                        root.addSubview(tile)
+                    }
+                }
+                return root
+            }
+        )
+    }
+
+    /// One real managed tile mid-turn, in review state `state` (the column).
+    static func makeBusyComposerTile(
+        harness: AgentHarness, model: String, state: Int, size: NSSize
+    ) -> ManagedAgentTileNSView {
+        let view = makeManagedAgentFixtureView(includeApproval: false)
+        view.frame = NSRect(origin: .zero, size: size)
+        view.applyLaunchSelection(AgentLaunchSelection(harness: harness, model: model, thinking: "high"))
+        view.qaApplyTurnSnapshotForChecks(AgentTileTurnSnapshot(
+            state: .working,
+            capabilities: AgentTurnCapabilities(canSend: false, canStop: true, canSteer: true, canQueue: true),
+            turnStartedAt: Date()))
+        switch state {
+        case 1:
+            view.qaSetComposerDraftForChecks("also check the iOS build")
+        case 2:
+            view.qaComposerForChecks?.updateQueueRail(ComposerQueueRailState(steers: [
+                .init(id: UUID(), text: "how about yesterday?", attachmentCount: 0, kind: .heldSteer),
+            ]))
+        case 3:
+            view.qaComposerForChecks?.updateQueueRail(ComposerQueueRailState(queued: [
+                .init(id: UUID(), text: "then write the release notes", attachmentCount: 1, kind: .queued),
+                .init(id: UUID(), text: "bump the version", attachmentCount: 0, kind: .queued),
+            ]))
+        default:
+            break
+        }
+        view.layoutSubtreeIfNeeded()
+        return view
     }
 
     private static var composerFullVariantCard: LabEntry {
@@ -4443,6 +4548,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             // `.plans/45` S1. Prompt + 3 reasoning entries + 2 tool rows + the
             // final prose — a floor, so supply work can only add rows.
             .realClaudeTurn: 6,
+            // Prompt, prose, four boundary rows, closing prose.
+            .compactionBoundary: 7,
         ]
         for state in AgentTranscriptReviewState.allCases {
             let size = NSSize(width: state == .long ? 320 : 480, height: 720)
@@ -4523,7 +4630,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                     throw fail("approval transcript review state lost its explicit contextual custom request controls")
                 }
             case .headingLadder, .lists, .tableAndBreaks, .errorVsNotice,
-                 .turnBoundary, .recededWork, .realClaudeTurn:
+                 .turnBoundary, .recededWork, .realClaudeTurn, .compactionBoundary:
                 // Row floors above only. Every STRUCTURAL assertion for these
                 // states lives in `--transcript-rhythm-check`, deliberately:
                 // this function runs inside `--component-lab-check`, which is in

@@ -376,6 +376,12 @@ enum UIProbeAppearance {
                 LabCatalog.makeTranscriptReviewSurface(
                     state: .tableAndBreaks, size: NSSize(width: 480, height: 720), theme: .dark)
             }),
+            // The compaction boundary's two hairlines, through the same
+            // production registration the live tile resolves.
+            ("appearance.transcriptCompactionBoundary", NSSize(width: 480, height: 720), {
+                LabCatalog.makeTranscriptReviewSurface(
+                    state: .compactionBoundary, size: NSSize(width: 480, height: 720), theme: .dark)
+            }),
             ("appearance.inboxHoverCard", NSSize(width: 360, height: 220), {
                 let card = InboxHoverCardView(frame: .zero)
                 card.apply(
@@ -422,6 +428,15 @@ enum UIProbeAppearance {
                     ),
                     hasDraft: true
                 ))
+            }),
+            // 2026-10-13: the busy send choice (Steer + its chevron menu) and the
+            // pending rail docked under the transcript, each through its own
+            // production entry point, so neither keeps a stale token CGColor.
+            ("appearance.composerSendChoice", NSSize(width: 160, height: 32), {
+                Self.sendChoiceFixture()
+            }),
+            ("appearance.composerPendingRail", NSSize(width: 420, height: 140), {
+                Self.pendingRailFixture(width: 420)
             }),
             // 91/P5.1: the v2 header shell stays behind its fixture flag until
             // P5.5 acceptance, so the live tile surfaces above never contain it.
@@ -977,17 +992,25 @@ enum UIProbeAppearance {
         // outline are held to the palette from the first frame; the WORDS on it are
         // covered by section K of `--agent-inbox-check` rather than by a pixel.
         "InboxUndoToast",
-        // T5b (`.plans/69`): the steering/queue rail's one painted layer is the
-        // divider under it — a LINE role (`decorativeHairline`) painted as a
-        // FILL on its own sublayer, the same hand-off as `UserPromptView.rule`.
-        // Its rows paint no fill at rest; the drag drop line paints only
-        // mid-drag.
-        "ComposerQueuedMessageRailView",
+        // T5b → 2026-10-13: the pending steer/queue rail docked under the
+        // transcript paints nothing itself; each pending message row paints
+        // only its rule — the user turn's rule in a LINE role
+        // (`decorativeHairline`) painted as a FILL on its own sublayer. The
+        // hover-only actions paint nothing at rest or under the pointer; the
+        // drag drop line paints only mid-drag.
+        "QueueRailItemRow",
+        // 2026-10-13: the busy send choice's chevron — the composer's own fill
+        // and a control boundary, so the accent stays on the default action.
+        "ComposerMenuChevronButton",
         // A6 (`.plans/45`): the approval/question dock's one fill,
         // `AgentSurfaceRole.artifact`, painted unconditionally in
         // `applyTokens()` — an open request is always an artifact surface,
         // never a resting-nil state.
-        "AgentRequestView"
+        "AgentRequestView",
+        // The transcript's context-compaction boundary: two hairlines either
+        // side of its label, a LINE role (`decorativeHairline`) painted as a
+        // FILL on its own sublayers. The host paints nothing.
+        "CompactionBoundaryView"
     ]
 
     /// Still painting literals, each with the ticket that retires them.
@@ -1042,6 +1065,11 @@ enum UIProbeAppearance {
         if owner == "KanbanColumnView" {
             return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
         }
+        if owner == "CompactionBoundaryView" {
+            // Exactly the hairline and nothing else: a boundary that grew a
+            // fill, or a rule promoted to a semantic line, is a regression.
+            return [hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme))]
+        }
         guard kind == .background || kind == .fill else { return values }
         switch owner {
         case "FileTreeBrowserView":
@@ -1062,8 +1090,20 @@ enum UIProbeAppearance {
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
-        case "ComposerQueuedMessageRailView":
+        case "ToolbarIconButton":
+            // Resting paints nothing; hover and an open menu use the row ladder.
+            for role in [AgentSurfaceRole.rowHover, .rowSelected] {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
+        case "ToolbarChoiceRowView":
+            values.insert(hex(AgentSurfaceRole.rowHover.color.cgColor(for: theme)))
+        case "ToolbarDividerView":
+            // A 1pt hairline drawn as a view, so a FILL of the separator line.
+            values.insert(hex(LineToken.separator.color.cgColor(for: theme)))
+        case "QueueRailItemRow":
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
+        case "ComposerMenuChevronButton":
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
         case "UserPromptView.rule":
             // A1 (ticket rulings 1, 3): the authorship rule is a LINE role
             // (`AgentLineRole.authorship`) painted as a FILL because it is drawn
@@ -1442,6 +1482,24 @@ enum UIProbeAppearance {
     /// two of the walked foreground slots (168 → 166).
     private static let minimumForegroundSlots = 166
 
+    private static func sendChoiceFixture() -> ComposerSendChoiceView {
+        let view = ComposerSendChoiceView(frame: NSRect(x: 0, y: 0, width: 160, height: 32))
+        view.setChoices(ComposerSendChoiceView.choices(for: AgentTurnCapabilities(
+            canSend: false, canStop: true, canSteer: true, canQueue: true)))
+        return view
+    }
+
+    private static func pendingRailFixture(width: CGFloat) -> ComposerQueuedMessageRailView {
+        let rail = ComposerQueuedMessageRailView(frame: NSRect(x: 0, y: 0, width: width, height: 140))
+        rail.setState(ComposerQueueRailState(
+            steers: [.init(id: UUID(), text: "how about yesterday?", attachmentCount: 0, kind: .heldSteer)],
+            queued: [
+                .init(id: UUID(), text: "then write the release notes", attachmentCount: 1, kind: .queued),
+                .init(id: UUID(), text: "bump the version", attachmentCount: 0, kind: .queued),
+            ]))
+        return rail
+    }
+
     private struct AdoptedSurface {
         let id: String
         let size: NSSize
@@ -1523,6 +1581,18 @@ enum UIProbeAppearance {
                     // P5.5: the request arrives the way production delivers it —
                     // the reducer-projected block, not the deleted legacy dock.
                     guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return }
+                    // Hazard 8 for `CompactionBoundaryView`: a compaction boundary,
+                    // delivered as the item every harness's translator emits, so
+                    // its two hairlines are painted in an ADOPTED surface too.
+                    let compactionTitle = AgentCompactionPayload.encodeTitle(
+                        preTokens: 154_000, postTokens: 22_000, automaticCompaction: false,
+                        provider: "claude", boundaryID: "token-values-compaction", trigger: "manual")
+                    tile.ingest(.itemStarted(
+                        threadId: tile.wiringThreadId, itemId: "token-values-compaction",
+                        kind: .compaction, title: compactionTitle))
+                    tile.ingest(.itemCompleted(
+                        threadId: tile.wiringThreadId, itemId: "token-values-compaction",
+                        kind: .compaction, status: .completed))
                     tile.ingest(.requestOpened(
                         threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
                     ))
@@ -1571,6 +1641,12 @@ enum UIProbeAppearance {
                     tile.layoutSubtreeIfNeeded()
                 }
             ),
+            AdoptedSurface(id: "composerSendChoice", size: NSSize(width: 160, height: 32), make: {
+                Self.sendChoiceFixture()
+            }),
+            AdoptedSurface(id: "composerPendingRail", size: NSSize(width: 420, height: 140), make: {
+                Self.pendingRailFixture(width: 420)
+            }),
             AdoptedSurface(id: "descriptorTile", size: NSSize(width: 480, height: 320), make: {
                 DescriptorTileNSView(tile: canned(kind: .browser, title: "example.com"))
             }),

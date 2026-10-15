@@ -156,6 +156,12 @@ final class ManagedAgentTileNSView: TileNSView {
     }
     private let v2Composer: AgentComposerView?
     private let v2ActionButton: ComposerActionButton?
+    /// 2026-10-13 — Steer (and its menu of queue / force send) beside a compact
+    /// Stop, only while a turn works and there is a draft.
+    private let v2SendChoice = ComposerSendChoiceView(frame: .zero)
+    /// Where the composer's pending steer/queue rail is docked: under the
+    /// transcript, above the compose strip.
+    private weak var v2PendingDock: PendingMessageDockView?
     private let projectionMonotonicNow: @Sendable () -> TimeInterval
     private var v2ActionAdapter: ManagedAgentTileActionAdapter?
     private var v2DraftStore: AgentComposerDraftStore?
@@ -400,12 +406,10 @@ final class ManagedAgentTileNSView: TileNSView {
             self?.onCompactContextRequested?()
         }
         v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
+        v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
             self?.beginOptimisticSubmission(prompt)
-        }
-        v2Composer?.onSteerAccepted = { [weak self] prompt in
-            self?.showAcceptedSteer(prompt)
         }
         v2Composer?.onSubmissionRefused = { [weak self] refusal in
             self?.pendingSubmissionRefusal = refusal
@@ -419,6 +423,11 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         v2ActionButton?.target = self
         v2ActionButton?.action = #selector(performV2PrimaryAction)
+        v2SendChoice.isHidden = true
+        v2SendChoice.onChoose = { [weak self] modifier in
+            guard let composer = self?.v2Composer else { return }
+            composer.composerRequestedSend(composer.textView, modifier: modifier)
+        }
         setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
         applyUnknownCompactStatus()
@@ -651,15 +660,12 @@ final class ManagedAgentTileNSView: TileNSView {
             composer.updateQueueRail(supervisor.queueRailState(for: agentID))
             // T5 — a prompt the supervisor started itself (a drained follow-up,
             // a delivered steer) has no composer bubble; show it when it runs.
+            // Until then it is pending in the rail docked under the transcript
+            // (2026-10-13), which lets it go on the same repaint: the pending
+            // message becomes the sent one, never both.
             if let token = promptEchoObserverToken { supervisor.removePromptEchoObserver(token, for: agentID) }
             promptEchoObserverToken = supervisor.addPromptEchoObserver(for: agentID) { [weak self] prompt in
                 guard let self, self.attachedAgentID == agentID else { return }
-                // A steer already on screen since it was accepted is the same
-                // message, not a second one.
-                if let index = self.inlineSteers.firstIndex(where: { $0.text == prompt.text }) {
-                    self.inlineSteers.remove(at: index)
-                    return
-                }
                 self.appendUserPrompt(prompt)
             }
             // S3: Array's own replies (`/status`, a held prompt that could not
@@ -1560,41 +1566,6 @@ final class ManagedAgentTileNSView: TileNSView {
         transcriptCollectionFixture?.setThinkingIndicatorVisible(true)
     }
 
-    /// Steers shown at acceptance and not yet echoed back by the supervisor.
-    private var inlineSteers: [(id: AgentNodeID, text: String)] = []
-
-    /// S3: a steer appears in the transcript the moment it is accepted. The
-    /// supervisor's echo when the provider takes it is then the same message;
-    /// a steer that leaves the queue without being taken is withdrawn.
-    private func showAcceptedSteer(_ prompt: AgentPrompt) {
-        guard let id = AgentNodeID(rawValue: "local-steer-\(UUID().uuidString)") else { return }
-        cancelStreamingMarkupParseTimer()
-        model.appendUserPrompt(id: id, prompt: prompt)
-        inlineSteers.append((id, prompt.text))
-        synchronizeV2Transcript(final: true)
-        transcriptCollectionFixture?.layoutSubtreeIfNeeded()
-        transcriptCollectionFixture?.jumpToLatest()
-        scheduleStreamingMarkupParseTimerIfNeeded()
-    }
-
-    private func withdrawInlineSteersNoLongerPending(_ pending: [AgentSupervisor.PendingSteer]) {
-        guard !inlineSteers.isEmpty else { return }
-        var stillPending = pending.map(\.text)
-        var kept: [(id: AgentNodeID, text: String)] = []
-        var withdrew = false
-        for steer in inlineSteers {
-            if let index = stillPending.firstIndex(of: steer.text) {
-                stillPending.remove(at: index)
-                kept.append(steer)
-            } else {
-                model.withdrawLocalPrompt(id: steer.id)
-                withdrew = true
-            }
-        }
-        inlineSteers = kept
-        if withdrew { synchronizeV2Transcript(final: true) }
-    }
-
     /// The local presence before Return armed it, restored if the prompt is
     /// refused: a refused prompt never became a submission.
     private var presenceBeforeOptimisticSubmission: AgentTurnPresence?
@@ -1855,9 +1826,13 @@ final class ManagedAgentTileNSView: TileNSView {
                 accountQuota: currentAccountQuota(),
                 enabledElements: AgentStatusElementConfig.visibleElements())
             compactStatusRow.apply(presentationWithoutThinkingIndicator(presented))
-            transcriptCollectionFixture?.setThinkingStatusText(presenceTailOverride(now: now) ?? Self.tailStatusText(
-                for: presented.activity, liveToolVerb: liveToolVerb?.text,
-                startupDetail: currentPresence.startupDetail))
+            // A running compaction names itself; the silence and tool
+            // overrides describe a turn, which this is not.
+            let compacting = compactionSessionFact != nil
+            transcriptCollectionFixture?.setThinkingStatusText(
+                (compacting ? nil : presenceTailOverride(now: now)) ?? Self.tailStatusText(
+                    for: presented.activity, liveToolVerb: liveToolVerb?.text,
+                    startupDetail: currentPresence.startupDetail, compacting: compacting))
             syncCompactStatusTick(for: presented.activity)
             return
         }
@@ -1869,7 +1844,8 @@ final class ManagedAgentTileNSView: TileNSView {
             quotas: currentQuotaPresentations(at: now),
             cost: currentCostPresentation(),
             enabledElements: AgentStatusElementConfig.visibleElements())))
-        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(for: activity, liveToolVerb: liveToolVerb?.text))
+        transcriptCollectionFixture?.setThinkingStatusText(Self.tailStatusText(
+            for: activity, liveToolVerb: liveToolVerb?.text, compacting: compactionSessionFact != nil))
         syncCompactStatusTick(for: activity)
     }
 
@@ -1995,7 +1971,14 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         if let compactionSessionFact {
             session = compactionSessionFact
-            if !presence.isLive { turn = nil }
+            // The compaction IS the operation in flight, anchored at its own
+            // start. No runner forwards a turn for it, and a running session
+            // alone resolves to "unknown" — so once the location's 30s "what"
+            // expired, the live line went blank mid-compaction while the
+            // header still said "Compacting context…" (Codex, 2026-10-13).
+            if !presence.isLive {
+                turn = .active(startedAt: compactionSessionFact.startedAt, stream: nil, streamStartedAt: nil)
+            }
         }
         return (session, turn)
     }
@@ -2102,10 +2085,19 @@ final class ManagedAgentTileNSView: TileNSView {
     private static func tailStatusText(
         for activity: AgentCompactStatusPresentation.Activity,
         liveToolVerb: String? = nil,
-        startupDetail: String? = nil
+        startupDetail: String? = nil,
+        compacting: Bool = false
     ) -> String? {
         guard !activity.isSilent, !footerRetainsPhase(activity.phase), !activity.text.isEmpty else {
             return nil
+        }
+        // A manual or automatic compaction holds the session live with no
+        // stream, which the phase adapter reads as a generic active turn —
+        // "Thinking". The header already says what is happening; so must this.
+        if compacting {
+            let text = "Compacting context…"
+            guard let elapsed = activity.elapsedText, !elapsed.isEmpty else { return text }
+            return "\(text) · \(elapsed)"
         }
         // `.plans/45` S6 — the verb carries the detail when the store knows it:
         // "Searching \u{201C}NBA finals\u{201D} · 31s", never just "searching".
@@ -2286,7 +2278,6 @@ final class ManagedAgentTileNSView: TileNSView {
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
                 v2Composer?.updateQueueRail(supervisor.queueRailState(for: agentID))
-                withdrawInlineSteersNoLongerPending(supervisor.pendingSteers(for: agentID))
             }
             // TR-06: the reply chips are a function of the turn state as well as
             // the document, and queueing moves ONLY the state — it appends no
@@ -2384,7 +2375,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // fit. The shipped third-row stack predated measured fit (its comment
         // feared zero-width labels at the 320 pt floor) and was never what the
         // owner reviewed (P5.5 defect 4).
-        let footerRow = NSStackView(views: [providerFooter, actionButton])
+        let footerRow = NSStackView(views: [providerFooter, actionButton, v2SendChoice])
         v2FooterRow = footerRow
         footerRow.orientation = .horizontal
         footerRow.alignment = .centerY
@@ -2392,6 +2383,9 @@ final class ManagedAgentTileNSView: TileNSView {
         footerRow.translatesAutoresizingMaskIntoConstraints = false
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        v2SendChoice.translatesAutoresizingMaskIntoConstraints = false
+        v2SendChoice.setContentHuggingPriority(.required, for: .horizontal)
+        v2SendChoice.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         // Status placement is an injected composition choice. The default keeps
         // transcript → status → composer → provider controls; the alternate puts
@@ -2425,7 +2419,13 @@ final class ManagedAgentTileNSView: TileNSView {
         composeBackdrop.addSubview(composeColumn)
 
         locationStatus.isHidden = true
-        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, composeBackdrop])
+        // 2026-10-13 — pending steers and queued messages dock at the foot of
+        // the transcript, on its surface and above the compose strip, so they
+        // read as messages waiting to go rather than as part of the draft.
+        let pendingDock = PendingMessageDockView(rail: composer.pendingMessageRail)
+        pendingDock.identifier = NSUserInterfaceItemIdentifier("agentTile.pendingMessages")
+        v2PendingDock = pendingDock
+        let layout = NSStackView(views: [agentHeader, locationStatus, transcript, pendingDock, composeBackdrop])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -2564,7 +2564,12 @@ final class ManagedAgentTileNSView: TileNSView {
         let showsWorkingTail = Self.showsWorkingTail(
             statusIsActive: statusIsActive, document: model.document,
             turnLiveness: turnLiveness)
-        if !statusIsActive, let settled = Self.settledTailText(for: presence) {
+        // The settled "Worked for Ns" is the tail row, pinned to the foot of the
+        // document. Once a compaction boundary lands after that turn it would
+        // sit BELOW the boundary and read as the compaction's duration, so the
+        // boundary retires it — as the next turn starting already does.
+        let boundaryIsNewest = model.document.entries.last?.blocks.last?.kind == .compaction
+        if !statusIsActive, !boundaryIsNewest, let settled = Self.settledTailText(for: presence) {
             transcriptCollectionFixture.setSettledTailStatus(settled)
             return
         }
@@ -3128,6 +3133,12 @@ final class ManagedAgentTileNSView: TileNSView {
         }
     }
 
+    private func applyWorkingSendChoices(_ choices: [ComposerSendChoiceView.Choice], to button: ComposerActionButton) {
+        v2SendChoice.setChoices(choices)
+        v2SendChoice.isHidden = choices.isEmpty
+        button.isCompact = !choices.isEmpty && button.presentation.primaryAction == .stop
+    }
+
     private func requestV2Stop() {
         v2Composer?.requestStop()
     }
@@ -3152,6 +3163,7 @@ final class ManagedAgentTileNSView: TileNSView {
         v2Composer?.isHidden = mirrored
         v2FooterRow?.isHidden = mirrored
         if mirrored {
+            applyWorkingSendChoices([], to: button)
             button.presentation = .resolve(
                 state: .ready,
                 capabilities: .init(canSend: false, canStop: false, canSteer: false, canQueue: false),
@@ -3175,6 +3187,13 @@ final class ManagedAgentTileNSView: TileNSView {
             ),
             hasDraft: v2Composer?.draft.taskContext != nil || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         )
+        // 2026-10-13 — a draft typed while the turn works is offered its ways
+        // in beside the Stop; an empty busy composer offers Stop alone.
+        let hasDraft = v2Composer?.draft.taskContext != nil
+            || !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let workingNow = snapshot?.executionState == .working
+        applyWorkingSendChoices(
+            workingNow && hasDraft ? ComposerSendChoiceView.choices(for: capabilities) : [], to: button)
         // In flight, not merely working (P5.5 consolidation): the pickers must
         // stay dark from send until the runner slot frees, or they flash
         // re-enabled during the spawn and drain windows a mid-turn pick still
@@ -3499,6 +3518,23 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaComposerIsOffered: Bool { !(v2Composer?.isHidden ?? true) }
     var qaProviderControlsAreOffered: Bool { !(v2FooterRow?.isHidden ?? true) }
     var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
+    /// 2026-10-13 — what the busy send choice offers, read from the real
+    /// control: its primary title and its menu rows ("title  chord").
+    struct QAWorkingSendChoice: Equatable {
+        let primary: String
+        let alternatives: [String]
+    }
+    var qaWorkingSendChoice: QAWorkingSendChoice? {
+        guard !v2SendChoice.isHidden, v2SendChoice.superview != nil else { return nil }
+        return QAWorkingSendChoice(primary: v2SendChoice.qaPrimaryTitle, alternatives: v2SendChoice.qaMenuRows)
+    }
+    var qaStopIsCompact: Bool { v2ActionButton?.isCompact == true }
+    /// The vertical space the docked pending rail takes: 0 when nothing waits.
+    var qaPendingRailSpace: CGFloat { v2PendingDock?.occupiedHeight ?? -1 }
+    func qaChooseWorkingSend(_ modifier: AgentComposerSubmitModifier) -> Bool {
+        guard qaWorkingSendChoice != nil else { return false }
+        return v2SendChoice.qaChoose(modifier)
+    }
     var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {

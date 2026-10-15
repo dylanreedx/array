@@ -49,12 +49,18 @@ struct ComposerQueueRailState: Equatable {
     var isEmpty: Bool { steers.isEmpty && queued.isEmpty }
 }
 
-/// B4 → T5b — Array's steering and follow-up queue, as two sections above the
-/// draft: "Steering · after next tool call" and "Queued · after this turn",
-/// each shown only when it has items. Every item offers send-now, edit and
-/// delete; follow-ups are numbered and reorder by drag. Direct manipulation of
-/// Array's queue: nothing here touches the turn in flight except send-now on a
-/// follow-up, which is D2's force send.
+/// B4 → T5b — Array's steering and follow-up queue, as two sections:
+/// "Steering · after next tool call" and "Queued · after this turn", each shown
+/// only when it has items. Since the 2026-10-13 owner review the tile docks it
+/// at the foot of the transcript, just above the composer, and each pending
+/// message reads as a quieter user message — the same left rule, dimmed text —
+/// with send-now, edit and delete appearing under the pointer. Follow-ups stack
+/// in drain order and reorder by drag. Direct manipulation of Array's queue:
+/// nothing here touches the turn in flight except send-now on a follow-up,
+/// which is D2's force send.
+///
+/// The rail itself paints nothing (it sits on the transcript's own surface);
+/// each item row paints only its rule.
 @MainActor
 final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomScalable {
     /// Visible item rows before the rail scrolls: four, and half of a fifth so
@@ -62,9 +68,12 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     /// a small tile.
     static let maximumVisibleRows = 4.5
 
-    static func rowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(24)) }
+    static func rowHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(28)) }
     static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(20)) }
-    static func verticalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func verticalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s)) }
+    /// The transcript's own content inset, so a pending message's rule lines
+    /// up with the sent messages' rules above it.
+    static func horizontalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
 
     /// The full height of `state`'s rows, scrolled or not.
     static func contentHeight(for state: ComposerQueueRailState, zoom: AgentPageZoom) -> CGFloat {
@@ -87,9 +96,6 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
 
     private let scrollView = NSScrollView(frame: .zero)
     private let documentView = FlippedContainerView(frame: .zero)
-    /// Separates the queue from the draft below it. A sublayer of the rail's own
-    /// layer, so the appearance census holds it to its line role.
-    private let divider = CALayer()
     /// Where a dragged follow-up will land. Painted only during a drag.
     private let dropIndicator = NSView(frame: .zero)
     private var rows: [NSView] = []
@@ -107,6 +113,8 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     var onEdit: ((UUID) -> Void)?
     /// A follow-up dragged to `index` among the follow-ups.
     var onMove: ((UUID, Int) -> Void)?
+    /// The rail hid (nothing pending) or showed; its host follows.
+    var onVisibilityChange: ((Bool) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -130,6 +138,7 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         if let drag, !newState.queued.contains(where: { $0.id == drag.id }) { endDrag() }
         rebuildRows()
         isHidden = newState.isEmpty
+        onVisibilityChange?(isHidden)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -146,14 +155,14 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         let theme = effectiveTokenTheme
         if !state.steers.isEmpty {
             rows.append(QueueRailHeaderRow(
-                symbol: state.pause == nil ? "arrow.turn.down.right" : "pause.fill",
+                symbol: state.pause == nil ? "arrow.turn.down.right" : "pause",
                 title: "Steering \u{00B7} " + (state.pause?.title ?? "after next tool call"),
                 pause: state.queued.isEmpty ? state.pause : nil, showsClear: false, rail: self))
             for item in state.steers { rows.append(QueueRailItemRow(item: item, number: nil, rail: self)) }
         }
         if !state.queued.isEmpty {
             rows.append(QueueRailHeaderRow(
-                symbol: state.pause == nil ? "hourglass" : "pause.fill",
+                symbol: state.pause == nil ? "clock" : "pause",
                 title: "Queued \u{00B7} " + (state.pause?.title ?? "after this turn"),
                 pause: state.pause, showsClear: state.queued.count > 1, rail: self))
             for (index, item) in state.queued.enumerated() {
@@ -172,11 +181,9 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     override func layout() {
         super.layout()
         let inset = Self.verticalInset(zoom: pageZoom)
-        scrollView.place(NSRect(x: 0, y: inset, width: bounds.width, height: max(0, bounds.height - inset * 2)))
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        divider.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 1)
-        CATransaction.commit()
+        let side = Self.horizontalInset(zoom: pageZoom)
+        scrollView.place(NSRect(
+            x: side, y: inset, width: max(0, bounds.width - side * 2), height: max(0, bounds.height - inset * 2)))
         let content = Self.contentHeight(for: state, zoom: pageZoom)
         let width = scrollView.contentSize.width
         documentView.place(NSRect(x: 0, y: 0, width: width, height: content))
@@ -193,7 +200,6 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     func applyTokens() {
         layer?.backgroundColor = nil
         let theme = effectiveTokenTheme
-        divider.backgroundColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
         dropIndicator.layer?.backgroundColor = drag?.moved == true
             ? AgentLineRole.focusRing.color.cgColor(for: theme) : nil
         for case let row as QueueRailRow in rows { row.apply(zoom: pageZoom, theme: theme) }
@@ -219,7 +225,8 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
         setAccessibilityRole(.group)
         setAccessibilityLabel("Steering and queued messages")
         setAccessibilityHelp("Steers wait for the agent's next tool call; queued messages run one per turn after this one.")
-        layer?.addSublayer(divider)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
 
         dropIndicator.wantsLayer = true
         dropIndicator.isHidden = true
@@ -370,6 +377,49 @@ final class ComposerQueuedMessageRailView: NSView, TokenThemed, AgentPageZoomSca
     }
 }
 
+/// Docks the pending rail as an arranged subview of a vertical stack (the
+/// tile's, between transcript and compose strip). Hidden whenever the rail is,
+/// so an empty queue takes no space and leaves no zero-height view behind. A
+/// stack DETACHES a hidden view and drops every constraint that tied it in, so
+/// the dock re-pins its width to whatever superview it lands in.
+@MainActor
+final class PendingMessageDockView: NSView {
+    let rail: ComposerQueuedMessageRailView
+    private var widthPin: NSLayoutConstraint?
+
+    init(rail: ComposerQueuedMessageRailView) {
+        self.rail = rail
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(rail)
+        NSLayoutConstraint.activate([
+            rail.leadingAnchor.constraint(equalTo: leadingAnchor),
+            rail.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rail.topAnchor.constraint(equalTo: topAnchor),
+            rail.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        isHidden = rail.isHidden
+        rail.onVisibilityChange = { [weak self] hidden in self?.isHidden = hidden }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        widthPin?.isActive = false
+        widthPin = nil
+        guard let superview else { return }
+        let pin = widthAnchor.constraint(equalTo: superview.widthAnchor)
+        pin.isActive = true
+        widthPin = pin
+    }
+
+    /// The vertical space the dock takes in its stack: none while hidden.
+    var occupiedHeight: CGFloat { isHidden || superview == nil ? 0 : frame.height }
+}
+
 /// A rail row's zoom/theme contract; the rail delivers both, rows do not walk.
 @MainActor
 private protocol QueueRailRow: NSView {
@@ -449,7 +499,7 @@ private final class QueueRailHeaderRow: NSView, QueueRailRow {
 
     func apply(zoom: AgentPageZoom, theme: TokenTheme) {
         self.zoom = zoom
-        icon.image = CanvasSymbolImage.image(named: symbol, pointSize: CGFloat(zoom.scaled(10)), weight: .semibold)
+        icon.image = CanvasSymbolImage.image(named: symbol, pointSize: CGFloat(zoom.scaled(10)), weight: .regular)
         titleLabel.font = .token(.caption, zoom: zoom)
         resumeButton.font = .token(.caption, zoom: zoom)
         clearButton.font = .token(.caption, zoom: zoom)
@@ -501,12 +551,20 @@ private final class QueueRailHeaderRow: NSView, QueueRailRow {
     }
 }
 
-/// One held steer, delivering steer or follow-up: `1  text…  📎2  ⤒ ✎ ✕`.
+/// One held steer, delivering steer or follow-up, drawn as a pending user
+/// message: the user turn's left rule in a quieter line role, the text dimmed
+/// and on one line, and `↑ ✎ ✕` (send now, edit, delete) appearing only under
+/// the pointer. A delivering steer instead says "Sending…", always.
+///
+/// `TokenThemed` because the rule is a sublayer of the row's own layer; at rest
+/// that rule is the only colour the row paints — no fill, and no fill on the
+/// hover-only buttons either.
 @MainActor
-final class QueueRailItemRow: NSView, QueueRailRow {
+final class QueueRailItemRow: NSView, QueueRailRow, TokenThemed {
     let itemID: UUID
     let kind: ComposerQueueRailState.ItemKind
-    private let numberLabel = NSTextField(labelWithString: "")
+    /// The pending twin of `UserPromptView`'s authorship rule.
+    private let rule = CALayer()
     private let textLabel = NSTextField(labelWithString: "")
     private let attachmentIcon = NSImageView(frame: .zero)
     private let attachmentLabel = NSTextField(labelWithString: "")
@@ -516,19 +574,21 @@ final class QueueRailItemRow: NSView, QueueRailRow {
     private var removeButton: NSButton!
     private weak var rail: ComposerQueuedMessageRailView?
     private var zoom: AgentPageZoom = .default
-    private let attachmentCount: Int
+    private var theme: TokenTheme = .dark
+    private var isHovered = false
+    private var hoverArea: NSTrackingArea?
     /// Measured when the font changes, never inside `layout()` (performance.md).
     private var textHeight: CGFloat = 0
-    private var numberHeight: CGFloat = 0
     private var stateSize = NSSize.zero
     private var attachmentSize = NSSize.zero
 
     fileprivate init(item: ComposerQueueRailState.Item, number: Int?, rail: ComposerQueuedMessageRailView) {
         itemID = item.id
         kind = item.kind
-        attachmentCount = item.attachmentCount
         self.rail = rail
         super.init(frame: .zero)
+        wantsLayer = true
+        layer?.addSublayer(rule)
         let oneLine = item.text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
         let preview = oneLine.isEmpty ? (item.attachmentCount > 0 ? "Attachment" : "Empty message") : oneLine
@@ -537,9 +597,6 @@ final class QueueRailItemRow: NSView, QueueRailRow {
         textLabel.cell?.truncatesLastVisibleLine = true
         textLabel.maximumNumberOfLines = 1
         textLabel.setAccessibilityElement(false)
-        numberLabel.stringValue = number.map(String.init) ?? ""
-        numberLabel.alignment = .right
-        numberLabel.setAccessibilityElement(false)
         attachmentIcon.imageScaling = .scaleNone
         attachmentIcon.isHidden = item.attachmentCount == 0
         attachmentIcon.setAccessibilityElement(false)
@@ -549,7 +606,7 @@ final class QueueRailItemRow: NSView, QueueRailRow {
         stateLabel.stringValue = item.kind == .deliveringSteer ? "Sending\u{2026}" : ""
         stateLabel.isHidden = item.kind != .deliveringSteer
         stateLabel.setAccessibilityElement(false)
-        for view in [numberLabel, textLabel, attachmentIcon, attachmentLabel, stateLabel] as [NSView] { addSubview(view) }
+        for view in [textLabel, attachmentIcon, attachmentLabel, stateLabel] as [NSView] { addSubview(view) }
 
         let what: String
         switch item.kind {
@@ -561,18 +618,23 @@ final class QueueRailItemRow: NSView, QueueRailRow {
             : item.attachmentCount == 1 ? ", 1 attachment" : ", \(item.attachmentCount) attachments"
         let sendNowLabel = item.kind == .heldSteer ? "Send steer now" : "Interrupt and send now"
         sendNowButton = queueRailIconButton(
-            symbol: "arrow.up.to.line", label: "\(sendNowLabel): \(preview)", target: self, action: #selector(sendNowPressed(_:)))
+            symbol: Self.sendNowSymbol, label: "\(sendNowLabel): \(preview)", target: self, action: #selector(sendNowPressed(_:)))
         editButton = queueRailIconButton(
-            symbol: "pencil", label: "Edit: \(preview)", target: self, action: #selector(editPressed(_:)))
+            symbol: Self.editSymbol, label: "Edit: \(preview)", target: self, action: #selector(editPressed(_:)))
         removeButton = queueRailIconButton(
-            symbol: "xmark", label: "Delete: \(preview)", target: self, action: #selector(removePressed(_:)))
+            symbol: Self.removeSymbol, label: "Delete: \(preview)", target: self, action: #selector(removePressed(_:)))
         // A delivering steer is the provider's now: nothing to send, edit or
         // delete. A queued compaction has no text to edit, and send-now would
         // only put it back (`sendQueuedItemNow` runs prompts).
         sendNowButton.isHidden = item.kind == .deliveringSteer || item.kind == .compaction
         editButton.isHidden = item.kind != .heldSteer && item.kind != .queued
         removeButton.isHidden = item.kind == .deliveringSteer
-        for button in [sendNowButton!, editButton!, removeButton!] { addSubview(button) }
+        for button in actionButtons {
+            // Hover-only, but still in the accessibility tree and still
+            // reachable by VoiceOver: transparent, never hidden.
+            button.alphaValue = 0
+            addSubview(button)
+        }
 
         toolTip = item.text.isEmpty ? preview : item.text
         setAccessibilityElement(true)
@@ -595,31 +657,47 @@ final class QueueRailItemRow: NSView, QueueRailRow {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// One weight and size for all three, lighter than the old ⤒ ✎ ✕ set.
+    private static let sendNowSymbol = "arrow.up"
+    private static let editSymbol = "pencil"
+    private static let removeSymbol = "xmark"
+
+    private var actionButtons: [NSButton] { [sendNowButton!, editButton!, removeButton!] }
     private var reorders: Bool { kind == .queued || kind == .compaction }
 
     func apply(zoom: AgentPageZoom, theme: TokenTheme) {
         self.zoom = zoom
-        numberLabel.font = .token(.captionMono, zoom: zoom)
-        textLabel.font = .token(.caption, zoom: zoom)
+        self.theme = theme
+        textLabel.font = .token(.body, zoom: zoom)
         attachmentLabel.font = .token(.caption, zoom: zoom)
         stateLabel.font = .token(.caption, zoom: zoom)
         attachmentIcon.image = CanvasSymbolImage.image(named: "paperclip", pointSize: CGFloat(zoom.scaled(10)), weight: .regular)
-        for (button, symbol) in [(sendNowButton!, "arrow.up.to.line"), (editButton!, "pencil"), (removeButton!, "xmark")] {
-            button.image = CanvasSymbolImage.image(named: symbol, pointSize: CGFloat(zoom.scaled(10)), weight: .semibold)
-            button.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
+        for (button, symbol) in zip(actionButtons, [Self.sendNowSymbol, Self.editSymbol, Self.removeSymbol]) {
+            button.image = CanvasSymbolImage.image(named: symbol, pointSize: CGFloat(zoom.scaled(11)), weight: .regular)
         }
+        textHeight = textLabel.intrinsicContentSize.height
+        stateSize = stateLabel.intrinsicContentSize
+        attachmentSize = attachmentLabel.intrinsicContentSize
+        applyTokens()
+        needsLayout = true
+    }
+
+    func applyTokens() {
+        layer?.backgroundColor = nil
         let secondary = TextToken.textSecondary.color.nsColor(for: theme)
-        numberLabel.textColor = secondary
-        // Handed over: shown, but quieter than the items Array still holds.
-        textLabel.textColor = kind == .deliveringSteer ? secondary : TextToken.textPrimary.color.nsColor(for: theme)
+        rule.backgroundColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        // Pending, not sent: every word one step quieter than a sent message.
+        textLabel.textColor = secondary
         attachmentIcon.contentTintColor = secondary
         attachmentLabel.textColor = secondary
         stateLabel.textColor = secondary
-        textHeight = textLabel.intrinsicContentSize.height
-        numberHeight = numberLabel.intrinsicContentSize.height
-        stateSize = stateLabel.intrinsicContentSize
-        attachmentSize = attachmentLabel.intrinsicContentSize
-        needsLayout = true
+        for button in actionButtons { button.contentTintColor = secondary }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        theme = effectiveTokenTheme
+        applyTokens()
     }
 
     override func layout() {
@@ -627,14 +705,17 @@ final class QueueRailItemRow: NSView, QueueRailRow {
         let gap = CGFloat(zoom.scaled(Space.s))
         let side = CGFloat(zoom.scaled(20))
         func centered(_ height: CGFloat) -> CGFloat { floor((bounds.height - height) / 2) }
-        // Indented under the section glyph, as in the approved layout.
-        let indent = CGFloat(zoom.scaled(14)) + gap
-        var x = indent
-        if !(numberLabel.stringValue.isEmpty) {
-            let width = CGFloat(zoom.scaled(14))
-            numberLabel.place(NSRect(x: x, y: centered(numberHeight), width: width, height: numberHeight))
-            x += width + gap * 2
-        }
+        let ruleInset = CGFloat(zoom.scaled(Space.xs))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        rule.frame = NSRect(
+            x: 0, y: ruleInset, width: UserPromptView.ruleWidth(zoom: zoom),
+            height: max(0, bounds.height - ruleInset * 2))
+        CATransaction.commit()
+        // The prose column starts where a sent message's does.
+        let x = UserPromptView.leadingInset(zoom: zoom)
+        // The action slots are reserved even at rest, so the text never
+        // reflows when the pointer arrives.
         var trailing = bounds.width
         for button in [removeButton!, editButton!, sendNowButton!] where !button.isHidden {
             trailing -= side
@@ -655,6 +736,27 @@ final class QueueRailItemRow: NSView, QueueRailRow {
             attachmentIcon.place(NSRect(x: trailing, y: centered(iconSide), width: iconSide, height: iconSide))
         }
         textLabel.place(NSRect(x: x, y: centered(textHeight), width: max(0, trailing - gap - x), height: textHeight))
+    }
+
+    // MARK: - Hover
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    private func setHovered(_ hovered: Bool) {
+        guard hovered != isHovered else { return }
+        isHovered = hovered
+        for button in actionButtons { button.alphaValue = hovered ? 1 : 0 }
     }
 
     override func resetCursorRects() {
@@ -684,14 +786,27 @@ final class QueueRailItemRow: NSView, QueueRailRow {
     // MARK: - QA seams
 
     var qaText: String { textLabel.stringValue }
-    var qaNumber: String { numberLabel.stringValue }
     var qaOffersSendNow: Bool { !sendNowButton.isHidden }
     var qaOffersEdit: Bool { !editButton.isHidden }
     var qaOffersRemove: Bool { !removeButton.isHidden }
     var qaShowsAttachments: Bool { !attachmentIcon.isHidden }
     var qaButtonSide: CGFloat { sendNowButton.isHidden ? removeButton.frame.width : sendNowButton.frame.width }
     var qaControlLabels: [String] {
-        [sendNowButton!, editButton!, removeButton!].filter { !$0.isHidden }.compactMap { $0.accessibilityLabel() }
+        actionButtons.filter { !$0.isHidden }.compactMap { $0.accessibilityLabel() }
+    }
+    var qaActionsVisible: Bool {
+        actionButtons.contains { !$0.isHidden && $0.alphaValue > 0 }
+    }
+    var qaRestingPaintsNil: Bool {
+        layer?.backgroundColor == nil && actionButtons.allSatisfy { $0.layer?.backgroundColor == nil }
+    }
+    /// The pointer entering or leaving, through the row's own handlers.
+    func qaHover(_ inside: Bool) {
+        guard let event = NSEvent.enterExitEvent(
+            with: inside ? .mouseEntered : .mouseExited, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil,
+            eventNumber: 0, trackingNumber: 0, userData: nil) else { return }
+        if inside { mouseEntered(with: event) } else { mouseExited(with: event) }
     }
     func qaPressSendNow() { sendNowButton.performClick(nil) }
     func qaPressEdit() { editButton.performClick(nil) }

@@ -68,6 +68,8 @@ enum AgentFirstPaintChecks {
         try checkAttachmentMidTurnUsesWorkingDraftIntent()
         try checkWorkingReturnKeysSteerQueueAndForceSend()
         try checkPopoverCommandEchoesLikeATypedSend()
+        try checkTypedCompactRoutesToNativeCompaction()
+        try checkDispatchedCommandClearsThePersistedDraft()
         try checkMirroredAgentOffersNoComposerOrStop()
         try checkStreamingResponseKeepsALivenessSignal()
         try checkAStreamingChunkDoesNotWalkTheWholeTranscript()
@@ -463,11 +465,16 @@ enum AgentFirstPaintChecks {
         guard press(.shift, draft: "newline") == nil else {
             throw fail("working Return keys: ⇧↩ must stay a native newline, got \(sink.receivedIntents)")
         }
-        // T5b — the hint under the draft names those chords while the turn
-        // works, and an idle composer shows no hint at all, as before.
-        let workingHint = "\u{21A9} steer   \u{2325}\u{21A9} queue   \u{2318}\u{21A9} force send"
-        guard composer.qaKeyHint == workingHint else {
-            throw fail("working Return keys: the hint line must read '\(workingHint)', got \(composer.qaKeyHint ?? "nil")")
+        // 2026-10-13 (owner review): no permanent chord line under the draft.
+        // A busy composer, empty or typed, reads exactly like an idle one; the
+        // choice is offered by the tile's send control once there is a draft.
+        composer.apply(.init(text: "", selection: NSRange(location: 0, length: 0), revision: 2))
+        guard composer.qaKeyHint == nil else {
+            throw fail("working Return keys: an empty busy composer must show no hint line, got '\(composer.qaKeyHint ?? "")'")
+        }
+        composer.apply(.init(text: "typed", selection: NSRange(location: 5, length: 0), revision: 3))
+        guard composer.qaKeyHint == nil else {
+            throw fail("working Return keys: a typed busy composer must show no hint line either, got '\(composer.qaKeyHint ?? "")'")
         }
         composer.updateTurnSnapshot(.init(
             state: .ready,
@@ -548,6 +555,142 @@ enum AgentFirstPaintChecks {
         }
         guard echoed.isEmpty, resolutions.isEmpty, composer.textView.string.isEmpty else {
             throw fail("popover command submission: typed compaction must clear the accepted draft without creating a synthetic prompt lifecycle; echo=\(echoed.map(\.text)) resolution=\(resolutions) draft='\(composer.textView.string)'")
+        }
+    }
+
+    /// 2026-10-13, preview app: a Codex tile's transcript opened with a USER
+    /// entry reading "/compact" and then the model's prose summary — the typed
+    /// command was submitted (Return / Send) without a picker row having been
+    /// accepted, so `selectedDraftCommand` was nil and the text went out as an
+    /// ordinary prompt. Codex and Pi hand a leading slash to the model; only
+    /// Claude happened to compact. A typed `/compact` must reach the same
+    /// `.compact` intent the accepted row does, on every harness, idle or busy —
+    /// and nothing else: `/compactor` and a mid-sentence `/compact` stay text.
+    @MainActor
+    private static func checkTypedCompactRoutesToNativeCompaction() throws {
+        func submit(_ text: String, state: AgentTileOperationalState) throws -> AgentComposerIntent? {
+            let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+            composer.apply(.init(
+                text: text,
+                selection: NSRange(location: (text as NSString).length, length: 0),
+                revision: 1))
+            let sink = OrderRecordingSink(.accepted)
+            let working: Bool
+            if case .working = state { working = true } else { working = false }
+            composer.bindActionSink(sink, agentID: AgentID(rawValue: UUID()), snapshot: .init(
+                state: state,
+                capabilities: AgentTurnCapabilities(
+                    canSend: !working, canStop: working, canSteer: working, canQueue: working),
+                turnStartedAt: working ? Date() : nil))
+            composer.composerRequestedSend(composer.textView)
+            let deadline = Date().addingTimeInterval(2)
+            while sink.receivedIntents.isEmpty && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            return sink.receivedIntents.first
+        }
+
+        for state in [AgentTileOperationalState.ready, .working] {
+            guard case let .compact(request)? = try submit("/compact", state: state),
+                  request.focus == nil else {
+                throw fail("typed /compact (\(state)): a typed '/compact' with no accepted picker row must resolve to the native compaction intent, not a prompt; got \(String(describing: try submit("/compact", state: state)))")
+            }
+        }
+        guard case let .compact(focused)? = try submit("/compact  keep the API notes ", state: .ready),
+              focused.focus == "keep the API notes" else {
+            throw fail("typed /compact: trailing text must become the compaction focus")
+        }
+        for literal in ["/compactor", "please /compact"] {
+            if case .compact? = try submit(literal, state: .ready) {
+                throw fail("typed /compact: '\(literal)' is not the /compact command and must stay an ordinary prompt")
+            }
+        }
+    }
+
+    /// 2026-10-13, preview app: a Codex tile compacted after a typed `/compact`,
+    /// and after relaunch its composer came back reading "/compact " — the
+    /// draft file in `agent-composer-drafts` still held the command. The
+    /// on-screen field had emptied, so nothing looked wrong until relaunch.
+    /// Driven through the REAL draft store: typed like a person (each edit goes
+    /// through `composerTextDidChange`, which is what saves), submitted, and
+    /// then the store is read back the way the next launch reads it.
+    @MainActor
+    private static func checkDispatchedCommandClearsThePersistedDraft() throws {
+        func waitFor<T>(_ label: String, timeout: TimeInterval = 3, _ work: @escaping @MainActor () async -> T?) throws -> T {
+            var result: T?
+            var finished = false
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                finished = false
+                Task { @MainActor in result = await work(); finished = true }
+                while !finished && Date() < deadline {
+                    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+                }
+                if let result { return result }
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            throw fail("persisted command draft: timed out waiting for \(label)")
+        }
+        enum Path { case typed, pickerRow }
+        let cases: [(String, String, Path, (AgentComposerIntent) -> Bool)] = [
+            ("typed /compact", "/compact", .typed, { if case .compact = $0 { return true }; return false }),
+            ("picker /compact", "/comp", .pickerRow, { if case .compact = $0 { return true }; return false }),
+        ]
+        for (label, typed, path, isExpected) in cases {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("first-paint-command-draft-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+            let agentID = AgentID(rawValue: UUID())
+            let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+            let sink = OrderRecordingSink(.accepted)
+            composer.bindActionSink(sink, agentID: agentID, snapshot: .init(
+                state: .ready,
+                capabilities: .sendStop(canSend: true, canStop: false),
+                turnStartedAt: nil))
+            composer.bindDraftStore(store, agentID: agentID)
+            // Let the bind's restore settle so it cannot overwrite the typing.
+            for _ in 0..<20 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+
+            composer.textView.string = typed
+            composer.textView.setSelectedRange(NSRange(location: (typed as NSString).length, length: 0))
+            composer.composerTextDidChange(composer.textView)
+            if path == .pickerRow {
+                let invocation = AgentCommandInvocation(descriptorID: "array:compact", name: "compact", surface: .array)
+                composer.qaAcceptCompletionForChecks(
+                    AgentCompletion(id: "array:compact", title: "compact", insertionText: "/compact",
+                                    payload: .command(invocation)),
+                    replacementRange: NSRange(location: 0, length: (typed as NSString).length))
+            }
+            let saved = try waitFor("\(label): the typed draft to persist") { () -> String? in
+                await store.flush(agentID: agentID)
+                guard let text = await store.load(for: agentID)?.text,
+                      text.trimmingCharacters(in: .whitespaces) == "/compact" else { return nil }
+                return text
+            }
+
+            composer.composerRequestedSend(composer.textView)
+            _ = try waitFor("\(label): the sink to accept") { sink.receivedIntents.first }
+            guard let intent = sink.receivedIntents.first, isExpected(intent) else {
+                throw fail("persisted command draft (\(label)): expected the native compaction intent, got \(sink.receivedIntents)")
+            }
+            for _ in 0..<30 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+            guard composer.textView.string.isEmpty else {
+                throw fail("persisted command draft (\(label)): the on-screen draft kept '\(composer.textView.string)'")
+            }
+            // What the next launch reads: a fresh store over the same directory.
+            _ = try waitFor("\(label): the store to flush") { () -> Bool? in
+                await store.flush(agentID: agentID)
+                return true
+            }
+            let relaunched = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+            let restored = try waitFor("\(label): the relaunched draft read") { () -> String? in
+                (await relaunched.load(for: agentID))?.text ?? ""
+            }
+            guard restored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw fail("persisted command draft (\(label)): the dispatched command '\(saved)' survives in the draft store — "
+                    + "after relaunch the composer reads '\(restored)'")
+            }
         }
     }
 

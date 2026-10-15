@@ -891,8 +891,11 @@ enum AgentPresenceChecks {
                 bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
             }
 
-            // 2. A steer shows in the transcript the moment it is accepted, and
-            //    once only when the provider later takes it.
+            // 2. A steer is on screen the moment it is accepted — pending, in the
+            //    rail docked under the transcript (2026-10-13 owner review), or
+            //    already a transcript message if the provider confirmed it that
+            //    fast — and exactly once. When the provider takes it, it is a
+            //    transcript message, once, and the pending rail has let it go.
             completed = bench.turnCompletedCount
             try bench.pressReturn("TOOL work")
             try await eventually("\(kind): the TOOL turn never became steerable") {
@@ -903,8 +906,10 @@ enum AgentPresenceChecks {
             try await eventually("\(kind): the steer was never accepted") {
                 ((try? bench.composer.qaDraftText) ?? "x").isEmpty
             }
-            if userEntries(bench, containing: "change course") != 1 {
-                violations.append("\(kind) steer: an accepted steer was not in the transcript at once (\(userEntries(bench, containing: "change course")) entries)")
+            let pendingAtAcceptance = try bench.composer.qaQueueRail.qaSteerTexts.filter { $0 == "change course" }.count
+            let shownAtAcceptance = pendingAtAcceptance + userEntries(bench, containing: "change course")
+            if shownAtAcceptance != 1 {
+                violations.append("\(kind) steer: an accepted steer must show exactly once at once, pending or sent — rail \(pendingAtAcceptance), transcript \(userEntries(bench, containing: "change course"))")
             }
             try await eventually("\(kind): the steered turn never ended", timeout: 10) {
                 bench.turnCompletedCount > completed && !bench.supervisor.isRunning(bench.id)
@@ -912,6 +917,9 @@ enum AgentPresenceChecks {
             try await Task.sleep(for: .milliseconds(200))
             if userEntries(bench, containing: "change course") != 1 {
                 violations.append("\(kind) steer: after the provider took it the steer reads \(userEntries(bench, containing: "change course")) times")
+            }
+            if try bench.composer.qaQueueRail.qaSteerTexts.contains("change course") {
+                violations.append("\(kind) steer: a delivered steer is still pending in the rail")
             }
 
             // 3. Array's own command reply reaches the live tile.

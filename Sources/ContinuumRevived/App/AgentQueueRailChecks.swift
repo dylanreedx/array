@@ -15,7 +15,8 @@ import Foundation
 // the view's own copy. Runs as part of `--agent-compaction-ui-check`.
 //
 // Set CONTINUUM_QUEUE_RAIL_SHOTS to a directory to also save offscreen
-// screenshots (light and dark; working with a steer and three queued; paused).
+// screenshots (light and dark; typed while busy on each harness; working with a
+// steer and three queued; one row hovered; paused).
 @MainActor
 func runAgentQueueRailChecks() async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -43,7 +44,6 @@ func runAgentQueueRailChecks() async throws {
     let shotsDirectory = ProcessInfo.processInfo.environment["CONTINUUM_QUEUE_RAIL_SHOTS"].map {
         URL(fileURLWithPath: $0, isDirectory: true)
     }
-    let workingHint = "\u{21A9} steer   \u{2325}\u{21A9} queue   \u{2318}\u{21A9} force send"
     let steeringTitle = "Steering \u{00B7} after next tool call"
     let queuedTitle = "Queued \u{00B7} after this turn"
 
@@ -161,14 +161,41 @@ func runAgentQueueRailChecks() async throws {
             }
         }
 
-        // 1. A working turn with nothing queued: the hint line names the D1
-        //    chords and the rail takes no space.
-        try expect(supervisor.send("LONG first", to: id), "\(kind): the seed turn was refused")
-        try await eventually("\(kind): a working turn must offer the D1 chords under the draft, got \(composer.qaKeyHint ?? "nil")") {
-            composer.qaKeyHint == workingHint
+        var isWorking: Bool {
+            supervisor.turnSnapshot(for: id).map { $0.executionState == .working && $0.capabilities.canSteer } == true
         }
+        // 1. A working turn with nothing queued and an empty draft (2026-10-13
+        //    owner review): the composer reads exactly like an idle one — no
+        //    chord line, no send choice, just Stop — and the rail takes no space.
+        try expect(supervisor.send("LONG first", to: id), "\(kind): the seed turn was refused")
+        try await eventually("\(kind): the seed turn never became steerable") { isWorking }
         settle()
-        try expect(rail.isHidden && rail.frame.height == 0, "\(kind): an empty queue must take no space")
+        try expect(composer.qaKeyHint == nil,
+                   "\(kind): an empty busy composer must show no hint line, got '\(composer.qaKeyHint ?? "")'")
+        try expect(tile.qaWorkingSendChoice == nil && tile.qaV2ActionTitle == "Stop",
+                   "\(kind): an empty busy composer offers only Stop, got choice \(String(describing: tile.qaWorkingSendChoice)), action \(tile.qaV2ActionTitle ?? "nil")")
+        try expect(rail.isHidden && tile.qaPendingRailSpace == 0,
+                   "\(kind): an empty queue must take no space, hidden \(rail.isHidden), \(tile.qaPendingRailSpace)pt")
+
+        // 1b. Typed while busy: Send becomes the primary action for ↩'s default
+        //     (steer), with queue and force send offered beside it — each naming
+        //     its chord — and still no text line under the draft.
+        tile.qaSetComposerDraftForChecks("typed while busy")
+        settle()
+        let expectedChoice = ManagedAgentTileNSView.QAWorkingSendChoice(
+            primary: "Steer",
+            alternatives: ["Steer \u{2014} after the next tool call  \u{21A9}",
+                           "Queue \u{2014} after this turn  \u{2325}\u{21A9}",
+                           "Interrupt and send now  \u{2318}\u{21A9}"])
+        try expect(tile.qaWorkingSendChoice == expectedChoice,
+                   "\(kind): a typed busy composer must offer Steer with queue/force send beside it, got \(String(describing: tile.qaWorkingSendChoice))")
+        try expect(composer.qaKeyHint == nil, "\(kind): a typed busy composer must not grow a hint line, got '\(composer.qaKeyHint ?? "")'")
+        try expect(tile.qaStopIsCompact, "\(kind): beside the send choice Stop must collapse to its icon")
+        try shoot("typed")
+        tile.qaSetComposerDraftForChecks("")
+        settle()
+        try expect(tile.qaWorkingSendChoice == nil && !tile.qaStopIsCompact,
+                   "\(kind): clearing the draft must withdraw the send choice and restore Stop")
 
         // 2. ↩ steers and ⌥↩ queues through the real key path; each section
         //    appears with its first item, follow-ups are numbered, and an item
@@ -177,7 +204,31 @@ func runAgentQueueRailChecks() async throws {
         try await eventually("\(kind): ↩ must hold a steer in the Steering section, got \(rail.qaSectionTitles)") {
             rail.qaSectionTitles == [steeringTitle] && rail.qaSteerTexts == ["also check the iOS build"]
         }
-        try await submit("then write the release notes", .option)
+        // The pending rail is docked under the transcript, not inside the
+        // composer: a separate view, between the two.
+        settle()
+        try expect(!rail.isDescendant(of: composer) && rail.window === window && !rail.isHidden,
+                   "\(kind): the pending rail must be its own view outside the composer, in composer \(rail.isDescendant(of: composer))")
+        if let transcript = tile.qaTranscriptForChecks {
+            let railRect = rail.convert(rail.bounds, to: tile)
+            let composerRect = composer.convert(composer.bounds, to: tile)
+            let transcriptRect = transcript.convert(transcript.bounds, to: tile)
+            let ordered = tile.isFlipped
+                ? transcriptRect.maxY <= railRect.minY + 0.5 && railRect.maxY <= composerRect.minY + 0.5
+                : transcriptRect.minY >= railRect.maxY - 0.5 && railRect.minY >= composerRect.maxY - 0.5
+            try expect(ordered && railRect.height > 0,
+                       "\(kind): the pending rail must sit between the transcript \(transcriptRect) and the composer \(composerRect), got \(railRect)")
+        } else {
+            throw Failure(description: "queue rail: \(kind): no transcript")
+        }
+        // The send choice's queue alternative goes through the same intent
+        // path as ⌥↩.
+        tile.qaSetComposerDraftForChecks("then write the release notes")
+        try expect(tile.qaChooseWorkingSend(.queue), "\(kind): the send choice offered no queue alternative")
+        try await eventually("\(kind): the send choice's Queue must queue, draft '\(composer.qaDraftText)', queue \(followUps)") {
+            composer.qaDraftText.isEmpty && followUps == ["then write the release notes"]
+        }
+        try await Task.sleep(for: .milliseconds(50))
         try await submit("bump the version", .option)
         let attachedFile = work.appendingPathComponent("CHANGELOG.md")
         try "notes".write(to: attachedFile, atomically: true, encoding: .utf8)
@@ -193,8 +244,9 @@ func runAgentQueueRailChecks() async throws {
         settle()
         try expect(!rail.qaHasVerticalScroller && rail.qaContentHeight <= rail.qaScrollViewHeight + 0.5,
                    "\(kind): a steer and three follow-ups must fit without scrolling")
-        let numbers = rail.qaItemRows.filter { $0.kind == .queued }.map(\.qaNumber)
-        try expect(numbers == ["1", "2", "3"], "\(kind): follow-ups must be numbered in drain order, got \(numbers)")
+        let order = rail.qaItemRows.filter { $0.kind == .queued }.map(\.qaText)
+        try expect(order == ["then write the release notes", "bump the version", "tidy the changelog"],
+                   "\(kind): follow-ups must stack in drain order, got \(order)")
         guard let steerRow = row("also check the iOS build"), let tidyRow = row("tidy the changelog") else {
             throw Failure(description: "queue rail: \(kind): rows missing")
         }
@@ -206,6 +258,16 @@ func runAgentQueueRailChecks() async throws {
             try expect(itemRow.qaControlLabels.count == 3 && !(itemRow.accessibilityLabel() ?? "").isEmpty,
                        "\(kind): every row and control needs an accessibility label, got \(itemRow.qaControlLabels)")
             try expect(itemRow.qaButtonSide >= 20, "\(kind): a control is \(itemRow.qaButtonSide)pt at 100%")
+            // Actions are hover-only: invisible and unpainted at rest, shown
+            // under the pointer, gone again when it leaves.
+            try expect(!itemRow.qaActionsVisible && itemRow.qaRestingPaintsNil,
+                       "\(kind): '\(itemRow.qaText)' must show no actions and paint nothing at rest, visible \(itemRow.qaActionsVisible), nil \(itemRow.qaRestingPaintsNil)")
+            itemRow.qaHover(true)
+            try expect(itemRow.qaActionsVisible, "\(kind): '\(itemRow.qaText)' must show its actions under the pointer")
+            if kind == .claude, itemRow.qaText == "bump the version" { try shoot("hover") }
+            itemRow.qaHover(false)
+            try expect(!itemRow.qaActionsVisible && itemRow.qaRestingPaintsNil,
+                       "\(kind): '\(itemRow.qaText)' must hide its actions when the pointer leaves")
         }
         // Hit targets and the cap follow the page zoom.
         for percent in [80, 150] {
@@ -309,15 +371,19 @@ func runAgentQueueRailChecks() async throws {
         try expect(completedTurns.first == .interrupted && !supervisor.isQueuePaused(for: id),
                    "\(kind): a force send must not pause the queue, turns \(completedTurns)")
         settle()
-        try expect(rail.isHidden && rail.frame.height == 0 && composer.qaKeyHint == nil,
-                   "\(kind): an idle agent with nothing queued shows no rail and no hint, rail hidden \(rail.isHidden) \(rail.frame.height)pt, hint \(composer.qaKeyHint ?? "nil")")
+        try expect(rail.isHidden && tile.qaPendingRailSpace == 0 && composer.qaKeyHint == nil,
+                   "\(kind): an idle agent with nothing queued shows no rail and no hint, rail hidden \(rail.isHidden) \(tile.qaPendingRailSpace)pt, hint \(composer.qaKeyHint ?? "nil")")
 
         // 10. ⤒ on a held steer hands it over now. Once handed over it is the
         //     provider's: no edit, no delete, until the transcript shows it.
         try expect(supervisor.send("LONG second", to: id), "\(kind): second seed refused")
-        try await eventually("\(kind): second turn working") { composer.qaKeyHint == workingHint }
-        try await submit("late steer")
-        try await eventually("\(kind): held steer") { row("late steer")?.kind == .heldSteer }
+        try await eventually("\(kind): second turn working") { isWorking }
+        // The send choice's primary action is ↩'s default: a steer.
+        tile.qaSetComposerDraftForChecks("late steer")
+        try expect(tile.qaChooseWorkingSend(.plain), "\(kind): the send choice offered no primary action")
+        try await eventually("\(kind): the send choice's Steer must hold a steer, draft '\(composer.qaDraftText)'") {
+            composer.qaDraftText.isEmpty && row("late steer")?.kind == .heldSteer
+        }
         row("late steer")?.qaPressSendNow()
         if kind == .codex {
             // codex's turn/steer reply is its receipt: straight to the transcript.
@@ -351,7 +417,7 @@ func runAgentQueueRailChecks() async throws {
         // 11. Stop pauses the queue: the rail says why and offers Resume, and
         //     Resume drains it on the same process.
         try expect(supervisor.send("LONG third", to: id), "\(kind): third seed refused")
-        try await eventually("\(kind): third turn working") { composer.qaKeyHint == workingHint }
+        try await eventually("\(kind): third turn working") { isWorking }
         try await submit("after stop", .option)
         try await eventually("\(kind): queued") { rail.qaQueuedTexts == ["after stop"] }
         let turnsBefore = completedTurns.count
@@ -411,5 +477,5 @@ func runAgentQueueRailChecks() async throws {
                    "\(kind): one process for the whole session, spawned \(AgentSteeringQAFakes.spawnCount(in: bin))")
     }
 
-    print("AgentQueueRailChecks passed: on claude, codex and pi the rail's sections follow the queue; ↩ steers and ⌥↩ queues through the key path with the D1 hint shown while working; drag reorders, ✕ deletes and ✎ moves an item (attachment included) into the composer on the supervisor's queue, refusing over a draft; ↑ edits the last queued item; the rail clamps and Clear spares steers; ⤒ on a follow-up interrupts without killing and runs it next; a handed-over steer is not editable; Stop pauses with a reason and Resume drains")
+    print("AgentQueueRailChecks passed: on claude, codex and pi an empty busy composer shows no hint and only Stop, a typed one offers Steer with queue and force send beside it; the pending rail is docked between transcript and composer with hover-only actions; its sections follow the queue; ↩ steers and ⌥↩ (or the send choice's Queue) queue; drag reorders, ✕ deletes and ✎ moves an item (attachment included) into the composer on the supervisor's queue, refusing over a draft; ↑ edits the last queued item; the rail clamps and Clear spares steers; ⤒ on a follow-up interrupts without killing and runs it next; a handed-over steer is not editable; Stop pauses with a reason and Resume drains")
 }

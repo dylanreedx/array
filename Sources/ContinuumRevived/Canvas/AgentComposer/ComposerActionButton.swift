@@ -16,6 +16,18 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         didSet { applyPresentation() }
     }
 
+    /// Icon only, a square of `controlHeight`. Stop collapses to this beside
+    /// the busy send choice (2026-10-13) so the footer stays roomy; its title
+    /// moves to the tooltip and accessibility label, which keep the full words.
+    var isCompact = false {
+        didSet {
+            guard isCompact != oldValue else { return }
+            titleLabel.isHidden = isCompact
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
+    }
+
     static let controlHeight: CGFloat = 32
     static let horizontalPadding = CGFloat(Space.m)
     static let itemSpacing = CGFloat(Space.s)
@@ -60,7 +72,8 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(
+        if isCompact { return NSSize(width: scaledControlHeight, height: scaledControlHeight) }
+        return NSSize(
             width: scaledHorizontalPadding * 2 + scaledIconSide + scaledItemSpacing + measuredTitleWidth,
             height: scaledControlHeight
         )
@@ -69,6 +82,12 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     override func layout() {
         super.layout()
         let iconSize = scaledIconSide
+        if isCompact {
+            iconView.frame = NSRect(
+                x: floor((bounds.width - iconSize) / 2), y: floor((bounds.height - iconSize) / 2),
+                width: iconSize, height: iconSize)
+            return
+        }
         let titleWidth = measuredTitleWidth
         let contentWidth = iconSize + scaledItemSpacing + titleWidth
         let start = floor((bounds.width - contentWidth) / 2)

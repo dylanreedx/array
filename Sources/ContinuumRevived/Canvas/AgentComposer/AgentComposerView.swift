@@ -80,11 +80,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private let replyOptionRail: ComposerReplyOptionRailView
     private let replyOptionRailHeightConstraint: NSLayoutConstraint
     private var replyOptions: [AgentReplyOption] = []
-    /// B4 → T5b — Array's steering and follow-up queue, at the top of the shell.
+    /// B4 → T5b — Array's steering and follow-up queue. The composer owns its
+    /// state and verbs (↑ and ✎ edit into this draft), but no longer hosts it:
+    /// since the 2026-10-13 owner review the tile docks it under the transcript
+    /// (`pendingMessageRail`), where pending messages read as messages.
     private let queuedMessageRail: ComposerQueuedMessageRailView
-    private let queuedMessageRailHeightConstraint: NSLayoutConstraint
-    /// T5b (D1) — the chords a working turn offers, under the draft; also where
-    /// a refused rail edit says why.
+    /// Where a refused rail edit says why. Nothing else: the permanent working
+    /// chord line was removed in the 2026-10-13 owner review — the tile's send
+    /// choice offers steer/queue/force send once there is a draft.
     private let keyHintLabel = NSTextField(labelWithString: "")
     private var keyHintHeightConstraint: NSLayoutConstraint!
     private var keyHintGapConstraint: NSLayoutConstraint!
@@ -110,6 +113,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var imageImportFailureCategories: [String] = []
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
+    /// After `apply(_:)` replaced the draft. Presentation only; no draft value,
+    /// so it cannot become a binding loop.
+    var onDraftApplied: (() -> Void)?
     /// Existing fire-and-forget seam retained until live-tile migration. It does
     /// not imply acceptance and therefore never clears a persisted draft.
     var onSubmitPrompt: ((String) -> Void)?
@@ -132,9 +138,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// `onSubmissionFinished(false)`. Absent when the submission never reached
     /// the sink at all (a lease or binding failure).
     var onSubmissionRefused: ((IntentRefusal) -> Void)?
-    /// A steer the sink accepted for the turn in flight. The tile shows it in
-    /// the transcript at once rather than when the provider gets to it.
-    var onSteerAccepted: ((AgentPrompt) -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private let completionController = CompletionPopoverController()
     // Keep an unbound composer useful as a real surface too. Managed tiles bind
@@ -219,7 +222,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         replyOptionRail = ComposerReplyOptionRailView(frame: .zero)
         replyOptionRailHeightConstraint = replyOptionRail.heightAnchor.constraint(equalToConstant: 0)
         queuedMessageRail = ComposerQueuedMessageRailView(frame: .zero)
-        queuedMessageRailHeightConstraint = queuedMessageRail.heightAnchor.constraint(equalToConstant: 0)
         super.init(frame: frameRect)
 
         wantsLayer = true
@@ -246,7 +248,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         replyOptionRail.onSelect = { [weak self] option in
             self?.acceptReplyOption(option)
         }
-        queuedMessageRail.translatesAutoresizingMaskIntoConstraints = false
         queuedMessageRail.onRemove = { [weak self] messageID in
             self?.onCancelQueuedMessage?(messageID)
         }
@@ -280,7 +281,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         addSubview(replyOptionRail)
         addSubview(fileReferenceRail)
         addSubview(attachmentRail)
-        addSubview(queuedMessageRail)
         addSubview(scrollView)
         keyHintLabel.font = .token(.caption, zoom: pageZoom)
         keyHintLabel.lineBreakMode = .byTruncatingTail
@@ -301,7 +301,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             replyOptionRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             fileReferenceRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             attachmentRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
-            queuedMessageRail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
             scrollView.topAnchor.constraint(equalTo: attachmentRail.bottomAnchor, constant: padding),
             keyHintLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
@@ -310,18 +309,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             replyOptionRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             fileReferenceRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             attachmentRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
-            queuedMessageRail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
             keyHintLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
         ]
         keyHintHeightConstraint = keyHintLabel.heightAnchor.constraint(equalToConstant: 0)
         keyHintGapConstraint = keyHintLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 0)
         NSLayoutConstraint.activate([
-            // The queue sits above everything that belongs to the draft.
-            queuedMessageRailHeightConstraint,
-            queuedMessageRail.topAnchor.constraint(equalTo: taskContextButton.bottomAnchor),
             replyOptionRailHeightConstraint,
-            replyOptionRail.topAnchor.constraint(equalTo: queuedMessageRail.bottomAnchor),
+            replyOptionRail.topAnchor.constraint(equalTo: taskContextButton.bottomAnchor),
             fileReferenceRailHeightConstraint,
             fileReferenceRail.topAnchor.constraint(equalTo: replyOptionRail.bottomAnchor),
             attachmentRailHeightConstraint,
@@ -375,11 +370,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         let railHeight = attachmentRail.isHidden ? 0 : ComposerImageAttachmentRailView.railHeight(zoom: pageZoom) + internalPadding
         let fileRailHeight = fileReferenceRail.isHidden ? 0 : ComposerFileReferenceRailView.railHeight(zoom: pageZoom)
         let optionRailHeight = replyOptionRail.isHidden ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
-        let queuedRailHeight = queuedMessageRailHeightConstraint.constant
         let hintHeight = (keyHintHeightConstraint?.constant ?? 0) + (keyHintGapConstraint?.constant ?? 0)
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + queuedRailHeight + hintHeight
+            height: (taskContextHeight?.constant ?? 0) + editorHeight + (internalPadding * 2) + railHeight + fileRailHeight + optionRailHeight + hintHeight
         )
     }
 
@@ -550,27 +544,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     /// T5b — the steering/queue rail, from `AgentSupervisor.queueRailState(for:)`.
+    /// The rail sizes itself (its intrinsic height) wherever the tile docks it.
     func updateQueueRail(_ state: ComposerQueueRailState) {
         queuedMessageRail.setState(state)
-        let height = ComposerQueuedMessageRailView.railHeight(for: state, zoom: pageZoom)
-        guard queuedMessageRailHeightConstraint.constant != height else { return }
-        queuedMessageRailHeightConstraint.constant = height
-        invalidateIntrinsicContentSize()
-        needsLayout = true
     }
 
-    /// T5b (D1) — while a turn works, the chords under the draft say what each
-    /// Return does; idle shows nothing, as before. ⇧↩ stays a newline unsaid.
+    /// The pending steer/queue rail this composer feeds, for its host to dock
+    /// under the transcript. Not a subview of the composer.
+    var pendingMessageRail: ComposerQueuedMessageRailView { queuedMessageRail }
+
+    /// Only a transient line (a refused rail edit) ever shows here. A busy
+    /// composer, empty or typed, reads exactly like an idle one (2026-10-13).
     private func updateKeyHint() {
-        var hint = transientHint
-        if hint == nil, let snapshot = turnSnapshot, snapshot.executionState == .working, !snapshot.isMirrored {
-            let capabilities = snapshot.capabilities
-            var parts: [String] = []
-            if capabilities.canSteer { parts.append("\u{21A9} steer") }
-            if capabilities.canQueue { parts.append((capabilities.canSteer ? "\u{2325}\u{21A9}" : "\u{21A9}") + " queue") }
-            if capabilities.canStop { parts.append("\u{2318}\u{21A9} force send") }
-            if !parts.isEmpty { hint = parts.joined(separator: "   ") }
-        }
+        let hint = transientHint
         keyHintLabel.stringValue = hint ?? ""
         keyHintLabel.toolTip = hint
         keyHintLabel.isHidden = hint == nil
@@ -716,6 +702,11 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         updateReplyOptionRail()
         withdrawTransientHintIfDraftCleared()
         editorContentsChanged()
+        // Model application never echoes through `onDraftChange` (that is the
+        // binding contract), but the owner's controls must still follow it — a
+        // restore, an edit pulled from the queue, the clear after an accepted
+        // send: the busy send choice must not outlive the draft it was for.
+        onDraftApplied?()
     }
 
     private func rescaleRail(_ constraint: NSLayoutConstraint, to height: CGFloat) {
@@ -737,8 +728,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         rescaleRail(replyOptionRailHeightConstraint, to: ComposerReplyOptionRailView.railHeight(zoom: pageZoom))
         rescaleRail(fileReferenceRailHeightConstraint, to: ComposerFileReferenceRailView.railHeight(zoom: pageZoom))
         rescaleRail(attachmentRailHeightConstraint, to: ComposerImageAttachmentRailView.railHeight(zoom: pageZoom))
-        rescaleRail(queuedMessageRailHeightConstraint, to: ComposerQueuedMessageRailView.railHeight(
-            for: queuedMessageRail.state, zoom: pageZoom))
         keyHintLabel.font = .token(.caption, zoom: pageZoom)
         updateKeyHint()
         // The completion popover's content view lives in its own window, so the
@@ -920,7 +909,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             )
             let intent: AgentComposerIntent?
             if draft.taskContext == nil, importedAttachments.isEmpty, importedFileReferences.isEmpty,
-               let invocation = resolvedSelectedCommand(in: prompt) {
+               let invocation = resolvedSelectedCommand(in: prompt)
+                ?? typedArrayCompactInvocation(in: prompt) {
                 // By descriptor ID, not by name. `/compact` is Array's own typed
                 // operation, and matching on the string "compact" handed the
                 // native compaction route to any command that happened to share
@@ -1156,6 +1146,35 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// form required by provider CLIs, preserving every other character as the
     /// command's context. For example `check auth with /review please` becomes
     /// `/review check auth with please` at the execution/transcript boundary.
+    /// A `/compact` typed and submitted WITHOUT accepting its picker row (Return
+    /// or Send before the row resolved). With no selected command this used to
+    /// go out as the literal prompt "/compact": codex and pi hand a leading
+    /// slash to the model, which wrote a prose summary and compacted nothing.
+    ///
+    /// Resolved to the `array:compact` baseline descriptor and nothing else —
+    /// its invocation names are the tokens the picker itself mints for it. A
+    /// provider or project command called `compact` is never offered under the
+    /// bare name (`AgentCommandCompletionProvider` drops or prefixes it), so
+    /// this is not a name match against a project's own `compact.md`. Only the
+    /// leading token counts, as it does for every CLI's slash parser.
+    private func typedArrayCompactInvocation(in prompt: String) -> AgentCommandInvocation? {
+        guard let descriptor = AgentCommandCatalog.arrayCommands()
+                .first(where: { $0.id == "array:compact" }) else { return nil }
+        let parts = prompt.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard let head = parts.first,
+              descriptor.invocationNames.contains(where: { "/\($0)" == head }) else { return nil }
+        let focus = parts.count > 1
+            ? String(parts[1]).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            : ""
+        return AgentCommandInvocation(
+            descriptorID: descriptor.id,
+            name: descriptor.name,
+            arguments: focus.isEmpty ? [] : [focus],
+            harness: descriptor.harness,
+            surface: descriptor.surface
+        )
+    }
+
     private func resolvedSelectedCommand(in prompt: String) -> AgentCommandInvocation? {
         guard let selectedDraftCommand else { return nil }
         let source = prompt as NSString
@@ -1393,7 +1412,6 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
                 }
                 return
             }
-            if case let .steer(prompt) = intent { self.onSteerAccepted?(prompt) }
             if let submittedTaskContext {
                 self.onAcceptedBoardTask?(submittedTaskContext)
             }
