@@ -329,6 +329,9 @@ enum UIProbeAppearance {
             ("appearance.floatingToolbarHoverPill", NSSize(width: 240, height: 48), {
                 ToolbarHoverPillView(title: "New Note", shortcut: "⇧⌘N")
             }),
+            ("appearance.floatingToolbarMenu", NSSize(width: 220, height: 160), {
+                ToolbarChoicesMenuView(title: FloatingToolbarHostView.agentMenuTitle, choices: [("Claude Code", {}), ("Codex", {}), ("Pi", {})])
+            }),
             ("appearance.onboardingContent", NSSize(width: 620, height: 600), {
                 OnboardingContentView(frame: NSRect(x: 0, y: 0, width: 620, height: 600))
             }),
@@ -869,11 +872,15 @@ enum UIProbeAppearance {
         // reads as one object. A pill with no reading paints `nil`, never
         // `.clear`, so an absent metric contributes no slot at all.
         "AgentStatusPillView",
-        // The floating creation surface uses the same panel and line tokens in
-        // both appearances; its settings are separately covered by its controls.
+        // The canvas creation toolbar: an overlay-surface capsule, its buttons
+        // (resting nil, row hover/selected under the pointer or an open menu),
+        // group hairlines, hover label and choice menu.
         "FloatingToolbarView",
-        "ToolbarDragHandleView",
+        "ToolbarIconButton",
+        "ToolbarDividerView",
         "ToolbarHoverPillView",
+        "ToolbarChoicesMenuView",
+        "ToolbarChoiceRowView",
         "OnboardingContentView",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
@@ -1670,9 +1677,17 @@ enum UIProbeAppearance {
                 view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))
                 return view
             }),
-            AdoptedSurface(id: "floatingToolbar", size: NSSize(width: 640, height: 64), make: {
-                FloatingToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 64))
-            }),
+            AdoptedSurface(
+                id: "floatingToolbar", size: NSSize(width: 640, height: 64),
+                make: { FloatingToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 64)) },
+                // An open menu's button: the one painted state a toolbar button has.
+                prepare: { ($0 as? FloatingToolbarView)?.buttons.first?.isActive = true }
+            ),
+            AdoptedSurface(
+                id: "floatingToolbarMenu", size: NSSize(width: 220, height: 160),
+                make: { ToolbarChoicesMenuView(title: FloatingToolbarHostView.agentMenuTitle, choices: [("Claude Code", {}), ("Codex", {}), ("Pi", {})]) },
+                prepare: { ($0 as? ToolbarChoicesMenuView)?.rows.first?.isHovered = true }
+            ),
             AdoptedSurface(id: "floatingToolbarHoverPill", size: NSSize(width: 240, height: 48), make: {
                 ToolbarHoverPillView(title: "New Note", shortcut: "⇧⌘N")
             }),

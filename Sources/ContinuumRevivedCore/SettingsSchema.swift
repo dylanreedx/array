@@ -22,7 +22,7 @@ public enum SettingsSchema {
             // an image import and a live preview are not independent defaults
             // keys, and the precedence rule must live in exactly one place.
             SettingsSection(id: "canvasBackground", title: "Canvas Background", iconSystemName: "photo", fields: []),
-            SettingsSection(id: "floatingToolbar", title: "Floating Toolbar", iconSystemName: "rectangle.bottomthird.inset.filled", fields: []),
+            SettingsSection(id: "floatingToolbar", title: "Toolbar", iconSystemName: "rectangle.bottomthird.inset.filled", fields: []),
             SettingsSection(id: "canvasAndZones", title: "Canvas & Zones", iconSystemName: "square.grid.2x2", fields: [
                 .toggle(key: CanvasAutoLayoutConfig.enabledKey, label: "Auto Layout by Default", default: CanvasAutoLayoutConfig.defaultEnabled),
                 .choice(key: CanvasAutoLayoutConfig.activationKey, label: "When Enabling Auto Layout", options: CanvasAutoLayoutActivation.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultActivation.rawValue),

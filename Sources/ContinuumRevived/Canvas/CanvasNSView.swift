@@ -902,6 +902,27 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    // MARK: Zone draw tool
+
+    /// The toolbar's Zone tool: the same marquee as an empty-canvas drag, but it
+    /// may start anywhere — over a tile or inside a zone — because the user
+    /// asked to draw a zone. The toolbar's capture view forwards the pointer.
+    func beginZoneDrawing(with event: NSEvent) {
+        guard !isZoneScopePickerActive else { return }
+        zoneGesture = .creating(originScreen: convert(event.locationInWindow, from: nil))
+    }
+
+    func continueZoneDrawing(with event: NSEvent) { mouseDragged(with: event) }
+
+    /// True when the drag drew a zone; a press that never cleared the create
+    /// threshold draws nothing and leaves the tool armed.
+    func finishZoneDrawing(with event: NSEvent) -> Bool {
+        guard case .creating = zoneGesture else { return false }
+        let before = liveZones.count
+        mouseUp(with: event)
+        return liveZones.count != before
+    }
+
     /// Starts the same memory-only zone flow as an empty-canvas drag, for
     /// Command Center and other non-pointer creation surfaces. The provisional
     /// zone cannot persist or capture members until a project/Home is confirmed.
@@ -8387,13 +8408,26 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let createdId = cvB.qaLiveZoneIds.first else { throw CheckError.failed("no zone created in case B") }
         try expect(cvB.qaZoneChromeIsBehindMembers(createdId), "gesture-created zone chrome must paint behind the tiles it enclosed (chrome-over-tiles regression guard)")
 
+        // Case C: the toolbar's Zone tool draws from anywhere — here from on top
+        // of a tile, where an ordinary press belongs to the tile — and a press
+        // that never drags draws nothing.
+        let zonesBeforeTool = cvB.qaLiveZoneIds.count
+        let onTile = win(200, 190)
+        cvB.beginZoneDrawing(with: try mouse(.leftMouseDown, at: onTile, window: wB))
+        let clickDrew = cvB.finishZoneDrawing(with: try mouse(.leftMouseUp, at: onTile, window: wB))
+        try expect(!clickDrew && cvB.qaLiveZoneIds.count == zonesBeforeTool, "a Zone-tool click with no drag must draw nothing")
+        cvB.beginZoneDrawing(with: try mouse(.leftMouseDown, at: onTile, window: wB))
+        cvB.continueZoneDrawing(with: try mouse(.leftMouseDragged, at: win(620, 520), window: wB))
+        let dragDrew = cvB.finishZoneDrawing(with: try mouse(.leftMouseUp, at: win(620, 520), window: wB))
+        try expect(dragDrew && cvB.qaLiveZoneIds.count == zonesBeforeTool + 1, "a Zone-tool drag that starts on a tile must draw a zone")
+
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent("zone-chrome-zorder-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
-        try JSONSerialization.data(withJSONObject: ["check": "zone-chrome-zorder", "cases": ["boot-seeded", "gesture-created"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        try JSONSerialization.data(withJSONObject: ["check": "zone-chrome-zorder", "cases": ["boot-seeded", "gesture-created", "zone-tool"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 

@@ -4893,7 +4893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var companionRelayPairingMonitorTask: Task<Void, Never>?
     private var contextCatalogObserver: NSObjectProtocol?
     private var contextWindowResolver: AgentContextWindowResolver?
-    private var floatingToolbar: FloatingToolbarController?
+    private var floatingToolbar: FloatingToolbarHostView?
     private var onboardingPanel: OnboardingPanel?
     private lazy var onboardingProgressStore = OnboardingProgressStore()
     private var starterCreationEligible = false
@@ -10756,6 +10756,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             gettingStarted.topAnchor.constraint(equalTo: contentPane.topAnchor, constant: 12),
         ])
 
+        // The creation toolbar is canvas chrome: an overlay over this pane, never
+        // a window of its own (see `FloatingToolbarHostView`).
+        let toolbarQAOptIn = ProcessInfo.processInfo.environment["CONTINUUM_TOOLBAR_QA"] == "1"
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
+           toolbarQAOptIn || (!smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
+            let toolbar = FloatingToolbarHostView(terminalProfiles: {
+                LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
+            }, onSelection: { [weak self] selection in
+                guard let self else { return }
+                switch selection {
+                case .fanOutQueueSelection: _ = self.performPaletteAction(.fanOutQueueSelection)
+                case let .palette(action): _ = self.performPaletteAction(action)
+                case let .terminalProfile(id): _ = self.spawnTerminalFromProfile(id, trigger: "toolbar:terminal")
+                case let .agentHarness(harness): _ = self.spawnManagedAgentForHarness(harness)
+                }
+            })
+            toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
+            toolbar.zoneDrawing = canvasView
+            toolbar.obstacles = { [weak toolbar, weak shortcutRail] in
+                guard let toolbar, let shortcutRail, !shortcutRail.isHidden, let pane = shortcutRail.superview else { return [] }
+                return [toolbar.convert(shortcutRail.frame, from: pane)]
+            }
+            floatingToolbar?.removeFromSuperview()
+            floatingToolbar = toolbar
+            toolbar.install(in: contentPane)
+        }
+
         splitView.addSubview(sidebar)
         splitView.addSubview(contentPane)
         workspaceSidebarView = sidebar
@@ -10848,26 +10875,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let contentFrame = window.contentRect(forFrameRect: window.frame)
         window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
         window.delegate = self
-        let toolbarQAOptIn = ProcessInfo.processInfo.environment["CONTINUUM_TOOLBAR_QA"] == "1"
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
-           toolbarQAOptIn || (!smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
-            let toolbar = FloatingToolbarController(terminalProfiles: {
-                LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
-            }, onSelection: { [weak self] selection in
-                guard let self else { return }
-                switch selection {
-                case .createZone: _ = self.performPaletteAction(.createZone)
-                case .fanOutQueueSelection: _ = self.performPaletteAction(.fanOutQueueSelection)
-                case let .palette(action): _ = self.performPaletteAction(action)
-                case let .terminalProfile(id): _ = self.spawnTerminalFromProfile(id, trigger: "toolbar:terminal")
-                case let .agentHarness(harness): _ = self.spawnManagedAgentForHarness(harness)
-                }
-            })
-            toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
-            floatingToolbar?.close()
-            floatingToolbar = toolbar
-            toolbar.show(near: window)
-        }
         return window
     }
 
@@ -18512,7 +18519,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, true)
         }
         focusBroker.applicationDidBecomeActive()
-        floatingToolbar?.writeVisibilityDiagnostic(reason: "applicationDidBecomeActive")
         refreshAgentSurfaces()
     }
 
@@ -18589,7 +18595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let contextCatalogObserver { NotificationCenter.default.removeObserver(contextCatalogObserver) }
         contextCatalogObserver = nil
         contextWindowResolver = nil
-        floatingToolbar?.close()
+        floatingToolbar?.removeFromSuperview()
         floatingToolbar = nil
         profilePalette?.close()
         profilePalette = nil

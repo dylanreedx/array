@@ -99,7 +99,7 @@ final class CanvasGettingStartedView: NSVisualEffectView {
         )
         rows[.dragToolbar]?.configure(
             title: "Drag the toolbar",
-            detail: "Move its handle anywhere. It snaps to the edges.",
+            detail: "Drag it to any edge of the canvas.",
             state: state(for: .dragToolbar, in: progress), primaryTitle: nil
         )
         isHidden = !Self.shouldPresent(progress)

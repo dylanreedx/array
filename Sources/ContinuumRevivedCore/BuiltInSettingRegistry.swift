@@ -13,15 +13,9 @@ public enum CanvasShortcutRailConfig {
 /// User-wide preferences for the floating canvas creation toolbar.
 public enum FloatingToolbarConfig {
     public static let visibleKey = "continuum.floatingToolbar.visible"
-    public static let alwaysVisibleKey = "continuum.floatingToolbar.alwaysVisible"
-    public static let compactKey = "continuum.floatingToolbar.compact"
+    /// The canvas edge the toolbar rests on — one value for every workspace.
     public static let positionEdgeKey = "continuum.floatingToolbar.position.edge"
-    public static let positionAlongEdgeKey = "continuum.floatingToolbar.position.alongEdge"
-    public static let positionXKey = "continuum.floatingToolbar.position.x"
-    public static let positionYKey = "continuum.floatingToolbar.position.y"
     public static let defaultVisible = true
-    public static let defaultAlwaysVisible = false
-    public static let defaultCompact = false
     public static let defaultItemVisible = true
 
     public static func itemVisibleKey(commandID: String) -> String {
@@ -144,36 +138,12 @@ public enum BuiltInSettingRegistry {
         id: SettingID(rawValue: FloatingToolbarConfig.visibleKey),
         category: .canvasAndZones,
         title: "Floating Toolbar",
-        description: "Show the draggable toolbar for creating zones and tiles.",
+        description: "Show the toolbar at the edge of the canvas for creating zones and tiles.",
         defaultValue: FloatingToolbarConfig.defaultVisible,
         control: .toggle,
         applicationPolicy: .live,
         keywords: ["toolbar", "create", "zones", "tiles"],
         consumerID: "canvas.floatingToolbar.visible"
-    )
-
-    public static let floatingToolbarAlwaysVisible = SettingDefinition(
-        id: SettingID(rawValue: FloatingToolbarConfig.alwaysVisibleKey),
-        category: .canvasAndZones,
-        title: "Always Show Labels",
-        description: "Keep action labels visible; otherwise show labels in token-themed hover pills.",
-        defaultValue: FloatingToolbarConfig.defaultAlwaysVisible,
-        control: .toggle,
-        applicationPolicy: .live,
-        keywords: ["toolbar", "hover", "always visible"],
-        consumerID: "canvas.floatingToolbar.alwaysVisible"
-    )
-
-    public static let floatingToolbarCompact = SettingDefinition(
-        id: SettingID(rawValue: FloatingToolbarConfig.compactKey),
-        category: .canvasAndZones,
-        title: "Compact Floating Toolbar",
-        description: "Use icon-only buttons in the floating toolbar.",
-        defaultValue: FloatingToolbarConfig.defaultCompact,
-        control: .toggle,
-        applicationPolicy: .live,
-        keywords: ["toolbar", "compact", "icons"],
-        consumerID: "canvas.floatingToolbar.compact"
     )
 
     public static let agentContextAutoCompact = SettingDefinition(
@@ -285,8 +255,6 @@ public enum BuiltInSettingRegistry {
             tileGap.erased,
             shortcutRail.erased,
             floatingToolbarVisible.erased,
-            floatingToolbarAlwaysVisible.erased,
-            floatingToolbarCompact.erased,
             agentContextAutoCompact.erased,
             agentContextAutoCompactPercent.erased,
         ] + floatingToolbarItemVisibility.map { $0.erased } + [
