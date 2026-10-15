@@ -12803,14 +12803,19 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
         if args.last == "" { args.removeLast() }
         if harness == .codex, args.count == expectedArgs.count {
             // The two file arguments are per-run temp paths: assert their shape
-            // and the schema's bytes, then compare the rest literally.
-            guard args[6].hasPrefix("/"), args[8].hasPrefix("/"),
-                  !args[6].hasPrefix(cwd), !args[8].hasPrefix(cwd),
+            // and the schema's bytes, then compare the rest literally. Located
+            // by the contract's own placeholders, not fixed indices, so a flag
+            // added ahead of them cannot misaim this assertion.
+            guard let schemaIndex = expectedArgs.firstIndex(of: "<schema>"),
+                  let lastMessageIndex = expectedArgs.firstIndex(of: "<last-message>"),
+                  args[schemaIndex - 1] == "--output-schema", args[lastMessageIndex - 1] == "-o",
+                  args[schemaIndex].hasPrefix("/"), args[lastMessageIndex].hasPrefix("/"),
+                  !args[schemaIndex].hasPrefix(cwd), !args[lastMessageIndex].hasPrefix(cwd),
                   fake.recorded("schema", 1) == schema else {
                 throw fail("codex: --output-schema/-o were not private files holding the name schema: \(args)")
             }
-            args[6] = "<schema>"
-            args[8] = "<last-message>"
+            args[schemaIndex] = "<schema>"
+            args[lastMessageIndex] = "<last-message>"
         }
         guard args == expectedArgs else {
             throw fail("\(harness): argv differs from production's contract:\n got \(args)\nwant \(expectedArgs)")
@@ -16256,10 +16261,20 @@ private func checkObservedRunRewriteBeforeInitialAppend(
     guard await waitUntil(timeout: 10, pollInterval: 0.05, {
         supervisor.observedRunBindingCount == 0
     }) else { throw fail("T6 rewrite-first: terminal rewrite did not release the binding") }
-    let terminal = inbox.events.compactMap { event -> TurnOutcome? in
-        if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
-        return nil
+    func terminalOutcomes() -> [TurnOutcome] {
+        inbox.events.compactMap { event -> TurnOutcome? in
+            if case let .turnCompleted(_, _, outcome, _) = event { return outcome }
+            return nil
+        }
     }
+    // The binding is released synchronously on main, but the boundary reaches
+    // `inbox` through the subscriber's AsyncStream task, which runs on a later
+    // main-actor turn. Reading the inbox the instant the count hits zero raced
+    // that hop under load and saw []. Wait for the boundary, then hold briefly
+    // so a duplicate would still be caught.
+    _ = await waitUntil(timeout: 5, pollInterval: 0.01, { !terminalOutcomes().isEmpty })
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let terminal = terminalOutcomes()
     guard terminal == [.completed],
           supervisor.turnSnapshot(for: child)?.state != .working else {
         throw fail("T6 rewrite-first: terminal rewrite owed exactly one completed child boundary, got \(terminal)")
