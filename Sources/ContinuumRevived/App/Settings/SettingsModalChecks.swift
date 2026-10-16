@@ -372,6 +372,30 @@ enum SettingsModalChecks {
         }
         try expect(delegate.qaSettingsModal?.isVisible == true, "a click inside the card must not close Settings")
 
+        // A text edit in progress survives the modal closing under it: type a new
+        // zone name into the real field, press Esc, and the name is saved.
+        delegate.qaSettingsModal?.model.selectPane("canvasAndZones")
+        fixture.pump(0.1)
+        func textFields(_ view: NSView) -> [NSTextField] {
+            ((view as? NSTextField).map { [$0] } ?? []) + view.subviews.flatMap(textFields)
+        }
+        guard let paneOverlay = delegate.qaSettingsModal?.overlay,
+              let nameField = textFields(paneOverlay).first(where: { $0.isEditable && $0.stringValue == DefaultGroupZoneName.fallback }) else {
+            throw SettingsCheckFixture.Failure(message: "the Canvas pane must draw an editable New zone name field")
+        }
+        fixture.window.makeFirstResponder(nameField)
+        guard let editor = nameField.currentEditor() as? NSTextView else {
+            throw SettingsCheckFixture.Failure(message: "the zone name field took no field editor")
+        }
+        editor.selectAll(nil)
+        editor.insertText("Studio", replacementRange: editor.selectedRange())
+        fixture.pump()
+        try fixture.sendKey(keyCode: 53, characters: "\u{1B}")
+        try expectClosed("Esc mid-edit")
+        try expect(fixture.defaults.string(forKey: DefaultGroupZoneName.userDefaultsKey) == "Studio",
+                   "closing mid-edit must keep the typed zone name; stored \(fixture.defaults.string(forKey: DefaultGroupZoneName.userDefaultsKey) ?? "nothing")")
+        try openWithCommandComma()
+
         // 7. The last pane comes back on the next open; the memory lives in the
         // injected suite, never the standard domain.
         delegate.qaSettingsModal?.model.selectPane("terminal")
@@ -509,10 +533,19 @@ enum SettingsSearchChecks {
         try expect(model.searchQuery.isEmpty && field.stringValue.isEmpty && modal.isVisible, "Esc must clear the search and keep Settings open")
 
         // Drift guard: every registry entry has a rendered anchor, and every
-        // rendered anchor is in the registry, pane by pane.
+        // rendered anchor is in the registry, pane by pane. Each pane is also
+        // written out (the app's real custom views included) for review.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let artifacts = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/\(timestamp)/settings-modal", isDirectory: true)
+        try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
         for pane in model.visiblePanes {
             model.selectPane(pane.id)
             fixture.pump()
+            if let card = modal.overlay?.card, let rep = card.bitmapImageRepForCachingDisplay(in: card.bounds) {
+                card.cacheDisplay(in: card.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: artifacts.appendingPathComponent("\(pane.id).png"))
+            }
             let expected = Set(model.entries().filter { $0.paneID == pane.id }.compactMap(\.anchor))
             let rendered = Set(model.renderedAnchors.keys)
             try expect(expected.subtracting(rendered).isEmpty, "\(pane.title): registry entries with no rendered row: \(expected.subtracting(rendered).sorted())")

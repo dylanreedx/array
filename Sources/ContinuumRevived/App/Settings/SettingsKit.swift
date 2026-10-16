@@ -174,6 +174,7 @@ struct NumberRow: View {
     }
 
     private func commit() {
+        model.pendingEdits[row.field.key ?? row.field.label] = nil
         let binding = model.binding(for: row.field)
         let trimmed = draft.trimmingCharacters(in: .whitespaces)
         if let zero = row.zeroTitle, trimmed.caseInsensitiveCompare(zero) == .orderedSame || trimmed.isEmpty {
@@ -197,6 +198,13 @@ struct NumberRow: View {
                         .focused($focused)
                         .onSubmit(commit)
                         .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+                        .onChange(of: draft) { _, value in
+                            // Not gated on focus: an AppKit-driven responder change
+                            // never reaches FocusState, and the edit must survive.
+                            if value != text(for: model.binding(for: row.field).double) {
+                                model.pendingEdits[row.field.key ?? row.field.label] = commit
+                            }
+                        }
                     Stepper("", value: Binding(get: { binding.double }, set: {
                         binding.set(.double($0))
                         draft = text(for: model.binding(for: row.field).double)
@@ -226,7 +234,8 @@ struct TextRow: View {
     private var isValid: Bool { !validatesURL || URL(string: draft)?.scheme != nil }
 
     private func commit() {
-        guard isValid else { return }
+        model.pendingEdits[row.field.key ?? row.field.label] = nil
+        guard isValid, draft != model.binding(for: row.field).string else { return }
         model.binding(for: row.field).set(.string(draft))
     }
 
@@ -240,6 +249,11 @@ struct TextRow: View {
                     .focused($focused)
                     .onSubmit(commit)
                     .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+                    .onChange(of: draft) { _, value in
+                        if value != model.binding(for: row.field).string {
+                            model.pendingEdits[row.field.key ?? row.field.label] = commit
+                        }
+                    }
                 if !isValid {
                     Text("Enter a complete address, including https://")
                         .font(.callout)

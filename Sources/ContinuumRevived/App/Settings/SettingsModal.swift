@@ -182,6 +182,7 @@ final class SettingsModal {
     func close() {
         guard let overlay else { return }
         let window = overlay.window
+        model.flushPendingEdits()
         model.cancelRecording()
         overlay.removeFromSuperview()
         self.overlay = nil

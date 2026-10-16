@@ -77,6 +77,9 @@ final class SettingsModel {
     @ObservationIgnored var viewportSize: CGSize = .zero
     @ObservationIgnored private var scrollToken = 0
     @ObservationIgnored private var highlightGeneration = 0
+    /// Commits for text and number rows being edited, so closing Settings mid-edit
+    /// (Esc, ⌘W, the scrim) keeps what was typed instead of dropping it.
+    @ObservationIgnored var pendingEdits: [String: () -> Void] = [:]
     @ObservationIgnored private var catalogObserver: NSObjectProtocol?
     @ObservationIgnored private var libraryObserver: NSObjectProtocol?
 
@@ -462,6 +465,12 @@ final class SettingsModel {
             guard let self, self.highlightGeneration == generation else { return }
             self.highlightedEntryID = nil
         }
+    }
+
+    func flushPendingEdits() {
+        let edits = pendingEdits
+        pendingEdits.removeAll()
+        for commit in edits.values { commit() }
     }
 
     func requestSearchFocus() {
