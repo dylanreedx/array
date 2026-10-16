@@ -663,38 +663,215 @@ enum ZoneTruthChecks {
     /// still reported success, so a move looked saved and came back undone on
     /// the next launch. It must now fail, roll the move back and say so.
     static func runLayoutCommitTruth() throws -> URL {
-        let fixture = try Fixture(label: "layout-truth")
-        defer { fixture.dispose() }
-        try fixture.mount()
-        let m = try fixture.requireMounted("layout-truth")
-        _ = pinPreferences(m.canvas, autoLayout: false)
-        let tile = Fixture.noteA2a
-        let seeded = Fixture.seed.tiles[tile]!
-        let moved = TileFrame(x: seeded.x + 40, y: seeded.y + 30, width: seeded.width, height: seeded.height)
+        var manifest: [String: Any] = [:]
+        // Auto-layout on is the default; this leg pinned it off for its first
+        // year, so it never ran the setup users have.
+        for autoLayout in [false, true] {
+            let label = autoLayout ? "auto-layout on" : "auto-layout off"
+            let fixture = try Fixture(label: "layout-truth-\(autoLayout)")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            let m = try fixture.requireMounted("layout-truth")
+            _ = pinPreferences(m.canvas, autoLayout: autoLayout)
+            let tile = Fixture.noteA2a
+            let seeded = Fixture.seed.tiles[tile]!
+            let moved = TileFrame(x: seeded.x + 40, y: seeded.y + 30, width: seeded.width, height: seeded.height)
+            func shownFrame() -> TileFrame? {
+                m.canvas.tilesInWorldFrames(forZoneId: Fixture.zoneA2)?.first(where: { $0.id == tile })?.frame
+            }
 
-        // Positive control: with its store present the same move commits.
-        let control = m.canvas.applyProgrammaticTileGeometry(
-            tileId: tile, in: Fixture.zoneA2, worldFrame: moved, action: .moveTile)
-        try expect(control == .committed(undoRecorded: true) || control == .committed(undoRecorded: false),
-                   "control: a move with its store present must commit; got \(control)")
-        try expect(fixture.readProjectFile(Fixture.projectA2).canvas?.tiles.first(where: { $0.id == tile })?.frame == moved,
-                   "control: the committed move must be on disk")
+            // Positive control: with its store present the same move commits.
+            let control = m.canvas.applyProgrammaticTileGeometry(
+                tileId: tile, in: Fixture.zoneA2, worldFrame: moved, action: .moveTile)
+            try expect(control == .committed(undoRecorded: true) || control == .committed(undoRecorded: false),
+                       "\(label) control: a move with its store present must commit; got \(control)")
+            let committed = shownFrame()
+            try expect(committed != nil && fixture.readProjectFile(Fixture.projectA2).canvas?.tiles.first(where: { $0.id == tile })?.frame == committed,
+                       "\(label) control: the committed move must be on disk")
+            if !autoLayout {
+                try expect(committed == moved, "\(label) control: the move must land where it was asked; got \(String(describing: committed))")
+            }
 
-        // The project's canvas goes missing while it is mounted, backups and all
-        // (a backup alone would be read in its place and written back).
-        let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
-        try FileManager.default.removeItem(at: layout.canvasFile)
-        try? FileManager.default.removeItem(at: layout.backupsDirectory)
-        let outcome = m.canvas.applyProgrammaticTileGeometry(
-            tileId: tile, in: Fixture.zoneA2, worldFrame: seeded, action: .moveTile)
-        try expect(outcome == .persistenceFailed,
-                   "THE reported bug. A move whose tile is in no saved canvas reported \(outcome); it was never "
-                   + "written anywhere")
-        let shown = m.canvas.tilesInWorldFrames(forZoneId: Fixture.zoneA2)?.first(where: { $0.id == tile })?.frame
-        try expect(shown == moved, "the failed move must be rolled back on screen; tile is at \(String(describing: shown))")
-        let message = m.delegate.qaWorkspaceManagementMessage ?? ""
-        try expect(message.contains("couldn't be saved"), "the failure must be shown; the notification reads \(message)")
-        return try writeArtifact("layout-commit-truth", ["outcome": "\(outcome)"])
+            // The project's canvas goes missing while it is mounted, backups and all
+            // (a backup alone would be read in its place and written back).
+            let layout = ProjectStoreLayout(projectRoot: fixture.projectRoots[Fixture.projectA2]!)
+            try FileManager.default.removeItem(at: layout.canvasFile)
+            try? FileManager.default.removeItem(at: layout.backupsDirectory)
+            let outcome = m.canvas.applyProgrammaticTileGeometry(
+                tileId: tile, in: Fixture.zoneA2, worldFrame: seeded, action: .moveTile)
+            try expect(outcome == .persistenceFailed,
+                       "\(label): THE reported bug. A move whose tile is in no saved canvas reported \(outcome); it was never "
+                       + "written anywhere")
+            try expect(shownFrame() == committed,
+                       "\(label): the failed move must be rolled back on screen; tile is at \(String(describing: shownFrame()))")
+            let message = m.delegate.qaWorkspaceManagementMessage ?? ""
+            try expect(message.contains("couldn't be saved"), "\(label): the failure must be shown; the notification reads \(message)")
+            // The toast cannot name tiles; the log it leaves behind must, or the
+            // next report of this is as undiagnosable as the last one.
+            let log = (try? String(contentsOf: fixture.appSupport.appendingPathComponent("layout-diagnostics.log"), encoding: .utf8)) ?? ""
+            try expect(log.contains(tile.uuidString) && log.contains("note"),
+                       "\(label): the refusal must be logged with the tile's id and kind; layout-diagnostics.log reads \"\(log)\"")
+            manifest[label] = ["outcome": "\(outcome)"]
+        }
+        return try writeArtifact("layout-commit-truth", manifest)
+    }
+
+    // MARK: - --spawn-arrange-commit-check
+
+    /// With auto-layout on (the default) every spawn but the agent's settled its
+    /// zone and committed that layout BEFORE the spawner wrote the new tile to
+    /// `canvas.json`. The commit found the new tile in no saved canvas, threw,
+    /// and rolled the tidy back: "That layout change couldn't be saved, so it was
+    /// undone: 1 moved tile(s) belong to no saved canvas." And because a gesture
+    /// sent every tile it captured, one unsaved tile anywhere in the workspace
+    /// failed every later drag as well.
+    static func runSpawnArrangeCommit() throws -> URL {
+        var manifest: [String: Any] = [:]
+        var failures: [String] = []
+        let ghostty = try GhosttyRuntimeContext()
+        // Each new tile's right edge lands 100pt inside note A1a, and the seeded
+        // A1b is not in gap-contact with A1a either, so the spawn's settle has to
+        // move something. Left of zone A1 is open canvas for the zone to grow into.
+        func spawnPoint(_ kind: TileKind) -> CGPoint {
+            let size = CanvasEngine.defaultFrame(for: kind)
+            return CGPoint(x: 740 - size.width / 2, y: 500)
+        }
+        func installFrame(_ kind: TileKind) -> TileFrame {
+            let size = CanvasEngine.defaultFrame(for: kind), point = spawnPoint(kind)
+            return TileFrame(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                             width: size.width, height: size.height)
+        }
+        func diagnostics(_ fixture: Fixture) -> String {
+            (try? String(contentsOf: fixture.appSupport.appendingPathComponent("layout-diagnostics.log"), encoding: .utf8)) ?? ""
+        }
+        /// Every commit the canvas sends, and how many the app refused.
+        func countRejections(_ canvas: CanvasNSView) -> () -> Int {
+            var rejected = 0
+            let persist = canvas.onLayoutCommitted
+            canvas.onLayoutCommitted = { transaction in
+                let ok = persist?(transaction) ?? true
+                if !ok { rejected += 1 }
+                return ok
+            }
+            return { rejected }
+        }
+        func onScreen(_ m: Fixture.Mounted) -> [UUID: TileFrame] {
+            Dictionary(uniqueKeysWithValues: (m.canvas.tilesInWorldFrames(forZoneId: Fixture.zoneA1) ?? []).map { ($0.id, $0.frame) })
+        }
+
+        // A. A spawn that has to settle its zone: note, terminal, browser.
+        let kinds: [(TileKind, (TileSpawner) -> Bool)] = [
+            (.note, { spawner in
+                if case .spawned = spawner.spawnNote(title: "settles", at: spawnPoint(.note)) { return true }
+                return false
+            }),
+            (.terminal, { spawner in
+                if case .spawned = spawner.spawnTerminal(
+                    profileId: "shell", at: spawnPoint(.terminal), allowTmuxPersistence: false) { return true }
+                return false
+            }),
+            (.browser, { spawner in
+                if case .spawned = spawner.spawnBrowser(url: "about:blank", at: spawnPoint(.browser)) { return true }
+                return false
+            }),
+        ]
+        for (tileKind, spawn) in kinds {
+            let kind = "\(tileKind)"
+            do {
+                let fixture = try Fixture(label: "spawn-arrange-\(kind)")
+                defer { fixture.dispose() }
+                fixture.ghostty = ghostty
+                try fixture.mount()
+                let m = try fixture.requireMounted(kind)
+                _ = pinPreferences(m.canvas, autoLayout: true)
+                try fixture.armByClick(Fixture.zoneA1)
+                fixture.drain()
+                let rejections = countRejections(m.canvas)
+                guard let spawner = m.runtime.controller(for: Fixture.projectA1)?.tileSpawner else {
+                    throw Failure(message: "\(kind): zone A1's project has no spawner")
+                }
+                let before = Set(onScreen(m).keys)
+                try expect(spawn(spawner), "\(kind): the spawn itself failed")
+                m.canvas.layoutSubtreeIfNeeded()
+                let shown = onScreen(m)
+                guard let newId = Set(shown.keys).subtracting(before).first, let newFrame = shown[newId] else {
+                    throw Failure(message: "\(kind): the spawned tile is not in zone A1's layer")
+                }
+                let message = m.delegate.qaWorkspaceManagementMessage ?? ""
+                try expect(!message.contains("couldn't be saved"),
+                           "\(kind): THE reported bug. The spawn's own settle was refused: \"\(message)\"")
+                try expect(rejections() == 0, "\(kind): \(rejections()) layout commit(s) were refused during the spawn")
+                try expect(diagnostics(fixture).isEmpty, "\(kind): a refusal was logged: \(diagnostics(fixture))")
+                // Positive control: the settle ran AND stuck. Rolled back, every
+                // tile is where it was before it: the seed, and the install frame.
+                var unsettled = Fixture.seed.tiles.filter { before.contains($0.key) }
+                unsettled[newId] = installFrame(tileKind)
+                try expect(shown != unsettled,
+                           "\(kind): the settle was rolled back; every tile is where it stood before it: \(shown)")
+                if let zone = m.canvas.zonePlacement(for: Fixture.zoneA1) {
+                    for (id, frame) in shown {
+                        try expect(contains(zone, frame), "\(kind): tile \(id.uuidString.suffix(4)) \(frame) sits outside its zone")
+                    }
+                }
+                fixture.drain()
+                let disk = Dictionary(uniqueKeysWithValues: (fixture.readProjectFile(Fixture.projectA1).canvas?.tiles ?? []).map { ($0.id, $0.frame) })
+                for (id, frame) in shown {
+                    try expect(disk[id] == frame,
+                               "\(kind): canvas.json holds \(String(describing: disk[id])) for tile \(id.uuidString.suffix(4)), "
+                               + "the screen shows the arranged \(frame)")
+                }
+                try fixture.remount(crash: false)
+                let remounted = onScreen(try fixture.requireMounted("\(kind) remount"))
+                for (id, frame) in shown {
+                    try expect(remounted[id] == frame,
+                               "\(kind): after a remount tile \(id.uuidString.suffix(4)) is at \(String(describing: remounted[id])), not \(frame)")
+                }
+                manifest[kind] = ["newTile": [newFrame.x, newFrame.y, newFrame.width, newFrame.height]]
+            } catch { failures.append("\(error)") }
+        }
+
+        // B. An unsaved tile elsewhere in the workspace must not fail a drag of a
+        //    saved one. Each gesture used to send every tile it captured.
+        do {
+            let fixture = try Fixture(label: "spawn-arrange-bystander")
+            defer { fixture.dispose() }
+            try fixture.mount()
+            let m = try fixture.requireMounted("bystander")
+            _ = pinPreferences(m.canvas, autoLayout: true)
+            let window = hostInWindow(m.canvas)
+            defer { window.orderOut(nil) }
+            // Installed into zone A2's layer and never written to any canvas.json.
+            let strayId = UUID()
+            var stray = Tile(id: strayId, kind: .note, title: "unsaved",
+                             frame: TileFrame(x: 400, y: 300, width: 240, height: 160),
+                             zPosition: .fromLegacyRank(9), runtimeRef: nil, metadata: TileMetadata(noteId: strayId))
+            stray.zoneId = Fixture.zoneA2
+            _ = m.canvas.installProjectTile(
+                tileView: NoteTileNSView(tile: stray, noteId: strayId, initialBody: ""), for: stray, targetZoneId: Fixture.zoneA2)
+            m.canvas.layoutSubtreeIfNeeded()
+            let rejections = countRejections(m.canvas)
+            guard let view = m.canvas.tileView(for: Fixture.noteA1a) else {
+                throw Failure(message: "bystander: note A1a has no view")
+            }
+            let seeded = Fixture.seed.tiles[Fixture.noteA1a]!
+            // Down and clear of A1b and the file tile: open space inside A1.
+            try dragTile(view, worldDelta: CGSize(width: 0, height: 420), window: window)
+            m.canvas.layoutSubtreeIfNeeded()
+            let shown = onScreen(m)[Fixture.noteA1a]
+            try expect(rejections() == 0,
+                       "bystander: THE second half. An unrelated unsaved tile in zone A2 failed the drag of a saved tile "
+                       + "(\(rejections()) refusal(s): \"\(m.delegate.qaWorkspaceManagementMessage ?? "")\")")
+            try expect(shown != nil && shown != seeded, "bystander: the drag was undone; A1a is back at \(String(describing: shown))")
+            fixture.drain()
+            let disk = fixture.readProjectFile(Fixture.projectA1).canvas?.tiles.first(where: { $0.id == Fixture.noteA1a })?.frame
+            try expect(disk == shown, "bystander: canvas.json holds \(String(describing: disk)), the screen \(String(describing: shown))")
+            manifest["bystander"] = ["dragged": shown.map { [$0.x, $0.y] } ?? []]
+        } catch { failures.append("\(error)") }
+        let artifact = try writeArtifact("spawn-arrange-commit", manifest)
+        guard failures.isEmpty else {
+            throw Failure(message: "\(failures.count) leg(s) failed:\n  " + failures.joined(separator: "\n  "))
+        }
+        return artifact
     }
 
     // MARK: - --refused-spawn-teardown-check

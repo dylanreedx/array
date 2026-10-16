@@ -289,7 +289,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func abandonConcreteGestureTransaction() {
         pendingGeometryEdit = nil
         autoLayoutGestureBaseline = nil
-        autoLayoutSwapLatch = nil
+        resetAutoLayoutMoveLatch()
     }
     private var zoneGesture: ZoneGesture = .none
     /// Tracks the latest placement during a render-model zone move (no ZoneLayer).
@@ -323,7 +323,12 @@ final class CanvasNSView: NSView, TokenThemed {
     var autoLayoutDefaults: UserDefaults = .standard
     private var lastAutoLayoutEnabled = CanvasAutoLayoutConfig.enabled()
     private var autoLayoutGestureBaseline: CanvasAutoLayoutEngine.Scene?
-    private var autoLayoutSwapLatch: UUID?
+    /// The live move's latch (a swap partner or a slot it slides into), the
+    /// slot it would drop into, and the pointer that drives both. Gesture state.
+    private var autoLayoutMoveLatch: CanvasAutoLayoutEngine.MoveLatch?
+    private(set) var autoLayoutLatchedSlot: TileFrame?
+    private var autoLayoutMovePointer: CGPoint?
+    private var autoLayoutPreferSwap = false
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
     private var autoLayoutUndoTimer: Timer?
@@ -487,8 +492,23 @@ final class CanvasNSView: NSView, TokenThemed {
         if autoLayoutDeferredUntilEdit { autoLayoutDeferredUntilEdit = false }
         if autoLayoutGestureBaseline == nil {
             autoLayoutGestureBaseline = autoLayoutScene()
-            autoLayoutSwapLatch = nil
+            resetAutoLayoutMoveLatch()
         }
+    }
+
+    private func resetAutoLayoutMoveLatch() {
+        autoLayoutMoveLatch = nil
+        autoLayoutLatchedSlot = nil
+        autoLayoutMovePointer = nil
+        autoLayoutPreferSwap = false
+    }
+
+    /// The pointer of a live tile move, in WINDOW coordinates, and whether ⌥ is
+    /// held. Whether the move slides in between tiles or swaps with one is
+    /// decided by where the pointer is, not by the tile's centre.
+    func setAutoLayoutMovePointer(windowPoint: NSPoint, preferSwap: Bool) {
+        autoLayoutMovePointer = CanvasEngine.screenToWorld(convert(windowPoint, from: nil), viewport: viewport)
+        autoLayoutPreferSwap = preferSwap
     }
 
     var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
@@ -509,10 +529,15 @@ final class CanvasNSView: NSView, TokenThemed {
             gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
             zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
             headerHeight: Double(ZoneChromeNSView.headerHeight),
-            latchedSwapTarget: autoLayoutSwapLatch
+            latched: autoLayoutMoveLatch,
+            pointer: autoLayoutMovePointer,
+            preferSwap: autoLayoutPreferSwap
         )
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
-        if case .tile = mutation { autoLayoutSwapLatch = transaction.swapTargetTileId }
+        if case .tile = mutation {
+            autoLayoutMoveLatch = transaction.moveLatch
+            autoLayoutLatchedSlot = transaction.latchedSlot
+        }
         let activeTileId: UUID?
         let activeZoneId: UUID?
         switch mutation {
@@ -784,7 +809,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
         autoLayoutGestureBaseline = nil
-        autoLayoutSwapLatch = nil
+        resetAutoLayoutMoveLatch()
         let current = autoLayoutScene()
         let oldTiles = firstWinsDictionary(baseline.tiles.map { ($0.id, $0.frame) })
         let oldZones = firstWinsDictionary(baseline.zones.map { ($0.zoneId, $0) })
@@ -2116,16 +2141,15 @@ final class CanvasNSView: NSView, TokenThemed {
         var scene = autoLayoutScene()
         guard let member = scene.tiles.first(where: { $0.id == tileId }),
               let zoneId = member.zoneId else { return }
-        // A latched exchange completes EXACTLY: the mover takes the displaced
-        // sibling's pre-gesture origin, so pointer jitter at the drop can never
-        // skew the inherited slot, and it settles PINNED — residents are pushed
-        // aside, never the mover into a different lane. (The latch and gesture
-        // baseline are still alive here — the gesture finishes in
-        // commitGeometryGesture.)
+        // A latched move completes EXACTLY: the mover takes its latched slot —
+        // a swapped sibling's pre-gesture origin, or the gap a slide opened —
+        // so pointer jitter at the drop can never skew it, and it settles
+        // PINNED: residents are pushed aside, never the mover into a different
+        // lane. (The latch and gesture baseline are still alive here — the
+        // gesture finishes in commitGeometryGesture.)
         var pinned = honorSnap
-        if !honorSnap, let latch = autoLayoutSwapLatch,
-           scene.tiles.first(where: { $0.id == latch })?.zoneId == zoneId,
-           let slot = autoLayoutGestureBaseline?.tiles.first(where: { $0.id == latch })?.frame {
+        if !honorSnap, autoLayoutMoveLatch != nil, let slot = autoLayoutLatchedSlot,
+           autoLayoutGestureBaseline?.tiles.first(where: { $0.id == tileId })?.zoneId == zoneId {
             applyLayoutTransaction(CanvasLayoutTransaction(
                 tileFrames: [tileId: TileFrame(x: slot.x, y: slot.y, width: member.frame.width, height: member.frame.height)]))
             pinned = true
@@ -2590,7 +2614,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
         guard !transaction.isNoOp else { return nil }
-        guard persistGeometrySnapshot(transaction.after) else {
+        guard persistGeometrySnapshot(transaction.after, changedFrom: transaction.before) else {
             _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
             return nil
         }
@@ -2841,7 +2865,7 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneIds: Set(snapshot.zones.map(\.zoneId)))
         lastInstalledGeometry = installed
         if notifyCommit {
-            guard persistGeometrySnapshot(installed) else {
+            guard persistGeometrySnapshot(installed, changedFrom: previous) else {
                 if let previous { _ = applyGeometrySnapshot(previous, notifyCommit: false) }
                 return false
             }
@@ -2850,13 +2874,23 @@ final class CanvasNSView: NSView, TokenThemed {
         return true
     }
 
-    private func persistGeometrySnapshot(_ snapshot: CanvasGeometrySnapshot) -> Bool {
+    /// Commits only the tiles whose geometry differs from `previous`. With
+    /// auto-layout on, a gesture captures every tile in the workspace, and
+    /// sending them all made one tile that is in no saved canvas (an unrelated
+    /// spawn mid-flight, a tile of a project whose file went missing) fail every
+    /// gesture anywhere. Unchanged tiles are already on disk as they are.
+    private func persistGeometrySnapshot(
+        _ snapshot: CanvasGeometrySnapshot,
+        changedFrom previous: CanvasGeometrySnapshot?
+    ) -> Bool {
         guard let onLayoutCommitted else { return true }
         let placements = firstWinsDictionary(allZonePlacements().map { ($0.zoneId, $0) })
+        let before = firstWinsDictionary((previous?.tiles ?? []).map { ($0.tileId, $0) })
+        let changedTiles = snapshot.tiles.filter { before[$0.tileId] != $0 }
         var layout = CanvasLayoutTransaction(
-            tileFrames: firstWinsDictionary(snapshot.tiles.map { ($0.tileId, $0.frame) }),
+            tileFrames: firstWinsDictionary(changedTiles.map { ($0.tileId, $0.frame) }),
             zonePlacements: [:],
-            tileZoneIds: firstWinsDictionary(snapshot.tiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
+            tileZoneIds: firstWinsDictionary(changedTiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
         )
         for zone in snapshot.zones {
             guard var placement = placements[zone.zoneId] else { continue }
@@ -6970,12 +7004,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// stale flat `canvasState` and laid the tile out against the DEPARTED zone's
     /// placement, so it never appeared in the zone the user was looking at.
     ///
-    /// This is the SPAWN: it grows the zone and settles it around the new tile.
+    /// This is the SPAWN: it grows the zone to hold the new tile. It does not
+    /// settle the zone, because that settle commits a layout transaction which
+    /// must find the new tile already saved: the caller persists, then calls
+    /// `arrangeAutoLayoutAfterSpawn` (`TileSpawner.persistThenArrange`).
     /// Replacing the view of a tile that already exists is
     /// `materializeProjectTile`, which moves nothing.
     @discardableResult
-    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil,
-                            arrangeAfterSpawn: Bool = true) -> ProjectTileTarget {
+    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil) -> ProjectTileTarget {
         guard let zoneId = targetZoneId ?? activeProjectZoneId,
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
@@ -7013,11 +7049,10 @@ final class CanvasNSView: NSView, TokenThemed {
         tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
-        // T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`
-        // already expands the zone, but only when auto-layout is enabled — with it off,
-        // a spawned tile sat outside its zone until someone dragged it.
+        // T7: unconditional. `arrangeAutoLayoutAfterSpawn` also expands the zone, but
+        // only when auto-layout is enabled — with it off, a spawned tile sat outside
+        // its zone until someone dragged it.
         growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
-        if arrangeAfterSpawn { arrangeAutoLayoutAfterSpawn(zoneId: zoneId) }
         return .zoneLayer(zoneId)
     }
 

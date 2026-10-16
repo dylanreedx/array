@@ -19,13 +19,18 @@ function initialFrames(mobile: boolean): Frames {
     browser: { x: 920, y: 680, width: mobile ? 330 : 560, height: 430 },
   };
 }
+// Where the demo cursor holds a dragged tile: on its header, at the offset
+// GuidedDemoController draws it (min(100, 30% of the width) from the left).
+// Native decides slide vs swap by the pointer, so the port is driven by it too.
+const grabPoint = (frame: Frame) => ({ x: frame.x + Math.min(100, frame.width * .3), y: frame.y + 20 });
 function movePrediction(baseline: Frames, active: string, requested: Frame) {
-  const live = solveMemberMove(baseline, active, requested, content, DEMO_GAP);
-  // A latched exchange takes the sibling's exact old origin. Before a swap,
-  // preview the nearest clear contact; honorSnap pins that destination on release.
-  const snapped = live.latch ? null : contactPlacement(requested,
+  const pointer = grabPoint(requested);
+  const live = solveMemberMove(baseline, active, requested, content, DEMO_GAP, null, pointer);
+  // A latched move (swap or slide) drops into its slot. Unlatched, preview the
+  // nearest clear contact; honorSnap pins that destination on release.
+  const snapped = live.latch !== null ? null : contactPlacement(requested,
     Object.entries(baseline).filter(([id]) => id !== active).map(([, frame]) => frame), content, DEMO_GAP);
-  return predictMove(baseline, active, requested, content, DEMO_GAP, null, snapped);
+  return predictMove(baseline, active, requested, content, DEMO_GAP, null, snapped, pointer);
 }
 const sources = [false, true].map(mobile => {
   const initial = initialFrames(mobile);

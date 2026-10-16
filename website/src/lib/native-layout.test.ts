@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'vitest';
 import fixtures from './native-layout.fixtures.json';
-import { clampIntoContent, contactPlacement, gapClear, isGapAdjacent, overlapsOrUnderGap, predictMove, pushAxis, resizeMembers, settleMembers, solveMemberMove, valid, type Frame, type Frames } from './native-layout';
+import { clampIntoContent, contactPlacement, gapClear, isGapAdjacent, memberRows, overlapsOrUnderGap, predictMove, pushAxis, resizeMembers, settleMembers, solveMemberMove, valid, type Frame, type Frames, type MoveLatch, type Point } from './native-layout';
 interface NativeFixtureScenario {
   id: string; active: string; baseline: Frames; content?: Frame;
-  moves: Record<string, { requested: Frame; snapped?: Frame | null; latchedInput: string | null; liveFrames: Frames; latch: string | null;
+  moves: Record<string, { requested: Frame; snapped?: Frame | null; latchedInput: MoveLatch; pointer?: Point | null; preferSwap?: boolean; liveFrames: Frames; latch: MoveLatch; slot?: Frame | null;
     releaseFrames: Frames; destination: Frame | null; passiveFrames: Frames; valid: boolean }>;
   resizes: Record<string, { active: string; requested: Frame; frames: Frames }>;
 }
@@ -17,7 +17,7 @@ describe('native member move and rest magnetism port', () => {
   test('pointer stays owned while pushes cascade horizontally and retreat restores baseline', () => {
     const baseline = { a: frame(0), b: frame(130), c: frame(250) };
     const pushed = solveMemberMove(baseline, 'a', frame(50), content, 8);
-    expect(pushed).toEqual({ latch: null, frames: { a: frame(50), b: frame(158), c: frame(266) } });
+    expect(pushed).toEqual({ latch: null, slot: null, frames: { a: frame(50), b: frame(158), c: frame(266) } });
     expect(solveMemberMove(baseline, 'a', frame(0), content, 8).frames).toEqual(baseline);
     expect(baseline.b.x).toBe(130);
     clear(pushed.frames);
@@ -104,6 +104,36 @@ describe('native member move and rest magnetism port', () => {
   });
 });
 
+describe('sliding a tile in between (pointer-driven)', () => {
+  // A B C D in one row, 8pt gaps, unequal widths; D is dragged by its title bar.
+  const row: Frames = { a: frame(0, 0, 100), b: frame(108, 0, 200), c: frame(316, 0, 120), d: frame(444, 0, 160) };
+  const grab = (x: number): Point => ({ x, y: 12 });
+  const dragged = (x: number): Frame => ({ ...row.d, x: x - row.d.width / 2 });
+  test('rows group overlapping vertical spans, left to right', () => {
+    expect(memberRows(['e', 'd', 'b', 'a', 'c'], { ...row, e: frame(0, 120) })).toEqual([['a', 'b', 'c', 'd'], ['e']]);
+  });
+  test("over B's outer quarter the row slides apart around D's slot", () => {
+    const pointer = grab(row.b.x + row.b.width / 8);
+    const live = solveMemberMove(row, 'd', dragged(pointer.x), content, 8, null, pointer);
+    expect(live.latch).toEqual({ row: 0, index: 1 });
+    expect(live.slot).toEqual({ ...row.d, x: 108 });
+    expect(live.frames.a).toEqual(row.a);
+    expect(live.frames.b).toEqual({ ...row.b, x: row.b.x + row.d.width + 8 });
+    expect(live.frames.c).toEqual({ ...row.c, x: row.c.x + row.d.width + 8 });
+    const drop = predictMove(row, 'd', dragged(pointer.x), content, 8, null, null, pointer).releaseFrames;
+    expect(Object.keys(drop).sort((p, q) => drop[p].x - drop[q].x)).toEqual(['a', 'd', 'b', 'c']);
+    clear(drop);
+  });
+  test("over B's middle half, or with option held, it still swaps", () => {
+    expect(solveMemberMove(row, 'd', dragged(208), content, 8, null, grab(208)).latch).toBe('b');
+    expect(solveMemberMove(row, 'd', dragged(133), content, 8, null, grab(133), true).latch).toBe('b');
+  });
+  test('without a pointer a move can only swap', () => {
+    expect(solveMemberMove(row, 'd', { ...row.d, x: 50 }, content, 8).latch).toBe('b');
+    expect(solveMemberMove(row, 'd', { ...row.d, x: 80 }, content, 8).latch).toBe('b');
+  });
+});
+
 describe('Swift-generated native parity', () => {
   test('fixture inventory is nonempty and generated from unchanged native bodies', () => {
     expect(nativeFixtures.scenarios.length).toBeGreaterThan(0);
@@ -114,9 +144,10 @@ describe('Swift-generated native parity', () => {
   for (const scenario of nativeFixtures.scenarios) {
     for (const [name, move] of Object.entries(scenario.moves)) {
       test(`${scenario.id}/${name}: live and actual release wrapper agree with Swift`, () => {
-        const result = predictMove(scenario.baseline, scenario.active, move.requested, scenario.content ?? nativeFixtures.content, nativeFixtures.gap, move.latchedInput, move.snapped ?? null);
+        const result = predictMove(scenario.baseline, scenario.active, move.requested, scenario.content ?? nativeFixtures.content, nativeFixtures.gap, move.latchedInput, move.snapped ?? null, move.pointer ?? null, move.preferSwap ?? false);
         expect(result.live.frames).toEqual(move.liveFrames);
-        expect(result.live.latch).toBe(move.latch);
+        expect(result.live.latch).toEqual(move.latch);
+        expect(result.live.slot).toEqual(move.slot ?? null);
         expect(result.releaseFrames).toEqual(move.releaseFrames);
         expect(result.destination).toEqual(move.destination);
         expect(result.passiveFrames).toEqual(move.passiveFrames);
