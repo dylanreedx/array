@@ -26149,6 +26149,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(openOverlay.zoneBadgeCount == 2, "nav mode overlay should render one ordinal badge per zone")
         try expect(openOverlay.hitTestPassesThrough, "nav mode overlay should not intercept mouse events")
         try expect(openOverlay.hintLine.contains("hjkl move") && openOverlay.hintLine.contains("esc exit"), "nav mode overlay should expose key hints")
+        // The pixel guard runs here, while the overlay is up and before any later
+        // assertion can stop the check short of it.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("nav-mode", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let screenshot = directory.appendingPathComponent("nav-overlay.png")
+        if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
+            overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
+            let pixels = VisualSnapshot.metrics(of: rep)
+            guard !pixels.isBlank else {
+                throw NSError(domain: "NavModeCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "nav-mode overlay render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
+            }
+        }
         let selectedRight = CanvasEngine.nearestTile(from: selectedTileId, direction: .right, tiles: overlayCanvas.canvasState.tiles)
         try expect(selectedRight == rightTileId, "nav mode l should select nearest tile to the right; got \(String(describing: selectedRight))")
         let selectedDown = CanvasEngine.nearestTile(from: selectedTileId, direction: .down, tiles: overlayCanvas.canvasState.tiles)
@@ -26332,6 +26349,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Switch to Main Canvas Workspace", "nav w should select a switch-workspace row, not New Workspace; selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
         navApp.profilePalette?.close()
 
+
+        overlayCanvas.setNavModeOverlayVisible(false)
+        try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
+
+        // Last on purpose: this is the documented KNOWN-RED product defect (⌘K
+        // ranks "Create Zone…" above a zone named Alpha for "z"). Run first, it
+        // hid every assertion above behind its failure.
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("z", keyCode: 6))
         try expect(navApp.focusBroker.activeSurface == .modal(.palette), "nav z should hand off from nav mode to the palette modal")
@@ -26343,26 +26367,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Jump to Alpha", "nav z should default-select the first jump-to-zone row (Alpha); selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
         try expect(zoneFilteredNames.contains { $0.contains("Review Zone") }, "nav z filtered rows must include the Review Zone project row; filtered=\(zoneFilteredNames)")
         navApp.profilePalette?.close()
-
-        overlayCanvas.setNavModeOverlayVisible(false)
-        try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
-
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("qa-runs", isDirectory: true)
-            .appendingPathComponent(timestamp, isDirectory: true)
-            .appendingPathComponent("nav-mode", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        overlayCanvas.setNavModeOverlayVisible(true)
-        let screenshot = directory.appendingPathComponent("nav-overlay.png")
-        if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
-            overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
-            try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
-            let pixels = VisualSnapshot.metrics(of: rep)
-            guard !pixels.isBlank else {
-                throw NSError(domain: "NavModeCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "nav-mode overlay render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
-            }
-        }
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "nav-mode",
