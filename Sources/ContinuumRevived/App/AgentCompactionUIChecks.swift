@@ -443,6 +443,13 @@ func runAgentCompactionUIChecks() async throws {
     try await expectEventually("failed-path seed did not start") {
         failedRunner.snapshotOperations() == ["run:seed"]
     }
+    // The runner having STARTED is not the supervisor having SEEN the turn:
+    // compaction is refused until `turnStarted` (or a session id) reaches the
+    // record, and both arrive on a later main-queue turn. Waiting on the runner
+    // alone raced, and lost as soon as `send` did any work of its own.
+    try await expectEventually("failed-path seed turn never reached the supervisor") {
+        failedSupervisor.records[failedID]?.latestTurnAt != nil
+    }
     guard await failedSupervisor.accept(.compact(AgentCompactionRequest()), for: failedID) == .accepted,
           await failedSupervisor.accept(.queue(AgentPrompt("held")), for: failedID) == .accepted else {
         throw Failure(description: "failed-path queue setup was refused")

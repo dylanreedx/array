@@ -624,17 +624,23 @@ public struct AgentTablePayload: Codable, Equatable, Sendable {
     /// The original Markdown, retained so copy still yields a real table and so
     /// nothing is lost when a row is wider than the renderer chooses to draw.
     public var source: String
+    /// Per column, whether the delimiter row asked for an alignment (`:--`,
+    /// `:-:`, `--:`) rather than leaving it unsaid (`---`). Optional so payloads
+    /// persisted before it existed still decode; nil reads as "unsaid".
+    public var explicitAlignments: [Bool]?
 
     public init(
         header: [[AgentInline]] = [],
         rows: [[[AgentInline]]] = [],
         alignments: [Alignment] = [],
-        source: String = ""
+        source: String = "",
+        explicitAlignments: [Bool]? = nil
     ) {
         self.header = header
         self.rows = rows
         self.alignments = alignments
         self.source = source
+        self.explicitAlignments = explicitAlignments
     }
 
     /// Widest row, header included — the column count a renderer must lay out.
@@ -644,6 +650,32 @@ public struct AgentTablePayload: Codable, Equatable, Sendable {
 
     public func alignment(forColumn index: Int) -> Alignment {
         index < alignments.count ? alignments[index] : .leading
+    }
+
+    /// The alignment a renderer should draw: the delimiter row's when it said
+    /// one, otherwise trailing for a column whose every non-empty body cell is a
+    /// number (so units line up) and leading for everything else.
+    public func effectiveAlignment(forColumn index: Int) -> Alignment {
+        if let explicit = explicitAlignments, index < explicit.count, explicit[index] {
+            return alignment(forColumn: index)
+        }
+        let values = rows.compactMap { index < $0.count ? Self.plainText($0[index]) : nil }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !values.isEmpty, values.allSatisfy(Self.isNumeric) else { return .leading }
+        return .trailing
+    }
+
+    /// "12", "1,024", "~1,800", "-3.5", "42%", "≈4k", "$9" — a number, perhaps
+    /// approximate, perhaps with a unit suffix. Not "R5", not "v2", not a date.
+    public static func isNumeric(_ text: String) -> Bool {
+        text.range(
+            of: #"^[~≈<>≤≥±+\-−$€£]?\s*\d[\d,._]*\s*(%|[kKmMbB])?$"#,
+            options: .regularExpression) != nil
+    }
+
+    private static func plainText(_ inlines: [AgentInline]) -> String {
+        inlines.map(\.plainTextForTable).joined()
     }
 }
 
@@ -696,5 +728,18 @@ public struct AgentBlock: Identifiable, Codable, Equatable, Sendable {
         self.sourceRange = sourceRange
         self.payload = payload
         self.children = children
+    }
+}
+
+extension AgentInline {
+    /// The visible characters of this inline, without any markup — what a
+    /// table's numeric-column test reads.
+    var plainTextForTable: String {
+        switch self {
+        case let .text(text), let .code(text): return text
+        case let .emphasis(children), let .strong(children), let .link(_, _, children):
+            return children.map(\.plainTextForTable).joined()
+        case .softBreak, .hardBreak: return " "
+        }
     }
 }

@@ -100,7 +100,7 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
     private func drawTrack(in rect: NSRect, theme: TokenTheme) {
         let track = NSBezierPath(ovalIn: rect)
         track.lineWidth = Self.lineWidth(zoom: pageZoom)
-        if presentation.state == .unknown || presentation.state == .stale {
+        if trackIsDashed {
             track.setLineDash([CGFloat(pageZoom.scaled(1.6)), CGFloat(pageZoom.scaled(2.2))], count: 2, phase: 0)
         }
         LineToken.separator.color.nsColor(for: theme).setStroke()
@@ -140,21 +140,31 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
         tick.stroke()
     }
 
-    private func drawStateOverlay(in rect: NSRect, theme: TokenTheme) {
-        let marker: String?
+    /// Dashed means "this ring is not a whole measurement": no window, or a
+    /// reading that has gone stale. An agent that has sent nothing yet is a
+    /// solid, empty track — there is nothing to doubt.
+    private var trackIsDashed: Bool {
+        presentation.state == .unknown || presentation.state == .stale
+    }
+
+    /// The glyph drawn in the ring's centre, or nil for none.
+    private var overlayMarker: String? {
         switch presentation.state {
-        case .known:
-            marker = nil
+        case .known, .empty:
+            return nil
         case .warning:
-            marker = "!"
+            return "!"
         case .critical:
-            marker = "!"
+            return "!"
         case .unknown:
-            marker = "?"
+            return "?"
         case .stale:
-            marker = "•"
+            return "•"
         }
-        guard let marker else { return }
+    }
+
+    private func drawStateOverlay(in rect: NSRect, theme: TokenTheme) {
+        guard let marker = overlayMarker else { return }
         let font = NSFont.systemFont(
             ofSize: CGFloat(pageZoom.scaled(presentation.state == .unknown ? 9 : 8)), weight: .bold)
         let color = markerColor(for: presentation.state, theme: theme)
@@ -175,7 +185,7 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
             return AccentToken.accentApproval.color.nsColor(for: theme)
         case .critical:
             return AccentToken.accentFailed.color.nsColor(for: theme)
-        case .unknown, .stale:
+        case .unknown, .stale, .empty:
             return TextToken.textSecondary.color.nsColor(for: theme)
         }
     }
@@ -188,7 +198,7 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
             return AccentToken.accentApproval.color.nsColor(for: theme)
         case .critical:
             return AccentToken.accentFailed.color.nsColor(for: theme)
-        case .unknown, .stale:
+        case .unknown, .stale, .empty:
             return TextToken.textSecondary.color.nsColor(for: theme)
         }
     }
@@ -198,5 +208,8 @@ final class AgentRadialContextMeterView: NSView, TokenThemed, AgentPageZoomScala
     var qaLabel: String { presentation.label }
     var qaDetail: String { presentation.detailText }
     var qaThresholdFraction: Double? { presentation.providerThresholdFraction }
+    /// What `draw(_:)` puts in the ring's centre and whether its track is dashed.
+    var qaOverlayMarker: String? { overlayMarker }
+    var qaTrackIsDashed: Bool { trackIsDashed }
     var qaIntrinsicSide: CGFloat { intrinsicContentSize.width }
 }

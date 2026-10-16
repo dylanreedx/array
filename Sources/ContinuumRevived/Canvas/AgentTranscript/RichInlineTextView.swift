@@ -402,12 +402,18 @@ final class RichInlineTextView: NSTextView, NSTextViewDelegate {
         writeSelection(plain: selectedPlainText, markdown: selectedMarkdown)
     }
 
+    /// A host that composes its own string (a table) can say what a selection
+    /// of it means as plain text and as Markdown; nil keeps the defaults.
+    var plainTextForSelection: ((NSRange) -> String?)?
+    var markdownForSelection: ((NSRange) -> String?)?
+
     private var selectedPlainText: String {
-        (string as NSString).substring(with: selectedRange())
+        plainTextForSelection?(selectedRange()) ?? (string as NSString).substring(with: selectedRange())
     }
 
     private var selectedMarkdown: String {
-        AgentTextStyleResolver.markdown(for: runs, selectedRange: selectedRange())
+        markdownForSelection?(selectedRange())
+            ?? AgentTextStyleResolver.markdown(for: runs, selectedRange: selectedRange())
     }
 
     private func writeSelection(plain: String, markdown: String) {

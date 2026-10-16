@@ -109,6 +109,10 @@ public enum AgentContextOccupancy {
 /// every turn start) blanked the ring, the next usage snapshot dropped the
 /// policy tick, and a cumulative result block painted the run's sum.
 public enum AgentContextMeter {
+    /// The source of the reading seeded for an agent that has sent no request
+    /// yet. Zero tokens under it is a fact about the session, not a measurement.
+    public static let freshSessionSource = AgentContextWindowTelemetrySource.unknown("fresh-session")
+
     /// The prompt tokens a snapshot states for its request, or nil when it
     /// states none. Cumulative accounting never counts, even when an older
     /// derivation left used/max on it.

@@ -2846,8 +2846,12 @@ final class AgentSupervisor {
         // Keep only the first local prompt's visible text for the explicit naming
         // action. Local image paths/@path argv capabilities are never copied into
         // this memory-only naming context.
-        if firstPromptByAgent[id] == nil, let firstPromptText {
-            firstPromptByAgent[id] = firstPromptText
+        // The titler's material is the visible prompt up to the one-shot's own
+        // 8000-character bound — NOT `firstPromptText`, which is a stored label
+        // already cut to 240 characters, so the titler only ever saw that much.
+        let capturesFirstPrompt = firstPromptByAgent[id] == nil && firstPromptText != nil
+        if capturesFirstPrompt, let titlerMaterial = Self.titlerMaterial(from: prompt) {
+            firstPromptByAgent[id] = titlerMaterial
         }
         // This is the ONE automatic naming funnel. The shared resolver applies
         // prompt, source-item, then parent-relative ordinal precedence; a later
@@ -2922,6 +2926,12 @@ final class AgentSupervisor {
         // session that has gone idle since; a new turn means they were taken.
         settleStaleDeliveringSteers(for: id)
         startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
+        // Title from the prompt NOW, not after the first turn: a long first turn
+        // showed the raw prompt as its name for as long as it ran. The titler is
+        // detached and never blocks the turn; `.turnCompleted` stays the retry,
+        // inside the same attempt budget. Last, after every write-back above,
+        // so no local copy of the record can clobber the naming marker.
+        if capturesFirstPrompt { refreshDerivedName(for: id) }
         return true
     }
 
@@ -3385,6 +3395,20 @@ final class AgentSupervisor {
     @discardableResult
     func send(_ prompt: String, to id: AgentID) -> Bool {
         send(AgentPrompt(prompt), to: id)
+    }
+
+    /// The first prompt as the titler reads it: bounded to the one-shot's
+    /// limit, local paths removed, controls dropped and whitespace collapsed —
+    /// and, unlike a stored label, not cut to the storage length. Only called
+    /// once `visibleNamingText` has accepted the prompt as nameable.
+    private nonisolated static func titlerMaterial(from prompt: AgentPrompt) -> String? {
+        let bounded = String(prompt.text.prefix(AgentNameOneShot.maximumPromptLength))
+        let visible = SecretRedactor.removeLocalPathReferences(bounded)
+        let printable = String(String.UnicodeScalarView(visible.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) || CharacterSet.whitespacesAndNewlines.contains($0)
+        }))
+        let collapsed = printable.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.isEmpty ? nil : collapsed
     }
 
     private nonisolated static func visibleNamingText(
@@ -5019,8 +5043,8 @@ final class AgentSupervisor {
 
     // MARK: - Derived name refresh (harness title, then generated fallback)
 
-    /// Give one agent the best title currently available to it. Called on every
-    /// turn completion.
+    /// Give one agent the best title currently available to it. Called when the
+    /// first prompt is sent and on every turn completion.
     ///
     /// The ladder is authority-ordered and stops at the first rung that can
     /// speak: a person's rename ends it outright; otherwise claude's own
@@ -5114,6 +5138,9 @@ final class AgentSupervisor {
         // Marking the agent done on the first refusal loses every capped agent's
         // only chance; never marking it retries a missing binary on every turn
         // forever. A small counter covers both without having to tell them apart.
+        // One in flight already — the send-time attempt, or an explicit Generate
+        // Name — is not superseded by an automatic one, and costs no attempt.
+        guard nameGenerationRequestIDs[id] == nil else { return }
         let attempts = automaticNamingAttempts[id] ?? 0
         guard attempts < Self.maximumAutomaticNamingAttempts else { return }
         automaticNamingAttempts[id] = attempts + 1
@@ -5490,6 +5517,39 @@ final class AgentSupervisor {
         // In-memory first (freshest), then the record's persisted telemetry so
         // a resumed session seeds real prior occupancy instead of "unknown".
         return contextWindowSnapshots[id] ?? record.lastContextWindow
+    }
+
+    /// The reading a tile seeds for an agent that has sent nothing yet, or nil
+    /// once it has. Zero tokens over the model's window when one is known (an
+    /// honest 0%), and over no window otherwise (the empty ring).
+    ///
+    /// A pure READ of the same ladder live telemetry uses, minus its side
+    /// effects: no provider value to remember, no "Context window unknown"
+    /// notice. A fresh tile has not reported anything for either to be about.
+    func freshSessionContextWindow(for id: AgentID) -> AgentContextWindowSnapshot? {
+        guard let record = records[id], record.latestPromptAt == nil, record.latestTurnAt == nil else {
+            return nil
+        }
+        var window: AgentContextWindowResolution?
+        if let harness = record.harness {
+            let model = record.resolvedModelId ?? record.model
+            // No `stated` and no `legacyRemembered`: `resolve` writes nothing.
+            var resolution = contextWindowResolver.resolve(
+                harness: harness, model: model,
+                piStore: harness == .pi ? AgentModelCatalog.shared.contextWindow(for: model, harness: .pi) : nil)
+            if resolution.tokens == nil, let legacy = record.providerContextWindows[model], legacy > 0 {
+                resolution = AgentContextWindowResolution(tokens: legacy, source: .remembered, model: model)
+            }
+            window = resolution
+        }
+        return AgentContextWindowSnapshot(
+            usedTokens: 0,
+            maxTokens: window?.tokens,
+            windowResolutionSource: window?.source,
+            contextModel: window?.model,
+            observedAt: record.createdAt,
+            source: AgentContextMeter.freshSessionSource,
+            freshness: .live)
     }
 
     /// Provider → shared remembered exact model → bundled → pi-only store → unknown.
@@ -6710,6 +6770,9 @@ final class AgentSupervisor {
     /// de-dupe meant to protect replay silently ate the second `/status` and
     /// left the second `/clear` with no boundary marker at all, while `accept`
     /// still returned `.accepted` and the composer still cleared the draft.
+    /// QA: how many Array-owned notices this agent has been sent this session.
+    func qaArrayOwnedNoticeCount(for id: AgentID) -> Int { arrayOwnedNoticeCounts[id] ?? 0 }
+
     private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
         let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
         arrayOwnedNoticeCounts[id] = ordinal
@@ -12496,14 +12559,17 @@ private func checkAutomaticNameRefresh<Failure: Error>(
     let manualSupervisor = AgentSupervisor(
         store: manualStore, makeRunner: { _ in manualRunner },
         nameTitlerCommand: { $0 == .codex ? manual.command : nil }, nameGenerationTimeout: 10)
+    // Renamed BEFORE its first prompt: the send-time titler is an automatic
+    // path too, and a person's name must shut it off as well.
     let manualID = manualSupervisor.spawn(
-        role: nil, prompt: "a prompt that will be renamed", cwd: root, harness: .codex,
+        role: nil, prompt: nil, cwd: root, harness: .codex,
         model: models[.codex]!, thinking: "medium")
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
-        throw fail("the manual-rename fixture agent's runner never started")
-    }
     guard manualSupervisor.rename(agentID: manualID, to: "Dylan's own title") else {
         throw fail("the manual rename fixture call itself was refused")
+    }
+    guard manualSupervisor.send("a prompt that will be renamed", to: manualID),
+          await waitUntil(timeout: 5, pollInterval: 0.02, { manualRunner.runCount > 0 }) else {
+        throw fail("the manual-rename fixture agent's runner never started")
     }
     try await completeTurn(manualSupervisor, manualRunner, manualID, "t1")
     guard manualSupervisor.records[manualID]?.displayName == "Dylan's own title",
@@ -12547,7 +12613,96 @@ private func checkAutomaticNameRefresh<Failure: Error>(
     }
     claudeRunner.releaseRunAfterStop()
 
-    return "automatic name refresh: the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
+    // -- 6. every harness: the title lands DURING the first turn, from the
+    // prompt alone. A long first turn used to show the raw prompt as its name
+    // for as long as the turn ran (6.5 minutes in Dylan's report), because the
+    // only trigger was turnCompleted. The turn here is held and never
+    // completes. The titler sees the first 8000 characters and nothing past. --
+    let filler = String(repeating: "lorem ipsum dolor ", count: 600)
+    let inside = "Investigate why the zone layout engine drops tiles " + filler
+    let longPrompt = String(inside.prefix(7_990)) + "INSIDE8000" + " BEYONDMARK " + filler.prefix(1_000)
+    guard longPrompt.count > 9_000,
+          String(longPrompt.prefix(AgentNameOneShot.maximumPromptLength)).hasSuffix("INSIDE8000") else {
+        throw fail("the long-prompt fixture lost its 8000-character edge")
+    }
+    for harness in [AgentHarness.claudeCode, .codex, .pi] {
+        let early = try FakeTitlerCLI(
+            binDirectory: root.appendingPathComponent("early-bin-\(harness)", isDirectory: true), harness: harness,
+            log: root.appendingPathComponent("early-log-\(harness)", isDirectory: true),
+            behavior: .succeed("Diagnose dropped zone tiles"))
+        let earlyRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let earlySupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("early-support-\(harness)", isDirectory: true)),
+            makeRunner: { _ in earlyRunner },
+            nameTitlerCommand: { $0 == harness ? early.command : nil }, nameGenerationTimeout: 10,
+            claudeSessionTitle: { _, _ in nil })
+        let earlyID = earlySupervisor.spawn(
+            role: nil, prompt: longPrompt, cwd: root, harness: harness,
+            model: models[harness]!, thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+            earlySupervisor.records[earlyID]?.displayNameSource == .generated
+        }) else {
+            throw fail("\(harness): a held first turn kept its prompt name for 5s instead of being titled at send: source=\(String(describing: earlySupervisor.records[earlyID]?.displayNameSource)) name=\(String(describing: earlySupervisor.records[earlyID]?.displayName.prefix(40))) titlerCalls=\(early.invocationCount)")
+        }
+        guard earlySupervisor.isRunning(earlyID),
+              earlySupervisor.records[earlyID]?.displayName == "Diagnose dropped zone tiles",
+              early.invocationCount == 1 else {
+            throw fail("\(harness): the send-time title must land while the turn is still running, once: running=\(earlySupervisor.isRunning(earlyID)) name=\(String(describing: earlySupervisor.records[earlyID]?.displayName)) calls=\(early.invocationCount)")
+        }
+        guard let stdin = early.recorded("stdin", 1),
+              stdin.contains("Investigate why the zone layout engine drops tiles"),
+              stdin.contains("INSIDE8000"),
+              !stdin.contains("BEYONDMARK") else {
+            let seen = early.recorded("stdin", 1) ?? ""
+            throw fail("\(harness): the titler must read the first 8000 characters of the prompt and nothing past them (stdin \(seen.count) chars, ends \(String(seen.suffix(60)).debugDescription))")
+        }
+        earlyRunner.releaseRunAfterStop()
+    }
+
+    // -- 7. every harness: a titler that fails at send leaves the turn alone,
+    // and the first completed turn is the retry that lands the title. --
+    for harness in [AgentHarness.claudeCode, .codex, .pi] {
+        let retryBin = root.appendingPathComponent("retry-bin-\(harness)", isDirectory: true)
+        let retryLog = root.appendingPathComponent("retry-log-\(harness)", isDirectory: true)
+        let failing = try FakeTitlerCLI(binDirectory: retryBin, harness: harness, log: retryLog, behavior: .fail)
+        let retryRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        let retrySupervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("retry-support-\(harness)", isDirectory: true)),
+            makeRunner: { _ in retryRunner },
+            nameTitlerCommand: { $0 == harness ? failing.command : nil }, nameGenerationTimeout: 10,
+            claudeSessionTitle: { _, _ in nil })
+        let retryID = retrySupervisor.spawn(
+            role: nil, prompt: "retry the title after a failed first attempt", cwd: root, harness: harness,
+            model: models[harness]!, thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+            failing.invocationCount == 1
+                && retrySupervisor.qaActiveNameGenerationCount == 0
+                && retrySupervisor.qaActiveHarnessTitleCount == 0
+        }) else {
+            throw fail("\(harness): the first prompt did not reach the titler at send (calls=\(failing.invocationCount))")
+        }
+        guard retrySupervisor.isRunning(retryID),
+              retrySupervisor.records[retryID]?.displayNameSource == .prompt else {
+            throw fail("\(harness): a failed send-time titler must leave the turn running and the prompt name in place")
+        }
+        // Same executable path, now succeeding: the retry is the next attempt.
+        _ = try FakeTitlerCLI(binDirectory: retryBin, harness: harness, log: retryLog,
+                              behavior: .succeed("Retry a failed title"))
+        let retryReply = "I will start by reading the failing titler log."
+        guard retryRunner.emit(.contentDelta(threadId: "t", turnId: "t1", streamKind: .assistant, delta: retryReply)) else {
+            throw fail("\(harness): the retry fixture runner had no live handler")
+        }
+        try await completeTurn(retrySupervisor, retryRunner, retryID, "t1")
+        guard retrySupervisor.records[retryID]?.displayName == "Retry a failed title",
+              retrySupervisor.records[retryID]?.displayNameSource == .generated,
+              failing.invocationCount == 2,
+              failing.recorded("stdin", 2)?.contains(retryReply) == true else {
+            throw fail("\(harness): the first completed turn did not retry the failed send-time title: name=\(String(describing: retrySupervisor.records[retryID]?.displayName)) calls=\(failing.invocationCount)")
+        }
+        retryRunner.releaseRunAfterStop()
+    }
+
+    return "automatic name refresh: claude/codex/pi title a held first turn from its prompt at send (first 8000 characters, nothing past), a failed send-time title is retried by the first completed turn, the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
 }
 
 /// A fake claude / codex / pi on disk, for the session-titler witnesses. It is
@@ -12820,10 +12975,13 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
         guard args == expectedArgs else {
             throw fail("\(harness): argv differs from production's contract:\n got \(args)\nwant \(expectedArgs)")
         }
+        // The title is asked for at SEND, from the request alone: the reply
+        // does not exist yet. (A retry after a failed send-time title carries
+        // it — `checkAutomaticNameRefresh` case 7.)
         guard !argsText.contains(request), !argsText.contains(reply),
-              stdin.contains(request), stdin.contains(reply),
+              stdin.contains(request), !stdin.contains(reply),
               harness != .codex || stdin.hasPrefix(AgentNameOneShot.titleRules) else {
-            throw fail("\(harness): the request/reply did not travel on stdin only: stdin=\(stdin.debugDescription)")
+            throw fail("\(harness): the request did not travel on stdin only: stdin=\(stdin.debugDescription)")
         }
         guard listing.isEmpty, cwd != root.resolvingSymlinksInPath().path,
               !fileManager.fileExists(atPath: cwd) else {
@@ -12959,8 +13117,12 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
         binDirectory: bin, harness: .claudeCode,
         log: root.appendingPathComponent("log", isDirectory: true), behavior: .succeed("Session investigation"))
 
+    // The ladder runs from the FIRST PROMPT's send as well as from every turn
+    // completion, so each race below interleaves with the read that send
+    // starts. `beforeSend` lets a case put a session file in place first.
     func fixture(
-        _ name: String, blockRead: DispatchSemaphore? = nil, readEntered: LockedFlag = LockedFlag()
+        _ name: String, blockRead: DispatchSemaphore? = nil, readEntered: LockedFlag = LockedFlag(),
+        beforeSend: ((URL) throws -> Void)? = nil
     ) async throws -> (AgentSupervisor, ScriptedAgentRunner, AgentID, URL) {
         let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent(name))
@@ -12974,14 +13136,18 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
                 return ClaudeSessionTitleReader.title(homeURL: home, cwd: cwd, sessionId: sessionId)
             })
         let id = supervisor.spawn(
-            role: nil, prompt: "investigate a Claude session without a title", cwd: root,
+            role: nil, prompt: nil, cwd: root,
             harness: .claudeCode, model: "anthropic/claude-fixture-opus", thinking: "medium")
-        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount > 0 }),
-              let record = supervisor.records[id] else { throw fail("\(name): runner did not start") }
+        guard let record = supervisor.records[id] else { throw fail("\(name): spawn failed") }
         let location = AgentSupervisor.claudeSessionLocation(for: record)
         let file = ClaudeSessionTranscriptReader.sessionFileURL(
             homeURL: home, cwd: location.cwd, sessionId: location.sessionId)
         try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try beforeSend?(file)
+        guard supervisor.send("investigate a Claude session without a title", to: id),
+              await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount > 0 }) else {
+            throw fail("\(name): runner did not start")
+        }
         return (supervisor, runner, id, file)
     }
     func emit(_ runner: ScriptedAgentRunner) throws {
@@ -12993,7 +13159,9 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
 
     // A native title is still the free first rung: adopted, revised, and the
     // titler is never spawned.
-    let (native, nativeRunner, nativeID, nativeFile) = try await fixture("native-title")
+    let (native, nativeRunner, nativeID, nativeFile) = try await fixture("native-title", beforeSend: {
+        try "{\"type\":\"ai-title\",\"aiTitle\":\"Native summary\"}\n".write(to: $0, atomically: true, encoding: .utf8)
+    })
     defer { nativeRunner.releaseRunAfterStop() }
     for title in ["Native summary", "Native summary", "Revised summary"] {
         try "{\"type\":\"ai-title\",\"aiTitle\":\"\(title)\"}\n".write(to: nativeFile, atomically: true, encoding: .utf8)
@@ -13015,7 +13183,6 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
     let (manual, manualRunner, manualID, _) = try await fixture(
         "rename-during-read", blockRead: readGate, readEntered: entered)
     defer { manualRunner.releaseRunAfterStop() }
-    try emit(manualRunner)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { entered.wasSet }),
           manual.rename(agentID: manualID, to: "Human during read") else {
         throw fail("could not interleave a rename with the claude title read")
@@ -13035,7 +13202,6 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
     let (pending, pendingRunner, pendingID, _) = try await fixture(
         "request-during-read", blockRead: pendingGate, readEntered: pendingEntered)
     defer { pendingRunner.releaseRunAfterStop() }
-    try emit(pendingRunner)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, { pendingEntered.wasSet }),
           let pendingRequest = pending.beginNameGeneration(agentID: pendingID) else {
         throw fail("could not interleave a naming request with the claude title read")
@@ -13053,7 +13219,6 @@ private func checkClaudeTitleLadderRaces<Failure: Error>(
     defer { titler.release() }
     let (late, lateRunner, lateID, _) = try await fixture("rename-during-titler")
     defer { lateRunner.releaseRunAfterStop() }
-    try emit(lateRunner)
     guard await waitUntil(timeout: 5, pollInterval: 0.02, {
         fileManager.fileExists(atPath: titler.log.appendingPathComponent("started-1").path)
     }), late.records[lateID]?.namingRequest != nil,

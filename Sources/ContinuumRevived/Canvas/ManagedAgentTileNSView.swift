@@ -1733,16 +1733,11 @@ final class ManagedAgentTileNSView: TileNSView {
             compactContextWindow = contextSeed
         }
         if compactContextWindow == nil,
-           let record = supervisor.records[agentID],
-           record.latestPromptAt == nil, record.latestTurnAt == nil {
-            // Zero prior turns establishes an empty prompt, but no denominator
-            // has been published. Keep the unknown ring with a zero-token count
-            // until the supervisor publishes the resolved window.
-            compactContextWindow = AgentContextWindowSnapshot(
-                usedTokens: 0,
-                observedAt: record.createdAt,
-                source: .unknown("fresh-session"),
-                freshness: .live)
+           let freshSeed = supervisor.freshSessionContextWindow(for: agentID) {
+            // Zero prior turns: the supervisor states the model's window when it
+            // knows one (0%) and none otherwise (the empty ring). The tile looks
+            // nothing up itself.
+            compactContextWindow = freshSeed
         }
         refreshCompactStatus()
     }
