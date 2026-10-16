@@ -26137,7 +26137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(revealInspectedBrowserWorked, "Reveal Inspected Browser did not focus the linked browser tile")
 
         let browserSection = SettingsSchema.sections().first { $0.id == "browser" }
-        let settingsCopy = browserSection?.fields.map(\.label).joined(separator: " ") ?? ""
+        // What the Browser pane shows: each row's label and its secondary line.
+        let settingsCopy = browserSection?.rows.flatMap { [$0.field.label, $0.help ?? ""] }.joined(separator: " ") ?? ""
         let settingsCopyDistinguishesSafariAndArrayInspector = settingsCopy.contains("Safari Web Inspector")
             && settingsCopy.contains("native WebKit inspection")
             && settingsCopy.contains("Array Inspector")

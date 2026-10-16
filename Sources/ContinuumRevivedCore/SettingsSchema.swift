@@ -244,7 +244,7 @@ public enum SettingsSchema {
                 SettingsRow(.url(key: DefaultBrowserURL.userDefaultsKey, label: "New browser tiles open", default: DefaultBrowserURL.fallback),
                             keywords: ["home page", "default url", "start page"]),
                 SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
-                            help: "Inspect browser tiles from Safari's Develop menu. Array's own inspector is always available from a tile.",
+                            help: "Safari Web Inspector is native WebKit inspection, opened from Safari's Develop menu. Array Inspector opens inside Array with focused Elements, Console, Styles, and Network panels, and needs no setting.",
                             keywords: ["devtools", "developer", "inspect", "debug"]),
             ]),
         ])
@@ -422,9 +422,12 @@ public enum SettingsSchema {
         var result = typed
         let tuning = SettingsSection(id: "advanced", title: "Advanced", fields: retainedTuningFields())
         for section in sections() + [tuning] {
-            let category = SettingsCategory(sectionID: section.id)
             for field in section.fields {
                 guard let key = field.key else { continue }
+                // Categorised by what the setting IS, not the pane it sits in: the
+                // navigation keys share the Keyboard pane with the shortcuts table
+                // but are value settings of their own category.
+                let category = key.hasPrefix("continuum.keymap.") ? .navigation : SettingsCategory(sectionID: section.id)
                 let id = SettingID(rawValue: key)
                 guard seen.insert(id).inserted else { continue }
                 result.append(AnySettingDefinition(
