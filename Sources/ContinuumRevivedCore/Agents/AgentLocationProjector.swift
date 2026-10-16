@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import Foundation
 
 // Queue 91 P2 — private runtime observations and the canonical host-local
@@ -283,9 +284,16 @@ public enum AgentToolDetailDisplaySanitizer {
 ///
 /// Values are BOUNDED AT CONSTRUCTION and the store's sanitizer runs on top —
 /// two independent caps, because this struct crosses from translator code that
-/// handles raw provider JSON. Translators whitelist per tool and per key; a
-/// command BODY never enters (claude's `Bash.description` is the sanctioned
-/// human summary; `command` itself is not carried).
+/// handles raw provider JSON. Translators whitelist per tool and per key.
+///
+/// A SHELL tool's command crosses under the one key `command` (and, from codex
+/// app-server, `cwd` when it differs from the agent's home). This is the
+/// host-local channel only — `AgentToolDetailStore` redacts and bounds it, and
+/// it never reaches an `AgentRuntimeEvent`, the semantic document or a sync
+/// payload (I5). It used to be dropped here too, which left every command row
+/// reading "Shell" or "Bash" with nothing to say what ran, while the same
+/// command's OUTPUT already crossed as `outputPreview`. Any other tool's body
+/// (a delegation prompt, an MCP tool's arguments) still never enters.
 public struct AgentToolDetailObservation: Equatable, Sendable {
     public enum FileAction: String, Equatable, Sendable { case add, edit, write, delete, rename, unknown }
     public struct FileChange: Equatable, Sendable {
@@ -337,6 +345,11 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     }
 
     public static let maxFieldValueCharacters = 200
+    /// A shell command is the row's headline and its expanded body, so it gets
+    /// a bound of its own; 200 characters cut an ordinary multi-line command.
+    public static let maxCommandCharacters = 4000
+    public static let shellCommandKey = "command"
+    public static let shellCwdKey = "cwd"
     public static let maxOutputCharacters = 2000
     public static let maxFields = 6
 
@@ -348,6 +361,15 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     public let exitCode: Int?
     public let fileChanges: [FileChange]
     public let parentItemID: String?
+    /// An ended shell's outcome when it is not simply "exited": timed out,
+    /// interrupted, or moved to the background by its harness.
+    public let shellOutcome: AgentShellStatus?
+    /// The provider's OWN measurement of the call (codex app-server's
+    /// `durationMs`). Preferred over the gap between two observation instants,
+    /// which measures when frames arrived — codex app-server emits a quick
+    /// command's start and end in the same millisecond, so that gap read 0.0s
+    /// whatever the command took.
+    public let reportedDuration: TimeInterval?
     public let observedAt: Date
 
     public init(
@@ -358,17 +380,22 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         exitCode: Int? = nil,
         fileChanges: [FileChange] = [],
         parentItemID: String? = nil,
+        shellOutcome: AgentShellStatus? = nil,
+        reportedDuration: TimeInterval? = nil,
         observedAt: Date
     ) {
         self.phase = phase
         self.toolName = toolName.map { String($0.prefix(80)) }
         self.fields = fields.prefix(Self.maxFields).map {
-            (key: String($0.key.prefix(48)), value: String($0.value.prefix(Self.maxFieldValueCharacters)))
+            let limit = $0.key == Self.shellCommandKey ? Self.maxCommandCharacters : Self.maxFieldValueCharacters
+            return (key: String($0.key.prefix(48)), value: String($0.value.prefix(limit)))
         }
         self.outputPreview = outputPreview.map { String($0.prefix(Self.maxOutputCharacters)) }
         self.exitCode = exitCode
         self.fileChanges = Array(fileChanges.prefix(24))
         self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
+        self.shellOutcome = shellOutcome
+        self.reportedDuration = reportedDuration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         self.observedAt = observedAt
     }
 
@@ -377,6 +404,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
             && lhs.fields.elementsEqual(rhs.fields, by: { $0.key == $1.key && $0.value == $1.value })
             && lhs.outputPreview == rhs.outputPreview && lhs.exitCode == rhs.exitCode
             && lhs.fileChanges == rhs.fileChanges && lhs.parentItemID == rhs.parentItemID
+            && lhs.shellOutcome == rhs.shellOutcome && lhs.reportedDuration == rhs.reportedDuration
             && lhs.observedAt == rhs.observedAt
     }
 }

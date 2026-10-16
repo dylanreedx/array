@@ -84,8 +84,10 @@ private func checkPiWhatObservationSideChannel() {
     // `.plans/45` S2 — the host-local contract, split. The side channel now
     // deliberately carries what a human would say the tool is DOING — the
     // search pattern and a bounded result preview, capped at construction and
-    // store-sanitized again before presentation. What stays forbidden even
-    // here: command bodies, edit payloads, reasoning text.
+    // store-sanitized again before presentation. A shell's command crosses
+    // too (launch polish, item J), REDACTED at the translator: its token value
+    // must already be gone. What stays forbidden even here: secrets inside a
+    // command, edit payloads, reasoning text.
     let localDescription = String(describing: box.observations)
     for secret in [secretCommand, "SECRET-COMMAND-BODY", "SECRET-REASONING-BODY", "SECRET-OLD", "SECRET-NEW"] {
         expect(!localDescription.contains(secret),
@@ -104,8 +106,10 @@ private func checkPiWhatObservationSideChannel() {
     let readEnd = toolDetails.first { $0.0 == "read-1" && $0.1.phase == .ended }?.1
     expect(readEnd?.outputPreview == "SECRET-FILE-BODY",
            "Agent What: the read result preview must ride the toolDetail channel, got \(String(describing: readEnd?.outputPreview))")
-    expect(toolDetails.filter { $0.0 == "bash-1" }.allSatisfy { $0.1.fields.isEmpty },
-           "Agent What: a shell call must carry NO detail fields — the command body never crosses")
+    let bashFields = toolDetails.filter { $0.0 == "bash-1" && $0.1.phase == .started }.flatMap(\.1.fields)
+    expect(bashFields.map(\.key) == [AgentToolDetailObservation.shellCommandKey]
+               && bashFields.first?.value.contains("deploy --token [REDACTED]") == true,
+           "Agent What: a shell call must carry only its command, with the token redacted, got \(bashFields)")
     expect(!((box.observations[0] as Any) is any Encodable),
            "Agent What: host-local runtime observations must not become Encodable")
 

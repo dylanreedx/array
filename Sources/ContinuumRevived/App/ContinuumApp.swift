@@ -1121,6 +1121,19 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--shell-tool-row-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ShellToolRowChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("shell-tool-row check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--transcript-provider-parity-check") {
             do {
                 try TranscriptProviderParityChecks.run()

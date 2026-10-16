@@ -2471,6 +2471,10 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             // when it repeats the action sentence.
             payload.summary = AgentToolDetailPresenter.observableDisclosureText(detail)
             payload.presentedTrailingDetailText = collapsed.durationText
+            // Launch polish, item J — a shell row is drawn from the command it
+            // ran, normalised across harnesses. Presentation only, like the
+            // fields around it.
+            payload.presentedShell = AgentToolDetailPresenter.shellInvocation(detail)
             // `.plans/45` S4.2 — the expanded pane's output, from the store's
             // sanitized bounded text, with its truncation/redaction surfaced
             // honestly (1c.8, 1c.9). Never from `.commandOutput` blocks.
@@ -3264,7 +3268,9 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     output: endDetail?.outputPreview,
                     status: mapped,
                     exitCode: endDetail?.exitCode,
-                    endedAt: endDetail?.observedAt
+                    endedAt: endDetail?.observedAt,
+                    shellOutcome: endDetail?.shellOutcome,
+                    reportedDuration: endDetail?.reportedDuration
                 ))
                 self?.refreshToolDetailPresentation()
             }
@@ -3366,6 +3372,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 exitCode: detail.exitCode ?? existing.exitCode,
                 fileChanges: detail.fileChanges.isEmpty ? existing.fileChanges : detail.fileChanges,
                 parentItemID: detail.parentItemID ?? existing.parentItemID,
+                shellOutcome: detail.shellOutcome ?? existing.shellOutcome,
+                reportedDuration: detail.reportedDuration ?? existing.reportedDuration,
                 observedAt: detail.observedAt
             )
         } else {
@@ -3511,6 +3519,15 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }),
               case let .toolCall(payload) = presentedToolBlock(block).payload else { return nil }
         return payload.name
+    }
+    /// The whole presented tool block, exactly as the host hands it to
+    /// `ToolCallRenderer`, so a witness can render the real row from it and read
+    /// the words a reader sees.
+    func qaPresentedToolBlock(for blockID: AgentNodeID) -> AgentBlock? {
+        guard let block = rows.compactMap(\.block).first(where: { $0.id == blockID }) else { return nil }
+        let presented = presentedToolBlock(block)
+        guard case .toolCall = presented.payload else { return nil }
+        return presented
     }
     /// TR-01 — the whole presented diff payload, so a witness can drive the real
     /// renderer with it and assert the SENTENCE the user reads, not just the

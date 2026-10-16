@@ -33,6 +33,7 @@ final class ToolCallRenderer: AgentBlockRendering {
             statusLabel: payload.status.agentToolStatusPresentation.label,
             outputText: payload.presentedOutputText,
             outputNote: payload.presentedOutputNote,
+            shell: payload.presentedShell,
             width: width,
             expanded: expanded,
             zoom: context.pageZoom
@@ -107,6 +108,14 @@ final class ToolCallView: NSView {
     private var compactSummary = ""
     private var hasDisclosureDetail = false
     private var status: AgentItemStatus = .pending
+    /// Launch polish, item J — the command this row ran, when it is a shell
+    /// row that knows one. Drives the monospaced headline, the exit badge and
+    /// the expanded command body.
+    private(set) var shell: AgentShellInvocation?
+    /// The last summary measurement `layout()` made, keyed by everything that
+    /// decides it (`performance.md` trap 2): an expanded row re-laid out by a
+    /// pan, a zoom or the 1 Hz live clock must not re-measure unchanged text.
+    private var summaryHeightCache: (key: SummaryMeasureKey, height: CGFloat)?
     private var context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
 
     override init(frame frameRect: NSRect) {
@@ -199,7 +208,10 @@ final class ToolCallView: NSView {
             blockID: blockID,
             default: payload.status.agentToolDefaultExpanded
         )
+        shell = payload.presentedShell
         titleLabel.stringValue = Self.safeSingleLine(payload.name, fallback: "Tool")
+        titleLabel.font = shellRow == nil || shellRow?.description != nil
+            ? NSFont.token(.label, zoom: zoom) : NSFont.token(.bodyMono, zoom: zoom)
         // `.plans/45` S4 — the title is the action sentence; the tool NAME
         // lives in the icon, the tooltip and the AX label.
         let toolName = payload.presentedToolNameText ?? payload.name
@@ -208,8 +220,12 @@ final class ToolCallView: NSView {
         iconView.image = Self.symbolImage(forToolNamed: toolName)
         toolTip = payload.presentedToolNameText.map { Self.safeSingleLine($0, fallback: "Tool") }
         let presentation = payload.status.agentToolStatusPresentation
-        statusLabel.stringValue = Self.statusText(
-            status: payload.status, duration: payload.presentedTrailingDetailText)
+        statusLabel.stringValue = payload.presentedShell == nil
+            ? Self.statusText(status: payload.status, duration: payload.presentedTrailingDetailText)
+            : Self.shellStatusText(
+                status: Self.glyphStatus(payload.status, shell: payload.presentedShell),
+                duration: payload.presentedTrailingDetailText,
+                badge: payload.presentedShell?.badgeText)
         // S3: a running row carries its own live clock ("◐ 1m 12s"), on one
         // shared 1 Hz tick for every running row, so a long bash visibly lives.
         if payload.status.agentToolIsTerminal {
@@ -237,19 +253,22 @@ final class ToolCallView: NSView {
         // whose only body line repeated its title hid that line and kept the
         // height it would have needed. Every single-file `Read` row is exactly
         // that shape, so the commonest row on the surface reserved a blank line.
+        outputText = payload.presentedOutputText?.isEmpty == false ? payload.presentedOutputText : nil
+        outputNote = payload.presentedOutputNote
         let presented = Self.presentedSummary(
             title: titleLabel.stringValue,
             summary: payload.summary,
-            statusLabel: presentation.label
+            statusLabel: presentation.label,
+            shell: shellRow,
+            hasOutput: outputText != nil
         )
         disclosureText = presented.disclosureText
         compactSummary = presented.compactLine
-        outputText = payload.presentedOutputText?.isEmpty == false ? payload.presentedOutputText : nil
-        outputNote = payload.presentedOutputNote
         hasDisclosureDetail = presented.lineCount > 1 || outputText != nil
         if !hasDisclosureDetail { isExpanded = false }
+        summaryLabel.font = NSFont.token(shellRow == nil ? .body : .bodyMono, zoom: zoom)
         summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
-        summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
+        summaryLabel.maximumNumberOfLines = isExpanded ? Self.expandedLineLimit(shell: shellRow) : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         outputTextView.apply(text: outputText ?? "", context: context)
         outputNoteLabel.stringValue = outputNote ?? ""
@@ -261,6 +280,68 @@ final class ToolCallView: NSView {
         applyAccessibility(status: payload.status)
         applyTokens()
         needsLayout = true
+    }
+
+    /// The shell shape when it has a command to show. A shell whose command
+    /// never crossed keeps the ordinary row, and still gets its exit badge.
+    private var shellRow: AgentShellInvocation? { shell.flatMap { $0.command.isEmpty ? nil : $0 } }
+
+    /// The headline of a shell row: the command in mono, or — when claude
+    /// described it — the description first and the command after it in
+    /// secondary mono, on the one line every other row uses.
+    private func applyShellTitle(theme: TokenTheme) {
+        guard let shellRow else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let mono = NSFont.token(.bodyMono, zoom: zoom)
+        let primary = context.tokens.primaryText.color.nsColor(for: theme)
+        guard let description = shellRow.description else {
+            titleLabel.attributedStringValue = NSAttributedString(string: shellRow.headline, attributes: [
+                .font: mono, .foregroundColor: primary, .paragraphStyle: paragraph,
+            ])
+            return
+        }
+        let title = NSMutableAttributedString(
+            string: (description.first.map { String($0).uppercased() } ?? "") + description.dropFirst(),
+            attributes: [.font: NSFont.token(.label, zoom: zoom), .foregroundColor: primary, .paragraphStyle: paragraph])
+        title.append(NSAttributedString(string: "  " + shellRow.headline, attributes: [
+            .font: mono,
+            .foregroundColor: context.tokens.secondaryText.color.nsColor(for: theme),
+            .paragraphStyle: paragraph,
+        ]))
+        titleLabel.attributedStringValue = title
+    }
+
+    struct SummaryMeasureKey: Equatable {
+        let text: String
+        let width: CGFloat
+        let expanded: Bool
+        let zoom: AgentPageZoom
+        let mono: Bool
+    }
+
+    private func cachedSummaryHeight(width: CGFloat) -> CGFloat {
+        let key = SummaryMeasureKey(
+            text: summaryLabel.stringValue, width: width, expanded: isExpanded, zoom: zoom, mono: shellRow != nil)
+        if let cached = summaryHeightCache, cached.key == key { return cached.height }
+        let height = Self.measuredSummaryHeight(key.text, width: width, expanded: isExpanded, zoom: zoom, shell: shellRow)
+        summaryHeightCache = (key, height)
+        return height
+    }
+
+    /// How many lines an expanded body may take. A shell command is the body,
+    /// so it gets room for a short script.
+    static func expandedLineLimit(shell: AgentShellInvocation?) -> Int { shell == nil ? 12 : 24 }
+
+    /// The status a shell row's glyph reports. A timeout is a failure to the
+    /// reader even when claude reported the call itself as completed.
+    static func glyphStatus(_ status: AgentItemStatus, shell: AgentShellInvocation?) -> AgentItemStatus {
+        guard status.agentToolIsTerminal, let shell else { return status }
+        switch shell.status {
+        case .timedOut, .failed: return .failed
+        case .interrupted: return .interrupted
+        case .running, .succeeded, .backgrounded: return status
+        }
     }
 
     func applyAccessibility(name: String, status: AgentItemStatus) {
@@ -275,6 +356,8 @@ final class ToolCallView: NSView {
     private func applyAccessibility(status: AgentItemStatus) {
         let presentation = status.agentToolStatusPresentation
         var parts = ["Tool", toolNameForAccessibility, presentation.label]
+        if let shellRow { parts.insert(shellRow.headline, at: 2) }
+        if let badge = shell?.badgeText { parts.append(badge) }
         if let trailingDetailText, !trailingDetailText.isEmpty, status.agentToolIsTerminal {
             parts.append("took \(trailingDetailText)")
         }
@@ -342,8 +425,7 @@ final class ToolCallView: NSView {
         let outputVisible = !outputScrollView.isHidden
         let summaryHeight: CGFloat
         if outputVisible {
-            summaryHeight = summaryLabel.isHidden ? 0 : Self.measuredSummaryHeight(
-                summaryLabel.stringValue, width: bounds.width, expanded: isExpanded, zoom: zoom)
+            summaryHeight = summaryLabel.isHidden ? 0 : cachedSummaryHeight(width: bounds.width)
         } else {
             summaryHeight = max(0, bounds.height - detailY - Self.detailBottomInset(zoom: zoom))
         }
@@ -408,12 +490,17 @@ final class ToolCallView: NSView {
         // same visual weight as live work, so a turn the reader stopped still
         // read as running. Any settled row recedes; a FAILURE is the exception
         // handled below, where only the status colour pulls the eye.
-        alphaValue = status.agentToolIsTerminal && status != .failed ? Opacity.receded : Opacity.full
+        // A timed-out command is a failure to the reader even when its harness
+        // reported the call itself as completed (claude moves it to the
+        // background), so it neither recedes nor loses the attention colour.
+        let needsAttention = status == .failed || shell?.needsAttention == true
+        alphaValue = status.agentToolIsTerminal && !needsAttention ? Opacity.receded : Opacity.full
         titleLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
         summaryLabel.textColor = context.tokens.primaryText.color.nsColor(for: theme)
-        statusLabel.textColor = status == .failed
+        statusLabel.textColor = needsAttention
             ? AgentLineRole.attention.color.nsColor(for: theme)
             : context.tokens.secondaryText.color.nsColor(for: theme)
+        applyShellTitle(theme: theme)
         disclosureButton.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         iconView.contentTintColor = context.tokens.secondaryText.color.nsColor(for: theme)
         clusterRail.backgroundColor = isClusterMember
@@ -473,6 +560,24 @@ final class ToolCallView: NSView {
         var lineCount: Int
     }
 
+    /// A shell row has no collapsed subtitle — its headline already says what
+    /// ran — so consecutive commands stack as one line each, like a terminal
+    /// log. Expanded, the body is the whole command (wrapped, selectable) and
+    /// where it ran, above the output pane. A short one-line command with
+    /// nothing else to show has no disclosure at all.
+    static func presentedSummary(
+        title: String, summary: String?, statusLabel: String,
+        shell: AgentShellInvocation?, hasOutput: Bool
+    ) -> PresentedSummary {
+        guard let shell else { return presentedSummary(title: title, summary: summary, statusLabel: statusLabel) }
+        let command = shell.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let addsSomething = hasOutput || shell.description != nil || shell.cwd != nil
+            || command.contains(where: \.isNewline) || command.count > 60
+        guard addsSomething else { return PresentedSummary(disclosureText: "", compactLine: "", lineCount: 0) }
+        let body = shell.disclosureText
+        return PresentedSummary(disclosureText: body, compactLine: "", lineCount: body.isEmpty ? 0 : 2)
+    }
+
     static func presentedSummary(
         title: String, summary: String?, statusLabel: String
     ) -> PresentedSummary {
@@ -506,6 +611,18 @@ final class ToolCallView: NSView {
     /// Those are the states where the number matters most. Every terminal state
     /// that knows its duration now shows it; an unfinished row keeps the wordy
     /// label, because "In progress" is the fact and there is no span yet.
+    /// Launch polish, item J — a shell row's trailing column: the badge, then
+    /// the duration, then the glyph — "exit 2 · 1.2s !". A success carries no
+    /// badge, and with no real duration it is the glyph alone: a run of quick
+    /// commands must not repeat "Completed" down the log. A running row keeps
+    /// the ordinary live label.
+    static func shellStatusText(status: AgentItemStatus, duration: String?, badge: String?) -> String {
+        guard status.agentToolIsTerminal else { return statusText(status: status, duration: duration) }
+        let glyph = status.agentToolStatusPresentation.glyph
+        let lead = [badge, duration].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return lead.isEmpty ? glyph : "\(lead) \(glyph)"
+    }
+
     static func statusText(status: AgentItemStatus, duration: String?) -> String {
         let presentation = status.agentToolStatusPresentation
         guard let duration, !duration.isEmpty, status.agentToolIsTerminal else {
@@ -550,6 +667,7 @@ final class ToolCallView: NSView {
         statusLabel: String,
         outputText: String? = nil,
         outputNote: String? = nil,
+        shell: AgentShellInvocation?,
         width: CGFloat,
         expanded: Bool,
         zoom: AgentPageZoom = .default
@@ -557,12 +675,16 @@ final class ToolCallView: NSView {
         _ = outputNote
         let zoomedRowHeight = rowHeight(zoom: zoom)
         let zoomedDetailBottomInset = detailBottomInset(zoom: zoom)
-        let presented = presentedSummary(title: title, summary: summary, statusLabel: statusLabel)
+        // Derived exactly as `apply` derives it.
+        let shellRow = shell.flatMap { $0.command.isEmpty ? nil : $0 }
+        let presented = presentedSummary(
+            title: title, summary: summary, statusLabel: statusLabel,
+            shell: shellRow, hasOutput: outputText?.isEmpty == false)
         let visibleSummary = expanded ? presented.disclosureText : presented.compactLine
         var height: CGFloat
         if !visibleSummary.isEmpty {
             height = zoomedRowHeight
-                + measuredSummaryHeight(visibleSummary, width: width, expanded: expanded, zoom: zoom)
+                + measuredSummaryHeight(visibleSummary, width: width, expanded: expanded, zoom: zoom, shell: shellRow)
                 + zoomedDetailBottomInset
         } else {
             height = zoomedRowHeight
@@ -584,7 +706,8 @@ final class ToolCallView: NSView {
     }
 
     static func measuredSummaryHeight(
-        _ summary: String, width: CGFloat, expanded: Bool, zoom: AgentPageZoom = .default
+        _ summary: String, width: CGFloat, expanded: Bool, zoom: AgentPageZoom = .default,
+        shell: AgentShellInvocation?
     ) -> CGFloat {
         // Measured against the INDENTED width the detail actually gets.
         let lines = summary.split(whereSeparator: { $0.isNewline }).map(String.init)
@@ -593,10 +716,10 @@ final class ToolCallView: NSView {
         let rect = (measuredText as NSString).boundingRect(
             with: NSSize(width: available, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: NSFont.token(.body, zoom: zoom)]
+            attributes: [.font: NSFont.token(shell == nil ? .body : .bodyMono, zoom: zoom)]
         )
-        let lineHeight = CGFloat(zoom.lineHeight(for: .body))
-        let lineLimit: CGFloat = expanded ? 12 : 1
+        let lineHeight = CGFloat(zoom.lineHeight(for: shell == nil ? .body : .bodyMono))
+        let lineLimit = CGFloat(expanded ? expandedLineLimit(shell: shell) : 1)
         return min(ceil(rect.height), lineHeight * lineLimit)
     }
 
@@ -605,7 +728,7 @@ final class ToolCallView: NSView {
         isExpanded.toggle()
         context.actions.setExpanded(isExpanded, blockID: blockID)
         summaryLabel.stringValue = isExpanded ? disclosureText : compactSummary
-        summaryLabel.maximumNumberOfLines = isExpanded ? 12 : 1
+        summaryLabel.maximumNumberOfLines = isExpanded ? Self.expandedLineLimit(shell: shellRow) : 1
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         syncOutputPaneVisibility()
         disclosureButton.apply(expanded: isExpanded, title: titleLabel.stringValue, zoom: zoom)

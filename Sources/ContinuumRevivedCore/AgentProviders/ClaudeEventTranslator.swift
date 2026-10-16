@@ -36,6 +36,10 @@ public struct ClaudeEventTranslator {
     private var itemKinds: [String: ItemKind] = [:]
     private var semanticSignalsByItemID: [String: Set<AgentSemanticSignalKind>] = [:]
     private var seenItemIds = Set<String>()
+    /// Tool-use ids of SHELL calls, so their results are read for an exit code
+    /// and outcome. `itemKinds` cannot say: every unknown tool is
+    /// `.commandExecution` there.
+    private var shellToolUseIDs = Set<String>()
     /// Provider-owned Claude children currently inside their one mirrored turn,
     /// keyed by the announcing Agent/Task tool-use id. Store the synthetic turn
     /// id at announcement time so the matching result cannot accidentally derive
@@ -387,8 +391,9 @@ public struct ClaudeEventTranslator {
             }
             // `.plans/45` S2 — the detail supply behind the tool rows. Same
             // side channel, one level richer: whitelisted argument FIELDS
-            // (query/url/pattern/basename/description — a command body never),
+            // (query/url/pattern/basename/description, and a SHELL's command),
             // bound at construction and store-sanitized on top.
+            if !isSubagent, AgentShellObservation.isShellTool(name) { shellToolUseIDs.insert(id) }
             if let onRuntimeObservation, !isSubagent {
                 onRuntimeObservation(.toolDetail(itemId: id, detail: AgentToolDetailObservation(
                     phase: .started,
@@ -460,6 +465,10 @@ public struct ClaudeEventTranslator {
               let content = message["content"] as? [[String: Any]]
         else { return [] }
         var events: [AgentRuntimeEvent] = []
+        // `tool_use_result` describes the frame's one result; with several it
+        // cannot be attributed, so it is read only when there is exactly one.
+        let resultCount = content.filter { ($0["type"] as? String) == "tool_result" }.count
+        let toolUseResult = resultCount == 1 ? object["tool_use_result"] : nil
         for block in content {
             guard (block["type"] as? String) == "tool_result",
                   let toolUseId = block["tool_use_id"] as? String
@@ -469,9 +478,17 @@ public struct ClaudeEventTranslator {
             // Emitted BEFORE `.itemCompleted` (observation delivery is FIFO),
             // so the host can fold it into the one recordEnd it issues there.
             if let onRuntimeObservation, !isSubagent {
+                let preview = Self.toolResultPreview(block["content"])
+                // A shell's exit code is the result's "Exit code N" first
+                // line; the row badges it, so the output keeps the rest.
+                let shell = shellToolUseIDs.remove(toolUseId) != nil
+                    ? AgentShellObservation.claudeResult(content: preview, isError: isError, toolUseResult: toolUseResult)
+                    : AgentShellObservation.ShellResult(output: preview)
                 onRuntimeObservation(.toolDetail(itemId: toolUseId, detail: AgentToolDetailObservation(
                     phase: .ended,
-                    outputPreview: Self.toolResultPreview(block["content"]),
+                    outputPreview: shell.output,
+                    exitCode: shell.exitCode,
+                    shellOutcome: shell.outcome,
                     observedAt: now()
                 )))
             }
@@ -753,7 +770,8 @@ public struct ClaudeEventTranslator {
         }
         // KEY-driven for the same reason pi's is: a tool name this switch has
         // never heard of still deserves its query shown, and the privacy rule
-        // is about which KEYS may cross — never `command`, never a prompt.
+        // is about which KEYS may cross — never a prompt, and `command` only
+        // for a shell tool (below).
         var fields: [(key: String, value: String)] = []
         if let query = string("query") { fields.append((key: "query", value: query)) }
         if let pattern = string("pattern") { fields.append((key: "pattern", value: pattern)) }
@@ -763,6 +781,12 @@ public struct ClaudeEventTranslator {
         }
         if let description = string("description") {
             fields.append((key: "description", value: description))
+        }
+        // Launch polish, item J — a SHELL's command, host-local only. It is
+        // the one body that crosses, because it is what the row is about.
+        if AgentShellObservation.isShellTool(toolName),
+           let command = AgentShellObservation.commandField(input["command"]) {
+            fields.append(command)
         }
         // A ROLE ID, and role ids are publishable — `RoleRegistry` reads them out
         // of project files and the inbox already shows them. `prompt` on the same
