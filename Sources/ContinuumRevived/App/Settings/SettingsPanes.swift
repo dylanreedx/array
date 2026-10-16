@@ -262,6 +262,12 @@ private struct SettingsPaneForm: View {
                 ForEach(pane.groups, id: \.id) { group in
                     if group.rows.count == 1, case .shortcuts = group.rows[0].field {
                         SettingsShortcutSections(model: model)
+                    } else if group.rows.count == 1, case .custom("canvasBackground", _) = group.rows[0].field {
+                        if let editor = model.canvasBackground {
+                            CanvasBackgroundSections(editor: editor, model: model)
+                        } else {
+                            Section(group.title ?? "") { InfoRow(text: "The canvas background is not available here.") }
+                        }
                     } else {
                         Section {
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in

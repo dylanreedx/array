@@ -31,6 +31,8 @@ final class SettingsModel {
     @ObservationIgnored var onSignIn: ((AgentHarness) -> Void)?
     /// `.custom` rows that embed an AppKit view, by id.
     @ObservationIgnored var customViews: [String: () -> NSView] = [:]
+    /// The Appearance pane's canvas background rows.
+    @ObservationIgnored var canvasBackground: CanvasBackgroundEditor?
     /// Presents the import panel for custom sounds; nil runs it app-modally.
     @ObservationIgnored weak var hostWindow: NSWindow?
 
@@ -485,7 +487,9 @@ final class SettingsModel {
         renderedAnchorsByPane[pane]?[anchor] = count > 0 ? count : nil
         if count <= 0, pane == selectedPaneID { anchorFrames[anchor] = nil }
     }
-    func noteFrames(_ frames: [String: CGRect]) { anchorFrames.merge(frames) { $1 } }
+    /// The pane's full set of row frames, as the latest layout reported it: rows
+    /// that left the pane leave this too.
+    func noteFrames(_ frames: [String: CGRect]) { anchorFrames = frames }
 
     /// True when the anchor's row lies inside the pane's visible scroll viewport.
     func isAnchorVisible(_ anchor: String) -> Bool {

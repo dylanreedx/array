@@ -57,9 +57,32 @@ private struct SettingsAnchorModifier: ViewModifier {
     }
 }
 
+/// A row's scroll target, accessibility identifier and frame, WITHOUT a census
+/// entry: for rows that come and go with the state of their section (an image's
+/// opacity, a custom colour), which search reaches through their section's
+/// always-present row instead.
+private struct SettingsFrameModifier: ViewModifier {
+    let anchor: String
+
+    func body(content: Content) -> some View {
+        content
+            .id(anchor)
+            .accessibilityIdentifier(anchor)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SettingsAnchorFrameKey.self,
+                    value: [anchor: proxy.frame(in: .named(SettingsCoordinateSpace.pane))])
+            })
+    }
+}
+
 extension View {
     func settingsAnchor(_ anchor: String, model: SettingsModel) -> some View {
         modifier(SettingsAnchorModifier(anchor: anchor, model: model))
+    }
+
+    func settingsFrame(_ anchor: String) -> some View {
+        modifier(SettingsFrameModifier(anchor: anchor))
     }
 }
 

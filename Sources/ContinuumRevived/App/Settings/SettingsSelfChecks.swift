@@ -110,7 +110,7 @@ enum SettingsSelfChecks {
         var sentinels: [String: NSView] = [:]
         let model = SettingsModel(sections: sections, defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }),
                                   isCompanionEnabled: true)
-        for id in ["canvasBackground", "companion"] {
+        for id in ["companion"] {
             let sentinel = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 80))
             sentinels[id] = sentinel
             model.customViews[id] = { mounts[id, default: 0] += 1; return sentinel }
@@ -136,13 +136,19 @@ enum SettingsSelfChecks {
             let stray = rendered.subtracting(expected)
             try expect(stray.isEmpty, "\(section.title): rendered rows the registry does not know: \(stray.sorted())")
         }
+        var background = CanvasBackgroundConfiguration.systemDefault
+        model.canvasBackground = CanvasBackgroundEditor(environment: .init(
+            loadGlobal: { background }, saveGlobal: { background = $0 },
+            loadWorkspace: { .inherit }, saveWorkspace: { _ in },
+            importImage: { _ in throw Failure(message: "no import in this check") },
+            chooseImageURL: { nil }, hasWorkspace: false))
         for (id, sentinel) in sentinels {
             try expect((mounts[id] ?? 0) > 0, "custom row \(id) never asked the app for its view")
             _ = sentinel
         }
         fixture.select("appearance")
-        try expect(sentinels["canvasBackground"]?.window === fixture.window,
-                   "Appearance must mount the canvas background editor inside the modal")
+        try expect(fixture.descendants(CanvasBackgroundRendererView.self).count == 1,
+                   "Appearance must draw the canvas background rows and their live preview")
         fixture.select("companion")
         try expect(sentinels["companion"]?.window === fixture.window,
                    "the iPhone pane must mount the pairing view inside the modal")

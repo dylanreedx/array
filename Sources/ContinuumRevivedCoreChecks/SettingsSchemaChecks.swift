@@ -307,8 +307,8 @@ private func runSettingsRegistrySearchChecks(sections: [SettingsSection]) {
            "'theme' must find Appearance and the Editor appearance")
     expect(has("codex") { $0.field?.key == AgentBackendConfig.key }, "'codex' must find the default agent CLI")
     expect(has("chime") { $0.anchor == "sounds.master" }, "'chime' must find the sounds")
-    expect(has("background") { $0.anchor == "custom.canvasBackground" }, "'background' must find the canvas background")
-    expect(has("wallpaper") { $0.anchor == "custom.canvasBackground" }, "'wallpaper' must find the canvas background")
+    expect(has("background") { $0.anchor == "canvasBackground.scope" }, "'background' must find the canvas background")
+    expect(has("wallpaper") { $0.anchor == "canvasBackground.scope" }, "'wallpaper' must find the canvas background")
     expect(search("continuum").isEmpty && search("autoLayout").isEmpty, "raw defaults keys must never be searchable")
 
     // "on" matches words STARTING with "on" only. The old substring search matched

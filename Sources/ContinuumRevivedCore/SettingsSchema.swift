@@ -380,12 +380,15 @@ public enum SettingsSchema {
                             keywords: ["agent cli", "sign in", "login", "installed", "ready", "harness"])
             }
         case .custom("canvasBackground", _):
-            let anchor = "custom.canvasBackground"
-            let words = ["wallpaper", "grid", "dots", "pattern", "image", "colour", "color", "canvas"]
+            // Rows that only appear in some states (a custom colour, grid spacing,
+            // an image's opacity) are found through the row that is always there.
+            let words = ["wallpaper", "canvas", "background"]
             return [
-                CustomEntry(anchor: anchor, label: "Canvas background", keywords: words),
-                CustomEntry(anchor: anchor, label: "Grid pattern", keywords: words),
-                CustomEntry(anchor: anchor, label: "Background image", keywords: words),
+                CustomEntry(anchor: "canvasBackground.scope", label: "Canvas background", keywords: words + ["workspace", "global", "inherit"]),
+                CustomEntry(anchor: "canvasBackground.pattern", label: "Grid pattern", keywords: words + ["dots", "lines", "grid colour", "grid color", "spacing"]),
+                CustomEntry(anchor: "canvasBackground.base", label: "Canvas colour", keywords: words + ["base colour", "base color", "system"]),
+                CustomEntry(anchor: "canvasBackground.image", label: "Background image", keywords: words + ["picture", "photo", "opacity", "fit", "fill"]),
+                CustomEntry(anchor: "canvasBackground.reset", label: "Reset background", keywords: words),
             ]
         case .custom("companion", _):
             return [CustomEntry(anchor: "custom.companion", label: "Pair an iPhone",

@@ -10701,9 +10701,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .cleanup(referencedIDs: referenced, grace: grace)
     }
 
-    private func makeCanvasBackgroundSettingsView() -> NSView {
+    private func makeCanvasBackgroundEditor() -> CanvasBackgroundEditor {
         let assetStore = CanvasBackgroundAssetStore()
-        let environment = CanvasBackgroundSettingsView.Environment(
+        let environment = CanvasBackgroundEditor.Environment(
             loadGlobal: { CanvasBackgroundGlobalStore.load() },
             saveGlobal: { [weak self] config in
                 CanvasBackgroundGlobalStore.save(config)
@@ -10730,7 +10730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return panel.runModal() == .OK ? panel.url : nil
             },
             hasWorkspace: workspaceRuntime != nil)
-        return CanvasBackgroundSettingsView(environment: environment)
+        return CanvasBackgroundEditor(environment: environment)
     }
 
     private func makeSettingsModal(paneID: String?) -> SettingsModal {
@@ -10748,8 +10748,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         model.customViews = [
             "companion": { [weak self] in self?.makeCompanionSettingsView() ?? NSView() },
-            "canvasBackground": { [weak self] in self?.makeCanvasBackgroundSettingsView() ?? NSView() },
         ]
+        model.canvasBackground = makeCanvasBackgroundEditor()
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
             model.actionHandlers["checkForUpdates"] = checkForUpdates
         }

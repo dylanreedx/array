@@ -491,7 +491,7 @@ enum SettingsSearchChecks {
         try type("chime")
         try expect(results().contains { $0.anchor == "sounds.master" }, "'chime' must find the sounds")
         try type("background")
-        try expect(results().contains { $0.anchor == "custom.canvasBackground" }, "'background' must find the canvas background")
+        try expect(results().contains { $0.anchor == "canvasBackground.scope" }, "'background' must find the canvas background")
         try type("on")
         try expect(!results().isEmpty, "'on' must find something")
         for entry in results() {
