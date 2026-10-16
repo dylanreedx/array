@@ -144,7 +144,7 @@ final class SettingsCheckFixture {
                 command: "/bin/cat", arguments: [], cwd: tempRoot.path, title: "settings-terminal"),
             ghostty: ghostty)
         let terminalView = TerminalTileNSView(tile: terminalTile, runtime: terminalRuntime)
-        guard case .zoneLayer = canvas.installProjectTile(tileView: terminalView, for: terminalTile, targetZoneId: zoneId, arrangeAfterSpawn: false) else {
+        guard case .zoneLayer = canvas.installProjectTile(tileView: terminalView, for: terminalTile, targetZoneId: zoneId) else {
             throw Failure(message: "fixture: the terminal tile did not install into its zone layer")
         }
         browserTileId = UUID()
@@ -160,7 +160,7 @@ final class SettingsCheckFixture {
             webView: WKWebView(frame: .zero, configuration: configuration),
             initialURL: "about:blank")
         let browserView = BrowserTileNSView(tile: browserTile, runtime: browserRuntime)
-        guard case .zoneLayer = canvas.installProjectTile(tileView: browserView, for: browserTile, targetZoneId: zoneId, arrangeAfterSpawn: false) else {
+        guard case .zoneLayer = canvas.installProjectTile(tileView: browserView, for: browserTile, targetZoneId: zoneId) else {
             throw Failure(message: "fixture: the browser tile did not install into its zone layer")
         }
         window.contentView?.layoutSubtreeIfNeeded()
