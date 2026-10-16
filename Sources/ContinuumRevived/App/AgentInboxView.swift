@@ -35,13 +35,16 @@ import Foundation
 // against a table).
 //
 // P2D.4 ADDS THE DISCLOSURE, and it is the one thing this file holds that is not
-// in the row: which parents you have folded. That is local UI state — not
-// persisted and never synced, because which groups you collapsed on this Mac is
-// not a fact about the agents (the packet says so in as many words). Folding a
-// group DOES hide a child that is asking for approval; the earlier note here
-// claimed a child is never hidden, and this ticket overrules it — a fold is
-// something you did, and P3.6's own frozen-order argument applies: the list moves
-// when you act. Nothing folds a group on your behalf.
+// in the row: which parents you have folded. That is local UI state, never
+// synced, because which groups you collapsed on this Mac is not a fact about the
+// agents (the packet says so in as many words).
+//
+// Launch polish, item Q: a group starts FOLDED — the parent's card, its rollup
+// line and the cards tucked behind it say what it holds — and each parent keeps
+// the choice you last made for it, which the host persists. One rule opens a
+// group you never touched: a child that needs you or failed. Your own choice
+// always wins over it — a group you folded stays folded when a child reports in
+// (P3.6's frozen-order argument: the list moves when you act).
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
 /// The four STORED lifecycle facts an undo puts back — `AgentRecord`'s
@@ -708,14 +711,37 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Why Delete is greyed, shown in the item's own title (see `setWorkspaceManagement`).
     private var workspaceDeleteDisabledReason: String?
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
-    /// The parents you have folded. VIEW-LOCAL: no defaults key, nothing in the
-    /// change set, nothing on the row — collapsing a group is a thing you did to
-    /// this list on this Mac, and a synced fold would hide an agent on a device
-    /// you were not looking at.
+    /// The parents drawn folded right now, derived from `foldChoices` and the
+    /// rollups on every display (`isFolded`). Never written anywhere else.
+    private var collapsedParents: Set<UUID> = []
+    /// What you last chose for each parent: true open, false folded. Nothing in
+    /// the change set, nothing on the row; the host persists it on this Mac only
+    /// (`onParentFoldChange`), because a synced fold would hide an agent on a
+    /// device you were not looking at.
     ///
     /// Ids are kept even when their agent leaves the list (a scope change, a settle)
-    /// so that coming back re-collapses the group the way you left it.
-    private var collapsedParents: Set<UUID> = []
+    /// so that coming back re-folds the group the way you left it.
+    private var foldChoices: [UUID: Bool] = [:]
+    /// Reports a fold or unfold by the person, with every choice made so far, so
+    /// the host can remember them across launches. Not called by `restoreParentFolds`.
+    var onParentFoldChange: (([UUID: Bool]) -> Void)?
+
+    /// Put back the fold choices the host persisted.
+    func restoreParentFolds(_ choices: [UUID: Bool]) {
+        guard choices != foldChoices else { return }
+        foldChoices = choices
+        render(display(from: allRows))
+    }
+
+    /// Whether a parent is drawn folded: your own choice when you made one;
+    /// otherwise folded, unless a child needs you or failed — a group you never
+    /// touched must not bury an approval behind a default.
+    private func isFolded(_ parentId: UUID) -> Bool {
+        if let open = foldChoices[parentId] { return !open }
+        guard foldsUntouchedGroups else { return false }
+        guard let rollup = rollupsByParent[parentId] else { return true }
+        return rollup.needsYou == 0 && rollup.failed == 0
+    }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
     /// presentation state: it changes how many children are inline, never the
@@ -782,6 +808,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         settledExpanded = settled
         historyExpanded = history
         render(display(from: allRows))
+    }
+
+    /// Whether a group nobody has folded or opened starts FOLDED (launch polish,
+    /// item Q). The app's sidebar turns it on (`AppDelegate.configureWorkspaceSidebar`);
+    /// a bare view keeps P2D.4's open default, which the older fixture legs are
+    /// written against — the same split, and the same open follow-up, as
+    /// `foldsSettledIntoShelf` below.
+    var foldsUntouchedGroups = false {
+        didSet {
+            guard foldsUntouchedGroups != oldValue else { return }
+            render(display(from: allRows))
+        }
     }
 
     var foldsSettledIntoShelf = false {
@@ -2054,6 +2092,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             fullRollups[remainder.parentId] = rollup
         }
         rollupsByParent = fullRollups
+        collapsedParents = Set(parentsWithChildren.filter(isFolded))
         let visible = InboxSort.visibleRows(bounded.rows, collapsed: collapsedParents)
         let visibleIDs = Set(visible.map(\.id))
         // A fold can remove the model's original after-row without removing the
@@ -2356,11 +2395,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `setScope` drops them — their indexes belong to the list that just went away,
     /// and a bulk action (P3.11) must never reach a row you cannot see.
     func toggleCollapse(parentId: UUID) {
-        if collapsedParents.contains(parentId) {
-            collapsedParents.remove(parentId)
-        } else {
-            collapsedParents.insert(parentId)
-        }
+        foldChoices[parentId] = collapsedParents.contains(parentId)
+        onParentFoldChange?(foldChoices)
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         // P1.2: hover and the focus ring are dropped and then RE-DERIVED from
@@ -2837,6 +2873,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
               let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
         else { return false }
         return card.clickHoverSettleForQA()
+    }
+
+    func clickSettleNudgeForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickSettleNudgeForQA()
     }
 
     func clickBackgroundBringBackForQA(id: UUID) -> Bool {
@@ -4628,6 +4672,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func rowGeometryForQA(id: UUID) -> AgentInboxRowGeometryForQA? {
         qaMaterializedRowCells.first { $0.qaAgentID == id }?.qaGeometry
     }
+
+    /// The cards tucked behind a folded parent, as its cell draws them, plus the
+    /// cell itself (for hit-testing) and the row's frame in the table.
+    func tuckedCardsForQA(id: UUID)
+        -> (count: Int, rects: [NSRect], card: NSRect, cell: NSView, rowFrame: NSRect)? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                as? AgentInbox96CellView else { return nil }
+        cell.layoutSubtreeIfNeeded()
+        let tucked = cell.qaTuckedCardsForQA
+        return (tucked.count, tucked.rects, tucked.card, cell, tableView.rect(ofRow: tableRow))
+    }
+    var parentFoldChoicesForQA: [UUID: Bool] { foldChoices }
 
     func groupBackgroundForQA(id: UUID) -> (visible: Bool, roundsTop: Bool, roundsBottom: Bool)? {
         guard let cell = qaMaterializedRowCells.first(where: { $0.qaAgentID == id }) else {

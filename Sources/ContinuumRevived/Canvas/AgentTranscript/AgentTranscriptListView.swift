@@ -3445,6 +3445,22 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return nil }
         return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.height
     }
+    /// The tool row a reader actually sees for `id`: the recycled `ToolCallView`
+    /// inside its collection item, its frame in the list's own coordinates, and
+    /// the gaps the layout left above and below it. Nil when the row is folded
+    /// out of the display or off screen.
+    func qaOnScreenToolRowForChecks(for id: AgentNodeID)
+        -> (view: ToolCallView, frameInList: NSRect, gapAbove: CGFloat?, gapBelow: CGFloat?)? {
+        layoutSubtreeIfNeeded()
+        collectionView.layoutSubtreeIfNeeded()
+        guard let index = displayIndexByID[id],
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? AgentTranscriptCollectionItem,
+              let tool = item.hostView?.rendererView as? ToolCallView else { return nil }
+        tool.layoutSubtreeIfNeeded()
+        return (tool, tool.convert(tool.bounds, to: self),
+                transcriptLayout.qaGapAboveForChecks(index),
+                transcriptLayout.qaGapAboveForChecks(index + 1))
+    }
     @discardableResult
     func qaPerformToolDisclosureClick(for id: AgentNodeID) -> Bool {
         // DISPLAY index, not the semantic row index: with clustering the two

@@ -1069,10 +1069,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         clipsToBounds = false
         groupBackground.clipsToBounds = false
         groupBackground.frame = bounds.insetBy(dx: 0, dy: -bleed)
+        // A folded parent shows the children it is holding as cards tucked
+        // behind its own (launch polish, item Q): one edge for one child, two
+        // for more. Decoration only — it draws in the row's own end gap, so the
+        // row's height and hit area are what they were.
+        let tucked = shown?.disclosure == .collapsed ? (shown?.rollup?.children ?? 0) : 0
         groupBackground.show(
             nesting, hasChildren: !disclosureButton.isHidden,
             metrics: Self.spineMetrics,
-            rowHeight: bounds.height + bleed * 2)
+            rowHeight: bounds.height + bleed * 2, tuckedCards: tucked)
         spine.clipsToBounds = false
         spine.frame = bounds.insetBy(dx: 0, dy: -bleed)
         spine.show(
@@ -1359,6 +1364,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return true
     }
 
+    /// Presses the "All set?" nudge through its own target/action.
+    func clickSettleNudgeForQA() -> Bool {
+        guard !settleNudge.isHidden else { return false }
+        settleNudge.performClick(nil)
+        return true
+    }
+
     func setIncreasedContrast(_ enabled: Bool) { card.usesIncreasedContrast = enabled }
 
     var accessibilityStatusOwner: NSView { stateLabel }
@@ -1543,6 +1555,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     var qaNestingForQA: InboxNesting { nesting }
     var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
+    /// The tucked cards as drawn, in the CELL's coordinates, and the card's frame.
+    var qaTuckedCardsForQA: (count: Int, rects: [NSRect], card: NSRect) {
+        (groupBackground.qaTuckedCardsForQA,
+         groupBackground.tuckedCardRects.map { groupBackground.convert($0, to: self) }, card.frame)
+    }
     var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
         (groupBackground.qaRoundsTopForQA, groupBackground.qaRoundsBottomForQA)
     }

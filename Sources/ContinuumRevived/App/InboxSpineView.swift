@@ -76,22 +76,56 @@ final class InboxGroupBackgroundView: NSView {
     private var roundsTop = false
     private var roundsBottom = false
     private var horizontalInset: CGFloat = 0
+    /// Launch polish, item Q: how many cards a FOLDED parent shows tucked behind
+    /// its own — 1 for one hidden child, 2 for two or more, 0 when open.
+    private(set) var tuckedCards = 0
+
+    /// How far each tucked card shows below the one in front of it, and how much
+    /// narrower it is on each side.
+    static let tuckedPeek: CGFloat = 3
+    static let tuckedInset: CGFloat = 6
+    /// The wash a tucked card is painted in, in front-to-back order: each one
+    /// lower in contrast than the sheet in front, so the stack recedes.
+    static let washAlpha: CGFloat = 0.035
+    static let tuckedAlphas: [CGFloat] = [0.08, 0.055]
+    /// Background left between the last tucked card and the next group's wash,
+    /// so the stack ends in an edge and not in a seam.
+    static let tuckedClearance: CGFloat = 2
 
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func show(_ nesting: InboxNesting, hasChildren: Bool,
-              metrics: InboxSpineMetrics, rowHeight: CGFloat) {
+              metrics: InboxSpineMetrics, rowHeight: CGFloat, tuckedCards: Int = 0) {
         isGroupMember = hasChildren || nesting.depth > 0
         roundsTop = isGroupMember && nesting.depth == 0
         roundsBottom = isGroupMember && nesting.nextDepth == 0
         horizontalInset = CGFloat(metrics.gutter)
+        // Only a group that ends here can show cards below it: a folded parent
+        // whose children are hidden. An open group draws its children instead.
+        self.tuckedCards = roundsBottom ? max(0, min(2, tuckedCards)) : 0
         needsDisplay = true
+    }
+
+    /// The tucked cards as drawn, back to front, in this view's coordinates.
+    var tuckedCardRects: [NSRect] {
+        let rect = NSRect(x: horizontalInset, y: 0,
+                          width: max(0, bounds.width - horizontalInset * 2),
+                          height: bounds.height)
+        guard tuckedCards > 0, rect.width > 0, rect.height > 0 else { return [] }
+        return (1...tuckedCards).reversed().map { depth in
+            let inset = Self.tuckedInset * CGFloat(depth)
+            let bottom = rect.maxY - Self.tuckedClearance - Self.tuckedPeek * CGFloat(tuckedCards - depth)
+            // Each card spans the front sheet's height less its own peek, so only
+            // its lower edge shows; the front sheet covers the rest.
+            return NSRect(x: rect.minX + inset, y: rect.minY,
+                          width: max(0, rect.width - inset * 2), height: max(0, bottom - rect.minY))
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         guard isGroupMember else { return }
-        let rect = NSRect(x: horizontalInset, y: 0,
+        var rect = NSRect(x: horizontalInset, y: 0,
                           width: max(0, bounds.width - horizontalInset * 2),
                           height: bounds.height)
         guard rect.width > 0, rect.height > 0 else { return }
@@ -99,7 +133,18 @@ final class InboxGroupBackgroundView: NSView {
         let theme: TokenTheme = appearance == .darkAqua ? .dark : .light
         let base = SidebarSurfaceRole.rowBase.color.resolved(for: theme)
         let foreground = TextToken.textPrimary.color.resolved(for: theme)
-        let wash = TokenColor(foreground.composited(over: base, alpha: 0.035))
+        // Cards tucked behind a folded parent, back to front, each a slim edge
+        // below the sheet in front. Opaque composites over the row base, so the
+        // front sheet painted last covers them cleanly. The radius is the card
+        // token, never a literal, so it follows the card it peeks out from.
+        let radius = CGFloat(Radius.card)
+        for (index, card) in tuckedCardRects.enumerated() {
+            let alpha = Self.tuckedAlphas[tuckedCards - 1 - index]
+            TokenColor(foreground.composited(over: base, alpha: alpha)).nsColor(for: theme).setFill()
+            NSBezierPath(roundedRect: card, xRadius: radius, yRadius: radius).fill()
+        }
+        if tuckedCards > 0 { rect.size.height -= Self.tuckedClearance + Self.tuckedPeek * CGFloat(tuckedCards) }
+        let wash = TokenColor(foreground.composited(over: base, alpha: Self.washAlpha))
         wash.nsColor(for: theme).setFill()
         roundedGroupStrip(rect, top: roundsTop ? 8 : 0, bottom: roundsBottom ? 8 : 0).fill()
     }
@@ -152,4 +197,5 @@ final class InboxGroupBackgroundView: NSView {
     var qaIsVisibleForQA: Bool { isGroupMember }
     var qaRoundsTopForQA: Bool { roundsTop }
     var qaRoundsBottomForQA: Bool { roundsBottom }
+    var qaTuckedCardsForQA: Int { tuckedCards }
 }

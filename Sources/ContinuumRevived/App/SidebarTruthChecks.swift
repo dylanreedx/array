@@ -97,7 +97,9 @@ enum SidebarTruthChecks {
 
     // MARK: - World
 
-    static func makeWorld() throws -> World {
+    /// `zoneOriginA` moves workspace A's zone (and its tiles with it) off the
+    /// world origin, so a witness can tell a WORLD frame from a ZONE-LOCAL one.
+    static func makeWorld(zoneOriginA: ZonePoint = ZonePoint(x: 0, y: 0)) throws -> World {
         let fm = FileManager.default
         let now = Date()
         let root = fm.temporaryDirectory
@@ -134,9 +136,10 @@ enum SidebarTruthChecks {
         try storeB.saveProject(projectValueB)
 
         func agentTile(_ id: UUID, _ title: String, x: Double, zone: UUID) -> Tile {
+            let origin = zone == zoneA ? zoneOriginA : ZonePoint(x: 0, y: 0)
             var tile = Tile(
                 id: id, kind: .managedAgent, title: title,
-                frame: TileFrame(x: x, y: 40, width: 320, height: 240),
+                frame: TileFrame(x: origin.x + x, y: origin.y + 40, width: 320, height: 240),
                 zPosition: .fromLegacyRank(1), runtimeRef: nil,
                 metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: "."))
             tile.zoneId = zone
@@ -159,7 +162,7 @@ enum SidebarTruthChecks {
 
         func zone(_ id: UUID, _ projectId: UUID, _ name: String) -> ZonePlacement {
             ZonePlacement(
-                zoneId: id, projectId: projectId, origin: ZonePoint(x: 0, y: 0),
+                zoneId: id, projectId: projectId, origin: id == zoneA ? zoneOriginA : ZonePoint(x: 0, y: 0),
                 size: ZoneSize(width: 1_600, height: 800), color: "blue", collapsed: false,
                 hydrationPolicy: .automatic, name: name, navKey: "1")
         }
@@ -218,6 +221,10 @@ enum SidebarTruthChecks {
         try agentStore.upsert(settled)
 
         let app = AppDelegate()
+        // Fold choices (launch polish, item Q) persist through the app's settings
+        // defaults: a private suite here, never `.standard`.
+        let settingsSuite = "array.qa.sidebar-truth.\(UUID().uuidString)"
+        app.qaSettingsDefaults = QAIsolatedDefaults(isolatedSuiteName: settingsSuite)
         app.registryStore = registryStore
         try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         let runners = Runners()
@@ -301,6 +308,7 @@ enum SidebarTruthChecks {
             browserEngine: browserEngine,
             restoreDefaults: {
                 unpinAmbientSelection()
+                UserDefaults(suiteName: settingsSuite)?.removePersistentDomain(forName: settingsSuite)
                 for (shelf, value) in storedShelves {
                     if let value {
                         defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))
@@ -538,6 +546,11 @@ enum SidebarTruthChecks {
 
         // W4 · a parent with two observed children. Closing the parent's tile
         // takes the group: no child may be left behind as a top-level row.
+        // Launch polish, item Q: the shipped sidebar starts the group folded; open
+        // it the way a person does, so its children are rows this leg can follow.
+        try expect(inbox.collapsedParentsForQA.contains(parentAgent.rawValue)
+                   && inbox.clickDisclosureForQA(id: parentAgent.rawValue),
+                   "setup: the shipped sidebar must start the parent's group folded, and open it on a click")
         for child in [childOne, childTwo] {
             try expect(block(world, child) == "live",
                        "setup: a live parent's child is drawn under it — got \(String(describing: block(world, child)))")

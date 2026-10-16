@@ -24,12 +24,12 @@ enum ShellToolRowChecks {
         // Every harness runs and reports, so one red harness cannot hide another.
         var lines: [String] = []
         var failures: [String] = []
-        for section in [checkCodexAppServer, checkCodexExecArgv, checkClaude, checkPi] {
+        for section in [checkCodexAppServer, checkCodexExecArgv, checkClaude, checkPi, checkCrossHarnessParity] {
             do { lines += try await section() } catch { failures.append(String(describing: error)) }
         }
         guard failures.isEmpty else { throw fail(failures.joined(separator: "\n")) }
         for line in lines { print("  \(line)") }
-        print("ShellToolRowChecks passed: \(lines.count) shell rows across codex app-server, codex exec, claude and pi name the command, hide a zero exit, badge a non-zero one, and show a duration only when it is real")
+        print("ShellToolRowChecks passed: \(lines.count) shell rows across codex app-server, codex exec, claude and pi name the command, hide a zero exit, badge a non-zero one, and show a duration only when it is real; codex app-server, codex exec and claude draw the same command as one row geometry and type size")
     }
 
     // MARK: - Harness drivers
@@ -485,5 +485,278 @@ enum ShellToolRowChecks {
         try expectHeadline(running, contains: "sleep 30", "pi running")
         try expectRunning(running, "pi running")
         return [ok, failed, timedOut, aborted, running].map(\.description)
+    }
+
+    // MARK: - One component across harnesses (launch polish, item M)
+
+    /// Reported side by side: the same python heredoc read as a different row
+    /// under Codex than under Claude — another left edge and vertical rhythm,
+    /// a larger mono command, a lone glyph with no duration. Each harness here
+    /// runs one whole turn through its real translator and the tile's real
+    /// list (prompt, a line of commentary, the command, the answer), and the
+    /// row is read off the collection view the reader is looking at, never
+    /// re-rendered on its own.
+    struct OnScreenRow: CustomStringConvertible {
+        let harness: String
+        let frame: NSRect
+        let gapAbove: CGFloat?
+        let gapBelow: CGFloat?
+        let titleX: CGFloat
+        let titleMidY: CGFloat
+        let iconX: CGFloat
+        let commandPointSize: CGFloat
+        let commandIsMono: Bool
+        let descriptionPointSize: CGFloat?
+        let statusMaxX: CGFloat
+        let statusPointSize: CGFloat
+        let status: String
+        let title: String
+        var description: String {
+            "\(harness): frame=\(frame) gap↑=\(gapAbove.map { "\($0)" } ?? "-") gap↓=\(gapBelow.map { "\($0)" } ?? "-") titleX=\(titleX) titleMidY=\(titleMidY) iconX=\(iconX) command=\(commandPointSize)pt\(commandIsMono ? " mono" : "") description=\(descriptionPointSize.map { "\($0)pt" } ?? "none") statusMaxX=\(statusMaxX) status='\(status)'@\(statusPointSize)pt title='\(title)'"
+        }
+    }
+
+    static let parityScript = "python3 - <<'PY'\nprint(sum(range(10)))\nPY"
+
+    private static func readOnScreen(_ tile: ManagedAgentTileNSView, itemID: String, harness: String) throws -> OnScreenRow {
+        guard let blockID = toolBlocks(tile)[itemID] else {
+            throw fail("\(harness): no tool row for \(itemID) (have \(toolBlocks(tile).keys.sorted()))")
+        }
+        guard let list = tile.qaTranscriptForChecks,
+              let row = list.qaOnScreenToolRowForChecks(for: blockID) else {
+            throw fail("\(harness): the shell row is not on screen in the transcript (folded, clustered away or never drawn)")
+        }
+        let view = row.view
+        let title = view.titleLabel.attributedStringValue
+        guard title.length > 0 else { throw fail("\(harness): the on-screen title is empty") }
+        let commandFont = title.attribute(.font, at: title.length - 1, effectiveRange: nil) as? NSFont
+        let leadFont = title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        let hasDescription = leadFont?.isFixedPitch == false
+        return OnScreenRow(
+            harness: harness, frame: row.frameInList, gapAbove: row.gapAbove, gapBelow: row.gapBelow,
+            titleX: view.titleLabel.convert(view.titleLabel.bounds, to: list).minX,
+            titleMidY: view.titleLabel.convert(view.titleLabel.bounds, to: list).midY - row.frameInList.minY,
+            iconX: view.iconView.convert(view.iconView.bounds, to: list).minX,
+            commandPointSize: commandFont?.pointSize ?? 0, commandIsMono: commandFont?.isFixedPitch == true,
+            descriptionPointSize: hasDescription ? leadFont?.pointSize : nil,
+            statusMaxX: view.statusLabel.convert(view.statusLabel.bounds, to: list).maxX,
+            statusPointSize: view.statusLabel.font?.pointSize ?? 0,
+            status: view.statusLabel.stringValue, title: title.string)
+    }
+
+    static func checkCrossHarnessParity() async throws -> [String] {
+        // Two turns, as reported: a turn of web searches first (it folds), then
+        // the turn that runs the command.
+        let earlierPrompt = "what happened in sports today?"
+        let prompt = "use python to do some calculations"
+        let commentary = "I'll use Python to work it out."
+        let answer = "The sum is 45."
+
+        // Codex app-server — the production default transport
+        // (`CodexCLIBackend.transportOverride()`), frames shaped as codex-cli
+        // 0.159 emits them: a commentary agentMessage, the command, an empty
+        // reasoning item, the final answer, `turn/completed`.
+        let appServer: OnScreenRow = try await {
+            let (tile, window) = makeTile("parity-codex-appserver")
+            defer { window.orderOut(nil) }
+            let thread = "00000000-0000-4000-8000-0000000000a1", turn = "00000000-0000-4000-8000-0000000000a2"
+            func params(_ body: String) -> String { #"\#(body),"threadId":"\#(thread)","turnId":"\#(turn)""# }
+            // app-server sends the joined string; the heredoc's quotes make
+            // codex wrap it in double quotes.
+            let commandJSON = String(decoding: try! JSONSerialization.data(
+                withJSONObject: "/bin/zsh -lc \"\(parityScript)\"", options: [.fragmentsAllowed]), as: UTF8.self)
+            let earlierTurn = "00000000-0000-4000-8000-0000000000a0"
+            func search(_ id: String, _ query: String) -> [String] {[
+                #"{"method":"item/started","params":{"item":{"type":"webSearch","id":"\#(id)","query":"","action":null,"results":null},"threadId":"\#(thread)","turnId":"\#(earlierTurn)"}}"#,
+                #"{"method":"item/completed","params":{"item":{"type":"webSearch","id":"\#(id)","query":"\#(query)","action":{"type":"search","query":"\#(query)","queries":null},"results":[]},"threadId":"\#(thread)","turnId":"\#(earlierTurn)"}}"#,
+            ]}
+            let earlier = [
+                #"{"method":"thread/started","params":{"thread":{"id":"\#(thread)","cwd":"/tmp/fixture"}}}"#,
+                #"{"method":"turn/started","params":{"threadId":"\#(thread)","turn":{"id":"\#(earlierTurn)","items":[],"status":"inProgress","error":null}}}"#,
+                #"{"method":"item/started","params":{"item":{"id":"msg_e","phase":"commentary","text":"","type":"agentMessage"},"threadId":"\#(thread)","turnId":"\#(earlierTurn)"}}"#,
+                #"{"method":"item/agentMessage/delta","params":{"delta":"I'll check today's results.","itemId":"msg_e","threadId":"\#(thread)","turnId":"\#(earlierTurn)"}}"#,
+                #"{"method":"item/completed","params":{"item":{"id":"msg_e","phase":"commentary","text":"I'll check today's results.","type":"agentMessage"},"threadId":"\#(thread)","turnId":"\#(earlierTurn)"}}"#,
+            ] + search("ws-1", "sports news today") + search("ws-2", "MLB scores") + search("ws-3", "NHL scores") + [
+                #"{"method":"turn/completed","params":{"threadId":"\#(thread)","turn":{"durationMs":9000,"error":null,"id":"\#(earlierTurn)","items":[],"status":"completed"}}}"#,
+            ]
+            let lines = [
+                #"{"method":"turn/started","params":{"threadId":"\#(thread)","turn":{"id":"\#(turn)","items":[],"status":"inProgress","error":null}}}"#,
+                #"{"method":"item/started","params":{"item":{"content":[{"text":"\#(prompt)","text_elements":[],"type":"text"}],"id":"u1","type":"userMessage"},\#(params(#""startedAtMs":1"#))}}"#,
+                #"{"method":"item/completed","params":{"item":{"content":[{"text":"\#(prompt)","text_elements":[],"type":"text"}],"id":"u1","type":"userMessage"},\#(params(#""completedAtMs":1"#))}}"#,
+                #"{"method":"item/started","params":{"item":{"id":"msg_c","phase":"commentary","text":"","type":"agentMessage"},\#(params(#""startedAtMs":2"#))}}"#,
+                #"{"method":"item/agentMessage/delta","params":{"delta":"\#(commentary)","itemId":"msg_c","threadId":"\#(thread)","turnId":"\#(turn)"}}"#,
+                #"{"method":"item/completed","params":{"item":{"id":"msg_c","phase":"commentary","text":"\#(commentary)","type":"agentMessage"},\#(params(#""completedAtMs":3"#))}}"#,
+                #"{"method":"item/started","params":{"item":{"aggregatedOutput":null,"command":\#(commandJSON),"commandActions":[],"cwd":"/tmp/fixture","durationMs":null,"exitCode":null,"id":"exec-parity","processId":"90507","source":"unifiedExecStartup","status":"inProgress","type":"commandExecution"},\#(params(#""startedAtMs":4"#))}}"#,
+                #"{"method":"item/completed","params":{"item":{"aggregatedOutput":"45\n","command":\#(commandJSON),"commandActions":[],"cwd":"/tmp/fixture","durationMs":1500,"exitCode":0,"id":"exec-parity","processId":"90507","source":"unifiedExecStartup","status":"completed","type":"commandExecution"},\#(params(#""completedAtMs":5"#))}}"#,
+                #"{"method":"item/started","params":{"item":{"content":[],"id":"rs_p","summary":[],"type":"reasoning"},\#(params(#""startedAtMs":6"#))}}"#,
+                #"{"method":"item/completed","params":{"item":{"content":[],"id":"rs_p","summary":[],"type":"reasoning"},\#(params(#""completedAtMs":7"#))}}"#,
+                #"{"method":"item/started","params":{"item":{"id":"msg_f","phase":"final_answer","text":"","type":"agentMessage"},\#(params(#""startedAtMs":8"#))}}"#,
+                #"{"method":"item/agentMessage/delta","params":{"delta":"\#(answer)","itemId":"msg_f","threadId":"\#(thread)","turnId":"\#(turn)"}}"#,
+                #"{"method":"item/completed","params":{"item":{"id":"msg_f","phase":"final_answer","text":"\#(answer)","type":"agentMessage"},\#(params(#""completedAtMs":9"#))}}"#,
+                #"{"method":"turn/completed","params":{"threadId":"\#(thread)","turn":{"durationMs":9000,"error":null,"id":"\#(turn)","items":[],"status":"completed"}}}"#,
+            ]
+            var translator = CodexAppServerEventTranslator(
+                workingDirectory: URL(fileURLWithPath: "/tmp/fixture"),
+                now: { Date(timeIntervalSinceReferenceDate: 813_000_000) })
+            for (text, turnLines) in [(earlierPrompt, earlier), (prompt, lines)] {
+                tile.qaBeginOptimisticSubmissionForChecks(text)
+                tile.qaFinishOptimisticSubmissionForChecks(accepted: true)
+                drive(tile, lines: turnLines) { line, sink in
+                    translator.onRuntimeObservation = sink
+                    return translator.translate(line: line)
+                }
+            }
+            tile.qaFlushStreamingMarkupForChecks(final: true)
+            try await settle(tile)
+            return try readOnScreen(tile, itemID: "exec-parity", harness: "codex app-server")
+        }()
+
+        // Codex exec --json — `CONTINUUM_CODEX_TRANSPORT=exec`. Its
+        // command_execution items carry no duration field at all.
+        let exec: OnScreenRow = try await {
+            let (tile, window) = makeTile("parity-codex-exec")
+            defer { window.orderOut(nil) }
+            let commandJSON = String(decoding: try! JSONSerialization.data(withJSONObject: ["/bin/zsh", "-lc", parityScript]), as: UTF8.self)
+            let earlier = [
+                #"{"type":"thread.started","thread_id":"019fe980-21f0-7df1-b2a0-49d7839c79a1"}"#,
+                #"{"type":"turn.started"}"#,
+                #"{"type":"item.completed","item":{"id":"item_e","type":"agent_message","text":"I'll check today's results."}}"#,
+                #"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}"#,
+            ]
+            let lines = [
+                #"{"type":"turn.started"}"#,
+                #"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"\#(commentary)"}}"#,
+                #"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":\#(commandJSON),"aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+                #"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":\#(commandJSON),"aggregated_output":"45\n","exit_code":0,"status":"completed"}}"#,
+                #"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"\#(answer)"}}"#,
+                #"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}"#,
+            ]
+            var translator = CodexEventTranslator(runToken: "parity", now: { Date(timeIntervalSinceReferenceDate: 813_000_000) })
+            for (text, turnLines) in [(earlierPrompt, earlier), (prompt, lines)] {
+                tile.qaBeginOptimisticSubmissionForChecks(text)
+                tile.qaFinishOptimisticSubmissionForChecks(accepted: true)
+                drive(tile, lines: turnLines) { line, sink in
+                    translator.onRuntimeObservation = sink
+                    return translator.translate(line: line)
+                }
+            }
+            tile.qaFlushStreamingMarkupForChecks(final: true)
+            try await settle(tile)
+            return try readOnScreen(tile, itemID: "parity-item_1", harness: "codex exec")
+        }()
+
+        // Claude Code stream-json with --include-partial-messages (production
+        // argv): the commentary and the Bash call share one assistant message.
+        let claude: OnScreenRow = try await {
+            let (tile, window) = makeTile("parity-claude")
+            defer { window.orderOut(nil) }
+            let session = #""session_id":"parity-claude","parent_tool_use_id":null"#
+            let input = String(decoding: try! JSONSerialization.data(
+                withJSONObject: ["command": parityScript, "description": "Add up the numbers"], options: [.sortedKeys]), as: UTF8.self)
+            func event(_ body: String) -> String { #"{"type":"stream_event","event":\#(body),\#(session)}"# }
+            func search(_ id: String, _ query: String) -> [String] {[
+                #"{"type":"assistant","message":{"id":"msg_\#(id)","type":"message","role":"assistant","content":[{"type":"tool_use","id":"\#(id)","name":"WebSearch","input":{"query":"\#(query)"}}]},\#(session)}"#,
+                #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"\#(id)","type":"tool_result","content":"results"}]},\#(session),"tool_use_result":{"query":"\#(query)","results":[],"durationSeconds":1.2}}"#,
+            ]}
+            let earlier = [
+                #"{"type":"system","subtype":"init","session_id":"parity-claude","cwd":"/tmp/fixture","model":"claude-fixture"}"#,
+            ] + search("toolu_ws1", "sports news today") + search("toolu_ws2", "MLB scores") + search("toolu_ws3", "NHL scores") + [
+                #"{"type":"assistant","message":{"id":"msg_e","type":"message","role":"assistant","content":[{"type":"text","text":"Here is today."}]},\#(session)}"#,
+                #"{"type":"result","subtype":"success","is_error":false,"duration_ms":9000,"result":"Here is today.","session_id":"parity-claude"}"#,
+            ]
+            // The reported Claude turn put the Bash call first, with no
+            // commentary before it; commentary is codex's habit.
+            let lines = [
+                event(#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[]}}"#),
+                event(#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_parity","name":"Bash","input":{}}}"#),
+                #"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_parity","name":"Bash","input":\#(input)}]},\#(session)}"#,
+                event(#"{"type":"content_block_stop","index":1}"#),
+                event(#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#),
+                event(#"{"type":"message_stop"}"#),
+                #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_parity","type":"tool_result","content":"45","is_error":false}]},\#(session),"tool_use_result":{"stdout":"45","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}"#,
+                event(#"{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[]}}"#),
+                event(#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#),
+                event(#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\#(answer)"}}"#),
+                #"{"type":"assistant","message":{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"\#(answer)"}]},\#(session)}"#,
+                event(#"{"type":"content_block_stop","index":0}"#),
+                event(#"{"type":"message_stop"}"#),
+                #"{"type":"result","subtype":"success","is_error":false,"duration_ms":9000,"result":"\#(answer)","session_id":"parity-claude"}"#,
+            ]
+            final class Clock: @unchecked Sendable {
+                var tick: TimeInterval = 0
+                func next() -> Date { tick += 0.5; return Date(timeIntervalSinceReferenceDate: 813_000_000 + tick) }
+            }
+            let clock = Clock()
+            var translator = ClaudeEventTranslator(runToken: "parity", now: { clock.next() })
+            for (text, turnLines) in [(earlierPrompt, earlier), (prompt, lines)] {
+                tile.qaBeginOptimisticSubmissionForChecks(text)
+                tile.qaFinishOptimisticSubmissionForChecks(accepted: true)
+                drive(tile, lines: turnLines) { line, sink in
+                    translator.onRuntimeObservation = sink
+                    return translator.translate(line: line)
+                }
+            }
+            tile.qaFlushStreamingMarkupForChecks(final: true)
+            try await settle(tile)
+            return try readOnScreen(tile, itemID: "toolu_parity", harness: "claude")
+        }()
+
+        let rows = [appServer, exec, claude]
+        var problems: [String] = []
+        let tolerance: CGFloat = 0.5
+        func same(_ a: CGFloat?, _ b: CGFloat?) -> Bool {
+            switch (a, b) {
+            case let (a?, b?): return abs(a - b) <= tolerance
+            case (nil, nil): return true
+            default: return false
+            }
+        }
+        for other in [appServer, exec] {
+            let pairs: [(String, CGFloat?, CGFloat?)] = [
+                ("row x-origin", other.frame.minX, claude.frame.minX),
+                ("row width", other.frame.width, claude.frame.width),
+                ("row height", other.frame.height, claude.frame.height),
+                ("gap above", other.gapAbove, claude.gapAbove),
+                ("gap below", other.gapBelow, claude.gapBelow),
+                ("icon x", other.iconX, claude.iconX),
+                ("title x", other.titleX, claude.titleX),
+                ("title vertical centre", other.titleMidY, claude.titleMidY),
+                ("command point size", other.commandPointSize, claude.commandPointSize),
+                ("status column trailing x", other.statusMaxX, claude.statusMaxX),
+                ("status point size", other.statusPointSize, claude.statusPointSize),
+            ]
+            for (name, mine, theirs) in pairs where !same(mine, theirs) {
+                problems.append("\(other.harness) vs claude: \(name) \(mine.map { "\($0)" } ?? "nil") ≠ \(theirs.map { "\($0)" } ?? "nil")")
+            }
+            if !other.commandIsMono { problems.append("\(other.harness): the command is not set in mono") }
+            if other.descriptionPointSize != nil { problems.append("\(other.harness): codex gave no description, so the row must not invent one") }
+        }
+        if !claude.commandIsMono { problems.append("claude: the command is not set in mono") }
+        // One type size on the headline: the command is set in mono at the
+        // size of the description beside it, which is the size every other
+        // tool row's title uses. A command a size up from its neighbours is
+        // what read as "larger" wherever no description sat beside it.
+        let labelSize = NSFont.token(.label).pointSize
+        for row in rows where abs(row.commandPointSize - labelSize) > tolerance {
+            problems.append("\(row.harness): the mono command is \(row.commandPointSize)pt, the row title size is \(labelSize)pt")
+        }
+        if let size = claude.descriptionPointSize, abs(size - labelSize) > tolerance {
+            problems.append("claude: the description is \(size)pt, the row title size is \(labelSize)pt")
+        }
+        if claude.descriptionPointSize == nil { problems.append("claude: the description label is missing") }
+        if !appServer.status.contains("1.5s") {
+            problems.append("codex app-server: codex reported durationMs 1500, so the row must say 1.5s — got '\(appServer.status)'")
+        }
+        if exec.status.range(of: #"\d+(\.\d)?s\b"#, options: .regularExpression) != nil {
+            problems.append("codex exec: exec carries no duration, so none may be shown — got '\(exec.status)'")
+        }
+        for row in rows where !row.title.contains("python3 - <<'PY'") {
+            problems.append("\(row.harness): the row must name the command — '\(row.title)'")
+        }
+        guard problems.isEmpty else {
+            throw fail("cross-harness shell rows differ:\n    " + problems.joined(separator: "\n    ")
+                + "\n  measured:\n    " + rows.map(\.description).joined(separator: "\n    "))
+        }
+        return rows.map(\.description)
     }
 }

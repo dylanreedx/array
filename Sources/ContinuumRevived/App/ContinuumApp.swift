@@ -1134,6 +1134,32 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--inbox-parent-fold-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await InboxParentFoldChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("inbox-parent-fold check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+        if CommandLine.arguments.contains("--settle-closes-tile-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await SettleClosesTileChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("settle-closes-tile check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--transcript-provider-parity-check") {
             do {
                 try TranscriptProviderParityChecks.run()
@@ -6979,16 +7005,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func deleteTile(id: UUID) {
+        deleteTile(id: id, parksAgent: true)
+    }
+
+    /// `parksAgent: false` is Settle's close (launch polish, item R): the same
+    /// window-closing as the × button, with the agent left where Settle filed it
+    /// — in Settled, not in History.
+    func deleteTile(id: UUID, parksAgent: Bool) {
         if let file = canvasView?.tileView(for: id) as? FileTileNSView {
             file.flushEditorBarrier { [weak self, weak file] success in
                 guard success else { return }
-                self?.deleteTileAfterEditorBarrier(id: id)
+                self?.deleteTileAfterEditorBarrier(id: id, parksAgent: parksAgent)
                 file?.resumeEditorAfterBarrier()
             }
-        } else { deleteTileAfterEditorBarrier(id: id) }
+        } else { deleteTileAfterEditorBarrier(id: id, parksAgent: parksAgent) }
     }
 
-    private func deleteTileAfterEditorBarrier(id: UUID) {
+    private func deleteTileAfterEditorBarrier(id: UUID, parksAgent: Bool = true) {
         guard let canvasView else { return }
         // `projectTiles()`, not the flat collection: once the active project's tiles
         // live in a ZoneLayer, looking a tile up here found nothing and deleteTile
@@ -7165,7 +7198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try? owner?.managedSessionStore.delete(tileId: id)
             reconciledManagedSessionSource.invalidateCache()
             if let agentId = agentSupervisor.agent(forTile: id) {
-                agentSupervisor.requestClose(agentID: agentId)
+                if parksAgent { agentSupervisor.requestClose(agentID: agentId) }
                 agentSupervisor.detachView(agentID: agentId)
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
@@ -11143,6 +11176,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onShelfExpansionChange = { shelf, expanded in
             WorkspaceSidebarConfig.setShelfExpanded(shelf, expanded)
         }
+        // Groups start folded, and each parent's fold is kept as it was left
+        // (launch polish, item Q).
+        sidebar.agentInbox.foldsUntouchedGroups = true
+        sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
+        sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
+            guard let self else { return }
+            WorkspaceSidebarConfig.setParentFolds(folds, defaults: self.settingsDefaults)
+        }
         // The header's New agent button makes the same agent ⌘K's New Agent does.
         sidebar.agentInbox.onNewAgent = { [weak self] in
             _ = self?.spawnManagedAgentFromPalette()
@@ -11195,6 +11236,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // snooze dates atomically.
         sidebar.agentInbox.onSnoozeSelection = { [weak self] rowIds, wakeAt in
             _ = self?.snoozeAgentsFromInbox(rowIds, wakeAt: wakeAt)
+        }
+        // P4.11's Undo toast, which only the checks ever wired: the reader hands
+        // the list the four stored facts, the restorer puts them back — and, for a
+        // settle, the tile Settle closed (launch polish, item R).
+        sidebar.agentInbox.lifecycleFacts = { [weak self] rawID in
+            self?.agentSupervisor.records[AgentID(rawValue: rawID)].map {
+                InboxLifecycleSnapshot(
+                    settledOverride: $0.settledOverride, settledAt: $0.settledAt,
+                    snoozedUntil: $0.snoozedUntil, snoozedAt: $0.snoozedAt)
+            }
+        }
+        sidebar.agentInbox.onUndoLifecycle = { [weak self] restoring in
+            self?.undoInboxLifecycle(restoring)
         }
         // P6.3: timer expiry is only a render signal. Rebuild from the current
         // records and real clock so an expired snooze changes lifecycle/variant;
@@ -11664,6 +11718,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
            !switchWorkspaceFromSidebarIfNeeded(owningWorkspaceId) {
             return false
         }
+        // Opening a settled agent gives it a tile the ordinary way; a tile Settle
+        // remembered for its Undo is no longer the one to restore.
+        settledAgentTiles[agentId] = nil
         guard let tileId = boundTileId ?? attachTileToAgentFromInbox(agentId) else { return false }
         guard revealTileFromInbox(tileId) else { return false }
         // Out of History: reopening a closed agent is asking for it back, and its
@@ -11804,11 +11861,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         guard !rowIds.isEmpty,
               rowIds.allSatisfy({ byID[$0]?.canSettle() == true }) else { return false }
-        let changed = rowIds.reduce(false) { result, rawID in
-            agentSupervisor.settle(agentID: AgentID(rawValue: rawID)) || result
+        var changed = false
+        for rawID in rowIds {
+            let agentId = AgentID(rawValue: rawID)
+            guard agentSupervisor.settle(agentID: agentId) else { continue }
+            changed = true
+            closeTileOfSettledAgent(agentId)
         }
         if changed { reloadWorkspaceSidebar() }
         return changed
+    }
+
+    /// Launch polish, item R. Settle used to write the record and stop: the row
+    /// left the live list and the tile stayed on the canvas, still typeable, so
+    /// "All set" only half happened. A settled agent is done for now, and its
+    /// window goes the way a closed one does — `deleteTile`, the × button's own
+    /// path: the tile-keyed session record goes, the view binding is cleared, the
+    /// tile leaves its layer and its project's canvas file, and the runner and
+    /// the record are left alone. What it does NOT do is park the agent in
+    /// History: Settled and History are different shelves, and Archive is the
+    /// verb for History.
+    ///
+    /// Settle is already refused for a running or blocked agent, so no turn is
+    /// cut off; and no tile is kept back, even the one being read — Settle is a
+    /// deliberate "I am done with this", and the Undo below gives it back.
+    ///
+    /// The tile is remembered — its WORLD frame and zone, as the layer held it
+    /// — so the settle's Undo can put it back exactly where it was.
+    private func closeTileOfSettledAgent(_ agentId: AgentID) {
+        guard let canvasView, let tileId = agentSupervisor.records[agentId]?.tileId,
+              let zoneId = canvasView.zoneId(containing: tileId),
+              let tile = canvasView.tilesInWorldFrames(forZoneId: zoneId)?.first(where: { $0.id == tileId })
+        else { return }
+        let session = try? controller(owningTile: tileId)?.managedSessionStore.load(tileId: tileId)
+        deleteTile(id: tileId, parksAgent: false)
+        guard canvasView.tileView(for: tileId) == nil else { return }
+        settledAgentTiles[agentId] = SettledAgentTile(worldTile: tile, zoneId: zoneId, session: session ?? nil)
+    }
+
+    /// A settled agent's tile, as it stood before Settle closed it.
+    struct SettledAgentTile {
+        /// The tile record with its frame in WORLD coordinates.
+        let worldTile: Tile
+        let zoneId: UUID
+        let session: ManagedAgentSessionRecord?
+    }
+
+    /// Put a settled agent's tile back where Settle took it from: same id, same
+    /// world frame, same zone, same z, bound to the same agent. The view is
+    /// rebuilt from the record and wired the way a hydrated agent tile is
+    /// (`wireManagedAgentTile` with the agent named, so nothing is minted).
+    /// False when the zone is no longer installed — the caller then gives the
+    /// agent a tile the ordinary way.
+    @discardableResult
+    private func restoreTileOfSettledAgent(_ agentId: AgentID) -> Bool {
+        guard let memo = settledAgentTiles.removeValue(forKey: agentId), let canvasView,
+              agentSupervisor.records[agentId]?.tileId == nil,
+              canvasView.tileView(for: memo.worldTile.id) == nil,
+              let placement = canvasView.installedZonePlacement(for: memo.zoneId)
+        else { return false }
+        var local = memo.worldTile
+        local.frame = CanvasEngine.worldToZoneLocal(memo.worldTile.frame, zoneOrigin: placement.origin)
+        local.zoneId = memo.zoneId
+        let view = ManagedAgentTileNSView(tile: local)
+        guard case .zoneLayer = canvasView.installProjectTile(tileView: view, for: local, targetZoneId: memo.zoneId)
+        else { return false }
+        let owner = controller(owningTile: local.id)
+        if let session = memo.session { try? owner?.managedSessionStore.upsert(session) }
+        reconciledManagedSessionSource.invalidateCache()
+        wireManagedAgentTile(local.id, agentID: agentId)
+        if let owner {
+            owner.scheduleCanvasSave()
+            do { try owner.flushCanvasSave() } catch {
+                fputs("restoreTileOfSettledAgent: the canvas stays unsaved: \(error)\n", stderr)
+            }
+        } else {
+            flushCanvasSave()
+        }
+        return true
+    }
+
+    /// The settle Undo's host half (P4.11's two seams, wired in production now):
+    /// the four captured lifecycle facts go back verbatim, and an agent whose
+    /// tile Settle closed gets that tile back.
+    private func undoInboxLifecycle(_ restoring: [UUID: InboxLifecycleSnapshot]) {
+        for (rawID, facts) in restoring {
+            let agentId = AgentID(rawValue: rawID)
+            agentSupervisor.restoreLifecycle(
+                agentID: agentId, settledOverride: facts.settledOverride, settledAt: facts.settledAt,
+                snoozedUntil: facts.snoozedUntil, snoozedAt: facts.snoozedAt)
+            if facts.settledOverride != .settled { restoreTileOfSettledAgent(agentId) }
+        }
+        refreshAgentSurfaces(notify: false)
     }
 
     @discardableResult
@@ -14878,6 +15022,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Tiles whose person asked, by sending a prompt in the unbound state, for a
     /// new agent. Consumed by the next `wireManagedAgentTile` for that tile.
     private var managedAgentStartRequests: Set<UUID> = []
+    /// Tiles Settle closed, kept for the settle's Undo (launch polish, item R).
+    private var settledAgentTiles: [AgentID: SettledAgentTile] = [:]
 
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
@@ -34171,8 +34317,22 @@ extension AppDelegate {
     WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: standardDefaults)
     let restoreScopeSectionShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
     defer { restoreScopeSectionShelves() }
+    // Launch polish, item Q: the shipped sidebar starts a group folded and
+    // persists a fold through the app's settings defaults — a private suite
+    // here, never `.standard`.
+    guard let foldDefaults = QAIsolatedDefaults(isolatedSuiteName: "array.qa.inbox-scope-folds.\(UUID().uuidString)") else {
+        throw CheckError.failed("setup: no isolated defaults suite for the fold choices")
+    }
+    defer { foldDefaults.removePersistentDomain(forName: foldDefaults.suiteDomainName) }
+    app.qaSettingsDefaults = foldDefaults
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
+    sidebar.inboxForQA.layoutForQA()
+    // This section is about scope membership, so open the headless agent's
+    // group the way a person does; the child is a row of 'Default' either way.
+    try expect(sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
+               && sidebar.inboxForQA.clickDisclosureForQA(id: headlessId.rawValue),
+               "item Q: the shipped sidebar must start the headless agent's group folded, and open it on a click")
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")

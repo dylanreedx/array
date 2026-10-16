@@ -116,4 +116,23 @@ public enum WorkspaceSidebarConfig {
     public static func setShelfExpanded(_ shelf: Shelf, _ expanded: Bool, defaults: UserDefaults = .standard) {
         defaults.set(expanded, forKey: shelfKey(shelf))
     }
+
+    // Launch polish, item Q: each parent agent's fold, as you last left it —
+    // true open, false folded; a parent you never touched is absent and starts
+    // folded. Stored by agent id.
+    public static let parentFoldsKey = "continuum.workspaceSidebar.parentFolds"
+
+    public static func parentFolds(defaults: UserDefaults = .standard) -> [UUID: Bool] {
+        guard let stored = defaults.dictionary(forKey: parentFoldsKey) else { return [:] }
+        var folds: [UUID: Bool] = [:]
+        for (key, value) in stored {
+            if let id = UUID(uuidString: key), let open = value as? Bool { folds[id] = open }
+        }
+        return folds
+    }
+
+    public static func setParentFolds(_ folds: [UUID: Bool], defaults: UserDefaults = .standard) {
+        defaults.set(Dictionary(uniqueKeysWithValues: folds.map { ($0.key.uuidString, $0.value) }),
+                     forKey: parentFoldsKey)
+    }
 }
