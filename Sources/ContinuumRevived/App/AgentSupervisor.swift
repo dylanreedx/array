@@ -10993,6 +10993,11 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     fail: (String) -> Failure
 ) async throws -> String {
     let fileManager = FileManager.default
+    // How long a released titler may take to answer and free its slot. Each
+    // answer is a real process (a shell script) that a loaded machine — a full
+    // matrix run — can delay by seconds; 5s failed there while the work was
+    // correct. A real leak still fails, just later.
+    let titlerSettleTimeout: TimeInterval = AgentNameOneShot.timeout + 15
     let root = fileManager.temporaryDirectory
         .appendingPathComponent("continuum-generated-name-oneshot-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? fileManager.removeItem(at: root) }
@@ -11042,6 +11047,9 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     cat > "$R/.p45-stdin"
     case "$model" in
       *normal-descendant*)
+        # A loaded machine, made certain: while `.p45-slow` exists the titler
+        # takes longer than a quiet run ever does before it answers.
+        if [ -e "$R/.p45-slow" ]; then sleep 2.5; fi
         (sleep 0.7; : > "$R/.p45-normal-child-survived") &
         printf '%s' "$!" > "$R/.p45-normal-child-pid"
         printf '%s\n' '{"name":"Normal Child"}'
@@ -11225,7 +11233,13 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         store: store,
         makeRunner: { _ in runner },
         nameTitlerCommand: { $0 == .pi ? fakeCommand : nil },
-        nameGenerationTimeout: 2)
+        // PRODUCTION's deadline, not a short one. At 2s a loaded machine (a full
+        // matrix run) made the normal-exit titler below miss its own deadline,
+        // so the name never landed and the release/preserve assertion failed
+        // for a reason that had nothing to do with releasing or preserving; at
+        // 10s every core saturated still did it once in three. That block now
+        // runs its titler deliberately slow (`.p45-slow`) to keep this honest.
+        nameGenerationTimeout: AgentNameOneShot.timeout)
     let generatedID = supervisor.spawn(
         role: "reviewer",
         prompt: privatePrompt,
@@ -11233,7 +11247,7 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         harness: .pi,
         model: piModel,
         thinking: config.thinking)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+    guard await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
         !supervisor.isRunning(generatedID) && supervisor.qaActiveNameGenerationCount == 0
     }) else {
         throw fail("the fixture prompt did not finish before the generated-name action")
@@ -11241,7 +11255,7 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     guard supervisor.requestGeneratedName(agentID: generatedID) else {
         throw fail("a resolvable fake pi titler did not start the explicit action")
     }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+    guard await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }), let generated = supervisor.records[generatedID],
           generated.displayName == "Ship it",
@@ -11311,14 +11325,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         model: piModel,
         thinking: config.thinking)
     guard supervisor.requestGeneratedName(agentID: raceID),
-          await waitUntil(timeout: 5, pollInterval: 0.02, {
+          await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
               fileManager.fileExists(atPath: root.appendingPathComponent(".p45-stdin").path)
           }),
           supervisor.rename(agentID: raceID, to: "Human wins") else {
         throw fail("the held production one-shot did not reach the rename race")
     }
     try fileManager.removeItem(at: hold)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+    guard await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }), supervisor.records[raceID]?.displayName == "Human wins",
           supervisor.records[raceID]?.displayNameSource == .manual else {
@@ -11341,14 +11355,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
         throw fail("the generated-name burst exceeded the concurrency cap or armed the refused member")
     }
     try fileManager.removeItem(at: hold)
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+    guard await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
     }),
           supervisor.records[burstIDs[0]]?.displayName == "Ship it",
           supervisor.records[burstIDs[1]]?.displayName == "Ship it",
           supervisor.records[burstIDs[2]]?.displayName == AgentRecord.defaultAgentName,
           supervisor.records[burstIDs[2]]?.namingRequest == nil else {
-        throw fail("the capped burst did not release both accepted names while keeping the refused member unchanged")
+        throw fail("the capped burst did not release both accepted names while keeping the refused member unchanged (active=\(supervisor.qaActiveNameGenerationCount), names=\(burstIDs.map { supervisor.records[$0]?.displayName ?? "nil" }), refusedRequest=\(String(describing: supervisor.records[burstIDs[2]]?.namingRequest)))")
     }
 
     // Timeout: the fake forks a child that would leave a marker after the leader
@@ -11455,15 +11469,22 @@ private func checkGeneratedNameOneShot<Failure: Error>(
           let priorName = supervisor.records[inputSupervisorID]?.displayName else {
         throw fail("input-failure setup did not create a prior display name")
     }
+    // The normal-exit titler answers 2.5s late, slower than any quiet run, so
+    // the assertion below holds on a loaded machine by construction rather
+    // than by luck — and goes RED if the supervisor deadline is ever tightened
+    // back under a slow answer.
+    try Data().write(to: root.appendingPathComponent(".p45-slow"))
+    defer { try? fileManager.removeItem(at: root.appendingPathComponent(".p45-slow")) }
     guard supervisor.requestGeneratedNames(agentIDs: [normalSupervisorID, inputSupervisorID]).accepted.count == 2 else {
         throw fail("normal/input-failure supervisor requests did not both claim a slot")
     }
-    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+    let released = await waitUntil(timeout: titlerSettleTimeout, pollInterval: 0.02, {
         supervisor.qaActiveNameGenerationCount == 0
-    }), supervisor.records[normalSupervisorID]?.displayName == "Normal child",
+    })
+    guard released, supervisor.records[normalSupervisorID]?.displayName == "Normal child",
           supervisor.records[inputSupervisorID]?.displayName == priorName,
           supervisor.records[inputSupervisorID]?.namingRequest == nil else {
-        throw fail("normal/input-failure supervisor paths did not release their slots or preserve the prior name")
+        throw fail("normal/input-failure supervisor paths did not release their slots or preserve the prior name (released=\(released), active=\(supervisor.qaActiveNameGenerationCount), normal=\(String(describing: supervisor.records[normalSupervisorID]?.displayName)), input=\(String(describing: supervisor.records[inputSupervisorID]?.displayName)), prior=\(priorName), inputRequest=\(String(describing: supervisor.records[inputSupervisorID]?.namingRequest)))")
     }
 
     return "P4.5 pi titler: QA-closed live gate hides the action and resolves no CLI; fake-pi exact argv (agent's own model) / stdin-only prompt / empty private cwd / private config copy / no session artifact / work-dir cleanup; strict one-field JSON with provider-failure rejection; exact companion-envelope prompt/generated scrub; production CAS; supervisor-owned burst cap/release; normal-exit/input-failure/timeout process-group cleanup; prior-name preservation"
@@ -12707,7 +12728,38 @@ private func checkAutomaticNameRefresh<Failure: Error>(
         retryRunner.releaseRunAfterStop()
     }
 
-    return "automatic name refresh: claude/codex/pi title a held first turn from its prompt at send (first 8000 characters, nothing past), a failed send-time title is retried by the first completed turn, the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
+    // -- 8. a REFUSED send titles nothing and holds no slot: send-time naming
+    // starts only once the prompt is accepted. Pi refuses a model its
+    // catalogue does not list, before anything is captured. --
+    let refusedTitler = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("refused-bin", isDirectory: true), harness: .pi,
+        log: root.appendingPathComponent("refused-log", isDirectory: true),
+        behavior: .succeed("Must never be named"))
+    let refusedRunner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let refusedSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("refused-support", isDirectory: true)),
+        makeRunner: { _ in refusedRunner },
+        nameTitlerCommand: { $0 == .pi ? refusedTitler.command : nil }, nameGenerationTimeout: 10)
+    let refusedID = refusedSupervisor.spawn(
+        role: nil, prompt: nil, cwd: root, harness: .pi,
+        model: "fixture-pi/not-in-the-catalogue", thinking: "medium")
+    let refusedNameBefore = refusedSupervisor.records[refusedID]?.displayName
+    guard !refusedSupervisor.send("a prompt that is refused before it runs", to: refusedID) else {
+        throw fail("fixture: a pi send on an uncatalogued model must be refused")
+    }
+    // A titler started at send would be counted synchronously; give a detached
+    // one time to reach the fake too, so a late start is caught as well.
+    let refusedStartedAnything = await waitUntil(timeout: 1, pollInterval: 0.02, {
+        refusedSupervisor.qaActiveNameGenerationCount > 0 || refusedTitler.invocationCount > 0
+    })
+    guard !refusedStartedAnything,
+          refusedRunner.runCount == 0,
+          refusedSupervisor.records[refusedID]?.displayName == refusedNameBefore,
+          refusedSupervisor.records[refusedID]?.namingRequest == nil else {
+        throw fail("a refused send started naming work: active=\(refusedSupervisor.qaActiveNameGenerationCount) calls=\(refusedTitler.invocationCount) name=\(String(describing: refusedSupervisor.records[refusedID]?.displayName))")
+    }
+
+    return "automatic name refresh: a refused send starts no titler and holds no slot; claude/codex/pi title a held first turn from its prompt at send (first 8000 characters, nothing past), a failed send-time title is retried by the first completed turn, the titler fires from turnCompleted with no explicit action, a generated name is final for the automatic path (no churn, 1 call over 2 turns), claude/codex/pi are each bounded to 3 attempts against a titler that never succeeds, a manual rename blocks every automatic path before the next turn (0 provider calls), and a session-less claude turn falls through to claude's own titler with a pi beside it never asked"
 }
 
 /// A fake claude / codex / pi on disk, for the session-titler witnesses. It is
