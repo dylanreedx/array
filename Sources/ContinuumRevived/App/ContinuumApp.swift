@@ -3899,6 +3899,19 @@ enum ContinuumApp {
             }
         }
 
+        // A real terminal spawn needs `GhosttyRuntimeContext`, so below `ghostty_init()`.
+        if CommandLine.arguments.contains("--spawn-arrange-commit-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZoneTruthChecks.runSpawnArrangeCommit()
+                print("ContinuumRevivedZoneTruthChecks --spawn-arrange-commit-check passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --spawn-arrange-commit-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // M1.3b (`.plans/46`): builds a real `GhosttyRuntimeContext` for the same
         // reason as the leg above, so it sits below `ghostty_init()` too.
         if CommandLine.arguments.contains("--zone-spawner-coverage-check") {
@@ -16043,9 +16056,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// write fails, already-written project canvases are restored before the
     /// caller rolls the preview back in memory.
     enum LayoutCommitError: Error, CustomStringConvertible {
-        case tilesWithoutStore(Int)
-        var description: String { "\(count) moved tile(s) belong to no saved canvas" }
-        private var count: Int { switch self { case let .tilesWithoutStore(count): return count } }
+        case tilesWithoutStore(Set<UUID>)
+        var description: String {
+            switch self {
+            case let .tilesWithoutStore(ids):
+                return ids.count == 1
+                    ? "a moved tile isn't in any saved canvas"
+                    : "\(ids.count) moved tiles aren't in any saved canvas"
+            }
+        }
+    }
+
+    /// A refused layout commit, one line per refusal, under the app-support
+    /// root (so a check's temp store keeps it off the real file). The toast
+    /// cannot name tiles, and stderr goes nowhere for an app launched with
+    /// `open`, so before this a report of the refusal had nothing to read.
+    /// Rotated at 1 MB to a single `.old`; never on a hot path.
+    private func appendLayoutDiagnostics(_ message: String) {
+        guard let registryStore else { return }
+        let url = registryStore.registryFile.deletingLastPathComponent()
+            .appendingPathComponent("layout-diagnostics.log", isDirectory: false)
+        let fileManager = FileManager.default
+        if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_048_576 {
+            let old = url.appendingPathExtension("old")
+            try? fileManager.removeItem(at: old)
+            try? fileManager.moveItem(at: url, to: old)
+        }
+        if !fileManager.fileExists(atPath: url.path) { fileManager.createFile(atPath: url.path, contents: nil) }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data("\(ISO8601DateFormatter().string(from: Date())) \(message)\n".utf8))
     }
 
     private func persistLayoutTransaction(_ transaction: CanvasLayoutTransaction) -> Bool {
@@ -16128,7 +16169,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             guard unplacedTileIds.isEmpty else {
-                throw LayoutCommitError.tilesWithoutStore(unplacedTileIds.count)
+                let tiles = unplacedTileIds.sorted { $0.uuidString < $1.uuidString }.map { id in
+                    let tile = canvasView?.tileRecord(for: id)
+                    let kind = tile.map { "\($0.kind)" } ?? "unknown"
+                    let zone = tile?.zoneId?.uuidString ?? "none"
+                    return "\(id.uuidString)(\(kind), zone \(zone))"
+                }
+                appendLayoutDiagnostics(
+                    "layout commit refused: workspace=\(workspaceId.uuidString) "
+                    + "unplaced=[\(tiles.joined(separator: ", "))] of \(transaction.tileFrames.count) committed tile(s)")
+                throw LayoutCommitError.tilesWithoutStore(unplacedTileIds)
             }
 
             var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []

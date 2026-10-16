@@ -2590,7 +2590,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
         guard !transaction.isNoOp else { return nil }
-        guard persistGeometrySnapshot(transaction.after) else {
+        guard persistGeometrySnapshot(transaction.after, changedFrom: transaction.before) else {
             _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
             return nil
         }
@@ -2841,7 +2841,7 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneIds: Set(snapshot.zones.map(\.zoneId)))
         lastInstalledGeometry = installed
         if notifyCommit {
-            guard persistGeometrySnapshot(installed) else {
+            guard persistGeometrySnapshot(installed, changedFrom: previous) else {
                 if let previous { _ = applyGeometrySnapshot(previous, notifyCommit: false) }
                 return false
             }
@@ -2850,13 +2850,23 @@ final class CanvasNSView: NSView, TokenThemed {
         return true
     }
 
-    private func persistGeometrySnapshot(_ snapshot: CanvasGeometrySnapshot) -> Bool {
+    /// Commits only the tiles whose geometry differs from `previous`. With
+    /// auto-layout on, a gesture captures every tile in the workspace, and
+    /// sending them all made one tile that is in no saved canvas (an unrelated
+    /// spawn mid-flight, a tile of a project whose file went missing) fail every
+    /// gesture anywhere. Unchanged tiles are already on disk as they are.
+    private func persistGeometrySnapshot(
+        _ snapshot: CanvasGeometrySnapshot,
+        changedFrom previous: CanvasGeometrySnapshot?
+    ) -> Bool {
         guard let onLayoutCommitted else { return true }
         let placements = firstWinsDictionary(allZonePlacements().map { ($0.zoneId, $0) })
+        let before = firstWinsDictionary((previous?.tiles ?? []).map { ($0.tileId, $0) })
+        let changedTiles = snapshot.tiles.filter { before[$0.tileId] != $0 }
         var layout = CanvasLayoutTransaction(
-            tileFrames: firstWinsDictionary(snapshot.tiles.map { ($0.tileId, $0.frame) }),
+            tileFrames: firstWinsDictionary(changedTiles.map { ($0.tileId, $0.frame) }),
             zonePlacements: [:],
-            tileZoneIds: firstWinsDictionary(snapshot.tiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
+            tileZoneIds: firstWinsDictionary(changedTiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
         )
         for zone in snapshot.zones {
             guard var placement = placements[zone.zoneId] else { continue }
@@ -6970,12 +6980,14 @@ final class CanvasNSView: NSView, TokenThemed {
     /// stale flat `canvasState` and laid the tile out against the DEPARTED zone's
     /// placement, so it never appeared in the zone the user was looking at.
     ///
-    /// This is the SPAWN: it grows the zone and settles it around the new tile.
+    /// This is the SPAWN: it grows the zone to hold the new tile. It does not
+    /// settle the zone, because that settle commits a layout transaction which
+    /// must find the new tile already saved: the caller persists, then calls
+    /// `arrangeAutoLayoutAfterSpawn` (`TileSpawner.persistThenArrange`).
     /// Replacing the view of a tile that already exists is
     /// `materializeProjectTile`, which moves nothing.
     @discardableResult
-    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil,
-                            arrangeAfterSpawn: Bool = true) -> ProjectTileTarget {
+    func installProjectTile(tileView: TileNSView, for tile: Tile, targetZoneId: UUID? = nil) -> ProjectTileTarget {
         guard let zoneId = targetZoneId ?? activeProjectZoneId,
               let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId })
         else {
@@ -7013,11 +7025,10 @@ final class CanvasNSView: NSView, TokenThemed {
         tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
-        // T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`
-        // already expands the zone, but only when auto-layout is enabled — with it off,
-        // a spawned tile sat outside its zone until someone dragged it.
+        // T7: unconditional. `arrangeAutoLayoutAfterSpawn` also expands the zone, but
+        // only when auto-layout is enabled — with it off, a spawned tile sat outside
+        // its zone until someone dragged it.
         growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
-        if arrangeAfterSpawn { arrangeAutoLayoutAfterSpawn(zoneId: zoneId) }
         return .zoneLayer(zoneId)
     }
 

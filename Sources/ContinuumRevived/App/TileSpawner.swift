@@ -361,7 +361,7 @@ final class TileSpawner {
             if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
             // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
@@ -1112,7 +1112,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             // Leave nothing behind: no web view process, no drawn tile nothing
             // persisted, no browser-state row for a tile that does not exist.
@@ -1204,7 +1204,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             fputs("TileSpawner target=_blank persistence failed: \(error)\n", stderr)
             canvasView.removeTile(id: tile.id)
@@ -1372,8 +1372,8 @@ final class TileSpawner {
         nextState.inspectorStates.append(inspectorState)
         do {
             try projectStore.saveBrowserState(nextState)
+            try persistThenArrange(after: target, in: canvasView)
             _ = revealTile(inspectorTileId)
-            try persistProjectCanvas(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -1733,7 +1733,7 @@ final class TileSpawner {
                 ? "Watching this subagent. It runs inside its parent, so it takes no prompts here."
                 : "Ready. Type a prompt below to run \(spawnModelName) in this tile."))
         let target = canvasView.installProjectTile(
-            tileView: view, for: tile, targetZoneId: creationScope?.zoneId, arrangeAfterSpawn: false)
+            tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
 
         do {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
@@ -1748,11 +1748,7 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try persistProjectCanvas(after: target, in: canvasView)
-            // The layout transaction must see the new tile in the saved canvas.
-            if case let .zoneLayer(zoneId) = target {
-                canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
-            }
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             withdrawFailedSpawn(tileId, target: target, in: canvasView)
@@ -2225,7 +2221,7 @@ final class TileSpawner {
         }
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2275,7 +2271,7 @@ final class TileSpawner {
         runtime.bindTile(tileId, to: boardId)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2327,7 +2323,7 @@ final class TileSpawner {
         view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2642,7 +2638,7 @@ final class TileSpawner {
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2676,6 +2672,22 @@ final class TileSpawner {
     private func withdrawFailedSpawn(_ tileId: UUID, target: CanvasNSView.ProjectTileTarget, in canvasView: CanvasNSView) {
         guard target != .unplaced else { return }
         canvasView.removeTile(id: tileId)
+    }
+
+    /// A spawn's two writes, in the only order that works: the new tile reaches
+    /// its project's `canvas.json` first, and only then does its zone settle
+    /// around it. The settle commits through `persistLayoutTransaction`, which
+    /// refuses (and rolls back) any moved tile it finds in no saved canvas, so
+    /// arranging first refused every spawn that moved anything: "That layout
+    /// change couldn't be saved, so it was undone". `--spawn-arrange-commit-check`.
+    private func persistThenArrange(
+        after target: CanvasNSView.ProjectTileTarget,
+        in canvasView: CanvasNSView
+    ) throws {
+        try persistProjectCanvas(after: target, in: canvasView)
+        if case let .zoneLayer(zoneId) = target {
+            canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
+        }
     }
 
     /// Persists through the model that actually received the tile. The flat
@@ -2751,7 +2763,7 @@ final class TileSpawner {
         let view = RunArtifactsTileNSView(tile: tile)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -6452,7 +6464,7 @@ final class TileSpawner {
             targetZoneId: targetZoneId
         )
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistThenArrange(after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
