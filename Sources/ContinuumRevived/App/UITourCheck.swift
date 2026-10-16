@@ -425,66 +425,47 @@ enum UITourCheck {
 
     // MARK: - Settings
     //
-    // Settings is a launcher, not a static card: `SettingsPanel` owns its own
-    // NSPanel. It is rendered on its own path rather than through `UIProbe`
-    // because `UIProbe` re-parents the view it is handed, and moving a live
-    // panel's `contentView` into another window leaves the panel pointing at a
-    // view it no longer contains. So the panel keeps its window, the window is
-    // given the requested appearance before it is shown, and the render is taken
-    // from the panel's own content view — with the same `effectiveAppearance`
-    // assertion `UIProbe` makes, so a settings shot mislabelled `aqua` is still
-    // impossible.
+    // Settings is a modal inside the main window, not a static card: it is
+    // rendered on its own path rather than through `UIProbe` because `UIProbe`
+    // re-parents the view it is handed, and the modal must stay inside the
+    // window that presents it. The fixture window is given the requested
+    // appearance before the modal opens, and the render is taken from the card —
+    // with the same `effectiveAppearance` assertion `UIProbe` makes, so a
+    // settings shot mislabelled `aqua` is still impossible.
 
     static func renderSettings(appearance name: NSAppearance.Name) throws -> (rep: NSBitmapImageRep, size: NSSize) {
         guard let appearance = NSAppearance(named: name) else {
             throw fail("settings: no NSAppearance named '\(name.rawValue)'")
         }
         // An isolated suite, so a tour render can never write to the real
-        // defaults domain (same convention as `SettingsPanel.runSelfCheck`).
+        // defaults domain (same convention as `SettingsSelfChecks.runPanelCheck`).
         let suiteName = "continuum.uiTour.settings.\(name.rawValue)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             throw fail("settings: could not create the isolated defaults suite")
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let panel = SettingsPanel(sections: SettingsSchema.sections(), defaults: defaults)
         let appAppearance = NSApp?.appearance
         NSApp?.appearance = appearance
         defer { NSApp?.appearance = appAppearance }
 
-        var result: Result<(NSBitmapImageRep, NSSize), Error>?
-        appearance.performAsCurrentDrawingAppearance {
-            do {
-                panel.show(near: nil)
-                guard let content = panel.contentViewForQA else {
-                    throw fail("settings: panel has no content view")
-                }
-                content.window?.appearance = appearance
-                content.layoutSubtreeIfNeeded()
-                guard content.effectiveAppearance.name == name else {
-                    throw fail(
-                        "settings: content effectiveAppearance is '\(content.effectiveAppearance.name.rawValue)', requested '\(name.rawValue)'"
-                    )
-                }
-                guard content.bounds.width > 0, content.bounds.height > 0 else {
-                    throw fail("settings: content laid out to \(content.bounds.size)")
-                }
-                guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
-                    throw fail("settings: could not allocate bitmap")
-                }
-                content.cacheDisplay(in: content.bounds, to: rep)
-                result = .success((rep, content.bounds.size))
-            } catch {
-                result = .failure(error)
-            }
+        let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        let fixture = SettingsFixtureWindow(model: model, appearance: appearance)
+        defer { fixture.tearDown() }
+        fixture.show(paneID: "general")
+        guard let card = fixture.modal.overlay?.card else {
+            throw fail("settings: the modal mounted no card")
         }
-        panel.close()
-
-        switch result {
-        case let .success((rep, size)): return (rep, size)
-        case let .failure(error): throw error
-        case nil: throw fail("settings: drawing-appearance block never ran")
+        guard card.effectiveAppearance.name == name else {
+            throw fail("settings: card effectiveAppearance is '\(card.effectiveAppearance.name.rawValue)', requested '\(name.rawValue)'")
         }
+        guard card.bounds.width > 0, card.bounds.height > 0 else {
+            throw fail("settings: card laid out to \(card.bounds.size)")
+        }
+        var rep: NSBitmapImageRep?
+        appearance.performAsCurrentDrawingAppearance { rep = fixture.snapshot() }
+        guard let rep else { throw fail("settings: could not allocate bitmap") }
+        return (rep, card.bounds.size)
     }
 
     // MARK: - Output

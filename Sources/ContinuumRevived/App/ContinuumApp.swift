@@ -2007,7 +2007,7 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
-                try SettingsPanel.runSelfCheck()
+                try SettingsSelfChecks.runPanelCheck()
                 print("ContinuumRevivedSettingsPanelChecks passed")
                 Foundation.exit(0)
             } catch {
@@ -2019,7 +2019,7 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--keybind-edit-check") {
             do {
                 _ = NSApplication.shared
-                try SettingsPanel.runKeybindEditSelfCheck()
+                try SettingsSelfChecks.runKeybindEditCheck()
                 print("ContinuumRevivedKeybindEditChecks passed")
                 Foundation.exit(0)
             } catch {
@@ -4259,6 +4259,13 @@ enum ContinuumApp {
     @MainActor
     private static var updaterController: SPUStandardUpdaterController?
 
+    /// Settings ▸ General ▸ Updates. Nil whenever the updater is inert (dev, QA).
+    @MainActor
+    static var checkForUpdatesAction: (() -> Void)? {
+        guard let updaterController else { return nil }
+        return { updaterController.checkForUpdates(nil) }
+    }
+
     private static func updaterPermitted() -> Bool {
         guard Bundle.main.bundleIdentifier == "dev.arrayapp.macos" else { return false }
         let environment = ProcessInfo.processInfo.environment
@@ -4925,9 +4932,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var paletteContextZoneId: UUID?
-    private var settingsPanel: SettingsPanel?
+    /// The in-window Settings modal while it is open; nil once it closes.
+    private var settingsModal: SettingsModal?
     /// QA: the defaults Settings reads and writes (a private suite in checks).
     var qaSettingsDefaults: UserDefaults?
+    /// QA: force the iPhone pane off. Its pairing view reads the keychain and
+    /// calls the relay the moment it is built, which a check must never do.
+    var qaSettingsCompanionEnabled: Bool?
+    /// QA: how many times Settings has closed (each close fires exactly once).
+    private(set) var qaSettingsCloseCount = 0
+    private var settingsDefaults: UserDefaults { qaSettingsDefaults ?? .standard }
     private var companionSettingsView: CompanionSettingsView?
     private let companionRelayProvisioning = CompanionRelayProvisioning()
     private var companionRelayPairingGrantID: UUID?
@@ -8168,7 +8182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// transition (released, or a second modifier joined) cancel the pending dwell and
     /// exit the leader if open.
     func handleFlagsChanged(_ event: NSEvent) {
-        guard !BoardTaskDetailController.isPresented(in: window) else { return }
+        guard !inWindowModalIsPresented(in: window) else { return }
         let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
         // P3.10: the inbox's ⌘-hold hint pills ride this monitor rather than a
         // `flagsChanged` override on the list. It is the only observer that sees a
@@ -8202,7 +8216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
-            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
+            guard !self.inWindowModalIsPresented(in: window) else { return event }
             if let session = self.focusModeSession {
                 _ = self.visitFocusModeTile(
                     at: event.locationInWindow, candidateTileIDs: session.protectedTileIds)
@@ -8304,7 +8318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let scrollMon = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
-            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
+            // An in-window modal (Settings, task details) scrolls its own content.
+            guard !self.inWindowModalIsPresented(in: window) else { return event }
             guard event.hasPreciseScrollingDeltas else { return event }
             // While a camera zoom session is live (pinch in progress, glide
             // running, or just after zoom input), the follow-through pan keeps
@@ -8326,7 +8341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let magnifyMon = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
-            guard !BoardTaskDetailController.isPresented(in: window) else { return event }
+            guard !self.inWindowModalIsPresented(in: window) else { return event }
             canvas.handlePinch(event)
             return nil
         }
@@ -8373,6 +8388,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let pending = leaderDwellWorkItem {
             pending.cancel()
             leaderDwellWorkItem = nil
+        }
+        // Settings is a modal INSIDE the main window: while it is open it owns that
+        // window's keyboard and nothing below runs, so canvas and global shortcuts
+        // are suppressed. Keys for another window (a sheet it raised) pass through.
+        if let settings = settingsModal, settings.isVisible {
+            guard event.window == nil || event.window === settings.window else { return false }
+            return settings.handleKeyEvent(event)
         }
         if BoardTaskDetailController.isPresented(in: event.window ?? window) {
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
@@ -9167,7 +9189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 openNavMode()
                 return true
             case .settings:
-                toggleSettingsPanel()
+                openSettings()
                 return true
             case .spawnProfile:
                 return false
@@ -9195,7 +9217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 closeFocusMode()
             }
         case "app.settings":
-            toggleSettingsPanel()
+            openSettings()
         case "tile.quickSpawn.1":
             spawnTerminalFromProfile("claude", trigger: "shortcut:quick-spawn-1")
         case "tile.quickSpawn.2":
@@ -9835,14 +9857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @objc func openSettingsFromMenu(_ sender: Any?) {
-        // The menu item always opens (never toggles) so re-selecting it brings
-        // the panel forward rather than dismissing it.
-        let panel = settingsPanel ?? makeSettingsPanel()
-        if !panel.isVisible {
-            focusBroker.openModal(.settings)
-        }
-        settingsPanel = panel
-        panel.show(near: window)
+        openSettings()
     }
 
     @objc func openCommandCenterFromMenu(_ sender: Any?) {
@@ -9854,21 +9869,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openKeybindingsSettings() {
-        let panel = settingsPanel ?? makeSettingsPanel()
-        if !panel.isVisible { focusBroker.openModal(.settings) }
-        settingsPanel = panel
-        panel.show(near: window, sectionID: "keybindings")
+        openSettings(paneID: "keybindings")
     }
 
-    private func toggleSettingsPanel() {
-        let panel = settingsPanel ?? makeSettingsPanel()
-        settingsPanel = panel
-        if panel.isVisible {
-            panel.close()
-        } else {
-            focusBroker.openModal(.settings)
-            panel.show(near: window)
+    /// Opens Settings inside the main window, or brings the open one forward and
+    /// focuses its search field. ⌘, never toggles it closed; Esc, ⌘W, the scrim
+    /// and the close button do.
+    private func openSettings(paneID: String? = nil) {
+        guard let window else { return }
+        if let modal = settingsModal, modal.isVisible {
+            modal.show(in: window, paneID: paneID)
+            return
         }
+        let modal = makeSettingsModal(paneID: paneID)
+        settingsModal = modal
+        focusBroker.openModal(.settings)
+        modal.show(in: window, paneID: paneID)
+    }
+
+    /// QA: the open Settings modal, if any.
+    var qaSettingsModal: SettingsModal? { settingsModal }
+    /// QA: `openSettings` is private; a leg drives the real one.
+    func qaOpenSettings(paneID: String? = nil) { openSettings(paneID: paneID) }
+
+    /// True while an in-window modal owns the pointer and keyboard.
+    private func inWindowModalIsPresented(in window: NSWindow?) -> Bool {
+        BoardTaskDetailController.isPresented(in: window) || settingsModal?.isVisible == true
     }
 
     @objc func openComponentLabFromMenu(_ sender: Any?) {
@@ -10707,33 +10733,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return CanvasBackgroundSettingsView(environment: environment)
     }
 
-    private func makeSettingsPanel() -> SettingsPanel {
-        let panel = SettingsPanel(
+    private func makeSettingsModal(paneID: String?) -> SettingsModal {
+        let defaults = settingsDefaults
+        let model = SettingsModel(
+            defaults: defaults,
             navKeymap: navKeymap,
-            customSectionViews: [
-                "floatingToolbar": { FloatingToolbarSettingsView() },
-                "companion": { [weak self] in
-                    self?.makeCompanionSettingsView() ?? NSView()
-                },
-                "canvasBackground": { [weak self] in
-                    self?.makeCanvasBackgroundSettingsView() ?? NSView()
-                },
-            ]
-        )
-        panel.onClose = { [weak self] in
-            self?.focusBroker.closeModal(.settings)
-            self?.settingsPanel = nil
-            // Pick up Navigation-section edits (leader modifier / hold delay), which
-            // persist to continuum.keymap.* but don't flow through onKeymapChanged.
-            self?.applyEditedNavKeymap(NavKeymap.resolve())
-        }
-        panel.onKeymapChanged = { [weak self] keymap in
+            isCompanionEnabled: qaSettingsCompanionEnabled ?? Self.showsCompanionSettings,
+            initialPaneID: paneID)
+        model.onKeymapChanged = { [weak self] keymap in
             self?.applyEditedNavKeymap(keymap)
         }
-        panel.onShortcutsChanged = { [weak self] in
+        model.onShortcutsChanged = { [weak self] in
             self?.refreshRegisteredShortcutSurfaces()
         }
-        return panel
+        model.customViews = [
+            "companion": { [weak self] in self?.makeCompanionSettingsView() ?? NSView() },
+            "canvasBackground": { [weak self] in self?.makeCanvasBackgroundSettingsView() ?? NSView() },
+        ]
+        if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
+            model.actionHandlers["checkForUpdates"] = checkForUpdates
+        }
+        model.onSignIn = { [weak self] harness in
+            self?.signInToAgentCLI(harness)
+        }
+        let modal = SettingsModal(model: model)
+        modal.onClose = { [weak self] in
+            guard let self else { return }
+            self.qaSettingsCloseCount += 1
+            self.focusBroker.closeModal(.settings)
+            self.settingsModal = nil
+            // Navigation edits already applied live through `onKeymapChanged`;
+            // re-resolve once more so nothing written another way is missed.
+            self.applyEditedNavKeymap(NavKeymap.resolve(defaults: defaults))
+        }
+        return modal
+    }
+
+    /// The iPhone pane: the companion is a developer surface in the alpha, and a
+    /// Mac already connected to the relay keeps its pairing controls.
+    private static var showsCompanionSettings: Bool {
+        if Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier { return true }
+        return CompanionRelayProvisioning().hasStoredIdentity()
+    }
+
+    /// Settings ▸ Agents ▸ "Sign In…": opens the CLI's OWN login flow in a terminal
+    /// tile. Array never asks for, stores or forwards a credential.
+    private func signInToAgentCLI(_ harness: AgentHarness) {
+        settingsModal?.close()
+        guard resolvedCreationScope() != nil else {
+            requestCreationScope { [weak self] in self?.signInToAgentCLI(harness) }
+            return
+        }
+        guard let spawner = spawnerForFilesystemCreation() else { return }
+        let command: (executable: String, arguments: [String])
+        switch harness {
+        case .claudeCode: command = ("claude", [])
+        case .codex: command = ("codex", ["login"])
+        case .pi: command = ("pi", [])
+        }
+        switch spawner.spawnSignInTerminal(executableName: command.executable, arguments: command.arguments,
+                                           title: "\(harness.rawValue) sign-in") {
+        case let .spawned(runtime):
+            installSpawnedTerminal(runtime, from: spawner)
+        case let .missingCommand(executable):
+            presentMissingCommand(executable: executable, profileId: command.executable)
+        default:
+            break
+        }
     }
 
     private func makeWorkspaceContentView(canvasView: CanvasNSView, frame: NSRect) -> NSView {
@@ -17295,11 +17361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         view.onOpenEditorSettings = { [weak self] in
-            guard let self else { return }
-            let panel = self.settingsPanel ?? self.makeSettingsPanel()
-            if !panel.isVisible { self.focusBroker.openModal(.settings) }
-            self.settingsPanel = panel
-            panel.show(near: self.window, sectionID: "editor")
+            self?.openSettings(paneID: "editor")
         }
         view.onOpenExternally = { [weak self] url in
             self?.tileSpawner?.openFileInPreferredEditor(path: url.path)
@@ -18689,8 +18751,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         floatingToolbar = nil
         profilePalette?.close()
         profilePalette = nil
-        settingsPanel?.close()
-        settingsPanel = nil
+        settingsModal?.close()
+        settingsModal = nil
         localPairingListener?.stop()
         localPairingListener = nil
 
@@ -34760,7 +34822,7 @@ extension AppDelegate {
         let workspaceBefore = revealApp.currentWorkspaceIdForSidebar()
         let tilesBefore = revealApp.canvasView?.canvasState.tiles.count
         let paletteBefore = revealApp.profilePalette.map(ObjectIdentifier.init)
-        let settingsBefore = revealApp.settingsPanel.map(ObjectIdentifier.init)
+        let settingsBefore = revealApp.settingsModal.map(ObjectIdentifier.init)
         for (name, event) in textGateEvents {
             try expect(revealApp.handleHotkey(event),
                        "\(name) must be withheld while \(label) owns text focus")
@@ -34768,7 +34830,7 @@ extension AppDelegate {
                         && revealApp.currentWorkspaceIdForSidebar() == workspaceBefore
                         && revealApp.canvasView?.canvasState.tiles.count == tilesBefore
                         && revealApp.profilePalette.map(ObjectIdentifier.init) == paletteBefore
-                        && revealApp.settingsPanel.map(ObjectIdentifier.init) == settingsBefore,
+                        && revealApp.settingsModal.map(ObjectIdentifier.init) == settingsBefore,
                        "\(name) escaped the \(label) text gate")
         }
         try expect(!revealApp.handleHotkey(ordinaryTyping),

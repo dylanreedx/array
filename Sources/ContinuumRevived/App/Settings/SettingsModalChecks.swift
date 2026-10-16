@@ -99,6 +99,7 @@ final class SettingsCheckFixture {
 
         delegate = AppDelegate()
         delegate.qaSettingsDefaults = defaults
+        delegate.qaSettingsCompanionEnabled = false
         let runtime = WorkspaceRuntime(
             boot: try zoneRegistry.acquire(projectId: projectId),
             workspaceId: workspaceId, document: document, registry: zoneRegistry,
@@ -212,43 +213,205 @@ final class SettingsCheckFixture {
 }
 
 /// `--settings-modal-check` — Settings is an in-window modal, not a window.
+///
+/// Opened through the real ⌘, key route in the production window: no window is
+/// created, the overlay is the window content's top-most subview over a live
+/// Metal terminal and a WKWebView, ⌘, focuses rather than duplicating or
+/// toggling, app shortcuts are suppressed while it is open, and each of the four
+/// ways out (Esc, ⌘W, the scrim, the close button) closes it, fires `onClose`
+/// once and returns focus to the tile that had it. The last pane comes back.
 @MainActor
 enum SettingsModalChecks {
-    static let overlayIdentifier = "ArraySettingsOverlay"
+    static let overlayIdentifier = SettingsOverlayView.identifier
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw SettingsCheckFixture.Failure(message: message) }
     }
 
     static func run() throws {
+        let standardGuard = QAStandardDefaultsGuard(keys: [SettingsModel.lastPaneKey, WorkspaceSidebarConfig.visibleKey])
         let fixture = try SettingsCheckFixture(label: "modal")
         defer { fixture.tearDown() }
+        let delegate = fixture.delegate
         guard let content = fixture.window.contentView else {
             throw SettingsCheckFixture.Failure(message: "the main window has no content view")
         }
         let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
+        func newWindows() -> [NSWindow] {
+            // The system's text-input window (`TUINSWindow`) appears whenever ANY field
+            // takes focus; it is AppKit's, not Settings', and is the only exclusion.
+            NSApp.windows.filter {
+                !windowsBefore.contains(ObjectIdentifier($0)) && !String(describing: type(of: $0)).hasPrefix("TUI")
+            }
+        }
+        func overlays() -> [NSView] { content.subviews.filter { $0.accessibilityIdentifier() == overlayIdentifier } }
+        func openWithCommandComma() throws { try fixture.sendKey(keyCode: 43, characters: ",", modifiers: [.command]) }
+
+        // Focus starts on the terminal tile, as it would after a click.
+        _ = delegate.qaFocusBroker.requestFocus(.tile(fixture.terminalTileId), reason: .userClick)
+        let focusedBefore = delegate.qaFocusBroker.activeSurface
+        try expect(focusedBefore == .tile(fixture.terminalTileId), "precondition: the terminal tile must hold focus")
 
         // 1. ⌘, through the production key route opens Settings INSIDE the window.
-        try fixture.sendKey(keyCode: 43, characters: ",", modifiers: [.command])
-        // The system's text-input window (`TUINSWindow`) appears whenever ANY field
-        // takes focus; it is AppKit's, not Settings', and is the only exclusion.
-        let newWindows = NSApp.windows.filter {
-            !windowsBefore.contains(ObjectIdentifier($0)) && !String(describing: type(of: $0)).hasPrefix("TUI")
-        }
-        try expect(newWindows.isEmpty,
-                   "⌘, must not create a window; it created \(newWindows.map { "\(type(of: $0)) '\($0.title)'" })")
-        let overlays = content.subviews.filter { $0.accessibilityIdentifier() == overlayIdentifier }
-        try expect(overlays.count == 1, "⌘, must mount exactly one Settings overlay in the main window; found \(overlays.count)")
-        try expect(content.subviews.last === overlays.first,
+        try openWithCommandComma()
+        try expect(newWindows().isEmpty,
+                   "⌘, must not create a window; it created \(newWindows().map { "\(type(of: $0)) '\($0.title)'" })")
+        try expect(overlays().count == 1, "⌘, must mount exactly one Settings overlay in the main window; found \(overlays().count)")
+        try expect(content.subviews.last === overlays().first,
                    "the Settings overlay must be the top-most subview of the window content")
+        try expect(delegate.qaFocusBroker.activeSurface == .modal(.settings),
+                   "Settings must own focus through the broker; active=\(String(describing: delegate.qaFocusBroker.activeSurface))")
+        guard let modal = delegate.qaSettingsModal, let overlay = modal.overlay else {
+            throw SettingsCheckFixture.Failure(message: "the app holds no Settings modal after ⌘,")
+        }
+
+        // 2. The scrim covers the whole content, above the Metal terminal, the
+        // WKWebView, the canvas toolbar and the sidebar: every point hits Settings.
+        try expect(overlay.frame == content.bounds, "the scrim must cover the window content; \(overlay.frame) vs \(content.bounds)")
+        let card = overlay.card.frame
+        try expect(card.width <= SettingsOverlayView.preferredCardSize.width && card.minX >= SettingsOverlayView.margin
+                   && card.minY >= SettingsOverlayView.margin, "the card must keep its margins: \(card) in \(content.bounds)")
+        func hitsOverlay(_ point: NSPoint) -> Bool {
+            var view = content.hitTest(point)
+            while let current = view { if current === overlay { return true }; view = current.superview }
+            return false
+        }
+        for (name, id) in [("terminal", fixture.terminalTileId), ("browser", fixture.browserTileId)] {
+            guard let tile = fixture.tileView(id), tile.window === fixture.window else {
+                throw SettingsCheckFixture.Failure(message: "the \(name) tile is not in the window")
+            }
+            let center = tile.convert(NSPoint(x: tile.bounds.midX, y: tile.bounds.midY), to: content)
+            try expect(hitsOverlay(center), "a point on the \(name) tile must hit Settings, not the tile")
+        }
+        try expect(fixture.tileView(fixture.terminalTileId)?.isDescendant(of: overlay) == false, "tiles stay under, not inside, Settings")
+        for corner in [NSPoint(x: 4, y: 4), NSPoint(x: content.bounds.maxX - 4, y: content.bounds.maxY - 4),
+                       NSPoint(x: 4, y: content.bounds.maxY - 4)] {
+            try expect(hitsOverlay(corner), "the scrim must cover \(corner) (sidebar, top bar, toolbar)")
+        }
+
+        // The card follows the window: preferred size when there is room, ≥32pt
+        // margins while it shrinks, the margins giving way below the minimum.
+        let sizes: [(NSSize, NSSize)] = [
+            (NSSize(width: 1_280, height: 800), NSSize(width: 880, height: 620)),
+            (NSSize(width: 760, height: 560), NSSize(width: 696, height: 496)),
+            (NSSize(width: 520, height: 380), NSSize(width: 520, height: 380)),
+        ]
+        for (bounds, expected) in sizes {
+            let frame = SettingsOverlayView.cardFrame(in: NSRect(origin: .zero, size: bounds))
+            try expect(frame.size == expected, "card in \(bounds) must be \(expected), got \(frame.size)")
+        }
+        let originalSize = fixture.window.frame.size
+        fixture.window.setContentSize(NSSize(width: 900, height: 600))
+        fixture.pump()
+        try expect(overlay.frame == content.bounds && overlay.card.frame.width == 900 - 64 && overlay.card.frame.height == 600 - 64,
+                   "the modal must follow a window resize; overlay \(overlay.frame) card \(overlay.card.frame)")
+        fixture.window.setContentSize(originalSize)
+        fixture.pump()
+
+        // 3. ⌘, again focuses the same modal: one overlay, no window, no toggle.
+        try openWithCommandComma()
+        try expect(overlays().count == 1 && delegate.qaSettingsModal === modal && newWindows().isEmpty,
+                   "a second ⌘, must keep exactly one Settings, open")
+        try expect(modal.searchField.map { fixture.window.firstResponder === $0.currentEditor() } == true,
+                   "⌘, on an open Settings must focus its search field")
+
+        // 4. App shortcuts are suppressed: ⌘1-⌘4 spawn nothing; ⌘K opens nothing.
+        let tilesBefore = fixture.canvas.allWorkspaceTiles().count
+        for (keyCode, digit) in [(UInt16(18), "1"), (19, "2"), (20, "3"), (21, "4")] {
+            try fixture.sendKey(keyCode: keyCode, characters: digit, modifiers: [.command])
+        }
+        try fixture.sendKey(keyCode: 40, characters: "k", modifiers: [.command])
+        try expect(fixture.canvas.allWorkspaceTiles().count == tilesBefore, "⌘1-⌘4 must not spawn tiles while Settings is open")
+        try expect(delegate.qaProfilePalette?.isVisible != true, "⌘K must not open the command menu over Settings")
+        try expect(delegate.qaFocusBroker.activeSurface == .modal(.settings) && overlays().count == 1,
+                   "suppressed shortcuts must leave Settings open and focused")
+        // Ordinary typing still reaches the field.
+        let plainA = try keyEvent(fixture, keyCode: 0, characters: "a")
+        try expect(!delegate.handleHotkey(plainA), "plain typing must pass through to the search field")
+
+        // 5. Esc clears an active search first, then closes.
+        modal.model.searchQuery = "dark"
+        try fixture.sendKey(keyCode: 53, characters: "\u{1B}")
+        try expect(modal.isVisible && modal.model.searchQuery.isEmpty, "Esc with a search must clear it and keep Settings open")
+
+        // 6. Each way out closes once and restores the tile's focus.
+        var closes = delegate.qaSettingsCloseCount
+        func expectClosed(_ how: String) throws {
+            fixture.pump()
+            try expect(overlays().isEmpty && delegate.qaSettingsModal == nil, "\(how) must remove Settings")
+            try expect(delegate.qaSettingsCloseCount == closes + 1,
+                       "\(how) must fire onClose exactly once; fired \(delegate.qaSettingsCloseCount - closes)")
+            try expect(delegate.qaFocusBroker.activeSurface == focusedBefore,
+                       "\(how) must hand focus back to the terminal tile; active=\(String(describing: delegate.qaFocusBroker.activeSurface))")
+            try expect(newWindows().isEmpty, "\(how) left a window behind")
+            closes = delegate.qaSettingsCloseCount
+        }
+        try fixture.sendKey(keyCode: 53, characters: "\u{1B}")
+        try expectClosed("Esc")
+
+        try openWithCommandComma()
+        try fixture.sendKey(keyCode: 13, characters: "w", modifiers: [.command])
+        try expectClosed("⌘W")
+        try expect(fixture.window.isVisible, "⌘W must close Settings, never the main window")
+
+        try openWithCommandComma()
+        guard let scrimCard = delegate.qaSettingsModal?.overlay?.card.frame else {
+            throw SettingsCheckFixture.Failure(message: "Settings did not reopen")
+        }
+        try fixture.click(atWindowPoint: content.convert(NSPoint(x: scrimCard.minX - 12, y: scrimCard.midY), to: nil))
+        try expectClosed("a click on the scrim")
+
+        try openWithCommandComma()
+        delegate.qaSettingsModal?.overlay?.closeButton.performClick(nil)
+        try expectClosed("the close button")
+
+        // A click INSIDE the card is not a dismissal.
+        try openWithCommandComma()
+        if let inside = delegate.qaSettingsModal?.overlay?.card.frame {
+            try fixture.click(atWindowPoint: content.convert(NSPoint(x: inside.midX, y: inside.minY + 6), to: nil))
+        }
+        try expect(delegate.qaSettingsModal?.isVisible == true, "a click inside the card must not close Settings")
+
+        // 7. The last pane comes back on the next open; the memory lives in the
+        // injected suite, never the standard domain.
+        delegate.qaSettingsModal?.model.selectPane("terminal")
+        fixture.pump()
+        try fixture.sendKey(keyCode: 53, characters: "\u{1B}")
+        try expectClosed("Esc (pane memory)")
+        try openWithCommandComma()
+        try expect(delegate.qaSettingsModal?.model.selectedPaneID == "terminal",
+                   "Settings must reopen on the last pane; got \(delegate.qaSettingsModal?.model.selectedPaneID ?? "none")")
+        try expect(fixture.defaults.string(forKey: SettingsModel.lastPaneKey) == "terminal", "the last pane must persist in Settings' defaults")
+        delegate.qaSettingsModal?.close()
+        let touched = standardGuard.finish()
+        try expect(touched.isEmpty, "Settings wrote the standard defaults domain: \(touched)")
+        print("settings-modal: in-window, top-most, single, shortcut-proof; Esc/⌘W/scrim/× each close once and restore focus")
+    }
+
+    static func keyEvent(_ fixture: SettingsCheckFixture, keyCode: UInt16, characters: String,
+                         modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+            windowNumber: fixture.window.windowNumber, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode) else {
+            throw SettingsCheckFixture.Failure(message: "could not synthesize key \(keyCode)")
+        }
+        return event
     }
 }
 
 /// `--settings-search-check` — the search field at the top of the Settings
-/// sidebar finds settings by the words a person would type.
+/// sidebar finds settings by the words a person would type, and takes them there.
+///
+/// Drives the real field (typed through the field editor), ↑/↓/Return through the
+/// app's key route, and asserts what the person sees: the results, the pane
+/// navigated to, the row scrolled into the viewport and highlighted. The drift
+/// guard holds the registry and the rendered rows to each other in both
+/// directions, pane by pane.
 @MainActor
 enum SettingsSearchChecks {
-    static let searchFieldIdentifier = "ArraySettingsSearch"
+    static let searchFieldIdentifier = SettingsSearchField.identifier
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw SettingsCheckFixture.Failure(message: message) }
@@ -266,6 +429,95 @@ enum SettingsSearchChecks {
             for child in view.subviews { if let found = find(child) { return found } }
             return nil
         }
-        try expect(find(content) != nil, "the Settings search field must be inside the main window")
+        guard let field = find(content), let modal = fixture.delegate.qaSettingsModal else {
+            throw SettingsCheckFixture.Failure(message: "the Settings search field must be inside the main window")
+        }
+        let model = modal.model
+        func isFocused() -> Bool { fixture.window.firstResponder === field.currentEditor() && field.currentEditor() != nil }
+        try expect(isFocused(), "opening Settings must focus the search field")
+
+        // ⌘F focuses the field from anywhere in Settings.
+        fixture.window.makeFirstResponder(nil)
+        try fixture.sendKey(keyCode: 3, characters: "f", modifiers: [.command])
+        try expect(isFocused(), "⌘F must focus the search field")
+
+        /// Types through the field editor, as keystrokes would, then settles.
+        func type(_ text: String) throws {
+            field.stringValue = ""
+            model.clearSearch()
+            fixture.window.makeFirstResponder(field)
+            guard let editor = field.currentEditor() as? NSTextView else {
+                throw SettingsCheckFixture.Failure(message: "the search field has no field editor")
+            }
+            editor.selectAll(nil)
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            fixture.pump()
+        }
+        func results() -> [SettingsEntry] { model.searchResults.map(\.entry) }
+
+        try type("dark")
+        try expect(model.searchQuery == "dark", "typing must reach the model; query='\(model.searchQuery)'")
+        try expect(results().contains { $0.paneID == "editor" && $0.label == "Appearance" }, "'dark' must find the Editor appearance")
+        try expect(results().contains { $0.id == "pane.appearance" }, "'dark' must find the Appearance pane")
+        try type("theme")
+        try expect(results().contains { $0.id == "pane.appearance" } && results().contains { $0.paneID == "editor" && $0.label == "Appearance" },
+                   "'theme' must find Appearance and the Editor appearance")
+        try type("codex")
+        try expect(results().contains { $0.field?.key == AgentBackendConfig.key }, "'codex' must find the default agent CLI")
+        try type("chime")
+        try expect(results().contains { $0.anchor == "sounds.master" }, "'chime' must find the sounds")
+        try type("background")
+        try expect(results().contains { $0.anchor == "custom.canvasBackground" }, "'background' must find the canvas background")
+        try type("on")
+        try expect(!results().isEmpty, "'on' must find something")
+        for entry in results() {
+            let words = ([entry.label, entry.groupTitle ?? "", entry.paneTitle] + entry.keywords + entry.optionTitles)
+                .flatMap(SettingsSearch.words)
+            try expect(words.contains { $0.hasPrefix("on") }, "'on' returned '\(entry.label)' without a word starting with 'on'")
+        }
+        try type("zzqxv")
+        try expect(results().isEmpty && model.groupedResults.isEmpty, "a query with no match must show the empty state")
+
+        // ↓ + Return navigates: to the Keyboard pane, the row scrolled into view
+        // from below the fold, and highlighted.
+        model.clearSearch()
+        model.selectPane("keybindings")
+        fixture.pump(0.15)
+        let target = "shortcut.tile.browser.browserFind"
+        try expect(model.renderedAnchors[target] != nil && !model.isAnchorVisible(target),
+                   "precondition: the browser Find shortcut must render below the fold of the Keyboard pane")
+        model.selectPane("general")
+        fixture.pump()
+        try type("browser find")
+        guard let targetIndex = model.searchResults.firstIndex(where: { $0.entry.anchor == target }) else {
+            throw SettingsCheckFixture.Failure(message: "'browser find' must find the browser Find shortcut; got \(results().map(\.label))")
+        }
+        try expect(model.selectedResultIndex == 0, "the first result must be selected as you type")
+        for _ in 0..<targetIndex { try fixture.sendKey(keyCode: 125, characters: "\u{F701}") }
+        try expect(model.selectedResultIndex == targetIndex, "↓ must move the selection; at \(String(describing: model.selectedResultIndex)) want \(targetIndex)")
+        try fixture.sendKey(keyCode: 126, characters: "\u{F700}")
+        try fixture.sendKey(keyCode: 125, characters: "\u{F701}")
+        try fixture.sendKey(keyCode: 36, characters: "\r")
+        fixture.pump(0.2)
+        try expect(model.selectedPaneID == "keybindings", "Return must navigate to the result's pane; at \(model.selectedPaneID)")
+        try expect(model.highlightedEntryID == target, "the result's row must be highlighted; highlighted=\(model.highlightedEntryID ?? "none")")
+        try expect(model.isAnchorVisible(target), "the result's row must be scrolled into view; frame=\(String(describing: model.anchorFrames[target])) viewport=\(model.viewportSize)")
+
+        // Esc clears the search and keeps Settings open.
+        fixture.window.makeFirstResponder(field)
+        try fixture.sendKey(keyCode: 53, characters: "\u{1B}")
+        try expect(model.searchQuery.isEmpty && field.stringValue.isEmpty && modal.isVisible, "Esc must clear the search and keep Settings open")
+
+        // Drift guard: every registry entry has a rendered anchor, and every
+        // rendered anchor is in the registry, pane by pane.
+        for pane in model.visiblePanes {
+            model.selectPane(pane.id)
+            fixture.pump()
+            let expected = Set(model.entries().filter { $0.paneID == pane.id }.compactMap(\.anchor))
+            let rendered = Set(model.renderedAnchors.keys)
+            try expect(expected.subtracting(rendered).isEmpty, "\(pane.title): registry entries with no rendered row: \(expected.subtracting(rendered).sorted())")
+            try expect(rendered.subtracting(expected).isEmpty, "\(pane.title): rendered rows missing from the registry: \(rendered.subtracting(expected).sorted())")
+        }
+        print("settings-search: word-prefix results, ↓/Return navigation with scroll and highlight, Esc clears, registry and rows agree")
     }
 }

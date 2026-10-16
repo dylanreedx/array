@@ -174,8 +174,9 @@ private func runPersistedPushCategoryPreferenceChecks(config: APNSConfig) throws
         expect(preferences.isEnabled(category), "\(category.rawValue): persisted true wins")
     }
 
-    guard let notifications = SettingsSchema.sections().first(where: { $0.id == "activityAndNotifications" }) else {
-        throw NSError(domain: "PersistedPushCategoryPreferencesChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing Activity & Notifications settings section"])
+    // The push categories reach the iPhone only, so they live in the iPhone pane.
+    guard let notifications = SettingsSchema.sections().first(where: { $0.id == "companion" }) else {
+        throw NSError(domain: "PersistedPushCategoryPreferencesChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing iPhone settings pane"])
     }
     let muteableCategories = PushCategory.allCases.filter(\.isMuteable)
     let categoryKeys = Set(muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) })
@@ -183,7 +184,7 @@ private func runPersistedPushCategoryPreferenceChecks(config: APNSConfig) throws
         guard case .toggle = field, let key = field.key else { return false }
         return categoryKeys.contains(key)
     }
-    expect(toggleFields.count == 7, "Activity & Notifications exposes exactly 7 muteable category toggles")
+    expect(toggleFields.count == 7, "the iPhone pane exposes exactly 7 muteable category toggles")
     expect(toggleFields.map(\.key) == muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) }, "notification toggle keys match muteable push category order")
     for (field, category) in zip(toggleFields, muteableCategories) {
         expect(field.currentValue(in: defaults) == .bool(preferences.isEnabled(category)), "\(category.rawValue): settings currentValue reads fixture defaults")
