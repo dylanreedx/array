@@ -28619,35 +28619,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // cacheDisplay writes row 0 at the top of the rep. Canvas points are
             // only top-left-origin when the view is flipped, so convert rather
             // than assume - a silently mirrored probe reads background as body.
-            func rgba(at point: CGPoint) -> [Int] {
-                let px = max(0, min(rep.pixelsWide - 1, Int(point.x * 2)))
-                let canvasY = canvas.isFlipped ? point.y : (canvas.bounds.height - point.y)
-                let py = max(0, min(rep.pixelsHigh - 1, Int(canvasY * 2)))
-                let offset = py * rep.bytesPerRow + px * 4
+            // Device pixels per canvas point, read from the capture itself.
+            let backingScale = CGFloat(rep.pixelsWide) / canvas.bounds.width
+            func rgba(atPixelX px: Int, pixelY py: Int) -> [Int] {
+                let x = max(0, min(rep.pixelsWide - 1, px))
+                let y = max(0, min(rep.pixelsHigh - 1, py))
+                let offset = y * rep.bytesPerRow + x * 4
                 return (0..<4).map { Int(bitmapData[offset + $0]) }
+            }
+            func pixelY(_ point: CGPoint) -> Int {
+                let canvasY = canvas.isFlipped ? point.y : (canvas.bounds.height - point.y)
+                return Int(canvasY * backingScale)
+            }
+            func rgba(at point: CGPoint) -> [Int] {
+                rgba(atPixelX: Int(point.x * backingScale), pixelY: pixelY(point))
+            }
+            // A border is found, not assumed: every border in the app is a
+            // hairline (0.5pt — one device pixel at 2x, and drawn a point
+            // inside the edge by some owners), so a probe parked one point in
+            // from the edge lands on the body. Scan perpendicular to the left
+            // edge, device pixel by device pixel, from 3pt outside to 4pt
+            // inside, and require a pixel that lies measurably OUTSIDE the
+            // range between the outside (6pt out) and the inside (6pt in) on
+            // some channel. An antialiased edge with no border is a blend of
+            // the two and stays inside that range, so it can never pass; no
+            // such pixel is a missing border, never a pass.
+            let borderThreshold = 12
+            func leftEdgeBorder(of rect: CGRect) -> (color: [Int], outside: [Int], inside: [Int], offsetPoints: CGFloat)? {
+                let y = pixelY(CGPoint(x: rect.minX, y: rect.midY))
+                let outside = rgba(atPixelX: Int((rect.minX - 6) * backingScale), pixelY: y)
+                let inside = rgba(atPixelX: Int((rect.minX + 6) * backingScale), pixelY: y)
+                let start = Int((rect.minX - 3) * backingScale)
+                let end = Int((rect.minX + 4) * backingScale)
+                var best: (color: [Int], score: Int, x: Int)?
+                for x in start...end {
+                    let color = rgba(atPixelX: x, pixelY: y)
+                    // How far this pixel escapes the outside↔inside span.
+                    let score = (0..<3).map { channel in
+                        let low = min(outside[channel], inside[channel])
+                        let high = max(outside[channel], inside[channel])
+                        return max(low - color[channel], color[channel] - high, 0)
+                    }.max() ?? 0
+                    if score >= borderThreshold, score > (best?.score ?? 0) { best = (color, score, x) }
+                }
+                guard let best else { return nil }
+                return (best.color, outside, inside, CGFloat(best.x) / backingScale - rect.minX)
             }
             let primaryZone = canvas.qaZoneChromeRectInCanvas(for: za1)!
             let lowerZone = canvas.qaZoneChromeRectInCanvas(for: za2)!
             let focusedTile = canvas.qaTileRectInCanvas(for: ta1)!
+            let zoneEdge = leftEdgeBorder(of: primaryZone)
+            let tileEdge = leftEdgeBorder(of: focusedTile)
             let probes: [String: [Int]] = [
                 "background": rgba(at: CGPoint(x: safe.minX + 2, y: safe.minY + 2)),
-                "primaryZoneBorder": rgba(at: CGPoint(x: primaryZone.minX + 1, y: primaryZone.midY)),
+                "primaryZoneBorder": zoneEdge?.color ?? [],
                 "primaryZoneHeader": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.maxY - 6)),
                 "primaryZoneBody": rgba(at: CGPoint(x: primaryZone.midX, y: primaryZone.midY)),
                 "lowerZoneBody": rgba(at: CGPoint(x: lowerZone.midX, y: lowerZone.midY)),
-                "tileBorder": rgba(at: CGPoint(x: focusedTile.minX + 1, y: focusedTile.midY)),
+                "tileBorder": tileEdge?.color ?? [],
                 "tileBody": rgba(at: CGPoint(x: focusedTile.midX, y: focusedTile.midY))]
             let distinctProbeColors = Set(probes.values.map { $0.map(String.init).joined(separator: ",") })
-            if minimum == maximum || distinctProbeColors.count < 4 {
+            if minimum == maximum || zoneEdge == nil || tileEdge == nil || distinctProbeColors.count < 4 {
+                let edges = "zoneEdge=\(zoneEdge.map { "\($0)" } ?? "none") tileEdge=\(tileEdge.map { "\($0)" } ?? "none")"
                 visualCaptureFailures.append(
-                    "\(phase)-\(slug): semantic raster probes lack background/border/body transitions probes=\(probes)")
+                    "\(phase)-\(slug): semantic raster probes lack background/border/body transitions \(edges) probes=\(probes)")
                 return
             }
             visualEvidence.append(["phase": phase, "appearance": slug, "path": path.path,
                 "captureSequence": sequence, "lifecycleEvent": phase,
                 "points": ["width": canvas.bounds.width, "height": canvas.bounds.height],
                 "pixels": ["width": rep.pixelsWide, "height": rep.pixelsHigh],
-                "backingScale": 2.0, "pixelMinimum": minimum, "pixelMaximum": maximum,
+                "backingScale": Double(backingScale), "pixelMinimum": minimum, "pixelMaximum": maximum,
+                "borderEdges": [
+                    "primaryZone": ["offsetPoints": zoneEdge?.offsetPoints ?? 0, "outside": zoneEdge?.outside ?? [], "inside": zoneEdge?.inside ?? []],
+                    "focusedTile": ["offsetPoints": tileEdge?.offsetPoints ?? 0, "outside": tileEdge?.outside ?? [], "inside": tileEdge?.inside ?? []]],
                 "cameraFit": ["x": fitted.x, "y": fitted.y, "zoom": fitted.zoom,
                     "note": "evidence framing only; document camera restored after capture"],
                 "documentCamera": ["x": priorViewport.x, "y": priorViewport.y, "zoom": priorViewport.zoom],
