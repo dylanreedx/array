@@ -339,8 +339,18 @@ final class SettingsModel {
         case .global: return "Everywhere"
         case .navMode: return "Navigation mode"
         case .inbox: return "Activity Dock"
-        case .tile(let kind): return "\(kind.rawValue.prefix(1).uppercased())\(kind.rawValue.dropFirst()) tiles"
+        case .tile(let kind): return "\(words(kind.rawValue)) tiles"
         }
+    }
+
+    /// "browserInspector" → "Browser inspector": a stored kind, read as words.
+    static func words(_ identifier: String) -> String {
+        var result = ""
+        for character in identifier {
+            if character.isUppercase, !result.isEmpty { result.append(" ") }
+            result.append(result.isEmpty ? Character(character.uppercased()) : Character(character.lowercased()))
+        }
+        return result
     }
 
     func chordDisplay(entryID: String) -> String? {

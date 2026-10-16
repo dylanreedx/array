@@ -33,8 +33,13 @@ final class SettingsCheckFixture {
     private let terminalRuntime: GhosttyTerminalRuntime
     private let browserRuntime: WKWebViewBrowserRuntime
     private var torn = false
+    private let appAppearance: NSAppearance?
 
     init(label: String) throws {
+        // The app pins dark at launch (`applicationDidFinishLaunching`); a check
+        // that skips launch pins it the same way, so renders show what users see.
+        appAppearance = NSApp.appearance
+        NSApp.appearance = NSAppearance(named: .darkAqua)
         let fileManager = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_000_000)
         let workspaceId = UUID()
@@ -209,6 +214,7 @@ final class SettingsCheckFixture {
         browserEngine.shutdown()
         defaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: tempRoot)
+        NSApp.appearance = appAppearance
     }
 }
 
@@ -264,6 +270,28 @@ enum SettingsModalChecks {
         guard let modal = delegate.qaSettingsModal, let overlay = modal.overlay else {
             throw SettingsCheckFixture.Failure(message: "the app holds no Settings modal after ⌘,")
         }
+
+        // Appearance follows the main window: the card, its SwiftUI content and the
+        // render all resolve to the window's appearance, and follow it when it moves.
+        func expectAppearance(_ name: NSAppearance.Name, _ state: String) throws {
+            fixture.pump()
+            let window = fixture.window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            let card = overlay.card.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            let content = overlay.hosting.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            try expect(window == name && card == window && content == window,
+                       "\(state): window \(String(describing: window)), card \(String(describing: card)), content \(String(describing: content)) — Settings must follow the window")
+            guard let rep = SettingsFixtureWindow.capture(overlay.card) else {
+                throw SettingsCheckFixture.Failure(message: "\(state): could not render the card")
+            }
+            let luminance = SettingsFixtureWindow.meanLuminance(rep)
+            try expect(name == .darkAqua ? luminance < 0.3 : luminance > 0.7,
+                       "\(state): the card renders at mean luminance \(luminance), which is not \(name == .darkAqua ? "dark" : "light")")
+        }
+        try expectAppearance(.darkAqua, "the app's pinned dark appearance")
+        fixture.window.appearance = NSAppearance(named: .aqua)
+        try expectAppearance(.aqua, "the window switched to light")
+        fixture.window.appearance = nil
+        try expectAppearance(.darkAqua, "the window back on the app's appearance")
 
         // 2. The scrim covers the whole content, above the Metal terminal, the
         // WKWebView, the canvas toolbar and the sidebar: every point hits Settings.
@@ -542,9 +570,18 @@ enum SettingsSearchChecks {
         for pane in model.visiblePanes {
             model.selectPane(pane.id)
             fixture.pump()
-            if let card = modal.overlay?.card, let rep = card.bitmapImageRepForCachingDisplay(in: card.bounds) {
-                card.cacheDisplay(in: card.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: artifacts.appendingPathComponent("\(pane.id).png"))
+            // Dark (the app's appearance) and light, each pane.
+            if let card = modal.overlay?.card {
+                for (suffix, appearance) in [("dark", NSAppearance.Name?.none), ("light", .some(.aqua))] {
+                    fixture.window.appearance = appearance.flatMap(NSAppearance.init(named:))
+                    fixture.pump()
+                    if let rep = SettingsFixtureWindow.capture(card) {
+                        try? rep.representation(using: .png, properties: [:])?
+                            .write(to: artifacts.appendingPathComponent("\(pane.id)-\(suffix).png"))
+                    }
+                }
+                fixture.window.appearance = nil
+                fixture.pump()
             }
             let expected = Set(model.entries().filter { $0.paneID == pane.id }.compactMap(\.anchor))
             let rendered = Set(model.renderedAnchors.keys)

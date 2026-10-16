@@ -10,7 +10,9 @@ final class SettingsFixtureWindow {
     let modal: SettingsModal
     var model: SettingsModel { modal.model }
 
-    init(model: SettingsModel, size: NSSize = NSSize(width: 1_100, height: 760), appearance: NSAppearance? = nil) {
+    /// Dark by default, as the app pins it at launch (`applicationDidFinishLaunching`).
+    init(model: SettingsModel, size: NSSize = NSSize(width: 1_100, height: 760),
+         appearance: NSAppearance? = NSAppearance(named: .darkAqua)) {
         window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless],
                           backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -60,10 +62,29 @@ final class SettingsFixtureWindow {
     }
 
     func snapshot() -> NSBitmapImageRep? {
-        guard let card = modal.overlay?.card,
-              let rep = card.bitmapImageRepForCachingDisplay(in: card.bounds) else { return nil }
-        card.cacheDisplay(in: card.bounds, to: rep)
+        guard let card = modal.overlay?.card else { return nil }
+        return Self.capture(card)
+    }
+
+    /// A card render in the card's OWN appearance (layer colours resolve against
+    /// the current drawing appearance, not the view's).
+    static func capture(_ view: NSView) -> NSBitmapImageRep? {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.effectiveAppearance.performAsCurrentDrawingAppearance { view.cacheDisplay(in: view.bounds, to: rep) }
         return rep
+    }
+
+    /// Mean luminance (0…1) of a render, sampled on a grid: dark chrome reads low.
+    static func meanLuminance(_ rep: NSBitmapImageRep) -> Double {
+        var total = 0.0, count = 0.0
+        for y in stride(from: 0, to: rep.pixelsHigh, by: 8) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 8) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                total += 0.2126 * Double(c.redComponent) + 0.7152 * Double(c.greenComponent) + 0.0722 * Double(c.blueComponent)
+                count += 1
+            }
+        }
+        return count > 0 ? total / count : 0
     }
 }
 
@@ -115,6 +136,12 @@ enum SettingsSelfChecks {
             sentinels[id] = sentinel
             model.customViews[id] = { mounts[id, default: 0] += 1; return sentinel }
         }
+        var background = CanvasBackgroundConfiguration.systemDefault
+        model.canvasBackground = CanvasBackgroundEditor(environment: .init(
+            loadGlobal: { background }, saveGlobal: { background = $0 },
+            loadWorkspace: { .inherit }, saveWorkspace: { _ in },
+            importImage: { _ in throw Failure(message: "no import in this check") },
+            chooseImageURL: { nil }, hasWorkspace: false))
         let fixture = SettingsFixtureWindow(model: model)
         defer { fixture.tearDown() }
         fixture.show()
@@ -136,12 +163,6 @@ enum SettingsSelfChecks {
             let stray = rendered.subtracting(expected)
             try expect(stray.isEmpty, "\(section.title): rendered rows the registry does not know: \(stray.sorted())")
         }
-        var background = CanvasBackgroundConfiguration.systemDefault
-        model.canvasBackground = CanvasBackgroundEditor(environment: .init(
-            loadGlobal: { background }, saveGlobal: { background = $0 },
-            loadWorkspace: { .inherit }, saveWorkspace: { _ in },
-            importImage: { _ in throw Failure(message: "no import in this check") },
-            chooseImageURL: { nil }, hasWorkspace: false))
         for (id, sentinel) in sentinels {
             try expect((mounts[id] ?? 0) > 0, "custom row \(id) never asked the app for its view")
             _ = sentinel
@@ -248,6 +269,13 @@ enum SettingsSelfChecks {
                    && AgentStatusElementConfig.isVisible(.contextMeter, defaults: defaults)
                    && !AgentStatusElementConfig.isVisible(.cost, defaults: defaults),
                    "status elements must stay independent")
+
+        // Shortcut group titles are words, never a stored tile kind.
+        try expect(SettingsModel.words("browserInspector") == "Browser inspector", "tile kinds must read as words")
+        for group in model.shortcutGroups {
+            try expect(group.title.range(of: "[a-z][A-Z]", options: .regularExpression) == nil,
+                       "shortcut group '\(group.title)' shows a stored identifier")
+        }
 
         // 7. The modal renders (grey-screen guard), with artifacts for review.
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
