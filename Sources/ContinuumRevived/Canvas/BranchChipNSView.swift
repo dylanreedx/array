@@ -120,7 +120,7 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         // `Radius.card`, not `Radius.pill`: CALayer does not clamp a corner radius
         // to half the view's height, so 999 on an 18pt chip is not a capsule but
         // undefined-looking geometry that would also make the PNG baseline

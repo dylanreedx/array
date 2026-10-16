@@ -1510,7 +1510,7 @@ enum UIProbeAppearance {
         return rail
     }
 
-    private struct AdoptedSurface {
+    struct AdoptedSurface {
         let id: String
         let size: NSSize
         let make: () -> NSView
@@ -1569,7 +1569,7 @@ enum UIProbeAppearance {
         ])
     }
 
-    private static func adoptedSurfaces() throws -> [AdoptedSurface] {
+    static func adoptedSurfaces() throws -> [AdoptedSurface] {
         let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
               case let .staticCard(_, makeTile) = entry.content else {

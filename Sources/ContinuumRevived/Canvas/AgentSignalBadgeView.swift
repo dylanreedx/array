@@ -29,7 +29,7 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 11
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         icon.imageScaling = .scaleProportionallyDown
         label.font = .monospacedSystemFont(ofSize: 10, weight: .semibold)
         label.lineBreakMode = .byTruncatingTail
@@ -100,7 +100,7 @@ final class AgentSignalBorderView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 8
-        layer?.borderWidth = 2
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         isHidden = true
         setAccessibilityElement(false)
     }

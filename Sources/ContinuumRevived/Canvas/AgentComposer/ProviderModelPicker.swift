@@ -232,7 +232,7 @@ final class ProviderModelPickerView: NSView, TokenThemed, AgentPageZoomScalable 
         wantsLayer = true
         layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
         layer?.masksToBounds = true
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
 
         indicator.wantsLayer = true
         // NOT scaled: `AgentPageZoom.scaled` quantizes to a half point and 1.25

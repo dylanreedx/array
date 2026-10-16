@@ -317,7 +317,9 @@ final class AgentReferenceChipView: NSButton {
             ?? CanvasSymbolImage.image(named: "person.2", pointSize: glyphPointSize, weight: .semibold)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         font = NSFont.token(.label, zoom: zoom)
-        layer?.borderWidth = CGFloat(zoom.scaled(1))
+        // A hairline is a device property, not a metric: it does not scale
+        // with the page zoom (same rule as `ChoiceListView.panelBorderWidth`).
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.cornerRadius = Self.cornerRadius(zoom: zoom)
     }
 

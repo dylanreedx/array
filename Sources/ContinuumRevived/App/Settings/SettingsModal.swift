@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
@@ -48,7 +49,7 @@ final class SettingsOverlayView: NSView {
         card.layer?.cornerRadius = 14
         card.layer?.cornerCurve = .continuous
         card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 0.5
+        card.layer?.borderWidth = CGFloat(LineWidth.hairline)
         card.setAccessibilityIdentifier(Self.cardIdentifier)
         addSubview(card)
         hosting.translatesAutoresizingMaskIntoConstraints = true

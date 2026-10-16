@@ -470,7 +470,7 @@ class TileNSView: NSView, TokenThemed {
         WorkspaceSwitchCounters.tileViewsBuilt += 1
         wantsLayer = true
         applyTokens()
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         // P1.11: `Radius.container`, per Metrics' own mapping table (6 → 10). The
         // tile CONTAINS cards, and P1.10 moved those to `Radius.card` (6) — this is
         // the other half of righting the inverted nesting.

@@ -609,7 +609,9 @@ final class ComposerImageAttachmentCellView: NSView, AgentPageZoomScalable {
         layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
         let lineRole = item?.state.lineRole ?? .decorativeHairline
         layer?.borderColor = lineRole.color.cgColor(for: theme)
-        layer?.borderWidth = item?.state == .ready ? 1 : 1.5
+        // The state is in the line's ROLE (attention for a failed or pending
+        // image); the width is the app-wide hairline in every state.
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
 
         imageContainer.wantsLayer = true
         imageContainer.layer?.cornerRadius = CGFloat(pageZoom.scaled(AgentTileRadius.artifact - 2))

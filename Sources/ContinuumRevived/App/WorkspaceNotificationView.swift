@@ -20,7 +20,7 @@ final class WorkspaceNotificationView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerRadius = 10
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         messageLabel.font = .systemFont(ofSize: 13)
         messageLabel.maximumNumberOfLines = 0
         messageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

@@ -1430,7 +1430,7 @@ private enum CommandCenterDisplayEntry {
     }
 }
 
-private final class CommandCenterSurfaceView: NSView {
+final class CommandCenterSurfaceView: NSView {
     struct AppearanceSnapshot: Equatable {
         let usesBlur: Bool
         let opacity: Double
@@ -1443,7 +1443,7 @@ private final class CommandCenterSurfaceView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 14
-        layer?.borderWidth = 0.5
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.24
         layer?.shadowRadius = 24

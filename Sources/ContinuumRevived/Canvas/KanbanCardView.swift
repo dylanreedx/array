@@ -393,7 +393,7 @@ final class KanbanCardView: NSView, TokenThemed {
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(in: self)
         // Selection is a ring; a resting card has NO border, which is what lets
         // the shadow do the separating.
-        layer?.borderWidth = (isSelected || isEditing) ? 2 : 0
+        layer?.borderWidth = (isSelected || isEditing) ? CGFloat(LineWidth.hairline) : 0
         layer?.borderColor = (isSelected || isEditing)
             ? LineToken.borderStrong.color.cgColor(in: self) : nil
         layer?.shadowColor = NSColor.black.cgColor

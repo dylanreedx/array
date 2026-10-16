@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// KB-01. The insertion preview inside a lane.
@@ -20,7 +21,7 @@ final class BoardCardGhostView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 7
-        layer?.borderWidth = 2
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         isHidden = true
         applyAccent()
     }

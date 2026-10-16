@@ -262,7 +262,7 @@ private final class ComposerFileReferenceChipView: NSView {
         wantsLayer = true
         layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
         layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         glyphLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         nameLabel.textColor = TextToken.textPrimary.color.nsColor(for: theme)
         removeButton.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)

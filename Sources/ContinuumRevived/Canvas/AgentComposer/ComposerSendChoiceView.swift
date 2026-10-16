@@ -246,7 +246,8 @@ final class ComposerMenuChevronButton: NSControl, TokenThemed, AgentPageZoomScal
         let theme = effectiveTokenTheme
         let focused = window?.firstResponder === self
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
-        layer?.borderWidth = focused ? 2 : 1
+        // One hairline in both states; keyboard focus is the focus-ring colour.
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.borderColor = (focused ? AgentLineRole.focusRing : .controlBoundary).color.cgColor(for: theme)
         iconView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
         alphaValue = isPressed ? 0.78 : 1

@@ -1367,7 +1367,7 @@ extension AgentFirstPaintChecks {
                 exercisedChips += 1
                 guard let row = chip.superview as? AgentReferenceChipRowView,
                       chip.frame.width < row.bounds.width,
-                      chip.layer?.borderWidth == 1,
+                      chip.layer?.borderWidth == CGFloat(LineWidth.hairline),
                       chip.layer?.borderColor != nil,
                       chip.qaHasAgentGlyph,
                       chip.qaCellContentIsEmpty,

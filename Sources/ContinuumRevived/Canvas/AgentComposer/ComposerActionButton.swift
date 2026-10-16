@@ -150,7 +150,8 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         // preserves which operation is completing without implying it can be fired.
         let showsOperation = active || (presentation.isLoading && presentation.primaryAction != .unavailable)
         layer?.backgroundColor = (showsOperation ? accent.color : AgentSurfaceRole.composer.color).cgColor(for: theme)
-        layer?.borderWidth = window?.firstResponder === self ? 2 : 1
+        // One hairline in both states; keyboard focus is the focus-ring colour.
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.borderColor = (window?.firstResponder === self ? AgentLineRole.focusRing : .controlBoundary).color.cgColor(for: theme)
         let foreground = showsOperation ? TextToken.textOnAccent.color : TextToken.textSecondary.color
         titleLabel.textColor = foreground.nsColor(for: theme)

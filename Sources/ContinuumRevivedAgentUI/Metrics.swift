@@ -111,6 +111,14 @@ public enum LineWidth {
     /// border in the app onto it. One declaration, so "at most 0.5 pt" is a
     /// value `runSidebarSurfaceChecks` pins rather than a convention call
     /// sites remember. `Double`, like every metric here — views convert.
+    ///
+    /// It is also the CEILING on every border in the app: the sweep is done,
+    /// and `--border-census-check` walks the real chrome (every tile kind, the
+    /// composer, sidebar, palette, settings card, toast, zone chrome, canvas
+    /// menus) and fails on any outline wider than this outside its listed
+    /// exemptions (the focus ring, the moving highlight, glyph strokes, native
+    /// control chrome). A hairline is a device property, not a metric: it never
+    /// scales with a page zoom.
     public static let hairline = 0.5
     /// An authorship rule: a state-bearing edge, not a decorative boundary, so
     /// it does not reuse `hairline` or `Space.xs` (a SPACING token that happens

@@ -113,7 +113,7 @@ private final class AgentFileReferenceChipView: NSView {
         layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
         layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: context.appearance)
         layer?.borderColor = context.tokens.decorativeLine.color.cgColor(for: context.appearance)
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
 
         glyphLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
         glyphLabel.textColor = context.tokens.secondaryText.color.nsColor(for: context.appearance)

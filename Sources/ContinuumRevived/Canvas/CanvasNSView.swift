@@ -4946,7 +4946,7 @@ final class CanvasNSView: NSView, TokenThemed {
         field.wantsLayer = true
         field.layer?.cornerRadius = 6
         field.layer?.masksToBounds = true
-        field.layer?.borderWidth = 1.5
+        field.layer?.borderWidth = CGFloat(LineWidth.hairline)
         field.layer?.borderColor = ZoneChromeNSView.color(named: placement.color).withAlphaComponent(0.9).cgColor
         field.delegate = self
         addSubview(field, positioned: .above, relativeTo: nil)
@@ -12863,7 +12863,7 @@ private final class WorkspaceTransitionLabelView: NSView {
         NSColor.black.withAlphaComponent(0.72).setFill()
         path.fill()
         NSColor.white.withAlphaComponent(0.16).setStroke()
-        path.lineWidth = 1
+        path.lineWidth = CGFloat(LineWidth.hairline)
         path.stroke()
         let size = (text as NSString).size(withAttributes: Self.textAttributes)
         let rect = CGRect(
@@ -13206,8 +13206,10 @@ final class ZoneChromeNSView: NSView {
         outlineShape.frame = bounds
         outlineShape.path = path
         outlineShape.fillColor = nil
-        outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : 0.75).cgColor
-        outlineShape.lineWidth = isArmed ? 3 : 2
+        outlineShape.strokeColor = accent.withAlphaComponent(isArmed ? 1.0 : 0.6).cgColor
+        // The zone's edge is a hairline like every other border; being armed is
+        // carried by the stroke's opacity, not by a 3pt line.
+        outlineShape.lineWidth = CGFloat(LineWidth.hairline)
         outlineShape.lineDashPattern = presentation.isProvisional ? [6, 4] : nil
         if headerDrawingView.frame != headerRect { headerDrawingView.frame = headerRect }
         CATransaction.commit()

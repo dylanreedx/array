@@ -203,8 +203,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     /// The padding ring this shell is currently drawing.
     var internalPadding: CGFloat { Self.internalPadding(zoom: pageZoom) }
-    static let idleBorderWidth: CGFloat = 1
-    static let focusedBorderWidth: CGFloat = 2
+    /// Both states draw THE hairline (`LineWidth.hairline`, the app-wide border
+    /// ceiling). Focus is carried by the line's colour — `focusRing` against the
+    /// resting `decorativeHairline` — not by a 2pt ring, which read as the thick
+    /// grey frame the owner asked to remove.
+    static let idleBorderWidth = CGFloat(LineWidth.hairline)
+    static let focusedBorderWidth = CGFloat(LineWidth.hairline)
     static let maximumVisibleLines = AgentComposerVariant.fullTurn.maximumVisibleLines
     static let compactMaximumVisibleLines = AgentComposerVariant.compactFreeform.maximumVisibleLines
 
