@@ -1468,6 +1468,11 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
 
     var qaTailIsSettled: Bool { tailIsSettled }
     var qaTailThrobberPhaseOffset: CGFloat { tailThinkingIndicator.qaPhaseOffset }
+    /// The phase the tail gyro's INSTALLED animation presents at `time`, or nil
+    /// when it is not animating.
+    func qaTailThrobberPresentedPhase(at time: CFTimeInterval) -> CGFloat? {
+        tailThinkingIndicator.qaPresentedPhase(at: time)
+    }
 
     /// Re-drives the words beside the gyro without touching the snapshot: the
     /// elapsed tick calls this once a second, and rebuilding the collection item

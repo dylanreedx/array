@@ -89,7 +89,9 @@ enum ThrobberTimelineChecks {
         try checkTheSidebarCellHandsItsRowsOffsetToTheGyro()
         print("ThrobberTimelineChecks: a layout pass neither resampled nor restarted the gyro, "
               + "a geometry change resampled it seamlessly, and each agent rides its own phase in "
-              + "both its sidebar row and its own tile")
+              + "both its sidebar row and its own tile; a working sidebar row animates the tile's "
+              + "gyro at the tile's phase through reload, hover, cell reuse and a fresh cell, its "
+              + "time still ticks, and a hidden or off-window row animates nothing")
     }
 
     /// The reported defect, plus the resample that is genuinely necessary.
@@ -220,10 +222,17 @@ enum ThrobberTimelineChecks {
                    + "of 10 deciles occupied")
     }
 
-    /// W12 (confidence pass, sidebar stream): the sidebar ROW carries no throbber
-    /// at all — a static glyph and a ticking time. The gyro reset on every reload
-    /// and hover in the list (the reported defect above); the agent's own tile
-    /// keeps its throbber, still on the agent's own phase.
+    /// The sidebar row carries the agent's OWN throbber — the tile's gyro, on the
+    /// agent's own timeline — and nothing about the list can restart it.
+    ///
+    /// This used to assert the opposite (W12: "the row holds no animating view"),
+    /// encoding 91d3128f's over-correction: the original complaint was the gyro
+    /// restarting from phase 0 on every reload and hover, and the timeline fix
+    /// (wall-clock `beginTime` plus a per-agent offset) had already removed that
+    /// cause. So the row's motion is read back off the installed `CAAnimation` at
+    /// a FIXED media time, before and after each thing the list does to a row —
+    /// re-apply (a reload), hover, recycling the cell onto another agent and back,
+    /// a fresh cell — and against the agent's own tile gyro at the same instant.
     private static func checkTheSidebarCellHandsItsRowsOffsetToTheGyro() throws {
         func makeCell() -> AgentInbox96CellView {
             AgentInbox96CellView(
@@ -233,6 +242,19 @@ enum ThrobberTimelineChecks {
                     iconPlacement: .leading, showsModelText: false),
                 prefersReducedMotion: { false })
         }
+        // `canAnimate` needs a window; parked off every display.
+        func host(_ view: NSView, size: NSSize) -> NSWindow {
+            let window = NSWindow(
+                contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.borderless], backing: .buffered, defer: false)
+            let content = NSView(frame: NSRect(origin: .zero, size: size))
+            window.contentView = content
+            view.frame = NSRect(origin: .zero, size: size)
+            content.addSubview(view)
+            window.orderFrontOffscreenForChecks()
+            window.layoutIfNeeded()
+            return window
+        }
         let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
         func apply(_ cell: AgentInbox96CellView, id: UUID, state: InboxState) {
             cell.apply(
@@ -241,33 +263,101 @@ enum ThrobberTimelineChecks {
                               createdAt: now.addingTimeInterval(-30)),
                 emphasis: .full, indent: 0, disclosure: .none, rollup: nil,
                 isSelected: false, isInteracting: false, now: now)
+            cell.layoutSubtreeIfNeeded()
         }
 
         let idA = UUID(uuidString: "7A000000-0000-4000-8000-000000000001")!
+        let idB = UUID(uuidString: "7B000000-0000-4000-8000-000000000002")!
         let cellA = makeCell()
-        cellA.frame = NSRect(x: 0, y: 0, width: 280, height: 68)
+        let windowA = host(cellA, size: NSSize(width: 280, height: 68))
+        defer { windowA.orderOut(nil) }
         apply(cellA, id: idA, state: .working)
+        try expect(cellA.qaGlyph == "throbber",
+                   "a working sidebar row must draw the agent's throbber, not a static glyph — got '\(cellA.qaGlyph)'")
+        try expect(cellA.qaThrobberActiveAnimationCount == 12,
+                   "the working row's throbber must be ANIMATING (12 compositor animations), got \(cellA.qaThrobberActiveAnimationCount)")
+        let offsetA = DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: idA)
+        try expect(cellA.qaThrobberPhaseOffset == offsetA,
+                   "the row must hand its AGENT's offset to the gyro; got \(String(describing: cellA.qaThrobberPhaseOffset)), expected \(offsetA)")
+
+        let sample = CACurrentMediaTime() + 1_000
+        guard let start = cellA.qaThrobberPresentedPhase(at: sample) else {
+            throw Failure(message: "control: the working row holds no installed throbber animation")
+        }
+        func expectNoRestart(_ cell: AgentInbox96CellView, _ when: String) throws {
+            guard let phase = cell.qaThrobberPresentedPhase(at: sample) else {
+                throw Failure(message: "\(when): the row's throbber animation is gone")
+            }
+            try expect(phaseDistance(phase, start) < 1e-4,
+                       "\(when) restarted or jumped the row's throbber: phase at the sample instant moved \(start) -> \(phase)")
+        }
+        // The agent's OWN tile gyro, at the same instant. One timeline per agent.
+        let transcript = AgentTranscriptListView()
+        let tileWindow = host(transcript, size: NSSize(width: 480, height: 320))
+        defer { tileWindow.orderOut(nil) }
+        transcript.bindToolDetailAgent(AgentID(rawValue: idA))
+        try expect(transcript.qaTailThrobberPhaseOffset == offsetA,
+                   "an agent tile's tail gyro must ride the same phase offset as that agent's sidebar row; got \(transcript.qaTailThrobberPhaseOffset), expected \(offsetA)")
+        transcript.setTurnInFlight(true)
+        transcript.setThinkingIndicatorVisible(true)
+        transcript.layoutSubtreeIfNeeded()
+        tileWindow.layoutIfNeeded()
+        guard let tilePhase = transcript.qaTailThrobberPresentedPhase(at: sample) else {
+            throw Failure(message: "control: the agent tile's tail gyro is not animating, so there is no tile phase to compare the row against")
+        }
+        try expect(phaseDistance(start, tilePhase) < 1e-3,
+                   "the sidebar row's throbber must present the tile's phase for the same agent; row \(start), tile \(tilePhase)")
+
+        // A reload re-applies the row.
+        for _ in 0..<3 { apply(cellA, id: idA, state: .working) }
+        try expectNoRestart(cellA, "a reload (re-apply)")
+        // Hover, on and off.
+        cellA.applyInteraction(RowInteraction(isHovered: true))
         cellA.layoutSubtreeIfNeeded()
-        try expect(cellA.qaGlyph == "circle.dashed",
-                   "a working sidebar row paints the STATIC working glyph — got '\(cellA.qaGlyph)'")
-        try expect(cellA.qaAnimatingViewCount == 0,
-                   "a working sidebar row must hold no animating view (throbber or CAAnimation) — found \(cellA.qaAnimatingViewCount)")
-        // The time is what moves: two clocks, two readings, no rebuild.
+        try expectNoRestart(cellA, "hovering the row")
+        cellA.applyInteraction(.none)
+        cellA.layoutSubtreeIfNeeded()
+        try expectNoRestart(cellA, "un-hovering the row")
+        // Recycled onto another agent: a different phase…
+        apply(cellA, id: idB, state: .working)
+        guard let other = cellA.qaThrobberPresentedPhase(at: sample) else {
+            throw Failure(message: "a cell recycled onto another working agent lost its throbber")
+        }
+        try expect(phaseDistance(other, start) > 1e-3,
+                   "a cell recycled onto another agent must take THAT agent's phase, not keep the last one")
+        // …and back onto the first: exactly where it was.
+        apply(cellA, id: idA, state: .working)
+        try expectNoRestart(cellA, "recycling the cell away and back")
+        // A brand-new cell for the same agent (scrolled away and rebuilt).
+        let fresh = makeCell()
+        let freshWindow = host(fresh, size: NSSize(width: 280, height: 68))
+        defer { freshWindow.orderOut(nil) }
+        apply(fresh, id: idA, state: .working)
+        try expectNoRestart(fresh, "a fresh cell for the same agent")
+
+        // The time still moves.
         let first = cellA.qaStateLabel
         cellA.updateElapsedClock(now: now.addingTimeInterval(61))
         let second = cellA.qaStateLabel
         try expect(first.hasPrefix("Working") && second.hasPrefix("Working") && first != second,
                    "the working row's time must advance on the shared clock — '\(first)' then '\(second)'")
-        let offsetA = DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: idA)
+        try expectNoRestart(cellA, "the elapsed-clock tick")
 
-        // The agent's OWN tile has to agree with its sidebar row: one mapping, one
-        // phase per agent, wherever that agent is drawn.
-        let transcript = AgentTranscriptListView()
-        try expect(transcript.qaTailThrobberPhaseOffset == 0,
-                   "control: an unbound transcript tail must start at the default phase")
-        transcript.bindToolDetailAgent(AgentID(rawValue: idA))
-        try expect(transcript.qaTailThrobberPhaseOffset == offsetA,
-                   "an agent tile's tail gyro must ride the same phase as that agent's sidebar "
-                   + "row; got \(transcript.qaTailThrobberPhaseOffset), expected \(offsetA)")
+        // Off screen, nothing animates: a hidden row (a hidden sidebar) and a row
+        // out of the window (scrolled away) hold no compositor animation.
+        cellA.isHidden = true
+        try expect(cellA.qaThrobberActiveAnimationCount == 0,
+                   "a hidden row must stop its throbber, found \(cellA.qaThrobberActiveAnimationCount) animations")
+        cellA.isHidden = false
+        try expect(cellA.qaThrobberActiveAnimationCount == 12,
+                   "an unhidden working row must resume its throbber")
+        try expectNoRestart(cellA, "hiding and showing the row")
+        fresh.removeFromSuperview()
+        try expect(fresh.qaThrobberActiveAnimationCount == 0,
+                   "a row out of the window must not animate, found \(fresh.qaThrobberActiveAnimationCount)")
+        // A row that stops working gives the throbber up entirely.
+        apply(cellA, id: idA, state: .ready)
+        try expect(cellA.qaAnimatingViewCount == 0,
+                   "a row that is no longer working must hold no throbber, found \(cellA.qaAnimatingViewCount)")
     }
 }

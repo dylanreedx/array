@@ -416,7 +416,7 @@ enum BrandMark96 {
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static let statusSymbolsInUse = [
-        "circle.dashed", "checkmark.circle.fill", "hand.raised.fill",
+        "checkmark.circle.fill", "hand.raised.fill",
         "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",
     ]
     /// Pitch and anatomy for THIS cell, handed in by whoever built it, so the Lab
@@ -475,6 +475,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The leading status glyph. A VIEW, not a painted decoration, for one reason:
     /// it is the only thing on the row that can animate.
     private let statusGlyph = StatusGlyphView()
+    /// The agent's own throbber — the tile's gyro — added only while the row is
+    /// working. Its phase is the AGENT's timeline (wall-clock `beginTime` plus
+    /// `phaseOffset(for:)`), never the view's age, so a reload, a hover, a
+    /// recycled cell or a fresh one all land on the pose the tile is showing.
+    /// It is pure Core Animation — Array does no per-frame work — and it stops
+    /// itself out of a window or under a hidden ancestor (`canAnimate`).
+    private var throbber: DualPlaneGyroTiltedThinkingIndicatorView?
     private var layoutColumnWidth: Double?
     private var indent: Double = 0
     // Ticket: .plans/0721-subagents-handoff.md
@@ -698,6 +705,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // marked) but a row you read and then left lying there forever. That one is
         // the settle nudge's job, and it is a different row entirely.
         statusGlyph.setPulsing(false)
+        applyThrobber(isWorking: row.state == .working)
         decorations.drawsBranchGlyph = rollupSummary == nil && !branchLabel.stringValue.isEmpty
 
         disclosureButton.isHidden = disclosure == .none
@@ -852,12 +860,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static func attentionSymbol(_ row: AgentInboxRow, now: Date) -> String? {
         if isUnseen(row) { return "checkmark.circle.fill" }
         switch row.state {
-        // A STATIC glyph, with the ticking time beside it carrying the motion
-        // (confidence pass, sidebar stream). The gyro that used to sit here reset
-        // on every reload and hover (2026-09-02: "jarring in the sidebar"), and a
-        // label that animates forever is noise — T3's rule. The agent's own tile
-        // keeps its throbber.
-        case .working: return "circle.dashed"
+        // The throbber, not a symbol. 91d3128f swapped it for a static
+        // `circle.dashed` because the gyro restarted on every reload and hover;
+        // that restart was a timeline defect, since fixed, so the row shows the
+        // same moving gyro as the agent's own tile.
+        case .working: return nil
         case .approval, .input: return "hand.raised.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .ready:
@@ -869,6 +876,28 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             case .cancelled: return "xmark.circle.fill"
             }
         }
+    }
+
+    /// Install, re-key or remove the row's throbber. Re-keying a recycled cell
+    /// onto another agent re-anchors it to THAT agent's phase; re-applying the
+    /// same agent changes nothing, so a reload never restarts it.
+    private func applyThrobber(isWorking: Bool) {
+        guard isWorking, let id = shown?.row.id else {
+            throbber?.stopAnimating()
+            throbber?.removeFromSuperview()
+            throbber = nil
+            return
+        }
+        if throbber == nil {
+            let indicator = DualPlaneGyroTiltedThinkingIndicatorView(
+                reducedMotion: prefersReducedMotion())
+            indicator.translatesAutoresizingMaskIntoConstraints = true
+            card.addSubview(indicator)
+            throbber = indicator
+        }
+        throbber?.setPhaseOffset(DualPlaneGyroTiltedThinkingIndicatorView.phaseOffset(for: id))
+        throbber?.setReducedMotion(prefersReducedMotion())
+        throbber?.startAnimating()
     }
 
     private func applyColours() {
@@ -1083,8 +1112,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
         var bandY = proposal.insetV
         var statusSlot: NSRect?
-        let iconSide = anatomy.statusIconSide
-        let hasIcon = statusGlyph.symbol != nil
+        let isWorking = throbber != nil
+        let iconSide = isWorking ? anatomy.workingIconSide : anatomy.statusIconSide
+        let hasIcon = statusGlyph.symbol != nil || isWorking
         let leadsWithIcon = anatomy.iconPlacement == .leading
 
         // Band 1 — placement left, state and time right, and the settle nudge
@@ -1129,8 +1159,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else {
             projectIcon.frame = .zero
         }
-        statusGlyph.isHidden = statusSlot == nil
-        if let slot = statusSlot { statusGlyph.frame = inCard(slot) }
+        statusGlyph.isHidden = statusSlot == nil || isWorking
+        if let slot = statusSlot {
+            if let throbber { throbber.frame = inCard(slot) } else { statusGlyph.frame = inCard(slot) }
+        }
         let placementFrame = NSRect(
             x: placementLeft, y: bandY,
             width: max(0, metaRight - stateWidth - trailingIconWidth - 6 - placementLeft),
@@ -1264,6 +1296,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             self.hoverSettle.alphaValue = settleOn ? 1 : 0
             self.stateLabel.alphaValue = statusAlpha
             self.statusGlyph.alphaValue = any ? 0 : 1
+            self.throbber?.alphaValue = any ? 0 : 1
         }
         if prefersReducedMotion() || window == nil {
             apply()
@@ -1275,6 +1308,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 self.hoverSettle.animator().alphaValue = settleOn ? 1 : 0
                 self.stateLabel.animator().alphaValue = statusAlpha
                 self.statusGlyph.animator().alphaValue = any ? 0 : 1
+                self.throbber?.animator().alphaValue = any ? 0 : 1
             }
         }
     }
@@ -1358,7 +1392,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 // Painted, so their frames come off the decoration layer rather
                 // than off a view that does not exist.
                 "statusGlyph": statusGlyph.isHidden
-                    ? .zero
+                    ? (throbber.map { $0.convert($0.bounds, to: self) } ?? .zero)
                     : statusGlyph.convert(statusGlyph.bounds, to: self),
                 "providerMark": decorations.markSlot.map { decorations.convert($0, to: self) }
                     ?? .zero,
@@ -1396,9 +1430,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
     /// The status is a PAINTED glyph here, not a text label, so it is reported by
     /// its symbol name — the honest answer for a row that draws rather than writes.
-    var qaGlyph: String { statusGlyph.symbol ?? "" }
+    var qaGlyph: String { throbber != nil ? "throbber" : (statusGlyph.symbol ?? "") }
     /// Whether anything in this row is ANIMATING: a subview of the throbber's class
-    /// or any layer carrying a `CAAnimation`. A sidebar row must never (W12).
+    /// or any layer carrying a `CAAnimation`. Only a working row's throbber may.
     var qaAnimatingViewCount: Int {
         func count(_ view: NSView) -> Int {
             let own = (view is DualPlaneGyroTiltedThinkingIndicatorView ? 1 : 0)
@@ -1406,6 +1440,21 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             return own + view.subviews.reduce(0) { $0 + count($1) }
         }
         return count(self)
+    }
+    /// The row's throbber, read off the view it actually installed: nil / 0 when
+    /// the row is not drawing one.
+    var qaThrobberPhaseOffset: CGFloat? { qaThrobber?.qaPhaseOffset }
+    var qaThrobberActiveAnimationCount: Int { qaThrobber?.qaActiveAnimationCount ?? 0 }
+    func qaThrobberPresentedPhase(at time: CFTimeInterval) -> CGFloat? {
+        qaThrobber?.qaPresentedPhase(at: time)
+    }
+    private var qaThrobber: DualPlaneGyroTiltedThinkingIndicatorView? {
+        func find(_ view: NSView) -> DualPlaneGyroTiltedThinkingIndicatorView? {
+            if let gyro = view as? DualPlaneGyroTiltedThinkingIndicatorView { return gyro }
+            for subview in view.subviews { if let gyro = find(subview) { return gyro } }
+            return nil
+        }
+        return find(self)
     }
     /// Whether the escalated review mark is actually animating right now — the one
     /// fact about rule 2 that a still image cannot carry.
