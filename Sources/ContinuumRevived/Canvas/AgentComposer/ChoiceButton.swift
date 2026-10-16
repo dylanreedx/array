@@ -303,15 +303,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
 
     private func pinPopoverWidthIfNeeded() {
-        guard let preferredPopoverWidth,
-              let panel = popoverController.panel,
-              let list = popoverController.listView else { return }
-        var frame = panel.frame
-        frame.size.width = preferredPopoverWidth
-        panel.setFrame(frame, display: false)
-        list.frame = NSRect(origin: .zero, size: frame.size)
-        list.needsLayout = true
-        list.layoutSubtreeIfNeeded()
+        guard let preferredPopoverWidth, popoverController.listView != nil else { return }
+        popoverController.setSurfaceWidth(preferredPopoverWidth)
     }
 
     func handleSelection(_ item: ChoiceItem) {
@@ -329,7 +322,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var qaRenderedTitle: String { titleLabel.stringValue }
     var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
     var qaPresentedItems: [ChoiceItem] { popoverController.listView?.qaItems ?? [] }
-    var qaPopoverWidth: CGFloat? { popoverController.panel?.frame.width }
+    var qaPopoverWidth: CGFloat? { popoverController.surfaceFrame?.width }
     var qaIsPopoverPresented: Bool { popoverController.isPresented }
     func dismissPopoverForQA() { popoverController.dismiss(); applyTokens() }
     @discardableResult

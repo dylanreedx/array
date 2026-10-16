@@ -133,6 +133,9 @@ final class FloatingToolbarHostView: NSView {
     func install(in pane: NSView) {
         frame = pane.bounds
         pane.addSubview(self, positioned: .above, relativeTo: nil)
+        // Canvas menus (the zone project chooser and its cancel confirmation)
+        // keep clear of the bar, wherever it rests.
+        ChoicePopoverController.registerObstacle(toolbar)
         settle()
     }
 
