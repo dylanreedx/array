@@ -48,6 +48,10 @@ if CommandLine.arguments.contains("--cli-install-owner-check") {
     runAgentCLIInstallOwnerChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--cli-update-runner-check") {
+    runAgentCLIUpdateRunnerChecks()
+    Foundation.exit(0)
+}
 
 if CommandLine.arguments.contains("--layout-pressure-check") {
     runLayoutPressureChecks()
