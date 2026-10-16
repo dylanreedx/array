@@ -318,7 +318,8 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                     rows: bodyRows,
                     alignments: alignments,
                     source: literalSource(for: table, in: source)?
-                        .trimmingCharacters(in: .newlines) ?? ""
+                        .trimmingCharacters(in: .newlines) ?? "",
+                    explicitAlignments: table.columnAlignments.map { $0 != nil }
                 ))
             )
         default:

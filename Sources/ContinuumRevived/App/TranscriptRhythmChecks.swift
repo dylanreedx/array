@@ -49,6 +49,7 @@ enum TranscriptRhythmChecks {
         try checkTurnSeparation()
         try checkErrorIsNotNotice()
         try checkTable()
+        try checkTablesRenderAsAGrid()
         try checkFillsAndEdges()
         try checkRealClaudeTurn()
         try checkClustering()
@@ -495,6 +496,218 @@ enum TranscriptRhythmChecks {
                 + "selected or read by VoiceOver, which _DESIGN.md §2.5 forbids."
             )
         }
+    }
+
+    /// The fixture for `checkTablesRenderAsAGrid`. The first table is the one
+    /// in Dylan's report (MR | Contents | Schemas | Mappings | LoC (approx.) |
+    /// Drops) — its cell text reconstructed from the screenshot's visible
+    /// cells, including the "part 1 | 15" pair that read as "part 115" and the
+    /// row whose middle cells are empty. Then explicit GFM alignment, then a
+    /// table too wide for a 480pt transcript.
+    static let gridTableMarkdown = """
+    The split, in merge requests:
+
+    | MR | Contents | Schemas | Mappings | LoC (approx.) | Drops |
+    | --- | --- | --- | --- | --- | --- |
+    | 1 | Foundation: canonical model and shared types | 4 | 4 | ~900 | 0 |
+    | 2 | Middle 15 schemas, part 1 | 15 | 15 | ~1,800 | 2 |
+    | 3 | Middle 15 schemas, part 2 | 15 | 15 | ~1,700 | 1 |
+    | 4 | Canonical model update to R5 |  |  | ~300 | after the R5 re-check |
+    | 5 | Tail schemas and the mapping registry | 11 | 12 | ~1,400 | 3 |
+
+    Alignment, as written:
+
+    | Left | Centre | Right | Default number |
+    | :-- | :-: | --: | --- |
+    | a | middle | 1 | 7 |
+    | longer left cell | c | 12,345 | 1,024 |
+
+    And one wider than the transcript:
+
+    | Stage | Owner | Inputs | Outputs | Risks | Mitigation | Status | Notes |
+    | --- | --- | --- | --- | --- | --- | --- | --- |
+    | Ingest the canonical schemas | Platform team | Upstream R4 and R5 schema bundles | Normalised schema registry entries | Upstream drift between releases | Pin bundles per release and diff on import | In progress | Waiting on the R5 re-check before the registry is frozen |
+    | Map | Data team | Registry | Mapping tables | Gaps | Review | Planned | — |
+    """
+
+    /// A Markdown table is a GRID: every column has one edge, cells never touch,
+    /// an empty cell holds its column, the header reads as a header, and a table
+    /// wider than the transcript stays inside its block. Rendered through the
+    /// production parser and transcript list, in both themes, and read off the
+    /// table text view's real layout manager.
+    private static func checkTablesRenderAsAGrid() throws {
+        let minimumGutter: CGFloat = 8
+        var failures: [String] = []
+        var measuredCells = 0
+        var wrappedCells = 0
+        var streamReport = ""
+        for theme in [TokenTheme.light, .dark] {
+            let transcript = AgentTranscriptListView(renderContext: AgentRenderContext(
+                actions: .disabled, tokens: .transcript, appearance: theme))
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 2_400))
+            transcript.frame = host.bounds
+            host.addSubview(transcript)
+            let entryID = AgentNodeID(rawValue: "grid-table-entry")!
+            let blocks = MarkdownAgentMarkupParser()
+                .parse(gridTableMarkdown, entryID: entryID, previous: []).blocks
+            let entry = AgentEntry(
+                id: entryID, revision: 1, role: .assistant,
+                provenance: .providerItem(provider: "fixture", itemID: "grid-table"),
+                lifecycle: .finished, blocks: blocks)
+            let document = AgentDocument(version: 1, entries: [entry])
+            try transcript.apply(document: document, patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id)))
+            transcript.layoutSubtreeIfNeeded()
+            transcript.collectionView.layoutSubtreeIfNeeded()
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            // Identified by column count (6, 4, 8), not by on-screen order, which
+            // depends on the collection view's coordinate flip.
+            let order = [6, 4, 8]
+            let tables = descendants(transcript).compactMap { $0 as? AgentTableView }
+                .sorted { (order.firstIndex(of: $0.qaPayload.columnCount) ?? 9)
+                    < (order.firstIndex(of: $1.qaPayload.columnCount) ?? 9) }
+            guard tables.count == 3 else {
+                throw fail("table grid (\(theme.rawValue)): expected 3 rendered tables, found \(tables.count)")
+            }
+            let expected: [[AgentTablePayload.Alignment]] = [
+                // MR, Schemas, Mappings and LoC are all numeric with no explicit
+                // alignment, so they right-align; Drops has prose in it.
+                [.trailing, .leading, .trailing, .trailing, .trailing, .leading],
+                [.leading, .center, .trailing, .trailing],
+                Array(repeating: .leading, count: 8),
+            ]
+            for (index, table) in tables.enumerated() {
+                let label = "table grid \(index) (\(theme.rawValue))"
+                let cells = table.qaCellGeometry
+                measuredCells += cells.filter { $0.frame != nil }.count
+                let lineHeight = cells.compactMap(\.frame).map(\.height).min() ?? 0
+                wrappedCells += cells.compactMap(\.frame).filter { $0.height > lineHeight * 1.5 }.count
+                let columns = table.qaPayload.columnCount
+                guard columns == expected[index].count else {
+                    throw fail("\(label): parsed \(columns) columns, expected \(expected[index].count)")
+                }
+                // 1 · one edge per column.
+                for column in 0..<columns {
+                    let frames = cells.filter { $0.column == column }.compactMap(\.frame)
+                    guard frames.count >= 2 else { continue }
+                    let alignment = expected[index][column]
+                    let edges: [CGFloat]
+                    switch alignment {
+                    case .leading: edges = frames.map(\.minX)
+                    case .trailing: edges = frames.map(\.maxX)
+                    case .center: edges = frames.map(\.midX)
+                    }
+                    let spread = (edges.max() ?? 0) - (edges.min() ?? 0)
+                    if spread > 1 {
+                        failures.append("\(label): column \(column) (\(alignment.rawValue)) cells do not share one edge — spread \(String(format: "%.1f", spread))pt over \(edges.map { String(format: "%.1f", $0) })")
+                    }
+                }
+                // 2 · cells in a row never touch: a gutter of at least N pt.
+                let rows = Set(cells.map(\.row))
+                for row in rows {
+                    let inRow = cells.filter { $0.row == row && $0.frame != nil }.sorted { $0.column < $1.column }
+                    for (a, b) in zip(inRow, inRow.dropFirst()) {
+                        guard let fa = a.frame, let fb = b.frame else { continue }
+                        let gap = fb.minX - fa.maxX
+                        let sameBand = fa.minY < fb.maxY && fb.minY < fa.maxY
+                        if sameBand && gap < minimumGutter {
+                            failures.append("\(label): row \(row) '\(a.text)' and '\(b.text)' are \(String(format: "%.1f", gap))pt apart (gutter floor \(minimumGutter)pt)")
+                        }
+                    }
+                }
+                // 3 · the header reads as a header.
+                if table.qaHasHeader {
+                    let header = cells.filter { $0.row == 0 && $0.frame != nil }
+                    let body = cells.filter { $0.row > 0 && $0.frame != nil }
+                    if !header.allSatisfy(\.isBold) || body.contains(where: \.isBold) || !table.qaHeaderSeparatorDrawn {
+                        failures.append("\(label): the header row is not distinct (bold header \(header.allSatisfy(\.isBold)), bold body \(body.contains(where: \.isBold)), separator \(table.qaHeaderSeparatorDrawn))")
+                    }
+                }
+                // 4 · the table stays inside its block.
+                for cell in cells {
+                    guard let frame = cell.frame else { continue }
+                    if frame.minX < -0.5 || frame.maxX > table.bounds.width + 0.5 {
+                        failures.append("\(label): cell '\(cell.text.prefix(24))' at \(frame) leaves the block (width \(table.bounds.width))")
+                        break
+                    }
+                }
+                if table.convert(table.bounds, to: transcript).maxX > transcript.bounds.width + 0.5 {
+                    failures.append("\(label): the table block overflows the transcript")
+                }
+            }
+
+            // Copy: a selection copies as TSV, the whole table as its Markdown.
+            let dylan = tables[0]
+            let everything = NSRange(location: 0, length: dylan.qaFullTextLength)
+            let tsv = dylan.tabSeparatedText(in: everything).components(separatedBy: "\n")
+            if tsv.first != "MR\tContents\tSchemas\tMappings\tLoC (approx.)\tDrops"
+                || !tsv.contains("4\tCanonical model update to R5\t\t\t~300\tafter the R5 re-check") {
+                failures.append("table grid (\(theme.rawValue)): a selection must copy as TSV with empty cells kept — got \(tsv.prefix(5))")
+            }
+            if dylan.markdownText(in: everything) != dylan.qaPayload.source {
+                failures.append("table grid (\(theme.rawValue)): copying the whole table must yield its Markdown source")
+            }
+
+            // A layout pass at an unchanged width measures and composes nothing.
+            let solvesBefore = AgentTableView.qaNaturalWidthSolves
+            let composesBefore = tables.map(\.qaComposeCount)
+            for _ in 0..<5 {
+                transcript.needsLayout = true
+                tables.forEach { $0.needsLayout = true }
+                transcript.layoutSubtreeIfNeeded()
+                transcript.collectionView.layoutSubtreeIfNeeded()
+            }
+            if AgentTableView.qaNaturalWidthSolves != solvesBefore || tables.map(\.qaComposeCount) != composesBefore {
+                failures.append("table grid (\(theme.rawValue)): five same-width layout passes re-measured \(AgentTableView.qaNaturalWidthSolves - solvesBefore) table(s) and re-composed \(zip(tables.map(\.qaComposeCount), composesBefore).map { $0 - $1 })")
+            }
+
+            // Streaming: a table growing a row at a time re-prepares only itself.
+            let tableBlockIDs = blocks.filter { $0.kind == .table }.map(\.id)
+            guard let streamingID = tableBlockIDs.first,
+                  case let .table(full) = blocks.first(where: { $0.id == streamingID })?.payload else {
+                throw fail("table grid: no streaming table block")
+            }
+            var version: UInt64 = 1
+            var durations: [Double] = []
+            var solvesPerDelta: [Int] = []
+            for count in 1...full.rows.count {
+                var growing = full
+                growing.rows = Array(full.rows.prefix(count))
+                let updated = blocks.map { block -> AgentBlock in
+                    guard block.id == streamingID else { return block }
+                    var next = block
+                    next.revision = block.revision + UInt64(count)
+                    next.payload = .table(growing)
+                    return next
+                }
+                let next = AgentDocument(version: version + 1, entries: [AgentEntry(
+                    id: entryID, revision: UInt64(1 + count), role: .assistant,
+                    provenance: .providerItem(provider: "fixture", itemID: "grid-table"),
+                    lifecycle: .open(markupBlockID: nil), blocks: updated)])
+                let before = AgentTableView.qaNaturalWidthSolves
+                let start = CACurrentMediaTime()
+                try transcript.apply(document: next, patch: AgentDocumentPatch(
+                    fromVersion: version, toVersion: version + 1, updated: [streamingID]))
+                transcript.layoutSubtreeIfNeeded()
+                transcript.collectionView.layoutSubtreeIfNeeded()
+                durations.append((CACurrentMediaTime() - start) * 1_000)
+                solvesPerDelta.append(AgentTableView.qaNaturalWidthSolves - before)
+                version += 1
+            }
+            // One prepare for the view, at most one more for its measurement.
+            if solvesPerDelta.contains(where: { $0 > 2 }) {
+                failures.append("table grid (\(theme.rawValue)): a streamed table row re-measured other tables — solves per delta \(solvesPerDelta)")
+            }
+            streamReport = "streamed \(full.rows.count) rows, solves/delta \(solvesPerDelta), worst \(String(format: "%.2f", durations.max() ?? 0)) ms"
+        }
+        // Non-vacuity: the three tables measured, and the wide one really wraps.
+        if measuredCells < 120 || wrappedCells == 0 {
+            failures.append("table grid: vacuous — \(measuredCells) cells measured, \(wrappedCells) wrapped (want >= 120 and > 0)")
+        }
+        guard failures.isEmpty else {
+            throw fail("table grid: \(failures.count) failure(s):\n  " + failures.prefix(30).joined(separator: "\n  "))
+        }
+        print("TranscriptRhythmChecks: table grid held over \(measuredCells) laid-out cells in both themes (\(wrappedCells) wrapped inside their column); \(streamReport)")
     }
 
     // MARK: - T6
