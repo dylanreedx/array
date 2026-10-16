@@ -422,9 +422,12 @@ public enum SettingsSchema {
         var result = typed
         let tuning = SettingsSection(id: "advanced", title: "Advanced", fields: retainedTuningFields())
         for section in sections() + [tuning] {
-            let category = SettingsCategory(sectionID: section.id)
             for field in section.fields {
                 guard let key = field.key else { continue }
+                // Categorised by what the setting IS, not the pane it sits in: the
+                // navigation keys share the Keyboard pane with the shortcuts table
+                // but are value settings of their own category.
+                let category = key.hasPrefix("continuum.keymap.") ? .navigation : SettingsCategory(sectionID: section.id)
                 let id = SettingID(rawValue: key)
                 guard seen.insert(id).inserted else { continue }
                 result.append(AnySettingDefinition(
