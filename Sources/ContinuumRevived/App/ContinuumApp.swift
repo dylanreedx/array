@@ -3796,6 +3796,32 @@ enum ContinuumApp {
             Foundation.exit(1)
         }
 
+        // The Settings witnesses mount the production window around a real Ghostty
+        // terminal tile, so they need the global bootstrap above.
+        if CommandLine.arguments.contains("--settings-modal-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsModalChecks.run()
+                print("ContinuumRevivedSettingsModalChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--settings-search-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsSearchChecks.run()
+                print("ContinuumRevivedSettingsSearchChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // The fresh-install witness mounts the real project-free workspace,
         // including its Ghostty runtime, so it requires the global bootstrap.
         if CommandLine.arguments.contains("--fresh-install-check") {
@@ -4900,6 +4926,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var paletteContextTileId: UUID?
     private var paletteContextZoneId: UUID?
     private var settingsPanel: SettingsPanel?
+    /// QA: the defaults Settings reads and writes (a private suite in checks).
+    var qaSettingsDefaults: UserDefaults?
     private var companionSettingsView: CompanionSettingsView?
     private let companionRelayProvisioning = CompanionRelayProvisioning()
     private var companionRelayPairingGrantID: UUID?
