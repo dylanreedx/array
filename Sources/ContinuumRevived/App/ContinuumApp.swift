@@ -2644,6 +2644,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--nav-overlay-visible-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try NavOverlayVisibleChecks.run()
+                print("ContinuumRevivedNavOverlayVisibleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-jump-check") || CommandLine.arguments.contains("--leader-jump-framing-check") {
             do {
                 _ = NSApplication.shared
@@ -8148,8 +8160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile, so the ⌘ that came up after a jump was never the inbox's event.
         updateInboxJumpHints(modifiers: modifiers)
         let leaderModifier = navKeymap.leaderHoldModifier
-        // Text input owns ⌥: word movement, ⌥↩ (queue) and ⌥-characters.
-        if !leaderModifier.isEmpty, modifiers == leaderModifier, !focusedResponderIsTextInput() {
+        // Every focus context arms the leader, text input included: an agent tile
+        // keeps its composer focused, so gating on text input killed Quick Jump
+        // whenever an agent was selected. The dwell keeps quick ⌥-chords in text
+        // (⌥↩, ⌥←/→, ⌥3 = #) from ever seeing it, and once it is open over text
+        // the keys text owns pass straight through (`leaderKeyBelongsToText`).
+        if !leaderModifier.isEmpty, modifiers == leaderModifier {
             scheduleLeaderActivation()
         } else {
             disarmLeader()
@@ -8310,7 +8326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// An editable text view (the agent composer, a note, any field editor) or
-    /// the code editor. The hold-⌥ leader never opens over one.
+    /// the code editor. The hold-⌥ leader opens over one, but hands it the keys
+    /// it owns, and a quick ⌥-chord there never jumps.
     private func focusedResponderIsTextInput() -> Bool {
         guard let responder = window?.firstResponder else { return false }
         if let text = responder as? NSTextView { return text.isEditable }
@@ -8342,9 +8359,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func handleHotkey(_ event: NSEvent) -> Bool {
         // A key while the hold-leader dwell is pending makes ⌥ a chord, not a
         // hold: the leader must not open under it, now or when the dwell ends.
+        // Off text input, a chord on a jump label or zone key IS the leader's —
+        // the fast ⌥+label jump — so the leader opens now and takes it below.
         if let pending = leaderDwellWorkItem {
             pending.cancel()
             leaderDwellWorkItem = nil
+            if leaderChordJumpsDuringDwell(event) { activateLeader() }
         }
         if BoardTaskDetailController.isPresented(in: event.window ?? window) {
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
@@ -8543,11 +8563,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func activateLeader() {
-        guard focusBroker.activeSurface != .modal(.leader), !focusedResponderIsTextInput() else { return }
+        guard focusBroker.activeSurface != .modal(.leader) else { return }
         focusBroker.openModal(.leader)
         canvasView?.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
         canvasView?.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
         canvasView?.setLeaderOverlayVisible(true)
+    }
+
+    /// A key pressed while the dwell is still pending: does it jump? Only off
+    /// text input and off a terminal surface (both type ⌥-letters), only with
+    /// the leader modifier alone, and only when the key names a label or zone
+    /// the overlay would show.
+    private func leaderChordJumpsDuringDwell(_ event: NSEvent) -> Bool {
+        guard let canvas = canvasView,
+              FocusKeyModifiers(modifierFlags: event.modifierFlags) == navKeymap.leaderHoldModifier,
+              !focusedResponderIsTextInput(), !focusedResponderIsTerminalSurface() else { return false }
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        guard !key.isEmpty else { return false }
+        canvas.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
+        canvas.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
+        return canvas.leaderZoneJumpTarget(forKey: key) != nil || canvas.leaderJumpTarget(forLabel: key) != nil
+    }
+
+    /// Keys a focused text input owns even while the leader is open over it:
+    /// ⌥↩ (queue), ⌥←/→/↑/↓ (word and paragraph moves), ⌥⌫ and ⌥⌦ (word
+    /// deletes). Labels, zone keys and Esc keep their leader meaning.
+    private func leaderKeyBelongsToText(_ event: NSEvent) -> Bool {
+        guard focusedResponderIsTextInput() else { return false }
+        return [36, 76, 123, 124, 125, 126, 51, 117].contains(event.keyCode)
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
@@ -8569,6 +8612,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// centers the labeled tile (Phase C). Any other key is not the leader's: it
     /// closes the leader and reaches content, so an ⌥-character still types.
     private func handleLeaderKey(_ event: NSEvent) -> Bool {
+        if leaderKeyBelongsToText(event) {
+            disarmLeader()
+            return false
+        }
         if event.keyCode == 53 { // Esc
             cancelLeaderSnap() // restore the tile if a dock is in flight (no-op otherwise)
             disarmLeader()

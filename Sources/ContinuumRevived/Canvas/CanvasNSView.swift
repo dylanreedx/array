@@ -5460,6 +5460,10 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    /// QA (`--nav-overlay-visible-check`): the installed overlay view itself, so a
+    /// witness can ask AppKit where it is and what it draws.
+    var qaNavModeOverlayView: NSView? { navModeOverlayView }
+
     func navModeOverlayQASnapshot() -> NavModeOverlayQASnapshot {
         let probePoint = CGPoint(x: bounds.midX, y: bounds.midY)
         return NavModeOverlayQASnapshot(
