@@ -224,6 +224,36 @@ enum BorderCensusChecks {
             let unique = Array(Set(violations.map(\.description))).sorted()
             throw Failure(description: "\(unique.count) border(s) exceed the \(ceiling)pt hairline:\n  " + unique.joined(separator: "\n  "))
         }
+        try checkToastMatchesPopoverStyle()
         print("border census: \(measured) lines measured, none above \(ceiling)pt; exempt owners seen: \(exempted.sorted())")
+    }
+
+    /// The app toast reads like the app's other floating surfaces (the canvas
+    /// menus, the hover card): a hairline in the quiet decorative line token,
+    /// with a soft shadow doing the separating — not a 1pt `LineToken.border`
+    /// frame, which is the strongest grey in the line palette.
+    private static func checkToastMatchesPopoverStyle() throws {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let theme: TokenTheme = appearance == .darkAqua ? .dark : .light
+            let probe = try UIProbe.render(
+                UIProbe.Spec(id: "border.toastStyle.\(appearance.rawValue)", size: NSSize(width: 420, height: 80), appearance: appearance),
+                make: {
+                    let toast = WorkspaceNotificationView(frame: NSRect(x: 0, y: 0, width: 420, height: 80))
+                    toast.show("Couldn't determine the active workspace.", kind: .error)
+                    return toast
+                })
+            guard let toast = ChromeCensusSurfaces.firstDescendant(WorkspaceNotificationView.self, in: probe.view),
+                  let layer = toast.layer else {
+                throw Failure(description: "toast: the notification view did not render")
+            }
+            let expected = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+            guard layer.borderWidth > 0, layer.borderWidth <= ceiling,
+                  let border = layer.borderColor, border == expected else {
+                throw Failure(description: "toast (\(appearance.rawValue)): border \(layer.borderWidth)pt in \(String(describing: layer.borderColor)), want a ≤\(ceiling)pt decorativeHairline")
+            }
+            guard layer.shadowOpacity > 0, !layer.masksToBounds else {
+                throw Failure(description: "toast (\(appearance.rawValue)): no soft shadow (opacity \(layer.shadowOpacity), masksToBounds \(layer.masksToBounds))")
+            }
+        }
     }
 }
