@@ -2778,11 +2778,11 @@ enum LabCatalog {
     private static var settingsLauncher: LabEntry {
         LabEntry(
             id: "panel.settings", category: "Palettes & Settings", title: "Settings",
-            summary: "The real Settings panel, live schema.",
+            summary: "The real Settings modal, live schema.",
             content: .launcher(buttonTitle: "Open Settings") { host in
-                let panel = SettingsPanel()
-                panel.show(near: host)
-                return panel
+                let modal = SettingsModal(model: SettingsModel(defaults: .standard, navKeymap: .resolve(), isCompanionEnabled: true))
+                modal.show(in: host)
+                return modal
             }
         )
     }

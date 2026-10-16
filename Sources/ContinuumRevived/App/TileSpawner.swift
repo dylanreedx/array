@@ -232,6 +232,33 @@ final class TileSpawner {
         )
     }
 
+    /// Settings ▸ Agents ▸ "Sign In…": a terminal running an agent CLI's OWN login
+    /// flow (`codex login`, `claude`, `pi` then `/login`), resolved on the same
+    /// augmented PATH as every launch profile. Never tmux-persisted: a sign-in is
+    /// a one-off, not a session to restore.
+    func spawnSignInTerminal(executableName: String, arguments: [String], title: String) -> Outcome {
+        let spec = LaunchProfileSpec(id: "signin:\(executableName)", displayName: title,
+                                     kind: .tool(executableName: executableName, args: arguments), title: title)
+        let creationScope = creationScopeProvider?()
+        let projectRoot = creationScope?.projectRoot ?? terminalProjectRoot()
+        let profile: LaunchProfile
+        switch registry.resolve(spec, in: projectRoot, environment: environmentProvider(), detector: detector) {
+        case let .found(found): profile = found
+        case let .missing(name): return .missingCommand(executable: name)
+        case let .notConfigured(id): return .notConfigured(profileId: id)
+        }
+        return spawnTerminal(
+            profile: LaunchProfile(command: profile.command, arguments: profile.arguments,
+                                   cwd: resolvedSpawnCwd(projectRoot: projectRoot, creationScope: creationScope),
+                                   title: title),
+            launchProfileId: spec.id,
+            agentDescriptor: nil,
+            createdAt: Date(),
+            at: nil,
+            allowTmuxPersistence: false,
+            creationScope: creationScope)
+    }
+
     private func resolvedFreshTerminalProfile(profileId: String) -> FreshTerminalProfileResolution {
         guard let spec = registry.spec(for: profileId) else {
             return .failed(.unknownProfile(id: profileId))
@@ -2938,27 +2965,34 @@ final class TileSpawner {
         guard let browserSectionIndex = sections.firstIndex(where: { $0.id == "browser" }) else {
             throw CheckError.failed("Settings surface is missing Browser section")
         }
-        let settingsSurfaceContainsWebInspectorToggle = sections[browserSectionIndex].fields.contains { field in
-            if case .toggle(BrowserWebInspectorConfig.userDefaultsKey, "Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)", BrowserWebInspectorConfig.defaultEnabled) = field {
+        // Bound to the exact key the policy reads; the wording is the schema's to own.
+        let inspectorField = sections[browserSectionIndex].fields.first { field in
+            if case .toggle(BrowserWebInspectorConfig.userDefaultsKey, _, BrowserWebInspectorConfig.defaultEnabled) = field {
                 return true
             }
             return false
         }
-        try expect(settingsSurfaceContainsWebInspectorToggle, "Settings surface is missing Safari Web Inspector toggle")
-        let settingsPanel = SettingsPanel(sections: sections, defaults: defaults)
-        settingsPanel.show(near: nil)
-        settingsPanel.selectSectionForQA(browserSectionIndex)
-        let settingsSurfaceRendered = settingsPanel.selectedSectionFieldsAllRenderedForQA()
-        guard let webInspectorToggle = settingsPanel.firstToggleControlForQA() else {
-            settingsPanel.close()
-            throw CheckError.failed("Settings Browser section did not render a toggle")
-        }
+        try expect(inspectorField != nil, "Settings surface is missing Safari Web Inspector toggle")
+        // The real modal, in an offscreen window: the Browser pane must draw the row,
+        // and the row's write must reach the key the policy reads.
+        let settingsModel = SettingsModel(sections: sections, defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        // Off before Settings opens, so the switch renders off and one click turns it on.
         defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
-        webInspectorToggle.state = .off
-        webInspectorToggle.performClick(nil)
+        let settings = SettingsFixtureWindow(model: settingsModel)
+        settings.show(paneID: "browser")
+        let settingsSurfaceRendered = settingsModel.renderedAnchors["field.\(BrowserWebInspectorConfig.userDefaultsKey)"] != nil
+        guard let inspectorField, let webInspectorSwitch = settings.descendants(NSSwitch.self).first,
+              webInspectorSwitch.state == .off else {
+            settings.tearDown()
+            throw CheckError.failed("Settings Browser pane did not render the inspector switch")
+        }
+        settings.settle()
+        webInspectorSwitch.performClick(nil)
+        settings.settle()
         let settingsToggleRoundTrips = defaults.bool(forKey: BrowserInspectionPolicy.userDefaultsKey) == true
-        settingsPanel.close()
-        try expect(settingsSurfaceRendered, "Settings Browser section did not render controls")
+            && inspectorField.currentValue(in: defaults) == .bool(true)
+        settings.tearDown()
+        try expect(settingsSurfaceRendered, "Settings Browser pane did not render the inspector row")
         try expect(settingsToggleRoundTrips, "Settings Web Inspector toggle did not round-trip through UserDefaults")
 
         // Keep the target=_blank check deliberately asymmetric: defaults are false
@@ -3044,8 +3078,8 @@ final class TileSpawner {
             "dynamicDefaultInspectable": dynamicDefaultInspectable,
             "dynamicOptInInspectable": dynamicOptInInspectable,
             "existingWebViewCanBeReappliedAfterPreferenceChange": existingWebViewCanBeReappliedAfterPreferenceChange,
-            "settingsSurfacePath": "Array > Settings… > Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",
-            "settingsSurfaceContainsWebInspectorToggle": settingsSurfaceContainsWebInspectorToggle,
+            "settingsSurfacePath": "Array > Settings… > Browser > \(inspectorField.label)",
+            "settingsSurfaceContainsWebInspectorToggle": true,
             "settingsSurfaceRendered": settingsSurfaceRendered,
             "settingsToggleRoundTrips": settingsToggleRoundTrips,
             "targetBlankChildInspectableFollowsPolicy": targetBlankChildInspectableFollowsPolicy,
@@ -5163,7 +5197,7 @@ final class TileSpawner {
 
         let terminalSection = SettingsSchema.sections().first { $0.id == "terminal" }
         let hasSettingsChoice = terminalSection?.fields.contains {
-            if case let .choice(key, _, options, defaultValue) = $0 {
+            if case let .choice(key, _, options, defaultValue, _) = $0 {
                 return key == NewTileCwdConfig.userDefaultsKey
                     && options == NewTileCwdPolicy.allCases.map(\.rawValue)
                     && defaultValue == NewTileCwdConfig.defaultPolicy.rawValue

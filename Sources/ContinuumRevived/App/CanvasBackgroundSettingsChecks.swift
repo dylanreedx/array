@@ -10,9 +10,9 @@ import Foundation
 /// to another workspace" is observed on the mounted canvas, not re-derived from
 /// the resolver the production code also calls.
 ///
-/// The editor half drives `CanvasBackgroundSettingsView`'s real controls and
-/// real actions: no test-only mutation path exists, the `qa…` helpers select on
-/// the control and then invoke the same `@objc` action the control does.
+/// The editor half drives `CanvasBackgroundEditor`'s actions — the methods its
+/// Settings rows bind to — and checks the rows Settings actually draws: which
+/// exist in each state, in what order, and what the live preview shows.
 @MainActor
 enum CanvasBackgroundSettingsChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -137,14 +137,14 @@ enum CanvasBackgroundSettingsChecks {
         var importCalls = 0
         let assetRoot: URL
         let store: CanvasBackgroundAssetStore
-        private(set) var view: CanvasBackgroundSettingsView!
+        private(set) var editor: CanvasBackgroundEditor!
 
         init(hasWorkspace: Bool = true) throws {
             assetRoot = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ws7-settings-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
             store = CanvasBackgroundAssetStore(applicationSupportDirectory: assetRoot)
-            view = CanvasBackgroundSettingsView(environment: .init(
+            editor = CanvasBackgroundEditor(environment: .init(
                 loadGlobal: { [unowned self] in self.global },
                 saveGlobal: { [unowned self] in self.global = $0; self.globalWrites += 1 },
                 loadWorkspace: { [unowned self] in self.workspace },
@@ -155,73 +155,113 @@ enum CanvasBackgroundSettingsChecks {
                 },
                 chooseImageURL: { [unowned self] in self.chosenURL },
                 hasWorkspace: hasWorkspace))
-            view.layoutSubtreeIfNeeded()
         }
 
         deinit { try? FileManager.default.removeItem(at: assetRoot) }
     }
 
-    // MARK: - 1. Accessibility and keyboard order
+    /// The editor mounted where production draws it: Settings ▸ Appearance, in an
+    /// offscreen window, with its own isolated defaults.
+    @MainActor
+    final class MountedEditor {
+        let fixture: SettingsFixtureWindow
+        let suite = "continuum.ws7.mounted.\(UUID().uuidString)"
+
+        init(_ editor: CanvasBackgroundEditor) throws {
+            guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
+                throw Failure(description: "could not create the isolated defaults suite")
+            }
+            let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+            model.canvasBackground = editor
+            fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1_100, height: 1_400))
+            fixture.show(paneID: "appearance")
+            fixture.settle(0.1)
+        }
+
+        /// The editor's controls on screen, top to bottom.
+        func renderedOrder() -> [String] {
+            fixture.settle()
+            let frames = fixture.model.anchorFrames
+            return CanvasBackgroundEditor.keyboardOrder
+                .compactMap { id in frames[id].map { (id, $0.minY) } }
+                .sorted { $0.1 < $1.1 }
+                .map(\.0)
+        }
+
+        var preview: CanvasBackgroundRendererView? { fixture.descendants(CanvasBackgroundRendererView.self).first }
+
+        func tearDown() {
+            fixture.tearDown()
+            UserDefaults().removePersistentDomain(forName: suite)
+        }
+    }
+
+    // MARK: - 1. Accessibility, keyboard order and which rows exist
 
     static func checkEditorAccessibilityAndKeyboardOrder() throws {
         let harness = try EditorHarness()
-        let view = harness.view!
+        let editor = harness.editor!
 
-        let snapshots = view.qaControlSnapshots
-        try expect(snapshots.count == CanvasBackgroundSettingsView.keyboardOrder.count,
-                   "the section exposes \(snapshots.count) controls, the declared order names \(CanvasBackgroundSettingsView.keyboardOrder.count)")
-        for snapshot in snapshots {
-            try expect(!snapshot.identifier.isEmpty, "a control has no accessibility identifier: \(snapshot)")
-            try expect(!snapshot.label.isEmpty, "\(snapshot.identifier) has no accessibility label")
-            try expect(!snapshot.help.isEmpty, "\(snapshot.identifier) has no accessibility help")
+        let controls = CanvasBackgroundEditor.controls
+        for control in controls {
+            try expect(!control.identifier.isEmpty, "a control has no accessibility identifier: \(control)")
+            try expect(!control.label.isEmpty, "\(control.identifier) has no accessibility label")
+            try expect(!control.help.isEmpty, "\(control.identifier) has no accessibility help")
         }
-        try expect(Set(snapshots.map(\.identifier)).count == snapshots.count,
-                   "two controls share an accessibility identifier: \(snapshots.map(\.identifier))")
+        try expect(Set(controls.map(\.identifier)).count == controls.count,
+                   "two controls share an accessibility identifier: \(controls.map(\.identifier))")
 
-        // The declared order is checked against APPKIT's real key-view loop, not
-        // against the declaration it came from.
-        let loop = view.qaKeyViewLoopIdentifiers
-        try expect(loop == CanvasBackgroundSettingsView.keyboardOrder,
-                   "the key-view loop is \(loop), the declared order is \(CanvasBackgroundSettingsView.keyboardOrder)")
+        // Mounted in Settings: the rows on screen are exactly the controls that can
+        // act in this state, drawn top to bottom in the declared order — the order
+        // Tab walks a grouped form in.
+        let mounted = try MountedEditor(editor)
+        defer { mounted.tearDown() }
+        func expectRows(_ state: String) throws {
+            let rendered = mounted.renderedOrder()
+            try expect(rendered == editor.presentControls,
+                       "\(state): rows on screen \(rendered), expected \(editor.presentControls) in that order")
+        }
+        try expectRows("defaults")
+        let typeE = CanvasBackgroundEditor.self
+        try expect(!editor.isPresent(typeE.opacityIdentifier) && !editor.isPresent(typeE.modeIdentifier),
+                   "image opacity and fit are shown with no image configured")
+        try expect(!editor.isPresent(typeE.baseColorIdentifier), "a base colour picker is shown while the system colour is on")
+        try expect(!editor.isPresent(typeE.spacingIdentifier), "grid spacing is shown for a solid background, which has no grid")
+        try expect(!editor.isPresent(typeE.inheritIdentifier), "the inherit switch is shown while editing the global scope")
+        editor.selectPattern(.lines)
+        try expect(editor.isPresent(typeE.spacingIdentifier) && editor.isPresent(typeE.patternColorIdentifier),
+                   "a line grid must show its spacing and colour")
+        try expectRows("line grid")
+        editor.setUsesSystemBase(false)
+        try expect(editor.isPresent(typeE.baseColorIdentifier), "turning off the system colour must show the colour picker")
+        try expectRows("custom base colour")
 
-        // The preview is decoration; the SUMMARY is what a screen reader gets.
-        try expect(view.qaPreviewIsAccessibilityIgnored,
+        // The preview is decoration; the SUMMARY (the preview's footer) is what a
+        // screen reader gets.
+        try expect(mounted.preview?.isAccessibilityElement() == false,
                    "the background preview is exposed to accessibility — it duplicates the summary as an unlabelled image")
-        try expect(view.qaSummary.contains("all workspaces"),
-                   "the summary does not state the effective scope: \(view.qaSummary)")
-
-        // Enabled/hidden state is meaningful, not decorative.
-        func enabled(_ identifier: String) -> Bool {
-            view.qaControlSnapshots.first { $0.identifier == identifier }?.enabled ?? false
-        }
-        try expect(!enabled(CanvasBackgroundSettingsView.removeImageIdentifier),
-                   "Remove Image is enabled with no image configured")
-        try expect(!enabled(CanvasBackgroundSettingsView.opacityIdentifier),
-                   "the opacity control is enabled with no image configured")
-        view.qaSelectPattern(.solid)
-        try expect(!enabled(CanvasBackgroundSettingsView.spacingIdentifier),
-                   "the spacing control is enabled for a solid background, which has no grid")
-        view.qaSelectPattern(.lines)
-        try expect(enabled(CanvasBackgroundSettingsView.spacingIdentifier),
-                   "the spacing control is disabled for a line grid")
-        try expect(!enabled(CanvasBackgroundSettingsView.inheritIdentifier),
-                   "Inherit Global is enabled while editing the global scope")
+        try expect(editor.summary.contains("all workspaces"),
+                   "the summary does not state the effective scope: \(editor.summary)")
 
         // The summary tracks the state rather than restating the controls.
-        view.qaSelectScope(.workspace)
-        try expect(view.qaSummary.contains("inherits"),
-                   "the workspace summary does not say the workspace is inheriting: \(view.qaSummary)")
-        view.qaSetSpacing(120)
-        try expect(view.qaSummary.contains("overrides"),
-                   "after an edit the workspace summary does not say it overrides: \(view.qaSummary)")
-        try expect(view.qaSummary.contains("120"),
-                   "the summary does not carry the spacing value: \(view.qaSummary)")
+        editor.selectScope(.workspace)
+        try expect(editor.isPresent(typeE.inheritIdentifier) && editor.inheritsGlobal,
+                   "the workspace scope must show the inherit switch, on")
+        try expectRows("workspace scope")
+        try expect(editor.summary.contains("inherits"),
+                   "the workspace summary does not say the workspace is inheriting: \(editor.summary)")
+        editor.setSpacing(120)
+        try expect(editor.summary.contains("overrides") && !editor.inheritsGlobal,
+                   "after an edit the workspace summary does not say it overrides: \(editor.summary)")
+        try expect(editor.summary.contains("120"),
+                   "the summary does not carry the spacing value: \(editor.summary)")
 
         // With no workspace mounted, the workspace scope cannot be entered.
         let unmounted = try EditorHarness(hasWorkspace: false)
-        unmounted.view.qaSelectScope(.workspace)
-        try expect(unmounted.view.scope == .global,
+        unmounted.editor.selectScope(.workspace)
+        try expect(unmounted.editor.scope == .global,
                    "the editor entered the workspace scope with no workspace mounted")
+        unmounted.editor.setInheritsGlobal(false)
         try expect(unmounted.workspaceWrites == 0, "the editor wrote to a workspace that is not mounted")
     }
 
@@ -229,10 +269,10 @@ enum CanvasBackgroundSettingsChecks {
 
     static func checkEditorWritesTheSelectedScopeOnly() throws {
         let harness = try EditorHarness()
-        let view = harness.view!
+        let editor = harness.editor!
 
         // Selecting a scope is NOT an edit.
-        view.qaSelectScope(.workspace)
+        editor.selectScope(.workspace)
         try expect(harness.workspaceWrites == 0 && harness.globalWrites == 0,
                    "selecting a scope wrote something: global=\(harness.globalWrites) workspace=\(harness.workspaceWrites)")
         try expect(harness.workspace == .inherit, "selecting the workspace scope created an override")
@@ -240,8 +280,7 @@ enum CanvasBackgroundSettingsChecks {
         // The FIRST edit in the workspace scope establishes the override, forked
         // from what was being shown (the inherited global).
         harness.global = CanvasBackgroundConfiguration(pattern: .dots, spacing: 88)
-        view.reload()
-        view.qaSetSpacing(150)
+        editor.setSpacing(150)
         try expect(harness.globalWrites == 0, "a workspace edit wrote the global")
         try expect(harness.workspaceWrites == 1, "a workspace edit did not write the workspace")
         guard let override = harness.workspace.overrideConfiguration else {
@@ -252,35 +291,42 @@ enum CanvasBackgroundSettingsChecks {
                    "the override did not fork from the inherited value: pattern is \(override.pattern), expected dots")
 
         // A later GLOBAL edit does not reach the overriding workspace.
-        view.qaSelectScope(.global)
-        view.qaSelectPattern(.solid)
+        editor.selectScope(.global)
+        editor.selectPattern(.solid)
         try expect(harness.global.pattern == .solid, "the global edit did not land")
         try expect(harness.workspace.overrideConfiguration?.pattern == .dots,
                    "a global edit changed an OVERRIDING workspace")
 
-        // Inherit removes the override; the workspace then follows the global.
-        view.qaSelectScope(.workspace)
-        view.qaInherit()
-        try expect(harness.workspace == .inherit, "Inherit Global did not clear the override")
+        // The inherit switch on removes the override; the workspace then follows
+        // the global. Off again forks an override from the global — an edit.
+        editor.selectScope(.workspace)
+        editor.setInheritsGlobal(true)
+        try expect(harness.workspace == .inherit, "the inherit switch did not clear the override")
         try expect(CanvasBackgroundResolver.effective(workspace: harness.workspace, global: harness.global)
                    == harness.global, "after inheriting, the workspace does not resolve to the global")
+        editor.setInheritsGlobal(false)
+        try expect(harness.workspace.overrideConfiguration == harness.global,
+                   "turning inherit off must fork an override equal to the global; got \(harness.workspace)")
 
         // Reset differs by scope, deliberately: global resets to the default
         // CONFIGURATION, workspace resets to INHERIT.
-        view.qaSelectScope(.global)
-        view.qaReset()
+        editor.selectScope(.global)
+        editor.reset()
         try expect(harness.global == .systemDefault, "Reset in the global scope did not restore the default")
-        view.qaSelectScope(.workspace)
-        view.qaSetSpacing(64)
+        editor.selectScope(.workspace)
+        editor.setSpacing(64)
         try expect(harness.workspace.isOverride, "the fixture needs an override before testing reset")
-        view.qaReset()
+        editor.reset()
         try expect(harness.workspace == .inherit,
                    "Reset in the workspace scope left an override instead of restoring inherit")
 
-        // An EXACT colour survives the well round trip untouched.
-        view.qaSelectScope(.global)
+        // An EXACT colour survives the picker round trip untouched…
+        editor.selectScope(.global)
+        let mounted = try MountedEditor(editor)
+        defer { mounted.tearDown() }
         let picked = NSColor(srgbRed: 0.137_254_9, green: 0.478_431_4, blue: 0.815_686_3, alpha: 1)
-        view.qaSetBaseColor(picked)
+        editor.setUsesSystemBase(false)
+        editor.setBaseColor(picked)
         guard let stored = harness.global.base.customColor else {
             throw Failure(description: "picking a colour did not store a custom base colour")
         }
@@ -289,21 +335,26 @@ enum CanvasBackgroundSettingsChecks {
                    && abs(stored.green - Double(srgb.greenComponent)) < 1e-6
                    && abs(stored.blue - Double(srgb.blueComponent)) < 1e-6,
                    "the picked colour was rewritten: stored \(stored.rgba8), picked (\(srgb.redComponent), \(srgb.greenComponent), \(srgb.blueComponent))")
-        // …and the live preview draws exactly it.
-        try expect(view.qaPreview.currentConfiguration.base.customColor == stored,
+        // …and the live preview Settings draws shows exactly it.
+        mounted.fixture.settle()
+        try expect(mounted.preview?.currentConfiguration.base.customColor == stored,
                    "the live preview is not showing the edited configuration")
+        // The system switch back on drops the custom colour and its picker.
+        editor.setUsesSystemBase(true)
+        try expect(harness.global.base == .systemDefault && !mounted.renderedOrder().contains(CanvasBackgroundEditor.baseColorIdentifier),
+                   "turning the system colour back on must store it and hide the picker")
     }
 
     // MARK: - 3. Import, cancel and remove
 
     static func checkImportAndRemoveSemantics() throws {
         let harness = try EditorHarness()
-        let view = harness.view!
+        let editor = harness.editor!
 
         // CANCEL changes nothing at all.
         harness.chosenURL = nil
         let before = harness.global
-        view.qaChooseImage()
+        editor.chooseImage()
         try expect(harness.importCalls == 0, "cancelling the picker still imported")
         try expect(harness.globalWrites == 0 && harness.workspaceWrites == 0,
                    "cancelling the picker wrote a configuration")
@@ -313,7 +364,7 @@ enum CanvasBackgroundSettingsChecks {
         let source = harness.assetRoot.appendingPathComponent("picked-wallpaper.png")
         try Data((0..<2048).map { UInt8($0 % 253) }).write(to: source)
         harness.chosenURL = source
-        view.qaChooseImage()
+        editor.chooseImage()
         try expect(harness.importCalls == 1, "the picker result was not imported")
         guard let spec = harness.global.image else {
             throw Failure(description: "the import did not reach the configuration")
@@ -326,9 +377,17 @@ enum CanvasBackgroundSettingsChecks {
         try expect(spec.opacity == .full && spec.mode == .fill,
                    "a fresh import did not take the documented defaults")
 
+        // With an image, its opacity and fit rows appear, in order.
+        let mounted = try MountedEditor(editor)
+        defer { mounted.tearDown() }
+        try expect(mounted.renderedOrder() == editor.presentControls
+                   && editor.presentControls.contains(CanvasBackgroundEditor.opacityIdentifier)
+                   && editor.presentControls.contains(CanvasBackgroundEditor.modeIdentifier),
+                   "an image must bring its opacity and fit rows: \(mounted.renderedOrder())")
+
         // Opacity and mode edit the existing reference rather than replacing it.
-        view.qaSetOpacity(.muted)
-        view.qaSetMode(.fit)
+        editor.setOpacity(.muted)
+        editor.setMode(.fit)
         try expect(harness.global.image?.assetID == spec.assetID, "editing opacity replaced the asset reference")
         try expect(harness.global.image?.opacity == .muted && harness.global.image?.mode == .fit,
                    "opacity/mode edits did not land: \(String(describing: harness.global.image))")
@@ -338,19 +397,21 @@ enum CanvasBackgroundSettingsChecks {
         try Data([1, 2, 3]).write(to: bad)
         harness.chosenURL = bad
         let beforeBad = harness.global
-        view.qaChooseImage()
+        editor.chooseImage()
         try expect(harness.global == beforeBad, "a refused import changed the configuration")
-        try expect(view.qaSummary.contains("could not be used"),
-                   "a refused import was not surfaced to the user: \(view.qaSummary)")
+        try expect(editor.summary.contains("could not be used"),
+                   "a refused import was not surfaced to the user: \(editor.summary)")
 
         // REMOVE clears the reference and leaves the managed file for the
-        // deferred, reference-aware sweep.
+        // deferred, reference-aware sweep; the image rows go with it.
         harness.chosenURL = source
-        view.qaChooseImage()
-        view.qaRemoveImage()
-        try expect(harness.global.image == nil, "Remove Image did not clear the reference")
+        editor.chooseImage()
+        editor.removeImage()
+        try expect(harness.global.image == nil, "Remove did not clear the reference")
         try expect(harness.store.exists(spec.assetID),
-                   "Remove Image deleted the managed file immediately — cleanup is deferred and reference-aware")
+                   "Remove deleted the managed file immediately — cleanup is deferred and reference-aware")
+        try expect(!mounted.renderedOrder().contains(CanvasBackgroundEditor.opacityIdentifier),
+                   "the opacity row outlived the image")
     }
 
     // MARK: - 4. Precedence on real workspaces

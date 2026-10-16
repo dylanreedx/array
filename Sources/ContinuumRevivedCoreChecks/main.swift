@@ -404,6 +404,14 @@ if CommandLine.arguments.contains("--agent-context-occupancy-check") {
     Foundation.exit(0)
 }
 
+// The settings schema section used to run only in the bare (KNOWN-RED) run, so
+// nothing it asserted ever reached the matrix. This arm reports it.
+if CommandLine.arguments.contains("--settings-schema-check") {
+    runSettingsSchemaChecks()
+    print("SettingsSchemaChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-account-quota-check") {
     runAgentAccountQuotaChecks()
     Foundation.exit(0)
@@ -7800,206 +7808,7 @@ do {
 
 // MARK: - Settings schema engine
 
-do {
-    let sections = SettingsSchema.sections()
-    let allFields = sections.flatMap(\.fields)
-
-    expect(
-        sections.map(\.title) == [
-            "General", "Appearance", "Canvas Background", "Toolbar", "Canvas & Zones", "Navigation", "Keybindings",
-            "Agents", "Agent context", "Editor", "Terminal", "Browser", "Companion", "Activity & Notifications", "Advanced",
-        ],
-        "settings exposes the fifteen product sections in stable order, got \(sections.map(\.title))"
-    )
-
-    // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
-    for section in sections {
-        expect(!section.id.isEmpty, "settings section id must be non-empty")
-        expect(!section.title.isEmpty, "settings section title must be non-empty")
-        for field in section.fields {
-            expect(!field.label.isEmpty, "settings field label must be non-empty")
-        }
-    }
-    let fieldKeys = allFields.compactMap(\.key)
-    expect(Set(fieldKeys).count == fieldKeys.count, "settings field keys must be unique across all sections")
-
-    // Existing prefs represented: the schema must bind each of these exact keys.
-    let expectedKeys: Set<String> = [
-        ZoneChromeFeature.userDefaultsKey,
-        DeleteConfirmPolicy.userDefaultsKey,
-        DefaultBrowserURL.userDefaultsKey,
-        TileGapResolver.userDefaultsKey,
-        FocusBorderConfig.enabledKey,
-        FocusBorderConfig.colorKey,
-        FocusBorderConfig.gapKey,
-        FocusBorderConfig.speedKey,
-        DragMagnetizeConfig.enabledKey,
-        ZoneHydrationBudgetConfig.maxLiveZonesKey,
-        ZoneHydrationReconcileConfig.intervalKey,
-        BrowserRuntimeBudget.defaultsKey,
-        DefaultGroupZoneName.userDefaultsKey,
-        AutosaveConfig.debounceMsKey,
-        ZoneGestureConfig.minCreateDragScreenPointsKey,
-        TmuxPersistenceConfig.enabledKey,
-        TmuxPersistenceConfig.pathKey,
-        TerminalDisplayConfig.fontSizeKey,
-        TerminalScrollConfig.preciseMultiplierKey,
-        TerminalScrollConfig.lineMultiplierKey,
-        WorkspaceSidebarConfig.visibleKey,
-        WorkspaceSidebarConfig.widthKey,
-        AgentModelConfig.modelKey,
-        AgentModelConfig.thinkingKey,
-        // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
-        // intentionally excluded: captureMode/applyMode have no behavioral effect yet
-        // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
-        // stores). Settings entries will be added when the session-state bridge lands.
-    ]
-    expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
-    expect(!fieldKeys.contains("continuum.ambientZoneHome"), "Ambient Zone Home is no longer a global setting")
-
-    // Drag snapping resolver: default-true on empty defaults, reads an override.
-    let dragSuiteName = "DragMagnetizeChecks-\(UUID().uuidString)"
-    let dragDefaults = UserDefaults(suiteName: dragSuiteName)!
-    defer { dragDefaults.removePersistentDomain(forName: dragSuiteName) }
-    dragDefaults.removePersistentDomain(forName: dragSuiteName)
-    expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == true, "drag magnetize defaults to enabled")
-    dragDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
-    expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == false, "drag magnetize reads a disabled override")
-
-    // ZoneHydrationReconcileConfig resolver round-trip.
-    let reconcileSuiteName = "ZoneHydrationReconcileConfigChecks-\(UUID().uuidString)"
-    let reconcileDefaults = UserDefaults(suiteName: reconcileSuiteName)!
-    defer { reconcileDefaults.removePersistentDomain(forName: reconcileSuiteName) }
-    reconcileDefaults.removePersistentDomain(forName: reconcileSuiteName)
-    expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == ZoneHydrationReconcileConfig.defaultIntervalMs, "reconcile debounce: empty defaults returns 200")
-    reconcileDefaults.set("50", forKey: ZoneHydrationReconcileConfig.intervalKey)
-    expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == 50, "reconcile debounce: string override '50' reads back 50")
-
-    // AutosaveConfig resolver: default / clamp-low / clamp-high / non-numeric → default.
-    let autosaveSuiteName = "AutosaveConfigChecks-\(UUID().uuidString)"
-    let autosaveDefaults = UserDefaults(suiteName: autosaveSuiteName)!
-    defer { autosaveDefaults.removePersistentDomain(forName: autosaveSuiteName) }
-    autosaveDefaults.removePersistentDomain(forName: autosaveSuiteName)
-    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 200, "autosave debounce: empty defaults returns 200")
-    autosaveDefaults.set("750", forKey: AutosaveConfig.debounceMsKey)
-    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 750, "autosave debounce: '750' reads back 750")
-    autosaveDefaults.set("-5", forKey: AutosaveConfig.debounceMsKey)
-    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == AutosaveConfig.minDebounceMs, "autosave debounce: '-5' clamps to min (\(AutosaveConfig.minDebounceMs))")
-    autosaveDefaults.set("99999", forKey: AutosaveConfig.debounceMsKey)
-    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == AutosaveConfig.maxDebounceMs, "autosave debounce: '99999' clamps to max (\(AutosaveConfig.maxDebounceMs))")
-    autosaveDefaults.set("abc", forKey: AutosaveConfig.debounceMsKey)
-    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 200, "autosave debounce: 'abc' non-numeric falls back to 200")
-
-    // ZoneGestureConfig resolver: empty defaults → 24; override 40 → 40; override 0 or negative → 24.
-    let zoneGestureSuiteName = "ZoneGestureConfigChecks-\(UUID().uuidString)"
-    let zoneGestureDefaults = UserDefaults(suiteName: zoneGestureSuiteName)!
-    defer { zoneGestureDefaults.removePersistentDomain(forName: zoneGestureSuiteName) }
-    zoneGestureDefaults.removePersistentDomain(forName: zoneGestureSuiteName)
-    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: absent key returns 24")
-    zoneGestureDefaults.set(40.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
-    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 40, "zoneGestureConfig: override 40 returns 40")
-    zoneGestureDefaults.set(0.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
-    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: override 0 falls back to 24")
-    zoneGestureDefaults.set(-5.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
-    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: negative override falls back to 24")
-
-    // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
-    expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
-
-    guard let activitySection = sections.first(where: { $0.id == "activityAndNotifications" }) else {
-        expect(false, "settings schema must include Activity & Notifications")
-        fatalError("unreachable")
-    }
-    expect(activitySection.title == "Activity & Notifications", "Activity & Notifications settings section title")
-    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity & Notifications exposes sidebar visibility")
-    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Activity & Notifications exposes sidebar width")
-
-    let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
-    let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!
-    defer { sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName) }
-    sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName)
-    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == true, "workspace sidebar defaults visible")
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 280.0, "workspace sidebar default width")
-    WorkspaceSidebarConfig.setVisible(false, defaults: sidebarDefaults)
-    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == false, "workspace sidebar visible round-trips false")
-    WorkspaceSidebarConfig.setWidth(350, defaults: sidebarDefaults)
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 350.0, "workspace sidebar width round-trips in-range value")
-    WorkspaceSidebarConfig.setWidth(100, defaults: sidebarDefaults)
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 220.0, "workspace sidebar width clamps to floor")
-    WorkspaceSidebarConfig.setWidth(520, defaults: sidebarDefaults)
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 520.0, "workspace sidebar persists a width above the legacy ceiling for the window-derived live clamp")
-    sidebarDefaults.set("320", forKey: WorkspaceSidebarConfig.widthKey)
-    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 320.0, "workspace sidebar width accepts Settings text-field numeric string")
-
-    // Per-field UserDefaults behavior in a suite that answers only from itself. A
-    // plain suite reads the global domain as a fallback, which this used to scrub
-    // by rewriting every app's shared preferences (mirrors the delete-policy check).
-    let suiteName = "SettingsSchemaChecks-\(UUID().uuidString)"
-    let defaults = QAIsolatedDefaults(isolatedSuiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
-    defaults.removePersistentDomain(forName: suiteName)
-
-    for field in allFields {
-        switch field {
-        case .info:
-            expect(field.currentValue(in: defaults) == nil, ".info field has no bound value")
-            field.setValue(.string("ignored"), in: defaults)
-            expect(field.currentValue(in: defaults) == nil, ".info setValue is a no-op")
-        case .shortcuts, .agentSounds:
-            expect(field.currentValue(in: defaults) == nil, "rich settings field has no directly bound value")
-        case .toggle(_, _, let fallback):
-            expect(field.currentValue(in: defaults) == .bool(fallback), "toggle currentValue on empty defaults is its declared default")
-            field.setValue(.bool(!fallback), in: defaults)
-            expect(field.currentValue(in: defaults) == .bool(!fallback), "toggle round-trips through setValue/currentValue")
-        case .text(_, _, let fallback):
-            expect(field.currentValue(in: defaults) == .string(fallback), "text currentValue on empty defaults is its declared default")
-            field.setValue(.string("\(fallback)-edited"), in: defaults)
-            expect(field.currentValue(in: defaults) == .string("\(fallback)-edited"), "text round-trips through setValue/currentValue")
-        case .url(let key, _, let fallback):
-            expect(field.currentValue(in: defaults) == .string(fallback), "URL currentValue on empty defaults is its declared default")
-            let valid = "https://example.com/settings-check"
-            field.setValue(.string(valid), in: defaults)
-            expect(field.currentValue(in: defaults) == .string(valid), "URL round-trips a valid absolute URL")
-            field.setValue(.string("not a URL"), in: defaults)
-            expect(defaults.string(forKey: key) == valid, "invalid URL remains unpersisted for inline validation")
-        case .directory(_, _, let fallback):
-            expect(field.currentValue(in: defaults) == .string(fallback), "directory currentValue on empty defaults is its declared default")
-            field.setValue(.string("/tmp"), in: defaults)
-            expect(field.currentValue(in: defaults) == .string("/tmp"), "directory picker values round-trip")
-        case .number(let key, _, let range, let fallback, _, _):
-            expect(field.currentValue(in: defaults) == .double(fallback), "number currentValue on empty defaults is its declared default")
-            field.setValue(.double(range.upperBound + 1), in: defaults)
-            expect(field.currentValue(in: defaults) == .double(range.upperBound), "number controls clamp values to their declared range")
-            expect(defaults.double(forKey: key) == range.upperBound, "number controls persist the bounded value")
-        case .choice(let key, _, let options, let fallback):
-            expect(field.currentValue(in: defaults) == .string(fallback), "choice currentValue on empty defaults is its declared default")
-            let valid = options.first { $0 != fallback } ?? fallback
-            field.setValue(.string(valid), in: defaults)
-            expect(field.currentValue(in: defaults) == .string(valid), "choice round-trips a valid option")
-            field.setValue(.string("not-a-valid-option"), in: defaults)
-            expect(field.currentValue(in: defaults) == .string(fallback), "choice rejects an invalid value, falling back to default")
-            expect(defaults.string(forKey: key) == fallback, "choice persists the fallback when given an invalid value")
-        case .slider(let key, _, let range, let fallback, _):
-            expect(field.currentValue(in: defaults) == .double(fallback), "slider currentValue on empty defaults is its declared default")
-            field.setValue(.double(range.upperBound + 1), in: defaults)
-            expect(field.currentValue(in: defaults) == .double(range.upperBound), "slider clamps values to its declared range")
-            expect(defaults.double(forKey: key) == range.upperBound, "slider persists its bounded numeric value")
-        }
-    }
-
-    // The zone-chrome toggle, written through the schema, is observed by the real
-    // resolver in the same isolated suite.
-    let chromeSuiteName = "SettingsSchemaChecks-chrome-\(UUID().uuidString)"
-    let chromeDefaults = UserDefaults(suiteName: chromeSuiteName)!
-    defer { chromeDefaults.removePersistentDomain(forName: chromeSuiteName) }
-    chromeDefaults.removePersistentDomain(forName: chromeSuiteName)
-    let chromeField = allFields.first { $0.key == ZoneChromeFeature.userDefaultsKey }!
-    chromeField.setValue(.bool(false), in: chromeDefaults)
-    expect(
-        ZoneChromeFeature.resolvedFromDefaults(standardDefaults: chromeDefaults, legacyDefaults: nil).isEnabled == false,
-        "zone-chrome field written through the schema is observed by ZoneChromeFeature.resolvedFromDefaults"
-    )
-}
+runSettingsSchemaChecks()
 
 // MARK: - WorkspaceProfileStore
 
@@ -8453,24 +8262,26 @@ do {
 
     // Group 8: SettingsSchema wiring.
     let sections = SettingsSchema.sections()
-    guard let zonesSection = sections.first(where: { $0.id == "canvasAndZones" }),
-          let advancedSection = sections.first(where: { $0.id == "advanced" }) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing Canvas & Zones or Advanced section\n", stderr)
+    // The empty-zone minimums left the Settings UI with their keys intact; they
+    // are witnessed through the retained tuning fields.
+    guard let zonesSection = sections.first(where: { $0.id == "canvasAndZones" }) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing Canvas section\n", stderr)
         Foundation.exit(1)
     }
+    let advancedSection = SettingsSection(id: "tuning", title: "Tuning", fields: SettingsSchema.retainedTuningFields())
     func numberField(key: String, in section: SettingsSection) -> SettingsField? {
         section.fields.first { $0.key == key }
     }
     guard let paddingField = numberField(key: ZoneBoundsConfig.paddingKey, in: zonesSection) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing padding in Canvas & Zones\n", stderr)
+        fputs("FAIL: zoneBoundsConfig group8: missing padding in Canvas\n", stderr)
         Foundation.exit(1)
     }
     guard let minWField = numberField(key: ZoneBoundsConfig.emptyMinWidthKey, in: advancedSection) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing minimum width in Advanced\n", stderr)
+        fputs("FAIL: zoneBoundsConfig group8: missing minimum width in the retained tuning fields\n", stderr)
         Foundation.exit(1)
     }
     guard let minHField = numberField(key: ZoneBoundsConfig.emptyMinHeightKey, in: advancedSection) else {
-        fputs("FAIL: zoneBoundsConfig group8: missing minimum height in Advanced\n", stderr)
+        fputs("FAIL: zoneBoundsConfig group8: missing minimum height in the retained tuning fields\n", stderr)
         Foundation.exit(1)
     }
     if case let .number(_, _, _, value, unit, _) = paddingField {

@@ -87,7 +87,7 @@ func runAgentAutoSettleConfigChecks() {
         return
     }
     switch field {
-    case let .choice(_, _, options, defaultValue):
+    case let .choice(_, _, options, defaultValue, _):
         expect(options == AgentAutoSettleConfig.options,
                "the picker must offer this config's options, got \(options)")
         expect(defaultValue == AgentAutoSettleConfig.defaultOption,
