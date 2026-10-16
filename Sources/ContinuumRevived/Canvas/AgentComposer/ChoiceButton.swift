@@ -82,7 +82,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     init(title: String = "Choose") {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.stringValue = title
         titleLabel.font = .token(.label, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -231,7 +231,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// it; the trigger forwards the rung to its own controller instead.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.font = .token(.label, zoom: pageZoom)
         popoverController.pageZoom = pageZoom
         invalidateIntrinsicContentSize()
@@ -239,6 +239,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         leadingIcon.contentTintColor = BrandMark96.foreground(in: self)
         let focused = window?.firstResponder === self

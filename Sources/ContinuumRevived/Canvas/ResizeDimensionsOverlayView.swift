@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 
 /// Small pass-through overlay that shows a live "W × H" pixel readout near the
 /// cursor while a tile is being resized — a sense-of-scale aid on the infinite
@@ -56,7 +57,7 @@ final class ResizeDimensionsOverlayView: NSView {
         origin.y = max(4, min(origin.y, bounds.maxY - pill.height - 4))
         let rect = CGRect(origin: origin, size: pill)
         NSColor.black.withAlphaComponent(0.8).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
+        NSBezierPath(roundedRect: rect, xRadius: CGFloat(CornerRole.radius(base: 5)), yRadius: CGFloat(CornerRole.radius(base: 5))).fill()
         text.draw(at: CGPoint(x: rect.minX + padX, y: rect.minY + padY), withAttributes: attributes)
     }
 

@@ -110,7 +110,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
         super.init(frame: .zero)
         listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
 
         breadcrumbLabel.lineBreakMode = .byTruncatingMiddle
@@ -202,6 +202,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         layer?.borderWidth = ChoiceListView.panelBorderWidth
@@ -219,7 +220,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
     /// breadcrumb's own attributed fonts, and pass the rung to the embedded list.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         footerLabel.font = .token(.caption, zoom: pageZoom)
         listView.applyPageZoom(pageZoom)
         applyBreadcrumb(theme: effectiveTokenTheme)
@@ -268,7 +269,7 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
         super.init(frame: .zero)
         listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -307,13 +308,14 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
     /// the embedded list.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         listView.applyPageZoom(pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         layer?.borderWidth = ChoiceListView.panelBorderWidth

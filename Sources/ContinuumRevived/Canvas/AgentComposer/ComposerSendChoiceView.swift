@@ -243,6 +243,7 @@ final class ComposerMenuChevronButton: NSControl, TokenThemed, AgentPageZoomScal
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         let focused = window?.firstResponder === self
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
@@ -255,7 +256,7 @@ final class ComposerMenuChevronButton: NSControl, TokenThemed, AgentPageZoomScal
 
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: zoom)
         iconView.image = CanvasSymbolImage.image(named: "chevron.down", pointSize: CGFloat(zoom.scaled(10)), weight: .regular)
         invalidateIntrinsicContentSize()
         needsLayout = true

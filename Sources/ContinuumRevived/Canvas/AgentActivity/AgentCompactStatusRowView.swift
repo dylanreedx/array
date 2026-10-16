@@ -586,6 +586,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     }
 
     func applyTokens() {
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         let locationColor = presentation?.location.isExternal == true

@@ -101,7 +101,7 @@ final class CodeBlockView: NSView {
     /// zoom. A recycled block runs this again from `apply`.
     private func applyZoomMetrics() {
         let zoom = self.zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         languageLabel.font = NSFont.token(.label, zoom: zoom)
         streamingLabel.font = NSFont.token(.caption, zoom: zoom)
         copyButton.applyZoom(zoom)

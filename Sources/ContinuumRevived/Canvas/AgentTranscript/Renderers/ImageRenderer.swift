@@ -105,7 +105,7 @@ final class AgentImageGalleryView: NSView {
         wantsLayer = true
         // Re-derived in `apply` — a gallery view is recycled across blocks and
         // may be handed a row at a different page zoom than it was born at.
-        layer?.cornerRadius = CGFloat(AgentPageZoom.default.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: AgentPageZoom.default)
         layer?.masksToBounds = true
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -136,7 +136,7 @@ final class AgentImageGalleryView: NSView {
         occurrenceKeys = Self.occurrenceKeys(for: images)
         snapshots = Self.snapshotMap(images: images, keys: occurrenceKeys, context: context)
         replaceObservations(blockID: blockID, images: images, context: context)
-        layer?.cornerRadius = CGFloat(context.pageZoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: context.pageZoom)
         identifier = NSUserInterfaceItemIdentifier("agent.imageGallery.\(blockID.rawValue)")
         contentView.apply(blockID: blockID, images: images, occurrenceKeys: occurrenceKeys, snapshots: snapshots, context: context)
         applyAccessibility(blockID: blockID, images: images, context: context)
@@ -608,7 +608,7 @@ final class AgentImageCellView: NSView {
     /// Every metric a recycled cell must re-derive when it is handed a row at a
     /// different page zoom. Called from `apply(...)`, not only from `init`.
     private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
-        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: zoom)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         metadataLabel.font = NSFont.token(.caption, zoom: zoom)
         stateLabel.font = NSFont.token(.caption, zoom: zoom)

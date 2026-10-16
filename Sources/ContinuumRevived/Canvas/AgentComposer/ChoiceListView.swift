@@ -132,7 +132,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             ?? items.first(where: \.enabled)?.id
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
         destructiveSeparator.wantsLayer = true
         destructiveSeparator.isHidden = true
@@ -349,6 +349,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = chrome == .standalone
             ? SurfaceToken.overlay.color.cgColor(for: theme) : nil
@@ -364,7 +365,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     /// to the rows, which own their own text and glyph metrics.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         for row in rows { row.applyPageZoom(pageZoom) }
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -469,7 +470,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         self.reservesLeadingSlot = reservesLeadingSlot
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.stringValue = item.title
         titleLabel.font = .token(.body, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -560,7 +561,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     /// on a row already showing its item.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.font = .token(.body, zoom: pageZoom)
         detailLabel.font = .token(.caption, zoom: pageZoom)
         invalidateIntrinsicContentSize()
@@ -575,6 +576,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         // Owner correction (P4.10): rows never paint a perimeter border. State is
         // fill plus checkmark — selected fill, soft hover/keyboard-focus fill,

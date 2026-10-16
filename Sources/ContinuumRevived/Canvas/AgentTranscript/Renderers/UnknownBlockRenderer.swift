@@ -68,7 +68,7 @@ final class AgentUnknownBlockView: NSView {
     /// from `init` and again from every `apply`, because a view built at 100%
     /// is reused for a row at 150%.
     private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         summaryLabel.font = NSFont.token(.label, zoom: zoom)
     }
 

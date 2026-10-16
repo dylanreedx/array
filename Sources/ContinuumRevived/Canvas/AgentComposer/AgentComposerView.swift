@@ -188,7 +188,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// Constraints whose constant is `-internalPadding`.
     private var trailingPaddingConstraints: [NSLayoutConstraint] = []
 
-    static let cornerRadius = CGFloat(AgentTileRadius.composer)
+    static var cornerRadius: CGFloat { CGFloat(AgentTileRadius.composer) }
     static let internalPadding = CGFloat(Space.l)
 
     /// `cornerRadius` at a page-zoom rung. Identity at 100%.
@@ -752,6 +752,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func applyTokens() {
+        layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
         layer?.borderColor = (isEditorFocused ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)

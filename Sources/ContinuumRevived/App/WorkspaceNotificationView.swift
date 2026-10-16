@@ -3,7 +3,7 @@ import ContinuumRevivedAgentUI
 
 /// One app-level message, kept outside navigation chrome so long failures wrap.
 @MainActor
-final class WorkspaceNotificationView: NSView {
+final class WorkspaceNotificationView: NSView, CornerStyled {
     enum Kind { case success, warning, error }
     private let icon = NSImageView()
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
@@ -19,7 +19,7 @@ final class WorkspaceNotificationView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 10
+        layer?.applyCorner(.popover)
         // The app's floating-surface style (canvas menus, hover card): one quiet
         // hairline and a soft shadow that does the separating. The toast used to
         // wear a 1pt `LineToken.border` frame, the strongest grey in the palette.
@@ -111,12 +111,15 @@ final class WorkspaceNotificationView: NSView {
     }
 
     private func applyColors() {
+        layer?.applyCorner(.popover)
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(in: self)
         layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(in: self)
         messageLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
         dismissButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         icon.contentTintColor = (kind == .success ? AccentToken.accentDone.color : kind == .error ? AccentToken.accentFailed.color : AccentToken.accentApproval.color).nsColor(in: self)
     }
+
+    func applyCornerStyle() { applyColors() }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

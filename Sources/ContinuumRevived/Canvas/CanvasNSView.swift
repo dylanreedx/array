@@ -3050,12 +3050,15 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Show the translucent drag-snap ghost at `worldFrame`'s screen rect, keeping
     /// it topmost (tile installs/reorders can otherwise bury it).
-    func showDragGhost(at worldFrame: TileFrame, label: String? = nil, detail: String? = nil) {
+    func showDragGhost(at worldFrame: TileFrame, label: String? = nil, detail: String? = nil, role: CornerRole = .tile) {
         let overlay = dragGhostOverlayView()
         overlay.show(
             at: CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport),
             label: label,
-            detail: detail
+            detail: detail,
+            role: role,
+            // A tile is drawn under the canvas zoom; zone chrome is screen-space.
+            radiusScale: role == .tile ? CGFloat(canvasState.viewport.zoom) : 1
         )
         // Keep the same attached layer across pointer updates. Removing and
         // re-adding it cancels/restarts Core Animation presentation state, which
@@ -3086,6 +3089,8 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     var qaDragGhostAttachmentCount: Int { dragGhostOverlay?.attachmentCount ?? 0 }
+    /// QA: the corner radius the drag ghost (the moving highlight) draws.
+    var qaDragGhostCornerRadius: CGFloat? { dragGhostOverlay?.layer?.cornerRadius }
 
     func showWorkspaceTransitionLabel(_ text: String, duration: TimeInterval = 1.2) {
         workspaceTransitionLabelView?.removeFromSuperview()
@@ -3311,7 +3316,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func showOverlayIfOnViewport(_ overlay: FocusBorderOverlayView, around tileScreenFrame: CGRect) {
         let outset = tileScreenFrame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
         if outset.intersects(bounds) {
-            overlay.show(around: tileScreenFrame)
+            overlay.show(around: tileScreenFrame, tileScale: CGFloat(canvasState.viewport.zoom))
         } else {
             overlay.hide()
         }
@@ -4944,7 +4949,7 @@ final class CanvasNSView: NSView, TokenThemed {
         field.lineBreakMode = .byTruncatingTail
         // Blend with the chrome: rounded pill + a thin border in the zone's accent.
         field.wantsLayer = true
-        field.layer?.cornerRadius = 6
+        field.layer?.applyCorner(.control)
         field.layer?.masksToBounds = true
         field.layer?.borderWidth = CGFloat(LineWidth.hairline)
         field.layer?.borderColor = ZoneChromeNSView.color(named: placement.color).withAlphaComponent(0.9).cgColor
@@ -6133,7 +6138,7 @@ final class CanvasNSView: NSView, TokenThemed {
                     width: Double(abs(bw.x - aw.x)),
                     height: Double(abs(bw.y - aw.y))
                 )
-                showDragGhost(at: marqueeWorld, label: "New Zone", detail: "Space-drag to pan")
+                showDragGhost(at: marqueeWorld, label: "New Zone", detail: "Space-drag to pan", role: .zone)
             }
             return
         case .movingZone(let target, let lastWindowPoint):
@@ -6170,7 +6175,7 @@ final class CanvasNSView: NSView, TokenThemed {
                     ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
                 if let final = pendingMovedPlacement {
                     if autoLayoutBlockedZoneIds.contains(zoneId) {
-                        showDragGhost(at: CanvasEngine.zoneWorldFrame(final))
+                        showDragGhost(at: CanvasEngine.zoneWorldFrame(final), role: .zone)
                     } else {
                         hideDragGhost()
                     }
@@ -12859,7 +12864,8 @@ private final class WorkspaceTransitionLabelView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let path = NSBezierPath(roundedRect: bounds, xRadius: 14, yRadius: 14)
+        let radius = CGFloat(CornerRole.radius(base: 14))
+        let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
         NSColor.black.withAlphaComponent(0.72).setFill()
         path.fill()
         NSColor.white.withAlphaComponent(0.16).setStroke()
@@ -12886,8 +12892,12 @@ private final class WorkspaceTransitionLabelView: NSView {
 /// with a barely-there tint, so the moving tile never reads as "turned blue". It
 /// materializes with a small fade + scale pop. Click-transparent. Lifecycle
 /// mirrors `FocusBorderOverlayView`.
-final class DragGhostOverlayView: NSView {
+final class DragGhostOverlayView: NSView, CornerStyled {
     override var isFlipped: Bool { true }
+    /// What the ghost previews, which decides its radius: a tile's (scaled by
+    /// the canvas zoom, as the tile itself is) or a zone's.
+    private(set) var role: CornerRole = .tile
+    private var radiusScale: CGFloat = 1
     private(set) var attachmentCount = 0
 
     override func viewDidMoveToSuperview() {
@@ -12903,7 +12913,7 @@ final class DragGhostOverlayView: NSView {
         layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.06).appResolvedCGColor
         layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).appResolvedCGColor
         layer?.borderWidth = 2
-        layer?.cornerRadius = 6
+        applyCornerStyle()
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = .labelColor
         detailLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -12923,7 +12933,19 @@ final class DragGhostOverlayView: NSView {
     /// presentational — a fade + scale pop on first appear, and a short eased
     /// TRAIL on moves so the phantom lags slightly behind the tile as you ride a
     /// neighbor's edge instead of rigidly mirroring it.
-    func show(at screenFrame: CGRect, label: String? = nil, detail: String? = nil) {
+    /// Corner style (Settings › Appearance › Corner style): the moving
+    /// highlight draws the radius of what it previews.
+    func applyCornerStyle() {
+        layer?.cornerRadius = role.cgRadius() * radiusScale
+    }
+
+    func show(
+        at screenFrame: CGRect, label: String? = nil, detail: String? = nil,
+        role: CornerRole = .tile, radiusScale: CGFloat = 1
+    ) {
+        self.role = role
+        self.radiusScale = radiusScale
+        applyCornerStyle()
         let appearing = isHidden
         let previousCenter = layer?.presentation()?.position
             ?? CGPoint(x: frame.midX, y: frame.midY)
@@ -12967,7 +12989,7 @@ final class DragGhostOverlayView: NSView {
     }
 }
 
-final class FocusBorderOverlayView: NSView {
+final class FocusBorderOverlayView: NSView, CornerStyled {
     static let lineWidth: CGFloat = 1.5
     static let dashPattern: [NSNumber] = [6, 4]
     private static let animationKey = "marchingAnts"
@@ -12978,9 +13000,15 @@ final class FocusBorderOverlayView: NSView {
     private(set) var gap: CGFloat = CGFloat(FocusBorderConfig.defaultGap)
     /// Marching-ants loop duration (s). Lower = faster march.
     private var animationDuration: CFTimeInterval = FocusBorderConfig.defaultSpeed
-    /// Tile corner radius (TileNSView uses 6) + gap, so the border stays
-    /// concentric with the rounded tile at any gap.
-    private var cornerRadius: CGFloat { 6 + gap }
+    /// The canvas zoom the bordered tile is drawn at: the tile's on-screen
+    /// radius is its `CornerRole.tile` radius times this.
+    private var tileScale: CGFloat = 1
+    /// The tile's on-screen radius + gap, so the border stays concentric with
+    /// the rounded tile at any gap — in every corner style, and square at Sharp.
+    /// (This used to be a fixed 6 + gap, left behind when the tile went to 10.)
+    private var cornerRadius: CGFloat {
+        CornerStyle.current == .sharp ? 0 : CornerRole.tile.cgRadius() * tileScale + gap
+    }
 
     private let shape = CAShapeLayer()
 
@@ -13046,9 +13074,11 @@ final class FocusBorderOverlayView: NSView {
 
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
     /// outset by `gap`, show it, and make sure the marching animation is attached.
-    func show(around tileScreenFrame: CGRect) {
+    func show(around tileScreenFrame: CGRect, tileScale: CGFloat = 1) {
         let next = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
-        if frame != next {
+        let rescaled = tileScale != self.tileScale
+        self.tileScale = tileScale
+        if frame != next || rescaled {
             frame = next
             layoutShape()
         }
@@ -13067,6 +13097,9 @@ final class FocusBorderOverlayView: NSView {
         isHidden = true
         shape.removeAnimation(forKey: Self.animationKey)
     }
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() { layoutShape() }
 
     override func layout() {
         super.layout()
@@ -13093,6 +13126,9 @@ final class FocusBorderOverlayView: NSView {
         animation.repeatCount = .infinity
         shape.add(animation, forKey: Self.animationKey)
     }
+
+    /// QA: the path the marching ants stroke.
+    var qaShapePath: CGPath? { shape.path }
 
     /// QA: true when the overlay is visible AND its looping animation is
     /// attached. Combined with frame/position assertions by the canvas accessor.
@@ -13176,6 +13212,8 @@ final class ZoneChromeNSView: NSView {
     private let headerHeight: CGFloat = 34
     private let backgroundShape = CAShapeLayer()
     private let outlineShape = CAShapeLayer()
+    /// QA: the zone's outline path.
+    var qaOutlinePath: CGPath? { outlineShape.path }
     private let headerDrawingView = HeaderDrawingView()
 
     /// Only the 34-point header needs a raster backing. Keeping the entire
@@ -13198,7 +13236,9 @@ final class ZoneChromeNSView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let rect = bounds.insetBy(dx: 1, dy: 1)
-        let path = CGPath(roundedRect: rect, cornerWidth: 12, cornerHeight: 12, transform: nil)
+        // Corner style (Settings › Appearance › Corner style): the zone radius.
+        let zoneRadius = CornerRole.zone.cgRadius()
+        let path = CGPath(roundedRect: rect, cornerWidth: zoneRadius, cornerHeight: zoneRadius, transform: nil)
         let accent = Self.color(named: placement.color)
         backgroundShape.frame = bounds
         backgroundShape.path = path
@@ -13307,7 +13347,8 @@ final class ZoneChromeNSView: NSView {
         drawnHeaderText = []
         let accent = Self.color(named: placement.color)
         let zoneRect = bounds.insetBy(dx: 1, dy: 1)
-        let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
+        let zoneRadius = CornerRole.zone.cgRadius()
+        let path = NSBezierPath(roundedRect: zoneRect, xRadius: zoneRadius, yRadius: zoneRadius)
 
         // Match the vector body's rounded boundary so the header cannot
         // paint square pixels through the top corners. The outline layer sits
@@ -13343,7 +13384,8 @@ final class ZoneChromeNSView: NSView {
             ]
             let homeRect = CGRect(x: 31 + titleWidth, y: 6, width: max(0, min((scope as NSString).size(withAttributes: scopeAttributes).width + 30, headerRect.width - titleWidth - 110)), height: 22)
             NSColor.white.withAlphaComponent(0.08).setFill()
-            NSBezierPath(roundedRect: homeRect, xRadius: 5, yRadius: 5).fill()
+            let homeRadius = CGFloat(CornerRole.radius(base: 5))
+            NSBezierPath(roundedRect: homeRect, xRadius: homeRadius, yRadius: homeRadius).fill()
             (placement.homeRelativePath == nil ? Self.homeIcon : Self.directoryIcon).draw(in: CGRect(x: homeRect.minX + 6, y: 11, width: 11, height: 11))
             scope.draw(
                 in: CGRect(
@@ -13488,7 +13530,8 @@ private final class NavModeOverlayNSView: NSView {
     private func drawTileLabels(in canvas: CanvasNSView) {
         for assignment in canvas.leaderJumpAssignments() {
             let badge = JumpIndicatorPlacementEngine.indicatorRect(for: assignment.placement, normalBadgeSize: badgeSize)
-            let badgePath = NSBezierPath(roundedRect: badge, xRadius: min(8, badge.width / 2), yRadius: min(8, badge.height / 2))
+            let badgeRadius = CornerRole.badge.cgRadius()
+            let badgePath = NSBezierPath(roundedRect: badge, xRadius: min(badgeRadius, badge.width / 2), yRadius: min(badgeRadius, badge.height / 2))
             NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
             badgePath.fill()
             let text = assignment.label.uppercased()
@@ -13513,7 +13556,8 @@ private final class NavModeOverlayNSView: NSView {
         else { return }
 
         let screenFrame = CanvasEngine.tileScreenFrame(snapshot.worldFrame, viewport: canvas.canvasState.viewport).insetBy(dx: -4, dy: -4)
-        let path = NSBezierPath(roundedRect: screenFrame, xRadius: 12, yRadius: 12)
+        let ringRadius = CGFloat(CornerRole.radius(base: 12))
+        let path = NSBezierPath(roundedRect: screenFrame, xRadius: ringRadius, yRadius: ringRadius)
         NSColor.controlAccentColor.withAlphaComponent(0.95).setStroke()
         path.lineWidth = 3
         path.stroke()
@@ -13523,7 +13567,8 @@ private final class NavModeOverlayNSView: NSView {
         for (index, model) in canvas.zoneRenderModels.enumerated() {
             let zoneFrame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(model.placement), viewport: canvas.canvasState.viewport)
             let rect = CGRect(x: zoneFrame.minX + 10, y: zoneFrame.minY + 8, width: badgeSize.width, height: badgeSize.height)
-            let badgePath = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+            let badgeRadius = CornerRole.badge.cgRadius()
+            let badgePath = NSBezierPath(roundedRect: rect, xRadius: badgeRadius, yRadius: badgeRadius)
             NSColor.controlAccentColor.withAlphaComponent(0.90).setFill()
             badgePath.fill()
             let text = String(index + 1)
@@ -13552,7 +13597,8 @@ private final class NavModeOverlayNSView: NSView {
             width: size.width + padding.width * 2,
             height: size.height + padding.height * 2
         )
-        let background = NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12)
+        let hintRadius = CGFloat(CornerRole.radius(base: 12))
+        let background = NSBezierPath(roundedRect: rect, xRadius: hintRadius, yRadius: hintRadius)
         NSColor.black.withAlphaComponent(0.62).setFill()
         background.fill()
         text.draw(at: CGPoint(x: rect.minX + padding.width, y: rect.minY + padding.height), withAttributes: attributes)

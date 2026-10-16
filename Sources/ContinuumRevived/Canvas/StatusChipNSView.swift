@@ -8,14 +8,19 @@ import ContinuumRevivedCore
 // decision (label, glyph, colours, contrast) lives in the shared, tested
 // StatusChipPresenter. This view only paints. The iOS counterpart
 // (StatusChipView, SwiftUI) paints the same display model.
-final class StatusChipNSView: NSView {
+final class StatusChipNSView: NSView, CornerStyled {
     private let glyphLabel = NSTextField(labelWithString: "")
     private let textLabel = NSTextField(labelWithString: "")
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() {
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 9))
+    }
 
     init(status: AgentStatus) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 9
+        applyCornerStyle()
         layer?.masksToBounds = true
 
         glyphLabel.font = .systemFont(ofSize: 11, weight: .bold)

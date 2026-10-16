@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
@@ -43,6 +44,7 @@ private struct SettingsSidebar: View {
 
 private struct SettingsPaneList: View {
     let model: SettingsModel
+    @State private var cornerStyle = CornerStyle.current
 
     /// Consecutive panes that share a sidebar heading, so the heading draws once.
     private var runs: [(heading: String?, panes: [SettingsSection])] {
@@ -94,8 +96,9 @@ private struct SettingsPaneList: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(selected ? Color.accentColor : Color.clear))
+                .background(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6), style: .continuous)
+                    .fill(selected ? Color.accentColor : Color.clear)
+                    .onCornerStyleChange($cornerStyle))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -106,6 +109,7 @@ private struct SettingsPaneList: View {
 
 private struct SettingsResultsList: View {
     let model: SettingsModel
+    @State private var cornerStyle = CornerStyle.current
 
     var body: some View {
         let groups = model.groupedResults
@@ -166,7 +170,9 @@ private struct SettingsResultsList: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor : Color.clear))
+            .background(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6))
+                .fill(selected ? Color.accentColor : Color.clear)
+                .onCornerStyleChange($cornerStyle))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -332,6 +338,8 @@ struct SettingsFieldRow: View {
             ToggleRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
             SettingsModelPickerRow(model: model, row: row)
+        case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
+            PickerRow(row: row, model: model, segmented: true)
         case .choice:
             PickerRow(row: row, model: model)
         case .slider:

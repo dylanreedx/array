@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// A fresh chord-capture field for the keybindings editor (docs/24 S5). Unlike
@@ -11,12 +12,17 @@ import ContinuumRevivedCore
 /// by the caller for single-key nav bindings) is reported via `onCapture`, and
 /// the view returns to its idle prompt.
 @MainActor
-final class ChordCaptureView: NSView {
+final class ChordCaptureView: NSView, CornerStyled {
     /// Reports a captured chord. `character` is `charactersIgnoringModifiers`,
     /// lowercased — the caller uses it for single-key nav-mode bindings.
     var onCapture: ((_ keyCode: UInt16, _ modifiers: FocusKeyModifiers, _ character: String?) -> Void)?
     /// Reports a cancel (Esc) so the caller can restore the static row.
     var onCancel: (() -> Void)?
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() {
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 4))
+    }
 
     private let promptLabel = NSTextField(labelWithString: "press new chord…  (esc to cancel)")
 
@@ -24,7 +30,7 @@ final class ChordCaptureView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).appResolvedCGColor
-        layer?.cornerRadius = 4
+        applyCornerStyle()
         promptLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         promptLabel.textColor = .controlAccentColor
         promptLabel.translatesAutoresizingMaskIntoConstraints = false

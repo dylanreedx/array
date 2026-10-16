@@ -141,6 +141,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        // The state dot is a capsule at Default and Rounded, square at Sharp.
+        stateDot.layer?.cornerRadius = CornerStyle.current == .sharp ? 0 : CGFloat(pageZoom.scaled(3))
         let theme = effectiveTokenTheme
         nameLabel.textColor = TextToken.textPrimary.color.nsColor(for: theme)
         stateLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)

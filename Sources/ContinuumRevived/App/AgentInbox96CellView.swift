@@ -40,7 +40,7 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
 
     override func layout() {
         super.layout()
-        layer?.cornerRadius = bounds.height / 2
+        layer?.applyCapsule()
     }
 
     override func updateTrackingAreas() {
@@ -82,7 +82,7 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
     override var focusRingMaskBounds: NSRect { bounds }
 
     override func drawFocusRingMask() {
-        let radius = bounds.height / 2
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
         NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
     }
 }

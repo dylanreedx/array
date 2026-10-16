@@ -1430,7 +1430,7 @@ private enum CommandCenterDisplayEntry {
     }
 }
 
-final class CommandCenterSurfaceView: NSView {
+final class CommandCenterSurfaceView: NSView, CornerStyled {
     struct AppearanceSnapshot: Equatable {
         let usesBlur: Bool
         let opacity: Double
@@ -1497,12 +1497,16 @@ final class CommandCenterSurfaceView: NSView {
             reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
             increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         )
+        // Corner style (Settings › Appearance): the palette is a modal surface.
+        for layer in [layer, effect.layer, tint.layer] { layer?.applyCorner(.modal) }
         effect.isHidden = !resolved.usesBlur
         tint.layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: effectiveTokenTheme).copy(alpha: resolved.backgroundOpacity)
         layer?.borderColor = LineToken.separator.color.cgColor(for: effectiveTokenTheme)
     }
 
     func reapplyAppearanceForQA() { applyAppearance() }
+
+    func applyCornerStyle() { applyAppearance() }
 
     var appearanceSnapshotForQA: AppearanceSnapshot {
         let alpha = tint.layer?.backgroundColor?.alpha ?? 0

@@ -534,6 +534,8 @@ private final class EditorNavigatorOutlineView: NSOutlineView {
 
 @MainActor
 private final class EditorNavigatorRowView: NSTableRowView {
+    /// Corner style (Settings › Appearance › Corner style): 5 at Default.
+    static var rowRadius: CGFloat { CGFloat(CornerRole.radius(base: 5)) }
     var isDark = false
     private var hovered = false
     private var hoverTracking: NSTrackingArea?
@@ -551,13 +553,13 @@ private final class EditorNavigatorRowView: NSTableRowView {
         if hovered && !isSelected {
             let theme: EditorThemeTokens = isDark ? .dark : .light
             StatusChipNSView.nsColor(theme.resolvedColor(\.hover)).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 5, yRadius: 5).fill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: Self.rowRadius, yRadius: Self.rowRadius).fill()
         }
     }
     override func drawSelection(in dirtyRect: NSRect) {
         let theme: EditorThemeTokens = isDark ? .dark : .light
         let accent = StatusChipNSView.nsColor(theme.resolvedColor(\.selection))
         accent.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 5, yRadius: 5).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: Self.rowRadius, yRadius: Self.rowRadius).fill()
     }
 }

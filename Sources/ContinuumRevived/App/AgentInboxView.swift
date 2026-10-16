@@ -6477,6 +6477,8 @@ final class InboxJumpHintView: NSView, TokenThemed {
     }
 
     func applyTokens() {
+        // Corner style (Settings › Appearance): re-resolved on every repaint.
+        layer?.cornerRadius = Radius.card
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         // P1.3: the ROLE, not the raw token — an overlay card that holds
@@ -7065,6 +7067,8 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         return "Unmerged work kept: " + branches.map { "\(BranchChipNSView.branchGlyph) \($0)" }.joined(separator: ", ")
     }
     func applyTokens() {
+        // Corner style (Settings › Appearance): re-resolved on every repaint.
+        layer?.cornerRadius = Radius.card
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
@@ -7230,6 +7234,8 @@ final class InboxUndoToast: NSView, TokenThemed {
     /// thing at full strength. Both are documented pairs over `overlay`, so P1.6's
     /// contrast gate measures them rather than exempting them.
     func applyTokens() {
+        // Corner style (Settings › Appearance): re-resolved on every repaint.
+        layer?.cornerRadius = Radius.card
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         // P1.3: the ROLE, not the raw token — an overlay card that holds
@@ -7303,6 +7309,8 @@ final class InboxRowFocusRingView: NSView, TokenThemed {
     required init?(coder: NSCoder) { return nil }
 
     func applyTokens() {
+        // Corner style (Settings › Appearance): re-resolved on every repaint.
+        layer?.cornerRadius = Radius.card
         let theme = effectiveTokenTheme
         let ring = AgentLineRole.focusRing.color.cgColor(for: theme)
         layer?.borderColor = ring
@@ -7444,6 +7452,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     func applyTokens() {
+        // Corner style (Settings › Appearance): re-resolved on every repaint.
+        layer?.cornerRadius = Radius.card
         let theme = effectiveTokenTheme
         layer?.backgroundColor = Self.interactionFill(
             for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: theme)

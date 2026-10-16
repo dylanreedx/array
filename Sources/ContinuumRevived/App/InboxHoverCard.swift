@@ -182,6 +182,8 @@ final class InboxHoverCardView: NSView, TokenThemed {
     }
 
     func applyTokens() {
+        layer?.cornerRadius = CGFloat(Radius.container)
+        effect.layer?.cornerRadius = CGFloat(Radius.container)
         layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(in: self)
         layer?.shadowColor = NSColor.black.cgColor
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)

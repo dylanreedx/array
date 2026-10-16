@@ -193,6 +193,7 @@ final class BranchChipNSView: NSView, TokenThemed, AgentPageZoomScalable {
     /// the 4.5 text floor; a tinted fill at some alpha is not a documented pair, so
     /// it could not be gated at all (the same reasoning `ApprovalDockView` records).
     func applyTokens() {
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         let accent = isWarning ? AccentToken.accentApproval.color : LineToken.border.color

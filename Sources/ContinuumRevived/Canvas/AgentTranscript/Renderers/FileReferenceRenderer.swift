@@ -110,7 +110,7 @@ private final class AgentFileReferenceChipView: NSView {
         let zoom = context.pageZoom
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         layer?.backgroundColor = context.tokens.artifactSurface.color.cgColor(for: context.appearance)
         layer?.borderColor = context.tokens.decorativeLine.color.cgColor(for: context.appearance)
         layer?.borderWidth = CGFloat(LineWidth.hairline)

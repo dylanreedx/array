@@ -605,7 +605,7 @@ final class ComposerImageAttachmentCellView: NSView, AgentPageZoomScalable {
         wantsLayer = true
         // Every metric here is re-derived from `pageZoom`: a token pass must
         // never put an unscaled value back.
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: pageZoom)
         layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
         let lineRole = item?.state.lineRole ?? .decorativeHairline
         layer?.borderColor = lineRole.color.cgColor(for: theme)
@@ -614,7 +614,7 @@ final class ComposerImageAttachmentCellView: NSView, AgentPageZoomScalable {
         layer?.borderWidth = CGFloat(LineWidth.hairline)
 
         imageContainer.wantsLayer = true
-        imageContainer.layer?.cornerRadius = CGFloat(pageZoom.scaled(AgentTileRadius.artifact - 2))
+        imageContainer.layer?.applyCorner(base: CornerRole.artifact.base - 2, zoom: pageZoom)
         imageContainer.layer?.backgroundColor = AgentSurfaceRole.codeSubdued.color.cgColor(for: theme)
         imageContainer.layer?.masksToBounds = true
 
@@ -728,8 +728,8 @@ final class ComposerImageAttachmentCellView: NSView, AgentPageZoomScalable {
         filenameLabel.font = .token(.caption, zoom: zoom)
         detailLabel.font = .token(.caption, zoom: zoom)
         stateLabel.font = .token(.caption, zoom: zoom)
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
-        imageContainer.layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact - 2))
+        layer?.applyCorner(.artifact, zoom: zoom)
+        imageContainer.layer?.applyCorner(base: CornerRole.artifact.base - 2, zoom: zoom)
         imageContainerLeadingConstraint.constant = CGFloat(zoom.scaled(Space.xs))
         imageContainerTopConstraint.constant = CGFloat(zoom.scaled(Space.xs))
         imageContainerWidthConstraint.constant = CGFloat(zoom.scaled(46))

@@ -118,7 +118,7 @@ final class AgentRequestView: NSView, TokenThemed {
     /// zoom. A recycled dock runs this again from `apply`.
     private func applyZoomMetrics() {
         let zoom = self.zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         titleLabel.font = NSFont.token(.title, zoom: zoom)
         statusLabel.font = NSFont.token(.caption, zoom: zoom)
         promptLabel.font = NSFont.token(.body, zoom: zoom)
@@ -292,7 +292,7 @@ final class AgentRequestChoiceButton: NSButton {
         focusRingType = .exterior
         font = NSFont.token(.label)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(Radius.card)
+        layer?.applyCorner(.card)
         // WS5: identity at 100%; the owner re-derives both on every apply.
         // Keep the AppKit exterior keyboard focus ring outside the rounded fill.
         layer?.masksToBounds = false
@@ -333,7 +333,7 @@ final class AgentRequestChoiceButton: NSButton {
     /// dock reuses two of them for the life of the view.
     func applyZoom(_ zoom: AgentPageZoom) {
         font = NSFont.token(.label, zoom: zoom)
-        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: zoom)
         invalidateIntrinsicContentSize()
     }
 

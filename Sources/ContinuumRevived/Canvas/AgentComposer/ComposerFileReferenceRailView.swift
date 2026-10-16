@@ -242,7 +242,7 @@ private final class ComposerFileReferenceChipView: NSView {
 
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         glyphLabel.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
         nameLabel.font = .token(.caption, zoom: zoom)
         removeButton.font = .systemFont(ofSize: CGFloat(zoom.scaled(13)), weight: .semibold)
@@ -259,6 +259,7 @@ private final class ComposerFileReferenceChipView: NSView {
     }
 
     func applyTokens(theme: TokenTheme) {
+        layer?.applyCorner(.artifact, zoom: pageZoom)
         wantsLayer = true
         layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
         layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)

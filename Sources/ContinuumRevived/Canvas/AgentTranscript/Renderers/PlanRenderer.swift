@@ -27,7 +27,7 @@ final class PlanRenderer: AgentBlockRendering {
 }
 
 @MainActor
-final class AgentPlanView: NSView {
+final class AgentPlanView: NSView, CornerStyled {
     struct Row {
         var ordinal: String
         var depth: Int
@@ -68,7 +68,7 @@ final class AgentPlanView: NSView {
         // These three are the 100% values a freshly built view starts with;
         // `applyZoomedMetrics()` re-assigns all of them on every `apply`,
         // because this view is RECYCLED and may be handed a row at another rung.
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        layer?.applyCorner(.artifact)
         layer?.masksToBounds = true
         // Same call as the diffstat: the steps are the subject, the word
         // "Plan" is a label.
@@ -105,9 +105,14 @@ final class AgentPlanView: NSView {
     /// Every metric this view assigns at construction time, re-derived from the
     /// context's page zoom. Called from `apply`, never from `init`, so a reused
     /// view can never keep the rung it was born with.
+    /// Corner style (Settings › Appearance › Corner style), at this row's rung.
+    func applyCornerStyle() {
+        layer?.applyCorner(.artifact, zoom: zoom)
+    }
+
     private func applyZoomedMetrics() {
         let zoom = self.zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         statusLabel.font = NSFont.token(.caption, zoom: zoom)
     }

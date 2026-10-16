@@ -519,7 +519,7 @@ final class AgentWorkStripView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let radius = AgentTurnCardMetrics.scaled(8, zoom)
+        let radius = AgentTurnCardMetrics.scaled(CGFloat(CornerRole.artifact.radius), zoom)
         model.tone.fillColor(theme).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
         let ticks = model.ticks.suffix(AgentTurnCardMetrics.maximumTicks)
@@ -746,7 +746,7 @@ final class AgentTurnOutcomeView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let radius = AgentTurnCardMetrics.scaled(6, zoom)
+        let radius = AgentTurnCardMetrics.scaled(CGFloat(CornerRole.card.radius), zoom)
         let pad = AgentTurnCardMetrics.scaled(AgentTurnCardMetrics.chipHorizontalPadding, zoom)
         for (chip, frame) in zip(model.chips, chipFrames) where frame.intersects(dirtyRect) {
             AgentSurfaceRole.artifact.color.nsColor(for: theme).setFill()

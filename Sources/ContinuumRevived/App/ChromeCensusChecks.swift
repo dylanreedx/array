@@ -257,3 +257,289 @@ enum BorderCensusChecks {
         }
     }
 }
+
+/// `--corner-style-check`: Settings › Appearance › Corner style reaches every
+/// rounded surface, live.
+///
+/// Renders every census surface at Default and records every radius Core
+/// Animation will draw: each layer's `cornerRadius`, each stroked or filled
+/// rounded-rect `CAShapeLayer` path, each `shadowPath` (paths are MEASURED,
+/// see `PathCornerRadius`). Then it switches the style through the production
+/// controller — with the views already on screen — and re-reads them:
+///  * Sharp: every one of them is 0, pills included;
+///  * Rounded: each is `CornerStyle.rounded.radius(default)`, a capsule stays
+///    a capsule (or the radius is clamped to half the shorter side);
+///  * back to Default: each is exactly what it was.
+/// A surface that still draws its Default radius after a switch is either not
+/// routed through `CornerRole` or only sets its radius once, at init.
+/// Separately: the marching ants follow the tile radius (concentric at their
+/// gap, square at Sharp), and the zone's moving highlight draws the zone's
+/// own radius.
+@MainActor
+enum CornerStyleChecks {
+    struct Failure: Error, CustomStringConvertible { let description: String }
+
+    /// Owners whose rounded shapes are glyphs, not corners: a status dot, a
+    /// throbber orbit, a gauge. They keep their geometry in every style.
+    static let exemptOwners: [String: String] = [
+        "DualPlaneGyroTiltedThinkingIndicatorView": "the working throbber's rings and orbit, an animated glyph",
+        "AgentRadialContextMeterView": "a gauge's circular track",
+        "CornerOverlayView": "the tile's resize-handle brackets: right-angle glyphs with no corner to round",
+        "NSTableRowView": "a native table row's selection, drawn by AppKit in its own inset style",
+    ]
+
+    private enum Kind: String { case corner, path, shadowPath }
+
+    /// One radius, found by WHERE it is rather than by object identity: a
+    /// re-render may rebuild a view (a transcript row, a table cell), and the
+    /// replacement at the same place must follow the style just the same.
+    @MainActor
+    private struct Sample {
+        let surface: String
+        let root: NSView
+        let owner: String
+        let ordinal: Int
+        let layerIndex: Int
+        let kind: Kind
+        let standard: CGFloat
+        weak var view: NSView?
+
+        var label: String { "\(surface): \(owner) \(kind.rawValue)" }
+
+        func currentLayer() -> CALayer? {
+            var host = view
+            if host?.window == nil {
+                host = ChromeCensusSurfaces.views(in: root).filter { CornerStyleChecks.label($0) == owner }
+                    .dropFirst(ordinal).first
+            }
+            guard let host else { return nil }
+            let layers = ChromeCensusSurfaces.ownedLayers(of: host)
+            return layerIndex < layers.count ? layers[layerIndex] : nil
+        }
+
+        func read() -> (radius: CGFloat, half: CGFloat)? {
+            guard let layer = currentLayer() else { return nil }
+            switch kind {
+            case .corner:
+                return (layer.cornerRadius, min(layer.bounds.width, layer.bounds.height) / 2)
+            case .path:
+                guard let path = (layer as? CAShapeLayer)?.path, let radius = PathCornerRadius.measure(path) else { return nil }
+                return (radius, min(path.boundingBoxOfPath.width, path.boundingBoxOfPath.height) / 2)
+            case .shadowPath:
+                guard let path = layer.shadowPath, let radius = PathCornerRadius.measure(path) else { return nil }
+                return (radius, min(path.boundingBoxOfPath.width, path.boundingBoxOfPath.height) / 2)
+            }
+        }
+    }
+
+    static func run() throws {
+        CornerStyleController.apply(.standard)
+        defer { CornerStyleController.apply(.standard) }
+
+        var probes: [UIProbe.Probed] = []
+        var samples: [Sample] = []
+        let surfaces = try ChromeCensusSurfaces.all() + overlaySurfaces()
+        for surface in surfaces {
+            let probe = try UIProbe.render(
+                UIProbe.Spec(id: "corner.\(surface.id)", size: surface.size, appearance: .darkAqua),
+                make: surface.make)
+            surface.prepare(probe.view)
+            probe.host.layoutSubtreeIfNeeded()
+            probes.append(probe)
+            samples += collect(surface: surface.id, root: probe.view)
+        }
+        guard samples.count >= 60 else {
+            throw Failure(description: "found only \(samples.count) rounded corners across \(surfaces.count) surfaces — the census stopped reaching the chrome")
+        }
+
+        var failures: [String] = []
+        for style in [CornerStyle.sharp, .rounded, .standard] {
+            let visited = CornerStyleController.apply(style)
+            for probe in probes { probe.host.layoutSubtreeIfNeeded(); probe.host.displayIfNeeded() }
+            guard visited > samples.count / 4 else {
+                throw Failure(description: "switching to \(style.title) reached only \(visited) views — the live walk does not reach the windows on screen")
+            }
+            for sample in samples {
+                guard let now = sample.read() else {
+                    failures.append("[\(style.title)] \(sample.label) lost its rounded shape (was \(sample.standard))")
+                    continue
+                }
+                if let problem = verdict(style: style, standard: sample.standard, now: now.radius, half: now.half) {
+                    failures.append("[\(style.title)] \(sample.label): \(problem)")
+                }
+            }
+            try checkHighlights(style: style, failures: &failures)
+        }
+        guard failures.isEmpty else {
+            let unique = Array(Set(failures)).sorted()
+            throw Failure(description: "\(unique.count) corner(s) ignore the corner style:\n  " + unique.prefix(80).joined(separator: "\n  ")
+                + (unique.count > 80 ? "\n  … and \(unique.count - 80) more" : ""))
+        }
+        try checkSettingDrivesTheStyle(probes: probes)
+        print("corner style census: \(samples.count) corners over \(surfaces.count) surfaces follow Sharp, Rounded and Default live; Settings › Appearance › Corner style drives it")
+    }
+
+    /// The setting itself: Appearance carries a three-way Corner style row
+    /// (Default by default) that search finds by its words, and choosing a
+    /// value through the Settings write path re-renders the open windows.
+    private static func checkSettingDrivesTheStyle(probes: [UIProbe.Probed]) throws {
+        let suite = "array.cornerStyle.check.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            throw Failure(description: "could not create isolated settings defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let observer = CornerStyleController.observeSetting(defaults: defaults)
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let model = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        guard let appearance = model.sections.first(where: { $0.id == "appearance" }),
+              let row = appearance.groups.flatMap(\.rows).first(where: { $0.field.key == CornerStyle.defaultsKey }),
+              case let .choice(_, label, options, defaultValue, _) = row.field else {
+            throw Failure(description: "Settings › Appearance has no Corner style row")
+        }
+        guard label == "Corner style", options == ["sharp", "default", "rounded"], defaultValue == "default",
+              CornerStyle.resolve(defaults.string(forKey: CornerStyle.defaultsKey)) == .standard else {
+            throw Failure(description: "Corner style row is \(label) \(options) default \(defaultValue); want Sharp / Default / Rounded defaulting to Default")
+        }
+        for word in ["corners", "radius", "rounded", "sharp", "square", "bubbly"] {
+            model.searchQuery = word
+            guard model.searchResults.contains(where: { $0.entry.label == "Corner style" }) else {
+                throw Failure(description: "searching Settings for \"\(word)\" does not find Corner style")
+            }
+        }
+        model.searchQuery = ""
+
+        // A tile already on screen, re-read after the write.
+        guard let tile = probes.lazy.compactMap({ ChromeCensusSurfaces.firstDescendant(TileNSView.self, in: $0.view) }).first,
+              let layer = tile.layer else {
+            throw Failure(description: "no tile on screen to watch for the setting")
+        }
+        for (raw, want) in [("sharp", CGFloat(0)), ("rounded", CornerRole.tile.cgRadius() == 0 ? 0 : CGFloat(CornerStyle.rounded.radius(CornerRole.tile.base))), ("default", CGFloat(CornerRole.tile.base))] {
+            model.binding(for: row.field).set(.string(raw))
+            guard CornerStyle.current == CornerStyle.resolve(raw), abs(layer.cornerRadius - want) < 0.05 else {
+                throw Failure(description: "choosing \(raw) in Settings left the style \(CornerStyle.current.title) and an on-screen tile at \(layer.cornerRadius), want \(want)")
+            }
+        }
+    }
+
+    private static func verdict(style: CornerStyle, standard: CGFloat, now: CGFloat, half: CGFloat) -> String? {
+        let capsule = half > 0 && standard >= half - 0.5
+        switch style {
+        case .sharp:
+            return now < 0.05 ? nil : "draws \(now), want 0"
+        case .standard:
+            return abs(now - standard) < 0.05 ? nil : "draws \(now), want its Default \(standard)"
+        case .rounded:
+            if capsule { return now >= half - 0.5 ? nil : "draws \(now), want a capsule (\(half))" }
+            let want = CGFloat(CornerStyle.rounded.radius(Double(standard)))
+            if abs(now - want) < 0.6 { return nil }
+            // Clamped to half the shorter side, never below the Default.
+            if want > half, now >= max(standard, half) - 0.5, now <= half + 0.5 { return nil }
+            return "draws \(now), want \(want) (Default \(standard))"
+        }
+    }
+
+    /// A plain AppKit view (an `NSView` card, an `NSVisualEffectView`) is named
+    /// for the nearest app-owned ancestor, so `SettingsOverlayView.NSView` is
+    /// the settings card rather than an anonymous view.
+    fileprivate static func label(_ view: NSView) -> String {
+        let own = ChromeCensusSurfaces.ownerName(view)
+        guard own.hasPrefix("NS") else { return own }
+        var ancestor = view.superview
+        while let current = ancestor {
+            let name = ChromeCensusSurfaces.ownerName(current)
+            if !name.hasPrefix("NS"), !name.hasPrefix("_NS") { return "\(name).\(own)" }
+            ancestor = current.superview
+        }
+        return own
+    }
+
+    private static func collect(surface: String, root: NSView) -> [Sample] {
+        var samples: [Sample] = []
+        var ordinals: [String: Int] = [:]
+        for view in ChromeCensusSurfaces.views(in: root) {
+            let raw = ChromeCensusSurfaces.ownerName(view)
+            let owner = label(view)
+            let ordinal = ordinals[owner, default: 0]
+            ordinals[owner] = ordinal + 1
+            // AppKit's private internals of native controls keep the system's shape.
+            guard !raw.hasPrefix("_NS"), exemptOwners[raw] == nil else { continue }
+            for (index, layer) in ChromeCensusSurfaces.ownedLayers(of: view).enumerated() {
+                // A layer with no size draws no corner.
+                guard layer.bounds.width > 0, layer.bounds.height > 0 else { continue }
+                func add(_ kind: Kind, _ radius: CGFloat) {
+                    samples.append(Sample(surface: surface, root: root, owner: owner, ordinal: ordinal,
+                                          layerIndex: index, kind: kind, standard: radius, view: view))
+                }
+                if layer.cornerRadius > 0.05 { add(.corner, layer.cornerRadius) }
+                if let shape = layer as? CAShapeLayer, let path = shape.path,
+                   let radius = PathCornerRadius.measure(path), radius > 0.5 {
+                    add(.path, radius)
+                }
+                if let shadow = layer.shadowPath, let radius = PathCornerRadius.measure(shadow), radius > 0.5 {
+                    add(.shadowPath, radius)
+                }
+            }
+        }
+        return samples
+    }
+
+    // MARK: - The canvas highlights
+
+    private static let antsGap: CGFloat = 4
+
+    private static func overlaySurfaces() -> [ChromeCensusSurfaces.Surface] {
+        [
+            ChromeCensusSurfaces.Surface(id: "zoneMovingHighlight", size: NSSize(width: 700, height: 480), make: {
+                let canvas = CanvasNSView(canvasState: CanvasState(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+                canvas.frame = NSRect(x: 0, y: 0, width: 700, height: 480)
+                return canvas
+            }, prepare: { root in
+                guard let canvas = ChromeCensusSurfaces.firstDescendant(CanvasNSView.self, in: root) else { return }
+                canvas.showDragGhost(at: TileFrame(x: 60, y: 60, width: 420, height: 260), label: "New Zone", detail: nil, role: .zone)
+            }),
+        ]
+    }
+
+    /// The marching ants and the zone's moving highlight, measured against the
+    /// surfaces they outline.
+    private static func checkHighlights(style: CornerStyle, failures: inout [String]) throws {
+        // Marching ants: concentric with the tile at their gap; square at Sharp.
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let ants = FocusBorderOverlayView(frame: .zero)
+        host.addSubview(ants)
+        ants.configure(color: .systemBlue, gap: antsGap, animationDuration: 1)
+        ants.show(around: CGRect(x: 40, y: 40, width: 300, height: 200), tileScale: 1)
+        ants.layoutSubtreeIfNeeded()
+        let antsPath = ants.qaShapePath.flatMap(PathCornerRadius.measure)
+        let antsWant: CGFloat = style == .sharp ? 0 : CornerRole.tile.cgRadius() + antsGap
+        if let antsPath, abs(antsPath - antsWant) < 0.6 {} else {
+            failures.append("[\(style.title)] marching ants draw radius \(String(describing: antsPath)), want \(antsWant) (tile \(CornerRole.tile.cgRadius()) + gap \(antsGap))")
+        }
+
+        // The zone's moving highlight draws the zone's radius, and so does the
+        // zone's own outline.
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 700, height: 480)
+        canvas.showDragGhost(at: TileFrame(x: 60, y: 60, width: 420, height: 260), label: "New Zone", detail: nil, role: .zone)
+        let ghost = canvas.qaDragGhostCornerRadius
+        let zoneWant = CornerRole.zone.cgRadius()
+        if let ghost, abs(ghost - zoneWant) < 0.05 {} else {
+            failures.append("[\(style.title)] the zone's moving highlight draws \(String(describing: ghost)), want the zone radius \(zoneWant)")
+        }
+        let placement = ZonePlacement(
+            zoneId: UUID(), projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 600, height: 300), color: "blue", collapsed: false,
+            hydrationPolicy: .automatic, name: "Array")
+        let zone = ZoneChromeNSView(placement: placement, presentation: .init(
+            title: "Array", homeLabel: nil, isProvisional: false, agentStatusRollup: .empty, qaVerdict: nil))
+        zone.frame = NSRect(x: 0, y: 0, width: 600, height: 300)
+        zone.layoutSubtreeIfNeeded()
+        let outline = zone.qaOutlinePath.flatMap(PathCornerRadius.measure)
+        if let outline, abs(outline - zoneWant) < 0.6 {} else {
+            failures.append("[\(style.title)] the zone outline draws \(String(describing: outline)), want the zone radius \(zoneWant)")
+        }
+    }
+}

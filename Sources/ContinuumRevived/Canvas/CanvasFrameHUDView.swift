@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 
 /// Opt-in, screen-space readout of the most recently completed canvas gesture.
 ///
@@ -7,16 +8,21 @@ import AppKit
 /// summary at most four times per second. There is no HUD-owned timer, display
 /// link, animation, or sampling path.
 @MainActor
-final class CanvasFrameHUDView: NSView {
+final class CanvasFrameHUDView: NSView, CornerStyled {
     private let label = NSTextField(labelWithString: "FPS —")
 
     override var isFlipped: Bool { true }
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() {
+        layer?.applyCorner(.control)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).appResolvedCGColor
-        layer?.cornerRadius = 6
+        applyCornerStyle()
         layer?.masksToBounds = true
 
         label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
