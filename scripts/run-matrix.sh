@@ -507,6 +507,9 @@ run_app_check .build/debug/Array --provider-model-picker-check
 # Popover ROW and trigger geometry for the agent tile selects: a row must be
 # able to draw its own title at the width the panel sized itself to.
 run_app_check .build/debug/Array --choice-geometry-check
+run_app_check .build/debug/Array --zone-cancel-menu-check
+run_app_check .build/debug/Array --border-census-check
+run_app_check .build/debug/Array --corner-style-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").
 run_app_check .build/debug/Array --app-support-channel-check
 if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then

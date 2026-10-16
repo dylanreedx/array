@@ -31,6 +31,7 @@ check --board-interaction-check
 check --board-model-check
 check --board-task-workflow-check
 check --board-tile-lifecycle-check
+check --border-census-check
 check --bring-to-front-focus-check
 check --browser-auth-challenge-check
 check --browser-click-recency-check
@@ -72,6 +73,7 @@ check --composer-image-components-check
 check --composer-key-routing-check
 check --conductor-queue-tile-check
 check --context-meter-contract-check
+check --corner-style-check
 check --cross-project-agents-check
 check --diff-review-off-main-check
 check --diff-tile-check
@@ -258,6 +260,7 @@ check --zone-adaptive-bounds-check
 check --zone-arming-check
 check --zone-autoname-check
 check --zone-breakout-check
+check --zone-cancel-menu-check
 check --zone-chrome-zorder-check
 check --zone-close-keep-delete-check
 check --zone-close-strand-check
@@ -314,6 +317,7 @@ leg run_app_check .build/debug/Array --attention-notification-check
 leg run_app_check .build/debug/Array --board-interaction-check
 leg run_app_check .build/debug/Array --board-task-workflow-check
 leg run_app_check .build/debug/Array --board-tile-lifecycle-check
+leg run_app_check .build/debug/Array --border-census-check
 leg run_app_check .build/debug/Array --bring-to-front-focus-check
 leg run_app_check .build/debug/Array --browser-auth-challenge-check
 leg run_app_check .build/debug/Array --browser-click-recency-check
@@ -351,6 +355,7 @@ leg run_app_check .build/debug/Array --component-lab-check
 leg run_app_check .build/debug/Array --composer-image-components-check
 leg run_app_check .build/debug/Array --composer-key-routing-check
 leg run_app_check .build/debug/Array --conductor-queue-tile-check
+leg run_app_check .build/debug/Array --corner-style-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-review-off-main-check
 leg run_app_check .build/debug/Array --diff-tile-check
@@ -524,6 +529,7 @@ leg run_app_check .build/debug/Array --zone-adaptive-bounds-check
 leg run_app_check .build/debug/Array --zone-arming-check
 leg run_app_check .build/debug/Array --zone-autoname-check
 leg run_app_check .build/debug/Array --zone-breakout-check
+leg run_app_check .build/debug/Array --zone-cancel-menu-check
 leg run_app_check .build/debug/Array --zone-chrome-zorder-check
 leg run_app_check .build/debug/Array --zone-close-keep-delete-check
 leg run_app_check .build/debug/Array --zone-close-strand-check
