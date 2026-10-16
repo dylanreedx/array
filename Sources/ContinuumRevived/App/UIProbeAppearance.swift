@@ -967,6 +967,12 @@ enum UIProbeAppearance {
         // `InboxUndoToast` below records — the walk reads the layer colours a view
         // painted in `init`.
         "InboxRowFocusRingView",
+        // The settle nudge: a real button on the row's meta line, filled from
+        // `SidebarControlRole` (resting / hover / pressed) so it reads as a
+        // control on a resting AND a hovered row — never the row's own hover
+        // fill, which is what made the first version vanish into the row. It
+        // is always filled while shown; hidden, it paints its resting step.
+        "InboxSettleNudgeButton",
         // P3.10. The ⌘-hold hint pill: `SurfaceToken.overlay` fill with a
         // `LineToken.border` outline. It only paints while the modifier is held, so
         // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
@@ -1130,6 +1136,10 @@ enum UIProbeAppearance {
             // the `SurfaceToken` family `legalValues(for:)` already admits,
             // so it needs the same owner-scoped admission as the roles above.
             values.insert(hex(AgentSurfaceRole.artifact.color.cgColor(for: theme)))
+        case "InboxSettleNudgeButton":
+            for role in SidebarControlRole.allCases {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
         case "AgentInboxCardView":
             // 94/P1.2: the sidebar's interaction ladder, owner-scoped exactly like
             // the roles above. The THREE emphases only — `resting` is deliberately

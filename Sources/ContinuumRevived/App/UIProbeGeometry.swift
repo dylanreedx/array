@@ -4341,12 +4341,123 @@ enum UIProbeGeometry {
             totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline,
             ladderAssertions, slimParityAssertions, tierAssertions
         ))
+        let nudgeAssertions = try checkSettleNudgeFundamentals()
+        print("UIProbeGeometry: settle nudge held \(nudgeAssertions) native-button assertions (meta band, clear of the title, content-sized padding, unclipped text, fill distinct from the row's hover in both appearances, hover/pressed states, focus ring, no duplicate Settle, arrow cursor)")
         print("UIProbeGeometry: unconfirmed rows held \(unconfirmedAssertions) live status/frozen-clock assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: elapsed formatter table and fixed sidebar/tile column held in \(elapsedAssertions) live assertions")
         print("UIProbeGeometry: live rename editor held \(renameAssertions) body/control/modifier/active-editor/trailing-click/Return/Escape/blur/empty assertions at 220/280/320pt in both appearances")
         print("UIProbeGeometry: filter band held \(filterBandAssertions) production-path scope/search/accessibility assertions at 220/280/320pt, including visible-disabled management and active-scope restoration")
         print("UIProbeGeometry: bulk bar held \(bulkAssertions) production-path scope/search targeting, host-owned confirmation, reentrant idempotence, later repeatability, and 220/280/320 control geometry assertions")
         print("UIProbeGeometry: accessibility/motion sweep held \(accessibilityMotionAssertions) live AX hierarchy, hidden-fact relocation, single status ownership, custom-menu/bulk/shelf/footer semantics, Reduce Motion, Increase Contrast, P6.5 remainder, and resize-divider assertions at 220/280/320pt in Aqua and Dark Aqua")
+    }
+
+    /// The "All set?" settle nudge as a native Mac control: a real button in the
+    /// row's meta band, sized from its content, filled distinctly from the row's
+    /// own hover, with hover/pressed/focus states — on a row whose cursor is the
+    /// system arrow. Every reading comes off the live list: the real cell, its
+    /// real button driven through its own pointer and press inputs, and the
+    /// table's real `resetCursorRects`.
+    private static func checkSettleNudgeFundamentals() throws -> Int {
+        var asserted = 0
+        let now = LabFixtures.inboxNow
+        // The long-title RTL row: the oldest candidate, and the one whose title
+        // runs the full width the nudge used to sit on top of.
+        let candidates = AgentInbox96Fixtures.rows(now: now).filter {
+            AgentInbox96CellView.isSettleCandidate($0, now: now)
+        }
+        guard let target = candidates.min(by: { ($0.lastActiveAt ?? now) < ($1.lastActiveAt ?? now) }) else {
+            throw fail("sidebar-ux-check.nudge: the fixtures carry no settle candidate")
+        }
+        // Every broken fundamental is reported together, per appearance and
+        // width, rather than the first one hiding the rest.
+        var failures: [String] = []
+        func require(_ condition: Bool, _ message: @autoclosure () -> String) throws {
+            guard condition else { failures.append(message()); return }
+            asserted += 1
+        }
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            for width in [CGFloat(WorkspaceSidebarConfig.minWidth), CGFloat(WorkspaceSidebarConfig.defaultWidth), 320] {
+                let label = "\(appearanceName.rawValue)@\(Int(width))pt"
+                let probe = try makeSidebarProbeHost(width: width, height: 400, appearanceName: appearanceName)
+                // The shipping card — the probe host defaults to the legacy one.
+                probe.inbox.cardStyleOverride = .production
+                probe.inbox.clock = { now }
+                probe.inbox.onRowAction = { _, _ in }
+                probe.inbox.wiredRowActions = Set(InboxRowAction.allCases)
+                probe.inbox.reload(rows: [target])
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                guard let nudge = probe.inbox.settleNudgeForQA(id: target.id) else {
+                    throw fail("sidebar-ux-check.nudge \(label): the settle candidate shows no nudge (block \(String(describing: probe.inbox.drawnBlockForQA(id: target.id))), variant \(String(describing: probe.inbox.drawnRowForQA(id: target.id)?.variant)), row \(String(describing: probe.inbox.tableRowIndexForQA(id: target.id))))")
+                }
+                // Place: the meta band, never over the title.
+                try require(!nudge.frame.intersects(nudge.titleLabelFrame),
+                            "\(label): the nudge \(nudge.frame) overlaps the title \(nudge.titleLabelFrame)")
+                try require(abs(nudge.frame.midY - nudge.metaBand.midY) <= 1
+                                && nudge.frame.maxY <= nudge.titleLabelFrame.minY
+                                && nudge.frame.minY >= nudge.cardFrame.minY
+                                && nudge.frame.maxX <= nudge.cardFrame.maxX,
+                            "\(label): the nudge \(nudge.frame) is not centred in the meta band \(nudge.metaBand)")
+                // Content: one label, system face at the meta size, no stray glyph.
+                try require(!nudge.title.contains("  ") && !nudge.title.contains("×")
+                                && nudge.title == nudge.title.trimmingCharacters(in: .whitespaces),
+                            "\(label): the nudge title '\(nudge.title)' carries a double space or a fake dismiss glyph")
+                let isMonospaced = nudge.font?.fontDescriptor.symbolicTraits.contains(.monoSpace) ?? true
+                try require(!isMonospaced && nudge.font?.pointSize == nudge.metaFont?.pointSize,
+                            "\(label): the nudge must use the system face at the meta size (\(String(describing: nudge.metaFont?.pointSize))), got \(String(describing: nudge.font))")
+                // Padding from content: ~8pt either side, ~4pt icon-to-text, nothing clipped.
+                let leading = nudge.imageRect.minX - nudge.bounds.minX
+                let gap = nudge.titleRect.minX - nudge.imageRect.maxX
+                let trailing = nudge.bounds.maxX - (nudge.titleRect.minX + nudge.textWidth)
+                try require(abs(leading - 8) <= 1 && abs(trailing - 8) <= 1.5 && abs(gap - 4) <= 1,
+                            "\(label): nudge padding leading \(leading) gap \(gap) trailing \(trailing) (want ~8/4/8) in bounds \(nudge.bounds)")
+                try require(nudge.titleRect.width + 0.5 >= nudge.textWidth
+                                && nudge.titleRect.maxX <= nudge.bounds.maxX + 0.5,
+                            "\(label): the nudge text (\(nudge.textWidth)pt) is clipped by its title rect \(nudge.titleRect)")
+                // Fill: distinct from the row at rest AND hovered, and its own states move.
+                func chip(_ color: CGColor?) -> ChipColor? { chipColor(color) }
+                let panel = SidebarSurfaceRole.rowBase.color.resolved(for: theme)
+                let rowHover = SidebarSurfaceRole.hover.color.resolved(for: theme)
+                guard let resting = chip(nudge.restingFill), let hover = chip(nudge.hoverFill),
+                      let pressed = chip(nudge.pressedFill) else {
+                    throw fail("sidebar-ux-check.nudge \(label): the nudge paints no fill in some state (resting \(hex(nudge.restingFill)) hover \(hex(nudge.hoverFill)) pressed \(hex(nudge.pressedFill)))")
+                }
+                try require(WCAGContrast.ratio(resting, rowHover) >= 1.2 && WCAGContrast.ratio(resting, panel) >= 1.2,
+                            "\(label): the nudge fill \(hex(nudge.restingFill)) is not distinct from the row's hover (\(String(format: "%.3f", WCAGContrast.ratio(resting, rowHover))):1) or resting (\(String(format: "%.3f", WCAGContrast.ratio(resting, panel))):1) fill — floor 1.2:1")
+                try require(WCAGContrast.ratio(hover, resting) >= 1.05 && WCAGContrast.ratio(pressed, hover) >= 1.05,
+                            "\(label): hover \(hex(nudge.hoverFill)) and pressed \(hex(nudge.pressedFill)) must each paint a different fill from resting \(hex(nudge.restingFill))")
+                try require(nudge.focusRingType != .none && nudge.accessibilityLabel?.isEmpty == false,
+                            "\(label): the nudge needs a keyboard focus ring and an accessibility label")
+                // The model id tooltip covers the provider mark, never the title.
+                if let tips = probe.inbox.modelToolTipsForQA(id: target.id) {
+                    try require(tips.layer == nil
+                                    && !(tips.markRect?.intersects(nudge.titleLabelFrame) ?? false),
+                                "\(label): the model tooltip spans the title (layer tooltip \(String(describing: tips.layer)), mark rect \(String(describing: tips.markRect)))")
+                }
+                // One settle affordance at a time: hovering the row offers no second Settle.
+                guard probe.inbox.hoverRowForQA(id: target.id) else {
+                    throw fail("sidebar-ux-check.nudge \(label): could not hover the nudge row")
+                }
+                let actions = probe.inbox.hoverActionsForQA(id: target.id)
+                try require(!(actions?.titles.contains("Settle") ?? false),
+                            "\(label): the hover Settle shows beside the nudge — got \(String(describing: actions?.titles))")
+                if let hovered = probe.inbox.settleNudgeForQA(id: target.id) {
+                    try require(!hovered.frame.intersects(hovered.titleLabelFrame),
+                                "\(label): the nudge moves over the title while the row is hovered")
+                }
+                _ = probe.inbox.hoverRowForQA(id: nil)
+                // The row's cursor is the system arrow: no row registers a cursor.
+                let cursors = probe.inbox.rowCursorsForQA()
+                try require(!cursors.contains(where: { $0 == NSCursor.pointingHand }),
+                            "\(label): sidebar rows register a pointing-hand cursor (\(cursors.count) rect(s)); native sidebars use the arrow")
+                guard failures.isEmpty else {
+                    throw fail("sidebar-ux-check.nudge: \(failures.count) failure(s):\n  " + failures.joined(separator: "\n  "))
+                }
+            }
+        }
+        return asserted
     }
 
     /// P5.2 production filter-band gate. It materializes the real ChoiceButton

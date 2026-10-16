@@ -288,13 +288,21 @@ private final class AgentInboxTableView: NSTableView {
         }
     }
 
+    /// Every cursor rect this table registered on its last `resetCursorRects`,
+    /// recorded at the AppKit seam so a check reads what the pointer will see.
+    private(set) var registeredCursorsForQA: [NSCursor] = []
+
+    override func addCursorRect(_ rect: NSRect, cursor object: NSCursor) {
+        registeredCursorsForQA.append(object)
+        super.addCursorRect(rect, cursor: object)
+    }
+
+    // No row cursor. A pointing hand over every whole row is a web idiom;
+    // native sidebars (Finder, Mail, Xcode) keep the arrow, and with the hand
+    // everywhere the row's real buttons gave no distinct feedback.
     override func resetCursorRects() {
+        registeredCursorsForQA = []
         super.resetCursorRects()
-        guard let contextHandler else { return }
-        for tableRow in 0..<numberOfRows
-        where contextHandler.isAgentTableRowForCursor(tableRow) {
-            addCursorRect(rect(ofRow: tableRow), cursor: .pointingHand)
-        }
     }
 }
 
@@ -4443,11 +4451,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
     var hoverCardBrandMarkTintForQA: NSColor? { hoverCard?.qaBrandMarkTintForQA }
 
-    fileprivate func isAgentTableRowForCursor(_ tableRow: Int) -> Bool {
-        rowIndex(forTableRow: tableRow) != nil
+    /// The cursors the list's rows register, by running the table's real
+    /// `resetCursorRects`. Empty means the system arrow.
+    func rowCursorsForQA() -> [NSCursor] {
+        guard let table = tableView as? AgentInboxTableView else { return [] }
+        table.resetCursorRects()
+        return table.registeredCursorsForQA
     }
 
-    var rowCursorForQA: NSCursor { .pointingHand }
+    func modelToolTipsForQA(id: UUID) -> (layer: String?, markRect: NSRect?)? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                as? AgentInbox96CellView else { return nil }
+        return (card.qaDecorationsToolTipForQA, card.qaMarkToolTipRectForQA)
+    }
+
+    func settleNudgeForQA(id: UUID) -> AgentInbox96CellView.SettleNudgeForQA? {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+                as? AgentInbox96CellView else { return nil }
+        card.layoutSubtreeIfNeeded()
+        return card.settleNudgeForQA()
+    }
 
     func setProjectIconSources(_ roots: [UUID: URL]) {
         projectFaviconResolver.update(roots)

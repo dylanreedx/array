@@ -581,6 +581,35 @@ public enum SidebarSurfaceRole: String, CaseIterable, Sendable {
     public static let rowBase: SurfaceToken = .panel
 }
 
+/// A CONTROL drawn on a sidebar row — the settle nudge — as opposed to the
+/// row's own fills above. It has to read as a button on a row at rest AND on
+/// a hovered one, so its quietest step sits well above the row's loudest
+/// (`SidebarSurfaceRole.active`, 11%): 18%, with hover and pressed one clear
+/// step each beyond it. Same construction as the row ladder — `textPrimary`
+/// over `panel`, never a fresh hex — so it is neutral in both themes and the
+/// text on it keeps `textPrimary`'s contrast.
+public enum SidebarControlRole: String, CaseIterable, Sendable {
+    case resting = "sidebarControlResting"
+    case hover = "sidebarControlHover"
+    case pressed = "sidebarControlPressed"
+
+    public var emphasisAlpha: Double {
+        switch self {
+        case .resting: return 0.18
+        case .hover: return 0.24
+        case .pressed: return 0.32
+        }
+    }
+
+    public var color: TokenColor {
+        let base = SidebarSurfaceRole.rowBase.color
+        let mix = TextToken.textPrimary.color
+        return TokenColor(
+            light: mix.light.composited(over: base.light, alpha: emphasisAlpha),
+            dark: mix.dark.composited(over: base.dark, alpha: emphasisAlpha))
+    }
+}
+
 /// The sidebar ladder's pair set, mirroring `AgentTileTokens`: these gate
 /// the THREE new fills, and `panel` (= `resting`) stays P1.3's to gate.
 public enum SidebarTokens {

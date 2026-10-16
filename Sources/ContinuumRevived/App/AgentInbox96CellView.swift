@@ -2,7 +2,154 @@ import Foundation
 import AppKit
 import ContinuumRevivedAgentUI
 
-final class InboxSettleNudgeButton: NSButton {}
+/// The "All set?" settle nudge: a real button on the row's meta line.
+///
+/// Native fundamentals, each of which the first version lacked: it is sized
+/// from its own content (8pt padding, a 4pt icon-to-text gap) rather than a
+/// hard-coded frame; its fill is `SidebarControlRole`, which stays distinct
+/// from the row's own resting and hover fills (the old one painted the row's
+/// hover colour, so it vanished into a hovered row); and it answers the
+/// pointer — hover and press each paint their own step — and the keyboard,
+/// with a capsule focus ring. Witness: `--sidebar-ux-check` (settle nudge).
+@MainActor
+final class InboxSettleNudgeButton: NSButton, TokenThemed {
+    static let horizontalPadding: CGFloat = 8
+    static let iconTextGap: CGFloat = 4
+    static let height: CGFloat = 18
+
+    /// Whether the pointer is over the button (driven by its tracking area).
+    var isPointerInside = false {
+        didSet { if oldValue != isPointerInside { applyTokens() } }
+    }
+    private var pointerTracking: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        cell = InboxSettleNudgeCell(textCell: "")
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        focusRingType = .exterior
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var intrinsicContentSize: NSSize { cell?.cellSize ?? .zero }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        pointerTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isPointerInside = true }
+    override func mouseExited(with event: NSEvent) { isPointerInside = false }
+
+    override var isHidden: Bool {
+        didSet { if isHidden { isPointerInside = false } }
+    }
+
+    /// The press state is the cell's highlight, which AppKit's own tracking sets.
+    fileprivate func pressedStateChanged() { applyTokens() }
+
+    func applyTokens() {
+        let role: SidebarControlRole = (cell?.isHighlighted ?? false)
+            ? .pressed : (isPointerInside ? .hover : .resting)
+        layer?.backgroundColor = role.color.cgColor(in: self)
+        let foreground = TextToken.textPrimary.color.nsColor(in: self)
+        contentTintColor = foreground
+        attributedTitle = NSAttributedString(
+            string: title, attributes: [.font: font as Any, .foregroundColor: foreground])
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        let radius = bounds.height / 2
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+/// Lays the nudge out from its content: padding, icon, gap, title, padding.
+/// `imageRect`/`titleRect` are the ONE geometry — drawing, sizing and the
+/// witness all read them.
+private final class InboxSettleNudgeCell: NSButtonCell {
+    override var isHighlighted: Bool {
+        didSet {
+            guard oldValue != isHighlighted else { return }
+            (controlView as? InboxSettleNudgeButton)?.pressedStateChanged()
+        }
+    }
+
+    private var textSize: NSSize {
+        let size = attributedTitle.size()
+        return NSSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    private var iconSize: NSSize { image?.size ?? .zero }
+
+    override var cellSize: NSSize {
+        let icon = iconSize.width > 0 ? iconSize.width + InboxSettleNudgeButton.iconTextGap : 0
+        return NSSize(
+            width: InboxSettleNudgeButton.horizontalPadding * 2 + icon + textSize.width,
+            height: InboxSettleNudgeButton.height)
+    }
+
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        let size = iconSize
+        guard size.width > 0 else { return .zero }
+        return NSRect(
+            x: rect.minX + InboxSettleNudgeButton.horizontalPadding,
+            y: rect.minY + ((rect.height - size.height) / 2).rounded(),
+            width: size.width, height: size.height)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        let icon = imageRect(forBounds: rect)
+        let x = icon.width > 0
+            ? icon.maxX + InboxSettleNudgeButton.iconTextGap
+            : rect.minX + InboxSettleNudgeButton.horizontalPadding
+        let height = textSize.height
+        return NSRect(
+            x: x, y: rect.minY + ((rect.height - height) / 2).rounded(),
+            width: max(0, rect.maxX - InboxSettleNudgeButton.horizontalPadding - x),
+            height: height)
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let tint = (controlView as? NSButton)?.contentTintColor ?? .labelColor
+        if let image {
+            let target = imageRect(forBounds: cellFrame)
+            let tinted = NSImage(size: image.size, flipped: false) { bounds in
+                image.draw(in: bounds)
+                tint.set()
+                bounds.fill(using: .sourceAtop)
+                return true
+            }
+            tinted.draw(in: target, from: .zero, operation: .sourceOver,
+                        fraction: 1, respectFlipped: true, hints: nil)
+        }
+        attributedTitle.draw(with: titleRect(forBounds: cellFrame),
+                             options: [.usesLineFragmentOrigin])
+    }
+}
 
 // Program 96 — the redesigned agent row, as a REAL cell.
 //
@@ -312,6 +459,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// and `docs/internals/performance.md` is explicit that a view per content item
     /// is how the Markdown tile froze the app.
     private let decorations = Decorations()
+    /// The exact model id, shown over the provider mark only. Retained here:
+    /// `addToolTip(_:owner:userData:)` does not retain its owner.
+    private var markToolTip: NSString?
+    private var markToolTipRect: NSRect?
 
 
     private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
@@ -415,14 +566,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.action = #selector(disclosureClicked)
         disclosureButton.isHidden = true
         card.addSubview(disclosureButton)
-        settleNudge.title = "All set?  ×"
-        settleNudge.image = NSImage(
-            systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
+        // ONE action, one label. The "×" this used to carry was title text, not a
+        // target — the whole pill settled — and there is no "dismiss the nudge"
+        // concept to give a real one: the nudge already withdraws on its own
+        // phase timer. The checkmark is the hover Settle's own glyph.
+        let metaSize = Typography.style(for: .label).size
+        settleNudge.title = "All set?"
+        settleNudge.font = .systemFont(ofSize: metaSize, weight: .medium)
+        settleNudge.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: metaSize - 2, weight: .semibold))
+        settleNudge.image?.isTemplate = true
         settleNudge.imagePosition = .imageLeading
-        settleNudge.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        settleNudge.isBordered = false
-        settleNudge.wantsLayer = true
-        settleNudge.layer?.cornerRadius = 11
+        settleNudge.toolTip = "Settle this agent"
         settleNudge.target = self
         settleNudge.action = #selector(settleNudgeClicked)
         settleNudge.isHidden = true
@@ -530,7 +685,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // The exact model id stays reachable when the row does not print it — §4.3
         // requires that of every step of the sacrifice ladder.
         modelLabel.toolTip = model.isEmpty ? nil : model
-        decorations.toolTip = model.isEmpty ? nil : model
+        // The mark's tooltip covers the MARK, not the whole decoration layer —
+        // that layer spans the card, so its tooltip popped over the title.
+        markToolTip = model.isEmpty ? nil : model as NSString
 
         statusGlyph.symbol = Self.attentionSymbol(row, now: now)
         statusGlyph.alignment =
@@ -732,12 +889,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // maximum contrast without recolouring the vendor shape by status or row
         // recession.
         decorations.markColour = BrandMark96.foreground(in: self)
-        let nudgeForeground = TextToken.textPrimary.color.nsColor(in: self)
-        settleNudge.contentTintColor = nudgeForeground
-        settleNudge.attributedTitle = NSAttributedString(
-            string: settleNudge.title,
-            attributes: [.font: settleNudge.font as Any, .foregroundColor: nudgeForeground])
-        settleNudge.layer?.backgroundColor = SidebarSurfaceRole.hover.color.cgColor(in: self)
+        settleNudge.applyTokens()
         for button in [hoverSnooze, hoverSettle] {
             button.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         }
@@ -935,7 +1087,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let hasIcon = statusGlyph.symbol != nil
         let leadsWithIcon = anatomy.iconPlacement == .leading
 
-        // Band 1 — placement left, state and time right.
+        // Band 1 — placement left, state and time right, and the settle nudge
+        // (when it shows) at the very end of the line. Everything else on the
+        // line ends where the nudge begins, so it can never sit on a label.
+        let nudgeSize = settleNudge.isHidden ? .zero : settleNudge.intrinsicContentSize
+        let metaRight = settleNudge.isHidden ? textRight : textRight - nudgeSize.width - 6
         let stateWidth = stateLabel.isHidden
             ? 0 : min(card.bounds.width * 0.55, Self.width(of: stateLabel))
         var placementLeft = textLeft
@@ -953,7 +1109,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else if hasIcon {
             trailingIconWidth = iconSide + 4
             statusSlot = NSRect(
-                x: textRight - stateWidth - trailingIconWidth,
+                x: metaRight - stateWidth - trailingIconWidth,
                 y: bandY + (proposal.bandTop - iconSide) / 2,
                 width: iconSide, height: iconSide)
         } else {
@@ -977,7 +1133,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let slot = statusSlot { statusGlyph.frame = inCard(slot) }
         let placementFrame = NSRect(
             x: placementLeft, y: bandY,
-            width: max(0, textRight - stateWidth - trailingIconWidth - 6 - placementLeft),
+            width: max(0, metaRight - stateWidth - trailingIconWidth - 6 - placementLeft),
             height: proposal.bandTop)
         placementLabel.frame = inCard(placementFrame)
         if var iconFrame = projectIconFrame {
@@ -991,8 +1147,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             projectIcon.frame = inCard(iconFrame)
         }
         stateLabel.frame = inCard(NSRect(
-            x: textRight - stateWidth, y: bandY,
+            x: metaRight - stateWidth, y: bandY,
             width: stateWidth, height: proposal.bandTop))
+        settleNudge.frame = settleNudge.isHidden ? .zero : inCard(NSRect(
+            x: textRight - nudgeSize.width,
+            y: (bandY + (proposal.bandTop - nudgeSize.height) / 2).rounded(),
+            width: nudgeSize.width, height: nudgeSize.height))
         bandY += proposal.bandTop + proposal.gapTop
 
         // Band 2 — the subject. Never sacrificed, at any width.
@@ -1026,6 +1186,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         modelLabel.frame = inCard(NSRect(
             x: textRight - modelWidth, y: bandY,
             width: modelWidth, height: proposal.bandDetail))
+        decorations.removeAllToolTips()
+        markToolTipRect = nil
+        if let slot = decorations.markSlot, let markToolTip {
+            decorations.addToolTip(slot, owner: markToolTip, userData: nil)
+            markToolTipRect = decorations.convert(slot, to: self)
+        }
 
         decorations.border = anatomy.border
         decorations.borderWidth = anatomy.borderWidth
@@ -1040,15 +1206,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // The hover actions sit in the status slot, right-aligned on the meta line.
         let actionSide: CGFloat = 20
         let actionY = proposal.insetV + (proposal.bandTop - actionSide) / 2
+        // While the nudge shows, the hover Settle is hidden (one settle
+        // affordance at a time) and Snooze takes the slot before the nudge.
         hoverSettle.frame = inCard(NSRect(
-            x: textRight - actionSide, y: actionY, width: actionSide, height: actionSide))
+            x: metaRight - actionSide, y: actionY, width: actionSide, height: actionSide))
         hoverSnooze.frame = inCard(NSRect(
-            x: textRight - actionSide * 2 - 4, y: actionY, width: actionSide, height: actionSide))
-        let nudgeSize = NSSize(width: 94, height: 22)
-        settleNudge.frame = inCard(NSRect(
-            x: max(textLeft, textRight - nudgeSize.width),
-            y: (card.bounds.height - nudgeSize.height) / 2,
-            width: nudgeSize.width, height: nudgeSize.height))
+            x: settleNudge.isHidden ? metaRight - actionSide * 2 - 4 : metaRight - actionSide,
+            y: actionY, width: actionSide, height: actionSide))
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -1087,7 +1251,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Motion). Only the actions the row offers ever appear.
     private func setHoverActionsShown(_ shown: Bool) {
         let snoozeOn = shown && onHoverSnooze != nil
-        let settleOn = shown && onHoverSettle != nil
+        // The nudge IS the settle action while it shows; a second one beside it
+        // is the duplicate the first version drew.
+        let settleOn = shown && onHoverSettle != nil && settleNudge.isHidden
         let any = snoozeOn || settleOn
         hoverActionsShown = any
         let statusAlpha: CGFloat = any ? 0 : CGFloat(self.shown?.emphasis.accentOpacity ?? 1)
@@ -1117,6 +1283,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         onSettleNudge = shown ? onSettle : nil
         guard settleNudge.isHidden == shown else { return }
         settleNudge.isHidden = !shown
+        needsLayout = true
         guard shown, !prefersReducedMotion(), let layer = settleNudge.layer else { return }
         let slide = CABasicAnimation(keyPath: "transform.translation.x")
         slide.fromValue = 14
@@ -1270,6 +1437,61 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             ? nil : disclosureButton.convert(disclosureButton.bounds, to: self)
     }
     var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+    /// The model-id tooltips this row registers: the whole-layer one (must be
+    /// nil — it spanned the title) and the provider-mark rect, in cell space.
+    var qaDecorationsToolTipForQA: String? { decorations.toolTip }
+    var qaMarkToolTipRectForQA: NSRect? { markToolTipRect }
+
+    /// The settle nudge as drawn, and the fill it paints in each of its states —
+    /// read by driving the button's own pointer and press inputs. nil when hidden.
+    struct SettleNudgeForQA {
+        let frame: NSRect
+        let titleLabelFrame: NSRect
+        let cardFrame: NSRect
+        /// Band 1 — the placement/state line — in this cell's coordinates.
+        let metaBand: NSRect
+        let title: String
+        let font: NSFont?
+        let metaFont: NSFont?
+        let bounds: NSRect
+        let imageRect: NSRect
+        let titleRect: NSRect
+        let textWidth: CGFloat
+        let restingFill: CGColor?
+        let hoverFill: CGColor?
+        let pressedFill: CGColor?
+        let focusRingType: NSFocusRingType
+        let accessibilityLabel: String?
+    }
+
+    func settleNudgeForQA() -> SettleNudgeForQA? {
+        guard !settleNudge.isHidden else { return nil }
+        let bounds = settleNudge.bounds
+        let resting = settleNudge.layer?.backgroundColor
+        settleNudge.isPointerInside = true
+        let hover = settleNudge.layer?.backgroundColor
+        settleNudge.isPointerInside = false
+        settleNudge.highlight(true)
+        let pressed = settleNudge.layer?.backgroundColor
+        settleNudge.highlight(false)
+        let cardFrame = card.convert(card.bounds, to: self)
+        return SettleNudgeForQA(
+            frame: settleNudge.convert(bounds, to: self),
+            titleLabelFrame: titleLabel.convert(titleLabel.bounds, to: self),
+            cardFrame: cardFrame,
+            metaBand: NSRect(x: cardFrame.minX, y: cardFrame.minY + proposal.insetV,
+                             width: cardFrame.width, height: proposal.bandTop),
+            title: settleNudge.title,
+            font: settleNudge.font,
+            metaFont: stateLabel.font,
+            bounds: bounds,
+            imageRect: settleNudge.cell?.imageRect(forBounds: bounds) ?? .zero,
+            titleRect: settleNudge.cell?.titleRect(forBounds: bounds) ?? .zero,
+            textWidth: ceil(settleNudge.attributedTitle.size().width),
+            restingFill: resting, hoverFill: hover, pressedFill: pressed,
+            focusRingType: settleNudge.focusRingType,
+            accessibilityLabel: settleNudge.accessibilityLabel())
+    }
     var qaNestingForQA: InboxNesting { nesting }
     var qaGroupBackgroundVisibleForQA: Bool { groupBackground.qaIsVisibleForQA }
     var qaGroupBackgroundCornersForQA: (top: Bool, bottom: Bool) {
