@@ -421,6 +421,10 @@ enum AgentRadialContextMeterState: String, Equatable, CaseIterable {
     case critical
     case unknown
     case stale
+    /// The agent has sent no request yet and no window is known for its model:
+    /// a solid empty track with no reading beside it. Neither a "?" (nothing is
+    /// in doubt) nor a "0" (no count was measured).
+    case empty
 }
 
 struct AgentRadialContextMeterPolicy: Equatable {
@@ -491,6 +495,11 @@ enum AgentRadialContextMeterPresenter {
         // Even an empty request needs a known window to claim a percentage.
         // An unresolved model keeps its dashed unknown ring and prompt count.
         let arithmetic = occupancyArithmetic(snapshot)
+        // An agent that has sent nothing yet. With a known window that is an
+        // honest 0% (the arithmetic below); without one it is the EMPTY ring —
+        // not a "?" (nothing is in doubt) and not a "0" (nothing was measured).
+        let isFreshSession = snapshot.source == AgentContextMeter.freshSessionSource
+            && (snapshot.usedTokens ?? 0) == 0
         // RAW, NOT CAPPED — a deliberate contract (`--ui-geometry-check`:
         // "over-capacity label lost raw arithmetic"). A reading above 100% is
         // how a wrong denominator becomes visible: the 237% that codex's
@@ -516,6 +525,9 @@ enum AgentRadialContextMeterPresenter {
         } else if case .stale = snapshot.freshness {
             state = .stale
             marker = "⏱"
+        } else if isFreshSession, arithmetic == nil {
+            state = .empty
+            marker = nil
         } else if let fraction = arithmetic?.fraction {
             if let critical = policy.validCriticalThreshold, fraction >= critical {
                 state = .critical
@@ -545,6 +557,8 @@ enum AgentRadialContextMeterPresenter {
             visualLabel = approx + countLabel
         } else {
             switch (state, rawPercent) {
+            case (.empty, _):
+                visualLabel = ""
             case (.unknown, _):
                 visualLabel = "unknown"
             case (.stale, let value?):
@@ -567,7 +581,8 @@ enum AgentRadialContextMeterPresenter {
             fraction: renderFraction,
             label: visualLabel,
             accessibilityLabel: accessibilityLabel(state: state, percent: rawPercent, freshness: freshness),
-            detailText: detailText(snapshot, source: source, freshness: freshness, arithmetic: arithmetic, policy: policy),
+            detailText: (isFreshSession ? "No requests yet\n" : "")
+                + detailText(snapshot, source: source, freshness: freshness, arithmetic: arithmetic, policy: policy),
             warningMarker: marker,
             providerThresholdFraction: {
                 guard let threshold = snapshot.automaticCompactionPolicy?.thresholdTokens,
@@ -592,6 +607,7 @@ enum AgentRadialContextMeterPresenter {
         freshness: String
     ) -> String {
         switch (state, percent) {
+        case (.empty, _): return "Context window: no requests yet."
         case (.unknown, _): return "Context window usage unknown. Freshness: \(freshness)."
         case (.stale, let value?): return "Context window usage stale, \(value) percent."
         case (.stale, nil): return "Context window usage stale and unknown."
@@ -683,7 +699,8 @@ enum AgentRadialContextMeterPresenter {
     /// the "8" mid-turn and the run's sum at turn end. Nil for cumulative
     /// accounting, which states no prompt at all.
     private static func promptTokenLabel(_ snapshot: AgentContextWindowSnapshot) -> String? {
-        guard let total = AgentContextMeter.promptTokens(of: snapshot), total >= 0 else { return nil }
+        // Never a zero: "0" beside a ring reads as a measurement of nothing.
+        guard let total = AgentContextMeter.promptTokens(of: snapshot), total > 0 else { return nil }
         if total >= 1_000_000 {
             return String(format: "%.1fM", Double(total) / 1_000_000)
         } else if total >= 1_000 {
@@ -718,6 +735,7 @@ enum AgentRadialContextMeterPresenter {
         case .codexRolloutTokenCount: return "Codex last request usage"
         case .claudeCompactBoundary: return "after compaction"
         case .unknown("compaction"): return "after compaction"
+        case .unknown("fresh-session"): return "no requests yet"
         case .unknown(let raw): return "unknown (\(raw))"
         }
     }

@@ -5492,6 +5492,39 @@ final class AgentSupervisor {
         return contextWindowSnapshots[id] ?? record.lastContextWindow
     }
 
+    /// The reading a tile seeds for an agent that has sent nothing yet, or nil
+    /// once it has. Zero tokens over the model's window when one is known (an
+    /// honest 0%), and over no window otherwise (the empty ring).
+    ///
+    /// A pure READ of the same ladder live telemetry uses, minus its side
+    /// effects: no provider value to remember, no "Context window unknown"
+    /// notice. A fresh tile has not reported anything for either to be about.
+    func freshSessionContextWindow(for id: AgentID) -> AgentContextWindowSnapshot? {
+        guard let record = records[id], record.latestPromptAt == nil, record.latestTurnAt == nil else {
+            return nil
+        }
+        var window: AgentContextWindowResolution?
+        if let harness = record.harness {
+            let model = record.resolvedModelId ?? record.model
+            // No `stated` and no `legacyRemembered`: `resolve` writes nothing.
+            var resolution = contextWindowResolver.resolve(
+                harness: harness, model: model,
+                piStore: harness == .pi ? AgentModelCatalog.shared.contextWindow(for: model, harness: .pi) : nil)
+            if resolution.tokens == nil, let legacy = record.providerContextWindows[model], legacy > 0 {
+                resolution = AgentContextWindowResolution(tokens: legacy, source: .remembered, model: model)
+            }
+            window = resolution
+        }
+        return AgentContextWindowSnapshot(
+            usedTokens: 0,
+            maxTokens: window?.tokens,
+            windowResolutionSource: window?.source,
+            contextModel: window?.model,
+            observedAt: record.createdAt,
+            source: AgentContextMeter.freshSessionSource,
+            freshness: .live)
+    }
+
     /// Provider → shared remembered exact model → bundled → pi-only store → unknown.
     private func contextWindowResolution(for id: AgentID, stated: Int?) -> AgentContextWindowResolution {
         guard var record = records[id], let harness = record.harness else {
@@ -6710,6 +6743,9 @@ final class AgentSupervisor {
     /// de-dupe meant to protect replay silently ate the second `/status` and
     /// left the second `/clear` with no boundary marker at all, while `accept`
     /// still returned `.accepted` and the composer still cleared the draft.
+    /// QA: how many Array-owned notices this agent has been sent this session.
+    func qaArrayOwnedNoticeCount(for id: AgentID) -> Int { arrayOwnedNoticeCounts[id] ?? 0 }
+
     private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
         let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
         arrayOwnedNoticeCounts[id] = ordinal

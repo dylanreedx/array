@@ -432,6 +432,8 @@ enum UIProbeGeometry {
             usedTokens: 64_000, maxTokens: 128_000,
             inputTokens: 600, outputTokens: 90, observedAt: now.addingTimeInterval(-800),
             source: .providerSessionStats, freshness: .stale)
+        let freshUnknown = AgentContextWindowSnapshot(
+            usedTokens: 0, observedAt: now, source: AgentContextMeter.freshSessionSource, freshness: .live)
 
         // THE SHIPPED POLICY. This block used to assert the opposite — that
         // production hard-codes NO thresholds — which is why a 348% reading
@@ -469,6 +471,7 @@ enum UIProbeGeometry {
             (.critical, AgentRadialContextMeterPresenter.present(critical, policy: policy)),
             (.unknown, AgentRadialContextMeterPresenter.present(unknown, policy: policy)),
             (.stale, AgentRadialContextMeterPresenter.present(stale, policy: policy)),
+            (.empty, AgentRadialContextMeterPresenter.present(freshUnknown, policy: policy)),
         ]
         for (state, presentation) in statePresentations {
             try require(presentation.state == state, "compact status context state \(state.rawValue) did not present truthfully")
@@ -476,6 +479,13 @@ enum UIProbeGeometry {
             try require(presentation.detailText.contains("Per-message/cache/cost fields"), "compact status context detail omits usage/cache/cost distinction for \(state.rawValue)")
             try require(presentation.detailText.contains("Freshness"), "compact status context detail omits freshness for \(state.rawValue)")
         }
+        let emptyPresentation = AgentRadialContextMeterPresenter.present(freshUnknown, policy: policy)
+        try require(emptyPresentation.fraction == nil && emptyPresentation.label.isEmpty
+                        && emptyPresentation.warningMarker == nil
+                        && emptyPresentation.detailText.hasPrefix("No requests yet"),
+                    "a fresh session without a window must present an empty ring with no reading and a 'No requests yet' tooltip, got label '\(emptyPresentation.label)' fraction \(String(describing: emptyPresentation.fraction))")
+        try require(Set(statePresentations.map(\.0)) == Set(AgentRadialContextMeterState.allCases),
+                    "the context state sweep must cover every meter state")
         try require(statePresentations.first { $0.0 == .unknown }?.1.fraction == nil,
                     "compact status unknown context fabricated an occupancy fraction")
         try require(!(statePresentations.first { $0.0 == .unknown }?.1.label.contains("0%") ?? true),
@@ -6038,6 +6048,7 @@ enum UIProbeGeometry {
                     throw fail("\(label): live assistant content must retain the transcript-tail Gyro and silent footer")
                 }
                 try checkManagedTileCompactStatusComposition(tile, label: label)
+                try checkFreshAgentContextSeed(label: label)
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
                 // P5.5 defect 6: a pixel gate cannot see this — the collection
                 // view's default background is `windowBackgroundColor`, which only
@@ -6082,6 +6093,84 @@ enum UIProbeGeometry {
                   "agentTile.statusProviderSpacing", "agentTile.providerControls"
               ] else {
             throw fail("managedAgent.v2 placement alternate did not preserve composer → status → deliberate spacing → provider controls")
+        }
+    }
+
+    /// The fresh-agent ring: solid empty track, no arc, no glyph, no reading.
+    private static func requireEmptyContextRing(
+        _ row: AgentCompactStatusRowView, fitsBounds: Bool, label: String
+    ) throws {
+        let digitOrQuestion = row.qaContextText.contains { $0.isNumber || $0 == "?" }
+        guard row.qaContextState == .empty,
+              row.qaContextFraction == nil,
+              row.qaContextLabelHidden,
+              !digitOrQuestion,
+              row.qaContextOverlayMarker == nil,
+              !row.qaContextTrackIsDashed,
+              row.qaContextDetail.hasPrefix("No requests yet"),
+              (row.qaContextMeterFrame?.width ?? 0) >= 18,
+              fitsBounds else {
+            throw fail("\(label) must render the empty ring (solid track, no arc, no marker, hidden label), got state \(row.qaContextState) fraction \(String(describing: row.qaContextFraction)) text '\(row.qaContextText)' hidden \(row.qaContextLabelHidden) marker \(String(describing: row.qaContextOverlayMarker)) dashed \(row.qaContextTrackIsDashed) meter \(String(describing: row.qaContextMeterFrame)) tooltip '\(row.qaContextDetail.prefix(40))'")
+        }
+    }
+
+    /// The fresh-agent ring through the PRODUCTION seed: a real supervisor
+    /// record with no turns, a tile attached to it, and nothing else. The
+    /// assertions above feed the row a hand-built snapshot; this is the path
+    /// every new agent tile actually takes (`seedCompactStatus`).
+    @MainActor
+    private static func checkFreshAgentContextSeed(label: String) throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("ui-geometry-fresh-context-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let piModel = "fixture-pi/known-window"
+        AgentModelCatalog.shared.apply(contextWindows: [piModel: 200_000])
+        defer { AgentModelCatalog.shared.apply(contextWindows: [:]) }
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: root),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        func freshTile(harness: AgentHarness, model: String) -> ManagedAgentTileNSView {
+            let tileID = UUID()
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: root, harness: harness,
+                model: model, thinking: "medium", tileId: tileID)
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: tileID, kind: .managedAgent, title: "fresh-context",
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+            tile.attach(agentID: id, supervisor: supervisor)
+            tile.layoutSubtreeIfNeeded()
+            tile.qaCompactStatusRow.layoutSubtreeIfNeeded()
+            return tile
+        }
+        // (a) No window anywhere for this model.
+        let unknownTile = freshTile(harness: .codex, model: "openai-codex/gpt-fixture-unwindowed")
+        defer { unknownTile.detach() }
+        try requireEmptyContextRing(
+            unknownTile.qaCompactStatusRow, fitsBounds: unknownTile.qaCompactStatusContentFitsBounds,
+            label: "\(label): a fresh agent tile whose model has no known window")
+        guard supervisor.records.values.allSatisfy({ $0.latestPromptAt == nil && $0.latestTurnAt == nil }) else {
+            throw fail("\(label): the fresh seed fixture must stay turn-free")
+        }
+        // (b) Pi's models-store knows the window: an honest 0%.
+        let knownTile = freshTile(harness: .pi, model: piModel)
+        defer { knownTile.detach() }
+        let knownRow = knownTile.qaCompactStatusRow
+        guard knownRow.qaContextState == .known,
+              knownRow.qaContextFraction == 0,
+              knownRow.qaContextText == "0%",
+              !knownRow.qaContextLabelHidden,
+              knownRow.qaContextOverlayMarker == nil,
+              !knownRow.qaContextTrackIsDashed,
+              knownRow.qaContextDetail.contains("0 / 200000 tokens") else {
+            throw fail("\(label): a fresh pi agent whose model window is known must seed 0%, got state \(knownRow.qaContextState) fraction \(String(describing: knownRow.qaContextFraction)) text '\(knownRow.qaContextText)' marker \(String(describing: knownRow.qaContextOverlayMarker))")
+        }
+        // The seed is a READ: no "Context window unknown" notice for (a).
+        guard supervisor.records.keys.allSatisfy({ supervisor.qaArrayOwnedNoticeCount(for: $0) == 0 }) else {
+            throw fail("\(label): seeding a fresh tile must not post a context-window-unknown notice")
         }
     }
 
@@ -6311,26 +6400,24 @@ enum UIProbeGeometry {
             throw fail("\(label): the context ring and its reading must stay visible beside the account pills")
         }
 
-        // An empty prompt count without a model window cannot establish an
-        // occupancy percentage. Keep its count visible with the unknown ring.
+        // An agent that has sent nothing, for a model with no known window: an
+        // empty solid ring and nothing beside it. This block used to assert the
+        // opposite — a dashed "?" ring captioned "0" — which is what every fresh
+        // agent tile showed: a doubt about nothing, and a count nobody measured.
         let emptySession = AgentContextWindowSnapshot(
-            usedTokens: 0, observedAt: now, source: .unknown("fresh-session"), freshness: .live)
+            usedTokens: 0, observedAt: now, source: AgentContextMeter.freshSessionSource, freshness: .live)
         tile.qaApplyCompactStatusFacts(
             .init(session: .init(state: .ready)), location: location,
             contextWindow: emptySession, now: now)
         let emptyRow = tile.qaCompactStatusRow
         emptyRow.layoutSubtreeIfNeeded()
-        guard emptyRow.qaContextState == .unknown,
-              emptyRow.qaContextFraction == nil,
-              emptyRow.qaContextText == "0",
-              tile.qaCompactStatusContentFitsBounds else {
-            throw fail("\(label): zero prompt tokens without a window must remain unknown with count 0, got state \(emptyRow.qaContextState) fraction \(String(describing: emptyRow.qaContextFraction)) text \(emptyRow.qaContextText)")
-        }
+        try requireEmptyContextRing(emptyRow, fitsBounds: tile.qaCompactStatusContentFitsBounds,
+                                    label: "\(label): a fresh session without a window")
 
         // A supplied denominator makes the same zero count authoritative 0%.
         let knownEmptySession = AgentContextWindowSnapshot(
             usedTokens: 0, maxTokens: 128_000, observedAt: now,
-            source: .unknown("known-window"), freshness: .live)
+            source: AgentContextMeter.freshSessionSource, freshness: .live)
         tile.qaApplyCompactStatusFacts(
             .init(session: .init(state: .ready)), location: location,
             contextWindow: knownEmptySession, now: now)
@@ -6339,8 +6426,22 @@ enum UIProbeGeometry {
         guard knownEmptyRow.qaContextState == .known,
               knownEmptyRow.qaContextFraction == 0,
               knownEmptyRow.qaContextText == "0%",
+              !knownEmptyRow.qaContextLabelHidden,
+              knownEmptyRow.qaContextOverlayMarker == nil,
+              !knownEmptyRow.qaContextTrackIsDashed,
               tile.qaCompactStatusContentFitsBounds else {
             throw fail("\(label): zero prompt tokens with a known window must present 0%, got state \(knownEmptyRow.qaContextState) fraction \(String(describing: knownEmptyRow.qaContextFraction)) text \(knownEmptyRow.qaContextText)")
+        }
+        // A MEASURED zero with no window is not a count worth printing either.
+        let measuredZero = AgentContextWindowSnapshot(
+            usedTokens: 0, observedAt: now, source: .providerSessionStats, freshness: .live)
+        tile.qaApplyCompactStatusFacts(
+            .init(session: .init(state: .ready)), location: location,
+            contextWindow: measuredZero, now: now)
+        let measuredZeroRow = tile.qaCompactStatusRow
+        measuredZeroRow.layoutSubtreeIfNeeded()
+        guard measuredZeroRow.qaContextText != "0", measuredZeroRow.qaContextFraction == nil else {
+            throw fail("\(label): a measured zero without a window printed a bare count, text \(measuredZeroRow.qaContextText)")
         }
 
         // A coarse running session (no active turn) stays intentionally

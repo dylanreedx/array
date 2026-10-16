@@ -119,11 +119,12 @@ func runAgentContextMeterChecks(root: URL) async throws {
     let zeroUnknown = AgentRadialContextMeterPresenter.present(AgentContextWindowSnapshot(
         usedTokens: 0, windowResolutionSource: .unknown, contextModel: "fixture/cold-unknown",
         observedAt: Date(), source: .providerSessionStats, freshness: .live))
+    // A measured zero is not a count worth printing: never a bare "0".
     guard zeroUnknown.state == .unknown, zeroUnknown.fraction == nil,
-          zeroUnknown.label == "0",
+          zeroUnknown.label != "0",
           zeroUnknown.detailText.contains("Context window unknown for fixture/cold-unknown"),
           !zeroUnknown.label.contains("%") else {
-        throw Failure(description: "zero prompt tokens with an unknown window must keep the dashed unknown ring, never claim 0%")
+        throw Failure(description: "zero prompt tokens with an unknown window must keep the dashed unknown ring without a zero count, never claim 0% (label '\(zeroUnknown.label)')")
     }
     let overflowPresentation = AgentRadialContextMeterPresenter.present(AgentContextWindowSnapshot(
         usedTokens: 237, maxTokens: 100, observedAt: Date(), source: .providerSessionStats, freshness: .live))
@@ -163,6 +164,70 @@ func runAgentContextMeterChecks(root: URL) async throws {
         let row = tile.qaCompactStatusRow
         return "label '\(row.qaContextText)', fraction \(String(describing: row.qaContextFraction)), state \(row.qaContextState), threshold \(String(describing: row.qaContextThresholdFraction))"
     }
+
+    // FRESH AND FIRST-READING TILES through the real seed and delivery path:
+    // a supervisor record, a tile attached to it, and (for c/d) one provider
+    // snapshot delivered by a runner. Every new agent tile used to show a dashed
+    // "?" ring captioned "0" until its first request reported.
+    let freshPiModel = "fixture-pi/fresh-known-window"
+    let unwindowedModel = "openai-codex/gpt-fixture-unwindowed"
+    AgentModelCatalog.shared.apply(contextWindows: [freshPiModel: 200_000])
+    let firstReading = AgentContextWindowSnapshot(
+        usedTokens: 21_936, observedAt: Date(), source: .providerSessionStats, freshness: .live)
+    let freshSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("meter-fresh")),
+        makeRunner: { _ in
+            MeterReplayRunner(
+                turns: [[.event(.contextWindowUpdated(threadId: "fresh", snapshot: firstReading))]],
+                freshTranslatorPerRun: true, makeTranslate: { _ in { _ in [] } })
+        })
+    func ringFacts(_ tile: ManagedAgentTileNSView) -> String {
+        let row = tile.qaCompactStatusRow
+        return "\(meter(tile)), hidden \(row.qaContextLabelHidden), marker \(String(describing: row.qaContextOverlayMarker)), dashed \(row.qaContextTrackIsDashed)"
+    }
+    // (fresh a) no window for the model: the empty ring, nothing beside it.
+    let (_, freshUnknownTile) = spawnWithTile(freshSupervisor, harness: .codex, model: unwindowedModel)
+    let freshUnknownRow = freshUnknownTile.qaCompactStatusRow
+    guard freshUnknownRow.qaContextState == .empty, freshUnknownRow.qaContextFraction == nil,
+          freshUnknownRow.qaContextLabelHidden,
+          !freshUnknownRow.qaContextText.contains(where: { $0.isNumber || $0 == "?" }),
+          freshUnknownRow.qaContextOverlayMarker == nil, !freshUnknownRow.qaContextTrackIsDashed else {
+        throw Failure(description: "(fresh a) a fresh agent with no known window must seed the empty ring — \(ringFacts(freshUnknownTile))")
+    }
+    // (fresh b) pi's models-store knows the window: an honest 0%.
+    let (_, freshKnownTile) = spawnWithTile(freshSupervisor, harness: .pi, model: freshPiModel)
+    let freshKnownRow = freshKnownTile.qaCompactStatusRow
+    guard freshKnownRow.qaContextState == .known, freshKnownRow.qaContextFraction == 0,
+          freshKnownRow.qaContextText == "0%", !freshKnownRow.qaContextLabelHidden,
+          freshKnownRow.qaContextOverlayMarker == nil else {
+        throw Failure(description: "(fresh b) a fresh pi agent whose window is known must seed 0% — \(ringFacts(freshKnownTile))")
+    }
+    // (fresh c) the first measured request, no window: dashed "?" and the count.
+    let (measuredUnknownID, measuredUnknownTile) = spawnWithTile(
+        freshSupervisor, harness: .codex, model: unwindowedModel)
+    guard freshSupervisor.send("first", to: measuredUnknownID) else {
+        throw Failure(description: "(fresh c) send refused")
+    }
+    try await expectEventually("(fresh c) a measured request without a window must show its count on the dashed unknown ring — \(ringFacts(measuredUnknownTile))") {
+        let row = measuredUnknownTile.qaCompactStatusRow
+        return row.qaContextState == .unknown && row.qaContextText == "21.9k" && !row.qaContextLabelHidden
+            && row.qaContextOverlayMarker == "?" && row.qaContextTrackIsDashed
+    }
+    // (fresh d) the same request over a known (bundled) window: a percentage.
+    let (measuredKnownID, measuredKnownTile) = spawnWithTile(
+        freshSupervisor, harness: .codex, model: "openai-codex/gpt-5.5")
+    guard freshSupervisor.send("first", to: measuredKnownID) else {
+        throw Failure(description: "(fresh d) send refused")
+    }
+    try await expectEventually("(fresh d) a measured request over a known window must read 21936/272000 = 8% — \(ringFacts(measuredKnownTile))") {
+        let row = measuredKnownTile.qaCompactStatusRow
+        return row.qaContextState == .known && row.qaContextText == "8%"
+            && near(row.qaContextFraction, 21_936.0 / 272_000)
+    }
+    try await expectEventually("(fresh) runners did not settle") {
+        !freshSupervisor.isRunning(measuredUnknownID) && !freshSupervisor.isRunning(measuredKnownID)
+    }
+    AgentModelCatalog.shared.apply(contextWindows: [:])
 
     let claudeTranslate: (@escaping @Sendable (AgentRuntimeObservation) -> Void) -> MeterReplayRunner.Translate = { observe in
         var translator = ClaudeEventTranslator()

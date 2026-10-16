@@ -370,6 +370,15 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         }
         thinkingSlot.isHidden = !next.activity.showsThinkingIndicator || thinkingIndicator == nil
         contextMeter.apply(next.context)
+        // The empty ring stands alone: hidden, not an empty string holding a
+        // slot and its spacing in the stack.
+        let hidesContextLabel = next.context.state == .empty
+        if contextLabel.isHidden != hidesContextLabel {
+            contextLabel.isHidden = hidesContextLabel
+            invalidateIntrinsicContentSize()
+            rootStack.needsLayout = true
+            needsLayout = true
+        }
         contextLabel.stringValue = next.context.label
         contextLabel.toolTip = next.context.detailText
         contextLabel.setAccessibilityLabel(next.context.accessibilityLabel)
@@ -777,7 +786,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
             return AccentToken.accentApproval.color.nsColor(for: theme)
         case .critical:
             return AccentToken.accentFailed.color.nsColor(for: theme)
-        case .unknown, .stale:
+        case .unknown, .stale, .empty:
             return TextToken.textSecondary.color.nsColor(for: theme)
         }
     }
@@ -793,6 +802,9 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     var qaActivitySymbolName: String { presentation?.activity.symbolName ?? "" }
     var qaElapsedText: String? { elapsedLabel.isHidden ? nil : elapsedLabel.stringValue }
     var qaContextText: String { contextLabel.stringValue }
+    var qaContextLabelHidden: Bool { contextLabel.isHidden }
+    var qaContextOverlayMarker: String? { contextMeter.qaOverlayMarker }
+    var qaContextTrackIsDashed: Bool { contextMeter.qaTrackIsDashed }
     /// ST-01 QA surface: what each account/cost chip is currently drawing, the
     /// elements the width pass dropped, and which elements are enabled at all.
     func qaQuotaText(_ element: AgentStatusElement) -> String {
@@ -867,7 +879,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// is ambient and stays put.
     var qaContextVisibleWhileActivitySilent: Bool {
         guard let context = qaContextFrame else { return false }
-        return context.width > 0 && bounds.contains(context) && !contextLabel.stringValue.isEmpty
+        return context.width > 0 && bounds.contains(context)
+            && (contextLabel.isHidden || !contextLabel.stringValue.isEmpty)
     }
     var qaActivityAndContextVisible: Bool {
         guard let activity = qaActivityFrame, let context = qaContextFrame else { return false }
@@ -878,11 +891,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         let minimumTextWidth: CGFloat = 6
         let minimumIconWidth: CGFloat = 8
         guard let locationIcon = qaLocationIconFrame,
-              let contextMeter = qaContextMeterFrame,
-              let contextLabel = qaContextLabelFrame else { return false }
+              let contextMeter = qaContextMeterFrame else { return false }
+        // A deliberately hidden reading (the empty ring) has no glyphs to protect.
+        let contextLabelProtected = contextLabel.isHidden
+            || (qaContextLabelFrame?.width ?? 0) >= minimumTextWidth
         let locationAndContext = locationIcon.width >= minimumIconWidth
             && contextMeter.width >= 18
-            && contextLabel.width >= minimumTextWidth
+            && contextLabelProtected
         // A silent row has no activity glyph or label to protect; the rule holds
         // for everything it is still drawing.
         if qaActivityIsSilent { return locationAndContext }
