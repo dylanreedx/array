@@ -210,8 +210,7 @@ final class ToolCallView: NSView {
         )
         shell = payload.presentedShell
         titleLabel.stringValue = Self.safeSingleLine(payload.name, fallback: "Tool")
-        titleLabel.font = shellRow == nil || shellRow?.description != nil
-            ? NSFont.token(.label, zoom: zoom) : NSFont.token(.bodyMono, zoom: zoom)
+        titleLabel.font = shellRow == nil ? NSFont.token(.label, zoom: zoom) : Self.commandFont(zoom: zoom)
         // `.plans/45` S4 — the title is the action sentence; the tool NAME
         // lives in the icon, the tooltip and the AX label.
         let toolName = payload.presentedToolNameText ?? payload.name
@@ -286,6 +285,16 @@ final class ToolCallView: NSView {
     /// never crossed keeps the ordinary row, and still gets its exit badge.
     private var shellRow: AgentShellInvocation? { shell.flatMap { $0.command.isEmpty ? nil : $0 } }
 
+    /// The command on a shell row's headline: mono at the row-title size, so
+    /// a command reads at the same size whether or not a description sits
+    /// before it, and at the size of every other tool row's title. It used to
+    /// be `.bodyMono`, a size up from the 11pt description beside it, which
+    /// read as "larger" on every row that had no description — every codex
+    /// and pi command (launch polish, item M).
+    static func commandFont(zoom: AgentPageZoom) -> NSFont {
+        .monospacedSystemFont(ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .regular)
+    }
+
     /// The headline of a shell row: the command in mono, or — when claude
     /// described it — the description first and the command after it in
     /// secondary mono, on the one line every other row uses.
@@ -293,7 +302,7 @@ final class ToolCallView: NSView {
         guard let shellRow else { return }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
-        let mono = NSFont.token(.bodyMono, zoom: zoom)
+        let mono = Self.commandFont(zoom: zoom)
         let primary = context.tokens.primaryText.color.nsColor(for: theme)
         guard let description = shellRow.description else {
             titleLabel.attributedStringValue = NSAttributedString(string: shellRow.headline, attributes: [
