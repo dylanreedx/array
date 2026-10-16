@@ -963,6 +963,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-agent-harness-check") {
+            do {
+                _ = NSApplication.shared
+                try LaunchProfilePalette.runAgentHarnessSelfCheck()
+                print("ContinuumRevivedPaletteAgentHarnessChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-duplicate-root-check") {
             do {
                 _ = NSApplication.shared
@@ -9647,8 +9659,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         palette.onSelectProfile = { [weak self] profileId in
             self?.spawnTerminalFromProfile(profileId, trigger: "palette:\(profileId)") ?? false
         }
-        palette.onSelectAgentModel = { [weak self] modelID in
-            self?.spawnManagedAgentFromPalette(model: modelID) ?? false
+        palette.onSelectAgentModel = { [weak self] harness, modelID in
+            self?.spawnManagedAgentFromPalette(harness: harness, model: modelID) ?? false
         }
         palette.onSelectAction = { [weak self] action in
             self?.performPaletteAction(action) ?? false
@@ -14540,9 +14552,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
+    private func spawnManagedAgentFromPalette(harness: AgentHarness? = nil, model: String? = nil) -> Bool {
         guard resolvedCreationScope() != nil else {
-            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentFromPalette(model: model) }
+            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentFromPalette(harness: harness, model: model) }
             return false
         }
         guard let spawner = spawnerForFilesystemCreation() else { return false }
@@ -14555,7 +14567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The refusal is SHOWN, in the workspace notification: File > New > Agent and
         // ⌘K both close on dispatch, and a beep plus a stderr line is invisible in a
         // GUI app — the person heard a beep and saw nothing happen.
-        switch spawner.spawnManagedAgentForSelectedModel(model, announceRefusal: { [weak self] message in
+        switch spawner.spawnManagedAgentForSelectedModel(model, harness: harness, announceRefusal: { [weak self] message in
             self?.presentSpawnRefusal(message)
         }, wire: { tileId, providerSettings in
             wireManagedAgentTile(tileId, initialLaunchSelection: providerSettings)

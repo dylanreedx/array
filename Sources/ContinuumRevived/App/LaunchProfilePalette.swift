@@ -8,7 +8,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     /// Returns true only when the app accepted/completed the selection far
     /// enough for it to be a truthful recent destination.
     var onSelectProfile: ((String) -> Bool)?
-    var onSelectAgentModel: ((String) -> Bool)?
+    /// The harness travels with the model: ids collide across CLIs.
+    var onSelectAgentModel: ((AgentHarness, String) -> Bool)?
     var onSelectAction: ((LaunchPaletteAction) -> Bool)?
     /// Bring a closed agent back. Separate from `onSelectAction` because the row
     /// already carries the dispatch identity and the agent id is not a tile id —
@@ -26,6 +27,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var rootRows: [LaunchPaletteRow] = []
     private var rootQuery = ""
     private var agentModelRows: [LaunchPaletteRow] = []
+    /// The rows a check passed in place of the live catalogue (default harness).
+    private var agentModelOverride: [AgentModelPaletteRow]?
+    /// The root row that opened the model step: recorded as the recent.
+    private var agentModelParent: LaunchPaletteRow = .action(.newManagedAgent)
     private var filtered: [LaunchPaletteRow] = []
     private var displayEntries: [CommandCenterDisplayEntry] = []
     private var filesystemCreationPreview: String?
@@ -57,14 +62,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], initialQuery: String = "", agentModels: [AgentModelPaletteRow]? = nil, filesystemCreationPreview: String? = nil) {
-        rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents)
+        rootRows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, contextualActions: contextualActions, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones, tilelessAgents: tilelessAgents, agentHarnesses: Self.agentHarnessRows(defaults: defaults))
         rows = rootRows
         rootQuery = initialQuery
         navigationLevel = .root
         self.filesystemCreationPreview = filesystemCreationPreview
-        let catalogModels = agentModels ?? Self.availableAgentModels()
-        agentModelRows = Self.agentModelChoices(catalogModels, defaults: defaults)
-            .map(LaunchPaletteRow.agentModel)
+        agentModelOverride = agentModels
+        agentModelRows = []
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
         let paletteView = ensurePaletteView()
@@ -163,6 +167,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         rows.removeAll()
         rootRows.removeAll()
         agentModelRows.removeAll()
+        agentModelOverride = nil
+        agentModelParent = .action(.newManagedAgent)
         rootQuery = ""
         navigationLevel = .root
         filtered.removeAll()
@@ -183,6 +189,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .action(action): return action.displayName
         case let .profile(profile): return profile.displayName
         case let .agentModel(model): return model.displayName
+        case let .agentHarness(row): return LaunchPaletteRow.agentHarness(row).displayName
         case let .project(project): return "Switch to \(project.name)"
         case let .workspace(workspace): return "Switch to \(workspace.name) Workspace"
         case let .workspaceAction(action, workspace):
@@ -410,7 +417,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         // `AgentModelConfig.resolved(selection:)`: a row that left the live catalogue
         // while the palette was open spawns nothing, and ⌘K must not then offer it
         // back as "Recently Used".
-        palette.onSelectAgentModel = { _ in false }
+        palette.onSelectAgentModel = { _, _ in false }
         palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
         palette.commitSelection()
         guard let refusedSearch = palette.searchField else { throw PaletteSelfCheckError.missingSearchField }
@@ -422,7 +429,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
 
         var selectedModelID: String?
-        palette.onSelectAgentModel = { modelID in
+        palette.onSelectAgentModel = { _, modelID in
             selectedModelID = modelID
             return true
         }
@@ -464,7 +471,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard !palette.isVisible,
               selectedModelID == "openai-codex/gpt-5.6-luna",
               defaults.stringArray(forKey: recentDefaultsKey)?.first == "action:new-agent",
-              defaults.string(forKey: recentAgentModelDefaultsKey) == "openai-codex/gpt-5.6-luna" else {
+              defaults.string(forKey: recentAgentModelDefaultsKey)
+                == recentAgentModelMemo(harness: AgentHarnessConfig.resolved(defaults: defaults), model: "openai-codex/gpt-5.6-luna") else {
             throw PaletteSelfCheckError.failed("model selection did not dispatch the exact id and record the completed parent action/model")
         }
         palette.show(near: host, profiles: [], initialQuery: "Agent", agentModels: agentModels)
@@ -493,6 +501,188 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard touched.isEmpty else {
             throw PaletteSelfCheckError.failed("this check wrote the owner's standard defaults domain, if only for a moment: \(touched)")
         }
+    }
+
+    /// `--palette-agent-harness-check`: ⌘K offers a New <Harness> Agent row for
+    /// Claude Code, Codex and Pi whatever Settings seeds, the default first; each
+    /// row's model step lists only that CLI's ids and dispatches the PAIR, so an id
+    /// two CLIs share (`openai-codex/gpt-5.6-luna`, Codex's and Pi's) runs on the
+    /// CLI the person picked; a harness that cannot run is listed, unselectable,
+    /// in the composer's own words.
+    ///
+    /// Drives the real palette — no `agentModels` override, the catalogue served
+    /// from `AgentCatalogQAFixture` — with every default written to a private
+    /// suite and the user's domain watched throughout.
+    static func runAgentHarnessSelfCheck() throws {
+        func fail(_ message: String) -> PaletteSelfCheckError { .failed("agent harness rows: " + message) }
+        let standardGuard = QAStandardDefaultsGuard(keys: QAStandardDefaultsGuard.agentSelectionKeys
+            .union([recentDefaultsKey, recentAgentModelDefaultsKey]))
+        let suiteName = "continuum.qa.palette-agent-harness.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else { throw fail("could not open a private suite") }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        func serveFixtureCatalogues(piReadiness: HarnessReadiness = .ready) {
+            AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+            AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+            AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+                harness: .pi, readiness: piReadiness, models: AgentCatalogQAFixture.pi))
+        }
+        serveFixtureCatalogues()
+        defer { serveFixtureCatalogues() }
+        let shared = "openai-codex/gpt-5.6-luna"
+        guard AgentModelConfig.modelOptions(for: .codex).contains(shared),
+              AgentModelConfig.modelOptions(for: .pi).contains(shared) else {
+            throw fail("the fixture no longer has an id both Codex and Pi offer; the collision arm tests nothing")
+        }
+
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView = NSView(frame: host.contentRect(forFrameRect: host.frame))
+        let names: [AgentHarness: String] = [
+            .claudeCode: "New Claude Code Agent…", .codex: "New Codex Agent…", .pi: "New Pi Agent…",
+        ]
+        func harnessRows(_ palette: LaunchProfilePalette) -> [AgentHarnessPaletteRow] {
+            palette.rootRows.compactMap { if case let .agentHarness(row) = $0 { return row }; return nil }
+        }
+        func homeIDs(_ palette: LaunchProfilePalette) -> [String] {
+            palette.displayEntries.compactMap { if case let .item(item) = $0 { return item.stableID }; return nil }
+        }
+        func select(_ palette: LaunchProfilePalette, query: String, displayName: String) throws {
+            guard let search = palette.searchField else { throw PaletteSelfCheckError.missingSearchField }
+            search.stringValue = query
+            palette.applyFilter(query: query)
+            if palette.selectedDisplayNameForQA != displayName,
+               let index = palette.displayEntries.firstIndex(where: { entry in
+                   if case let .item(item) = entry { return item.row.displayName == displayName }
+                   return false
+               }) {
+                palette.tableView?.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            }
+            guard palette.selectedDisplayNameForQA == displayName else {
+                throw fail("could not select '\(displayName)' for query '\(query)'; selected \(palette.selectedDisplayNameForQA ?? "nil")")
+            }
+        }
+        func stepModels(_ palette: LaunchProfilePalette) -> [AgentModelPaletteRow] {
+            palette.agentModelRows.compactMap { if case let .agentModel(model) = $0 { return model }; return nil }
+        }
+
+        // 1. Every default: all three rows, the default first.
+        for defaultHarness in AgentHarness.allCases {
+            defaults.set(defaultHarness.rawValue, forKey: AgentHarnessConfig.key)
+            let palette = LaunchProfilePalette(defaults: defaults)
+            palette.show(near: host, profiles: [])
+            let rows = harnessRows(palette)
+            let expected = [defaultHarness] + AgentHarness.allCases.filter { $0 != defaultHarness }
+            guard rows.map(\.harness) == expected else {
+                throw fail("with \(defaultHarness.rawValue) as the default, the rows are \(rows.map(\.harness.rawValue)), want \(expected.map(\.rawValue))")
+            }
+            guard rows.first?.isDefault == true, rows.dropFirst().allSatisfy({ !$0.isDefault }), rows.allSatisfy(\.isSelectable) else {
+                throw fail("only the first row may be the default and every ready harness must be selectable: \(rows)")
+            }
+            let rowNames = palette.rootRows.map(\.displayName)
+            guard expected.allSatisfy({ rowNames.contains(names[$0]!) }), rowNames.contains("New Agent…") else {
+                throw fail("the root rows lack a harness row or plain New Agent…: \(rowNames)")
+            }
+            let defaultItem = LaunchPaletteModel.presentation(for: .agentHarness(rows[0]))
+            guard defaultItem.subtitle?.hasPrefix("Default · ") == true, defaultItem.stableID == "action:new-agent:\(AgentHarnessPaletteRow.slug(defaultHarness))" else {
+                throw fail("the default row must say so and keep its stable id: \(defaultItem.subtitle ?? "nil"), \(defaultItem.stableID)")
+            }
+            // Typing "agent" (or "new agent") lists New Agent… and then every
+            // harness, the default first.
+            let order = ["action:new-agent"] + expected.map { "action:new-agent:\(AgentHarnessPaletteRow.slug($0))" }
+            for query in ["agent", "new agent"] {
+                if let search = palette.searchField { search.stringValue = query }
+                palette.applyFilter(query: query)
+                let listed = homeIDs(palette)
+                let positions = order.compactMap { listed.firstIndex(of: $0) }
+                guard positions.count == order.count, positions == positions.sorted() else {
+                    throw fail("'\(query)' must list New Agent… then each harness, \(defaultHarness.rawValue) first; listed \(listed)")
+                }
+            }
+            palette.close()
+        }
+
+        // 2. Claude Code default, choose Codex: only Codex's ids, and the pair
+        //    reaches the handler — the shared id goes to Codex, not the default.
+        defaults.set(AgentHarness.claudeCode.rawValue, forKey: AgentHarnessConfig.key)
+        let palette = LaunchProfilePalette(defaults: defaults)
+        var dispatched: [(AgentHarness, String)] = []
+        palette.onSelectAgentModel = { harness, model in dispatched.append((harness, model)); return true }
+        palette.show(near: host, profiles: [])
+        try select(palette, query: "codex agent", displayName: names[.codex]!)
+        palette.commitSelection()
+        guard palette.isChoosingAgentModelForQA else { throw fail("New Codex Agent… did not open its model step") }
+        let codexStep = stepModels(palette)
+        guard !codexStep.isEmpty, codexStep.allSatisfy({ $0.harness == .codex }),
+              Set(codexStep.map(\.id)) == Set(AgentModelConfig.modelOptions(for: .codex)) else {
+            throw fail("the Codex step must list exactly Codex's ids, each as Codex: \(codexStep.map { "\($0.harness?.rawValue ?? "nil")|\($0.id)" })")
+        }
+        try select(palette, query: "luna", displayName: "GPT-5.6 Luna")
+        palette.commitSelection()
+        guard dispatched.count == 1, dispatched[0].0 == .codex, dispatched[0].1 == shared else {
+            throw fail("choosing Luna under Codex must dispatch (Codex, \(shared)); got \(dispatched.map { "\($0.0.rawValue)|\($0.1)" })")
+        }
+        guard defaults.string(forKey: recentAgentModelDefaultsKey) == recentAgentModelMemo(harness: .codex, model: shared),
+              defaults.stringArray(forKey: recentDefaultsKey)?.first == "action:new-agent:codex" else {
+            throw fail("the recent model must be remembered as Codex|\(shared) and the recent row as the Codex row: \(defaults.string(forKey: recentAgentModelDefaultsKey) ?? "nil"), \(defaults.stringArray(forKey: recentDefaultsKey) ?? [])")
+        }
+
+        // 3. The same id under Pi goes to Pi, and Codex's recent is not Pi's.
+        palette.show(near: host, profiles: [])
+        try select(palette, query: "pi agent", displayName: names[.pi]!)
+        palette.commitSelection()
+        let piStep = stepModels(palette)
+        guard piStep.allSatisfy({ $0.harness == .pi }), !piStep.contains(where: { $0.kind == .recentlyUsed }) else {
+            throw fail("the Pi step must be Pi's alone, with no Recently Used carried over from Codex: \(piStep.map { "\($0.kind)|\($0.harness?.rawValue ?? "nil")|\($0.id)" })")
+        }
+        try select(palette, query: "luna", displayName: "GPT-5.6 Luna")
+        palette.commitSelection()
+        guard dispatched.count == 2, dispatched[1].0 == .pi, dispatched[1].1 == shared else {
+            throw fail("choosing Luna under Pi must dispatch (Pi, \(shared)); got \(dispatched.map { "\($0.0.rawValue)|\($0.1)" })")
+        }
+
+        // 4. Plain New Agent… keeps the Settings harness: Codex default → Codex.
+        defaults.set(AgentHarness.codex.rawValue, forKey: AgentHarnessConfig.key)
+        palette.show(near: host, profiles: [], initialQuery: "Agent")
+        guard palette.selectedDisplayNameForQA == "New Agent…" else {
+            throw fail("the plain New Agent… row must still lead 'Agent'; selected \(palette.selectedDisplayNameForQA ?? "nil")")
+        }
+        palette.commitSelection()
+        guard stepModels(palette).allSatisfy({ $0.harness == .codex }) else {
+            throw fail("plain New Agent… under a Codex default must offer Codex's models only")
+        }
+        palette.commitSelection()
+        guard dispatched.count == 3, dispatched[2].0 == .codex else {
+            throw fail("plain New Agent… under a Codex default must dispatch to Codex; got \(dispatched.map { "\($0.0.rawValue)|\($0.1)" })")
+        }
+
+        // 5. A harness that cannot run: listed, unselectable, in the composer's words.
+        serveFixtureCatalogues(piReadiness: .loggedOut)
+        palette.show(near: host, profiles: [])
+        guard let piRow = harnessRows(palette).first(where: { $0.harness == .pi }) else {
+            throw fail("a signed-out Pi must still be listed")
+        }
+        let reason = AgentSupervisor.readinessRefusal(for: .pi, retry: "try again")
+        guard !piRow.isSelectable, let reason, piRow.unavailableReason == reason,
+              LaunchPaletteModel.presentation(for: .agentHarness(piRow)).subtitle == reason,
+              reason.contains("signed out"), !reason.lowercased().contains("api key") else {
+            throw fail("a signed-out Pi must be unselectable and say why in the CLI-login words: \(piRow), reason \(reason ?? "nil")")
+        }
+        if let search = palette.searchField { search.stringValue = "pi agent" }
+        palette.applyFilter(query: "pi agent")
+        guard let piIndex = palette.displayEntries.firstIndex(where: { entry in
+            if case let .item(item) = entry { return item.row.displayName == names[.pi]! }
+            return false
+        }) else { throw fail("a signed-out Pi must stay findable by search") }
+        palette.tableView?.selectRowIndexes(IndexSet(integer: piIndex), byExtendingSelection: false)
+        palette.commitSelection()
+        guard palette.isVisible, !palette.isChoosingAgentModelForQA, dispatched.count == 3 else {
+            throw fail("selecting a signed-out harness must do nothing — no model step, no dispatch, no other CLI")
+        }
+        palette.close()
+        palette.onSelectAgentModel = nil
+
+        let touched = standardGuard.finish()
+        guard touched.isEmpty else { throw fail("this check wrote the owner's standard defaults: \(touched)") }
     }
 
     static func runFirstResponderRestoreSelfCheck() throws {
@@ -856,8 +1046,24 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         )
     }
 
-    private static func availableAgentModels() -> [AgentModelPaletteRow] {
-        AgentModelConfig.modelOptions.map { id in
+    /// One New <Harness> Agent row per CLI, the Settings default first. A
+    /// harness that cannot start an agent is listed with the composer's own
+    /// refusal wording, never hidden and never swapped for another CLI.
+    static func agentHarnessRows(defaults: UserDefaults) -> [AgentHarnessPaletteRow] {
+        let defaultHarness = AgentHarnessConfig.resolved(defaults: defaults)
+        let ordered = [defaultHarness] + AgentHarness.allCases.filter { $0 != defaultHarness }
+        return ordered.map { harness in
+            var reason = AgentSupervisor.readinessRefusal(for: harness, retry: "try again")
+            if reason == nil, AgentModelConfig.modelOptions(for: harness).isEmpty {
+                reason = "\(harness.rawValue) has not offered any model yet."
+            }
+            return AgentHarnessPaletteRow(harness: harness, isDefault: harness == defaultHarness, unavailableReason: reason)
+        }
+    }
+
+    /// The model ids `harness` offers, verbatim from that CLI's catalogue.
+    private static func availableAgentModels(for harness: AgentHarness) -> [AgentModelPaletteRow] {
+        AgentModelConfig.modelOptions(for: harness).map { id in
             let provider = id.split(separator: "/", maxSplits: 1).first.map(String.init) ?? "Provider"
             let providerName: String
             switch provider {
@@ -868,37 +1074,52 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             let fallbackName = fallbackAgentModelName(for: id)
             return AgentModelPaletteRow(
                 id: id,
-                displayName: AgentModelCatalog.shared.displayName(for: id) ?? fallbackName,
-                providerName: "\(providerName) · \(id)"
+                displayName: AgentModelCatalog.shared.displayName(for: id, harness: harness)
+                    ?? AgentModelCatalog.shared.displayName(for: id) ?? fallbackName,
+                providerName: "\(providerName) · \(id)",
+                harness: harness
             )
         }
     }
 
+    /// The remembered model is stored as `<harness>|<model>`: an id alone cannot
+    /// say which CLI it was chosen under.
+    static func recentAgentModelMemo(harness: AgentHarness, model: String) -> String {
+        "\(harness.rawValue)|\(model)"
+    }
+
     private static func agentModelChoices(
         _ catalog: [AgentModelPaletteRow],
+        harness: AgentHarness,
         defaults: UserDefaults
     ) -> [AgentModelPaletteRow] {
         guard !catalog.isEmpty else { return [] }
         // Keyed, not `uniqueKeysWithValues`: the catalogue is a live parse of another
         // process's output, and a repeated id there must not trap the app on ⌘K.
         let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let resolvedDefaultID = AgentModelConfig.resolvedFromDefaults(defaults: defaults).model
+        let resolvedDefaultID = AgentModelConfig.resolvedFromDefaults(harness: harness, defaults: defaults).model
         let defaultModel = byID[resolvedDefaultID] ?? catalog[0]
+        let isSettingsHarness = harness == AgentHarnessConfig.resolved(defaults: defaults)
         var choices = [AgentModelPaletteRow(
             id: defaultModel.id,
             displayName: "Default — \(defaultModel.displayName)",
-            providerName: "Configured in Settings · \(defaultModel.id)",
-            kind: .configuredDefault
+            providerName: (isSettingsHarness ? "Configured in Settings" : "\(harness.rawValue)'s default") + " · \(defaultModel.id)",
+            kind: .configuredDefault,
+            harness: harness
         )]
-        if let recentID = defaults.string(forKey: recentAgentModelDefaultsKey),
-           recentID != defaultModel.id,
-           let recentModel = byID[recentID] {
-            choices.append(AgentModelPaletteRow(
-                id: recentModel.id,
-                displayName: "Recently Used — \(recentModel.displayName)",
-                providerName: "Last successful Cmd+K agent · \(recentModel.id)",
-                kind: .recentlyUsed
-            ))
+        let memo = defaults.string(forKey: recentAgentModelDefaultsKey)
+        let prefix = recentAgentModelMemo(harness: harness, model: "")
+        if let memo, memo.hasPrefix(prefix) {
+            let recentID = String(memo.dropFirst(prefix.count))
+            if recentID != defaultModel.id, let recentModel = byID[recentID] {
+                choices.append(AgentModelPaletteRow(
+                    id: recentModel.id,
+                    displayName: "Recently Used — \(recentModel.displayName)",
+                    providerName: "Last successful Cmd+K agent · \(recentModel.id)",
+                    kind: .recentlyUsed,
+                    harness: harness
+                ))
+            }
         }
         choices.append(contentsOf: catalog)
         return choices
@@ -937,7 +1158,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private func rowUsesFilesystemScope(_ row: LaunchPaletteRow) -> Bool {
         switch row {
         case let .profile(profile): return profile.displayName.lowercased() == "shell"
-        case .action(.newManagedAgent), .action(.openFileTree): return true
+        case .action(.newManagedAgent), .action(.openFileTree), .agentHarness: return true
         default: return false
         }
     }
@@ -1062,7 +1283,15 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard case let .item(presented) = entry(at: row) else { return }
         let selected = presented.row
         if navigationLevel == .root, selected == .action(.newManagedAgent) {
-            enterAgentModelStep()
+            enterAgentModelStep(harness: AgentHarnessConfig.resolved(defaults: defaults), parent: selected)
+            return
+        }
+        if navigationLevel == .root, case let .agentHarness(harnessRow) = selected {
+            guard harnessRow.isSelectable else {
+                NSSound.beep()
+                return
+            }
+            enterAgentModelStep(harness: harnessRow.harness, parent: selected)
             return
         }
         switch selected {
@@ -1075,10 +1304,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             recordRecent(selected, succeeded: succeeded)
             close(restoreFocus: true)
         case let .agentModel(model):
-            let succeeded = onSelectAgentModel?(model.id) ?? false
-            if succeeded { defaults.set(model.id, forKey: Self.recentAgentModelDefaultsKey) }
-            recordRecent(.action(.newManagedAgent), succeeded: succeeded)
+            let harness = model.harness ?? AgentHarnessConfig.resolved(defaults: defaults)
+            let succeeded = onSelectAgentModel?(harness, model.id) ?? false
+            if succeeded {
+                defaults.set(Self.recentAgentModelMemo(harness: harness, model: model.id), forKey: Self.recentAgentModelDefaultsKey)
+            }
+            recordRecent(agentModelParent, succeeded: succeeded)
             close(restoreFocus: true)
+        case .agentHarness:
+            // Only reachable from the model step's root, handled above.
+            NSSound.beep()
         case let .action(action):
             let succeeded = onSelectAction?(action) ?? false
             recordRecent(selected, succeeded: succeeded)
@@ -1121,7 +1356,15 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    private func enterAgentModelStep() {
+    /// The model step for ONE harness: only that CLI's ids, each row carrying
+    /// the harness so the dispatch can never land on another CLI.
+    private func enterAgentModelStep(harness: AgentHarness, parent: LaunchPaletteRow) {
+        let catalog = agentModelOverride.map { rows in
+            rows.map { AgentModelPaletteRow(id: $0.id, displayName: $0.displayName, providerName: $0.providerName, kind: $0.kind, harness: harness) }
+        } ?? Self.availableAgentModels(for: harness)
+        agentModelRows = Self.agentModelChoices(catalog, harness: harness, defaults: defaults)
+            .map(LaunchPaletteRow.agentModel)
+        agentModelParent = parent
         guard !agentModelRows.isEmpty, let searchField else {
             NSSound.beep()
             return

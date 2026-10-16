@@ -274,12 +274,56 @@ public struct AgentModelPaletteRow: Equatable, Sendable {
     public let displayName: String
     public let providerName: String
     public let kind: Kind
+    /// The CLI that offered this id and will run it. Ids collide across
+    /// harnesses (`openai-codex/gpt-5.6-luna` is Codex's and Pi's), so the
+    /// choice is the PAIR; nil only for rows a check built without one.
+    public let harness: AgentHarness?
 
-    public init(id: String, displayName: String, providerName: String, kind: Kind = .catalog) {
+    public init(id: String, displayName: String, providerName: String, kind: Kind = .catalog, harness: AgentHarness? = nil) {
         self.id = id
         self.displayName = displayName
         self.providerName = providerName
         self.kind = kind
+        self.harness = harness
+    }
+}
+
+/// One "New <Harness> Agent…" row: a tile-bound agent on a NAMED CLI. Offered
+/// for every harness, whatever Settings seeds; a harness that is not ready is
+/// still listed, unselectable, saying why (CLAUDE.md #3: the CLI's own login,
+/// never a key). Selecting one never falls back to another CLI.
+public struct AgentHarnessPaletteRow: Equatable, Sendable {
+    public let harness: AgentHarness
+    /// The harness Settings seeds new agents with.
+    public let isDefault: Bool
+    /// Why this harness cannot start an agent now; nil when it can.
+    public let unavailableReason: String?
+
+    public init(harness: AgentHarness, isDefault: Bool, unavailableReason: String? = nil) {
+        self.harness = harness
+        self.isDefault = isDefault
+        self.unavailableReason = unavailableReason
+    }
+
+    public var isSelectable: Bool { unavailableReason == nil }
+
+    /// Stable dispatch/recents identity: `action:new-agent:claude-code` etc.
+    public var stableID: String { "action:new-agent:\(Self.slug(harness))" }
+
+    public static func slug(_ harness: AgentHarness) -> String {
+        switch harness {
+        case .claudeCode: return "claude-code"
+        case .codex: return "codex"
+        case .pi: return "pi"
+        }
+    }
+
+    public var keywords: [String] {
+        switch harness {
+        case .claudeCode: return ["claude", "code", "anthropic"]
+        case .codex: return ["codex", "openai", "gpt"]
+        case .pi: return ["pi"]
+        }
     }
 }
 
@@ -331,6 +375,7 @@ public struct TilelessAgentPaletteRow: Equatable, Sendable {
 public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
     case agentModel(AgentModelPaletteRow)
+    case agentHarness(AgentHarnessPaletteRow)
     case tilelessAgent(TilelessAgentPaletteRow)
     case action(LaunchPaletteAction)
     case project(ProjectPickerRow)
@@ -343,6 +388,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.displayName
         case let .agentModel(model): return model.displayName
+        case let .agentHarness(row): return "New \(row.harness.rawValue) Agent…"
         case let .action(action): return action.displayName
         case let .project(project):
             if project.worktreeOf != nil {
@@ -375,6 +421,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.isSelectable
         case .agentModel: return true
+        case let .agentHarness(row): return row.isSelectable
         case .tilelessAgent: return true
         case .action: return true
         case let .project(project): return project.isSelectable
@@ -393,6 +440,10 @@ public enum LaunchPaletteRow: Equatable, Sendable {
                 || profile.id.lowercased().contains(query)
         case let .agentModel(model):
             let haystacks = [model.displayName, model.id, model.providerName, "agent model provider"].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .agentHarness(row):
+            let haystacks = (["new agent managed", row.harness.rawValue] + row.keywords).map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         case let .tilelessAgent(agent):
@@ -514,9 +565,16 @@ public enum LaunchPaletteModel {
     public static let defaultItemLimit = 12
     public static let recentItemLimit = 5
 
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = []) -> [LaunchPaletteRow] {
-        profiles.map(LaunchPaletteRow.profile)
-            + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
+    /// `agentHarnesses` are inserted straight after the plain New Agent row, in
+    /// the order given (the caller puts the default harness first).
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], tilelessAgents: [TilelessAgentPaletteRow] = [], agentHarnesses: [AgentHarnessPaletteRow] = []) -> [LaunchPaletteRow] {
+        var actionRows = CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
+        if !agentHarnesses.isEmpty {
+            let index = actionRows.firstIndex(of: .action(.newManagedAgent)).map { $0 + 1 } ?? 0
+            actionRows.insert(contentsOf: agentHarnesses.map(LaunchPaletteRow.agentHarness), at: index)
+        }
+        return profiles.map(LaunchPaletteRow.profile)
+            + actionRows
             + contextualActions.map(LaunchPaletteRow.action)
             + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) }
             + jumpTiles.map(LaunchPaletteRow.jumpToTile)
@@ -625,7 +683,16 @@ public enum LaunchPaletteModel {
             let title = profile.displayName.lowercased() == "shell" ? "Terminal" : profile.displayName
             return item(row, .create, title, profile.detail, "terminal", [profile.id, "launch", "profile"], true, true, "profile:\(profile.id)")
         case let .agentModel(model):
-            return item(row, .models, model.displayName, model.providerName, "cpu", [model.id, "agent", "model", "provider"], true, false, "agent-model:\(model.id)")
+            let stableID = model.harness.map { "agent-model:\(AgentHarnessPaletteRow.slug($0)):\(model.id)" } ?? "agent-model:\(model.id)"
+            return item(row, .models, model.displayName, model.providerName, "cpu", [model.id, "agent", "model", "provider"], true, false, stableID)
+        case let .agentHarness(harness):
+            let name = harness.harness.rawValue
+            let subtitle = harness.unavailableReason
+                ?? (harness.isDefault ? "Default · Start a \(name) session" : "Start a \(name) session")
+            // Not on the empty-query home: its twelve slots are budgeted, and the
+            // plain New Agent row already leads it. Any agent or CLI word finds
+            // all three, the default first (`rankPrecedes`).
+            return item(row, .create, "\(name) Agent", subtitle, "sparkles", ["new", "agent", "managed"] + harness.keywords, false, true, harness.stableID)
         case let .project(project):
             let subtitle = project.worktreeOf == nil ? project.rootPath : "Worktree · \(project.rootPath)"
             return item(row, .workspacesAndProjects, project.name, subtitle, "folder", ["project", "canvas", "add"], true, true, "project:\(project.id.uuidString)")
@@ -734,6 +801,13 @@ public enum LaunchPaletteModel {
         let right = searchRank(for: rhs, query: query)
         if left.0 != right.0 { return left.0 < right.0 }
         if left.1 != right.1 { return left.1 < right.1 }
+        // New <Harness> Agent rows keep their given order — the Settings default
+        // first — rather than falling to alphabetical.
+        if case let .agentHarness(lhsRow) = lhs.row, case let .agentHarness(rhsRow) = rhs.row {
+            if lhsRow.isDefault != rhsRow.isDefault { return lhsRow.isDefault }
+            let order = AgentHarness.allCases
+            return (order.firstIndex(of: lhsRow.harness) ?? 0) < (order.firstIndex(of: rhsRow.harness) ?? 0)
+        }
         return left.2 < right.2
     }
 

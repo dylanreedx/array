@@ -1816,6 +1816,7 @@ final class TileSpawner {
     /// outlive its model.
     func spawnManagedAgentForSelectedModel(
         _ selection: String?,
+        harness explicitHarness: AgentHarness? = nil,
         defaults injectedDefaults: UserDefaults? = nil,
         announceRefusal: @MainActor (String) -> Void = TileSpawner.announceManagedAgentModelRefusal,
         wire: (UUID, AgentLaunchSelection) -> Void
@@ -1824,7 +1825,14 @@ final class TileSpawner {
         // `.standard` here meant File > New > Agent ignored the suite a check had
         // injected through `spawnerDefaults` and read whatever the shared domain held.
         let defaults = injectedDefaults ?? self.defaults
-        guard let launchSelection = AgentModelConfig.launchSelection(model: selection, defaults: defaults), AgentModelConfig.validates(launchSelection) else {
+        // An explicit harness is the CLI the person picked (⌘K's New <Harness>
+        // Agent): the selection is that pair or nothing, never another CLI.
+        guard let launchSelection = AgentModelConfig.launchSelection(harness: explicitHarness, model: selection, defaults: defaults), AgentModelConfig.validates(launchSelection) else {
+            if let explicitHarness,
+               let notReady = AgentSupervisor.readinessRefusal(for: explicitHarness, retry: "try again") {
+                announceRefusal("New agent refused: \(notReady) No tile and no agent were created.")
+                return .refusedModel(selection ?? "")
+            }
             guard let selection else {
                 // No explicit choice: File > New > Agent, or ⌘K's plain New Agent.
                 // What was refused is the SETTINGS default, which a narrowed live
@@ -2058,6 +2066,28 @@ final class TileSpawner {
         try expect(composerAtWireTime == [AgentModelConfig.Resolution(model: chosenSettings.model, thinking: chosenSettings.thinking)],
                    "the composer did not already hold the chosen model when the record was wired — the model is being repaired after attach again, which is the bug: \(composerAtWireTime)")
 
+        // MARK: 2b · an explicit NON-default harness owns the selection
+
+        // ⌘K's New Codex Agent… under a Pi default, choosing an id BOTH CLIs offer.
+        // Before the harness travelled with the choice, `launchSelection(model:)`
+        // resolved the ambient harness and this agent ran on Pi.
+        try expect(AgentModelConfig.modelOptions(for: .codex).contains(chosen),
+                   "the Codex QA catalogue no longer offers \(chosen); the collision arm tests nothing")
+        let wiredBeforeHarness = wired.count
+        let crossHarness = spawner.spawnManagedAgentForSelectedModel(
+            chosen,
+            harness: .codex,
+            defaults: defaults,
+            announceRefusal: { refusals.append($0) },
+            wire: wire)
+        guard case let .spawned(codexTile, codexSettings) = crossHarness else {
+            throw CheckError(description: "an explicit Codex choice under a Pi default did not spawn: \(crossHarness)")
+        }
+        try expect(codexSettings.harness == .codex && codexSettings.model == chosen,
+                   "the explicit harness must own the selection: wanted Codex/\(chosen), got \(codexSettings.harness.rawValue)/\(codexSettings.model)")
+        try expect(wired.count == wiredBeforeHarness + 1 && wired.last?.tileId == codexTile && wired.last?.settings.harness == .codex,
+                   "the agent record was not wired on Codex: \(wired.suffix(1))")
+
         // MARK: 3 · generic creation with NO selection still comes from Settings
 
         // Against a literal, and against a value written HERE. Comparing
@@ -2139,7 +2169,7 @@ final class TileSpawner {
         // MARK: 5 · and production still goes through both witnessed seams
 
         let paletteBody = try appDelegateMethodBody(
-            "private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {")
+            "private func spawnManagedAgentFromPalette(harness: AgentHarness? = nil, model: String? = nil) -> Bool {")
         try expect(paletteBody.contains("spawnManagedAgentForSelectedModel("),
                    "⌘K's spawn no longer routes through the seam every rule above is witnessed on:\n\(paletteBody)")
         let revealBody = try appDelegateMethodBody(

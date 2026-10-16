@@ -222,6 +222,36 @@ expect(LaunchPaletteModel.isFileURL(root.appendingPathComponent("Sources/App.swi
 expect(!LaunchPaletteModel.isFileURL(URL(fileURLWithPath: "/tmp/continuum/project-sibling/README.md"), insideProjectRoot: root), "sibling prefix path is rejected")
 expect(!LaunchPaletteModel.isFileURL(URL(fileURLWithPath: "/tmp/continuum/other.txt"), insideProjectRoot: root), "outside project path is rejected")
 
+// New <Harness> Agent rows: one per CLI, straight after plain New Agent…, in the
+// order given (the app puts the Settings default first); a harness that cannot
+// run is listed but unselectable, with its reason as the subtitle.
+let harnessAgentRows = LaunchPaletteModel.makeRows(profiles: [], agentHarnesses: [
+    AgentHarnessPaletteRow(harness: .codex, isDefault: true),
+    AgentHarnessPaletteRow(harness: .claudeCode, isDefault: false),
+    AgentHarnessPaletteRow(harness: .pi, isDefault: false, unavailableReason: "Pi is signed out — run `pi` and use /login, then try again."),
+])
+expect(harnessAgentRows.map(\.displayName) == ["New Agent…", "New Codex Agent…", "New Claude Code Agent…", "New Pi Agent…"] + builtInActionNames.dropFirst() + ["Create Zone…"],
+       "harness rows sit straight after New Agent…, in the given order, and nothing else moves")
+expect(harnessAgentRows.first(where: { $0.displayName == "New Pi Agent…" })?.isSelectable == false, "a harness with a reason is unselectable")
+expect(LaunchPaletteModel.filterRows(harnessAgentRows, query: "codex").map(\.displayName) == ["New Codex Agent…"], "codex query finds only the Codex row")
+expect(LaunchPaletteModel.filterRows(harnessAgentRows, query: "anthropic").map(\.displayName) == ["New Claude Code Agent…"], "anthropic finds the Claude Code row")
+expect(LaunchPaletteModel.filterRows(harnessAgentRows, query: "agent").map(\.displayName) == ["New Agent…", "New Codex Agent…", "New Claude Code Agent…", "New Pi Agent…", "New Agent Without a Tile…", "Fan Out Selected Tickets…"],
+       "agent query reaches every harness row after New Agent…")
+let harnessItems = harnessAgentRows.compactMap { row -> CommandCenterItem? in
+    if case .agentHarness = row { return LaunchPaletteModel.presentation(for: row) }
+    return nil
+}
+expect(harnessItems.map(\.stableID) == ["action:new-agent:codex", "action:new-agent:claude-code", "action:new-agent:pi"], "harness rows keep stable ids")
+expect(harnessItems[0].subtitle?.hasPrefix("Default · ") == true && harnessItems[1].subtitle?.hasPrefix("Default") == false, "only the default row says Default")
+expect(harnessItems[2].subtitle == "Pi is signed out — run `pi` and use /login, then try again.", "an unavailable harness shows its reason")
+let searchedAgentIDs = LaunchPaletteModel.makeSections(rows: harnessAgentRows, query: "agent").flatMap(\.items).map(\.stableID)
+let harnessOrder = ["action:new-agent:codex", "action:new-agent:claude-code", "action:new-agent:pi"].compactMap { searchedAgentIDs.firstIndex(of: $0) }
+expect(harnessOrder.count == 3 && harnessOrder == harnessOrder.sorted() && searchedAgentIDs.first == "action:new-agent",
+       "searching 'agent' ranks New Agent… first, then the harness rows default first, not alphabetically: \(searchedAgentIDs)")
+let homeIDs = LaunchPaletteModel.makeSections(rows: harnessAgentRows, query: "").flatMap(\.items).map(\.stableID)
+expect(homeIDs.first == "action:new-agent" && !homeIDs.contains(where: { $0.hasPrefix("action:new-agent:") }),
+       "the empty-query home keeps its budget: plain New Agent leads it and the harness rows stay search-only: \(homeIDs)")
+
 let build = try runSwift(["build", "--product", "Array"])
 guard build.status == 0 else { Foundation.exit(build.status) }
 
