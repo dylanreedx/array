@@ -43,7 +43,9 @@ final class BoardRuntime {
     var tileConfigurator: ((KanbanTileNSView) -> Void)?
     /// Installed by the app once. Runs for UI, API, automatic lifecycle and
     /// undo/redo commits alike so assignment context cannot drift by origin.
-    var onCommittedTransaction: ((BoardTransaction) -> Void)?
+    /// The second argument is the managed agent whose workspace-API call made
+    /// the commit, or nil for the user and Array's own automation.
+    var onCommittedTransaction: ((BoardTransaction, AgentID?) -> Void)?
 
     init(projectStore: any ProjectStoring) {
         self.projectStore = projectStore
@@ -130,6 +132,7 @@ final class BoardRuntime {
         to boardId: UUID,
         originatingView: KanbanTileNSView? = nil,
         recordUndo: Bool = true,
+        actingAgent: AgentID? = nil,
         now: Date = Date()
     ) -> BoardCommandOutcome {
         guard let current = board(id: boardId) else {
@@ -160,7 +163,7 @@ final class BoardRuntime {
         boards[boardId] = transaction.after
         if recordUndo { history(for: boardId).record(transaction) }
         broadcast(transaction.after, for: boardId, skipping: nil)
-        onCommittedTransaction?(transaction)
+        onCommittedTransaction?(transaction, actingAgent)
         return transaction.rebasedAnchors
             ? .rebased(revision: transaction.after.revision)
             : .applied(revision: transaction.after.revision)

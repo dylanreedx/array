@@ -233,7 +233,7 @@ extension WorkspaceAPIService {
         guard !nowStale || canRebase else {
             return .error(WorkspaceAPIError(code: .revisionConflict, message: "The board changed before this operation could be applied. Re-query before writing."))
         }
-        let outcome = boardRuntime.apply(command, to: request.boardId)
+        let outcome = boardRuntime.apply(command, to: request.boardId, actingAgent: agentId)
         let resultOutcome: BoardApplyResult.Outcome
         switch outcome {
         case .applied: resultOutcome = (stale || nowStale) ? .rebased : .applied

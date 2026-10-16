@@ -7842,10 +7842,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard runtime.tileConfigurator == nil else { return runtime }
         let projectID = controller.project.id
         let attachmentStore = BoardAttachmentStore(projectRoot: controller.projectRoot)
-        runtime.onCommittedTransaction = { [weak self, weak runtime] transaction in
+        runtime.onCommittedTransaction = { [weak self, weak runtime] transaction, actingAgent in
             guard let self, let runtime else { return }
             self.synchronizeBoardTaskContexts(
-                transaction, runtime: runtime, projectID: projectID,
+                transaction, actingAgent: actingAgent, runtime: runtime, projectID: projectID,
                 attachmentStore: attachmentStore)
         }
         runtime.tileConfigurator = { [weak self, weak runtime] view in
@@ -7902,9 +7902,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// One post-commit path for UI, API, lifecycle automation and undo. The
     /// board assignment is authoritative even when an agent tile is absent;
     /// composer context is a best-effort view of that durable fact and never
-    /// sends by itself.
+    /// sends by itself. `actingAgent` is the agent whose workspace-API call
+    /// made the commit; it is never handed its own task.
     private func synchronizeBoardTaskContexts(
         _ transaction: BoardTransaction,
+        actingAgent: AgentID?,
         runtime: BoardRuntime,
         projectID: UUID,
         attachmentStore: BoardAttachmentStore
@@ -7930,7 +7932,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             default:
                 taskFieldsEdited = false
             }
-            guard let card = new, let newAgent,
+            // The chip is the user's hand-off: it waits in the composer for an
+            // explicit send. An agent that took or edited its own task through
+            // the workspace API already holds it in the turn it is running, so
+            // staging it there would only invite a second send of the same task.
+            // A hand-off to ANOTHER agent still stages, unsent, for the user.
+            guard let card = new, let newAgent, newAgent != actingAgent,
                   oldAgent != newAgent || contentChanged || taskFieldsEdited,
                   let record = agentSupervisor.records[newAgent], record.projectId == projectID,
                   record.archivedAt == nil, record.capabilities.locallyManaged,
