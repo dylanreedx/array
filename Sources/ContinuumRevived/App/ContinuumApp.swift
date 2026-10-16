@@ -8680,13 +8680,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the other way); a perpendicular direction restarts from the origin. Always
     /// computed against the tile's ORIGINAL frame so the leapfrog index is stable.
     private func leaderSnapStep(direction: TileArrangement.Direction) {
+        // Resolve through the navigation snapshot (WORLD frames) and the tile
+        // record, never `canvasState.tiles`: once the workspace scene mounts, the
+        // flat list is retired and empty, and ⌥+arrow silently did nothing.
         guard let canvas = canvasView,
               let tileId = canvas.canvasState.lastActiveTileId,
-              let tile = canvas.canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+              let tile = canvas.tileRecord(for: tileId),
+              let current = canvas.navigationTileSnapshot(for: tileId)?.worldFrame else { return }
 
         if leaderSnapTileId != tileId || leaderSnapOriginalFrame == nil {
             leaderSnapTileId = tileId
-            leaderSnapOriginalFrame = tile.frame
+            leaderSnapOriginalFrame = current
             leaderSnapDirection = direction
             leaderSnapIndex = 0
             canvas.beginGeometryEdit(.dockTile, tileIds: [tileId], includeAllZones: true)
@@ -8704,14 +8708,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         guard let original = leaderSnapOriginalFrame, let dir = leaderSnapDirection else { return }
-        let others = canvas.canvasState.tiles.filter { $0.id != tileId }.map(\.frame)
+        let others = canvas.navigationTileSnapshots().filter { $0.tileId != tileId }.map(\.worldFrame)
         let candidates = TileArrangement.dockCandidates(ahead: original, direction: dir, among: others)
         guard !candidates.isEmpty else { leaderSnapIndex = 0; return }
         let index = min(max(leaderSnapIndex, 0), candidates.count - 1)
         leaderSnapIndex = index
         let dest = TileArrangement.dockDestination(original, direction: dir, against: candidates[index], gap: TileGapResolver.resolvedGap())
+        // `dest` is WORLD; the record is in its own model's space (zone-local in
+        // a ZoneLayer). Move it by the world delta so either space stays right.
         var moved = tile
-        moved.frame = dest
+        moved.frame = TileFrame(
+            x: tile.frame.x + (dest.x - current.x), y: tile.frame.y + (dest.y - current.y),
+            width: dest.width, height: dest.height)
         canvas.updateTile(moved, recalculateZoneBounds: false, notifyChange: false)
     }
 
@@ -26012,12 +26020,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(frameOf(aId) == dockB, "releasing ⌥ should commit the dock (no restore); got \(String(describing: frameOf(aId)))")
         try expect(app.focusBroker.activeSurface == .tile(aId), "release exits the leader to the prior tile scope")
 
+        // The same dock in the scene production mounts (flat list retired).
+        let mounted = try runLeaderSnapMountedArm()
+
         let manifest: [String: Any] = [
             "check": "leader-snap",
             "path": "synthesized .flagsChanged + arrow .keyDown NSEvents → handleHotkey → handleLeaderKey (real input path)",
             "dockNearest": ["x": dockB.x, "y": dockB.y],
             "leapfrog": ["x": dockC.x, "y": dockC.y],
             "gap": gap,
+            "mounted": mounted,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
