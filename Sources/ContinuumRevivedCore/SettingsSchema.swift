@@ -244,7 +244,7 @@ public enum SettingsSchema {
                 SettingsRow(.url(key: DefaultBrowserURL.userDefaultsKey, label: "New browser tiles open", default: DefaultBrowserURL.fallback),
                             keywords: ["home page", "default url", "start page"]),
                 SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
-                            help: "Inspect browser tiles from Safari's Develop menu. Array's own inspector is always available from a tile.",
+                            help: "Safari Web Inspector is native WebKit inspection, opened from Safari's Develop menu. Array Inspector opens inside Array with focused Elements, Console, Styles, and Network panels, and needs no setting.",
                             keywords: ["devtools", "developer", "inspect", "debug"]),
             ]),
         ])
