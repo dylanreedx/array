@@ -108,6 +108,7 @@ public enum SettingsSchema {
                             keywords: ["default name", "rename"]),
                 SettingsRow(.choice(key: ZoneColorConfig.assignmentPolicyKey, label: "New zone colour", options: ZoneColorAssignmentPolicy.allCases.map(\.rawValue), default: ZoneColorConfig.defaultAssignmentPolicy.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: ZoneColorAssignmentPolicy.allCases.map { ($0.rawValue, $0.displayName) })),
+                            help: "Used when a zone is created. A colour you pick is never changed.",
                             keywords: ["color", "palette"]),
             ]),
             SettingsGroup(id: "canvas.toolbar", title: "Toolbar and hints", rows: [

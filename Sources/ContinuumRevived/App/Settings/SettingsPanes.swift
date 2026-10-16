@@ -343,8 +343,10 @@ struct SettingsFieldRow: View {
         case let .info(text):
             InfoRow(text: text)
         case let .action(id, label, buttonTitle):
-            ButtonRow(title: label, buttonTitle: buttonTitle, help: row.help,
-                      enabled: model.canPerform(action: id)) { model.perform(action: id) }
+            let enabled = model.canPerform(action: id)
+            ButtonRow(title: label, buttonTitle: buttonTitle,
+                      help: enabled || id != "checkForUpdates" ? row.help : "Updates are checked in the released app only.",
+                      enabled: enabled) { model.perform(action: id) }
         case let .custom(id, label):
             if let make = model.customViews[id] {
                 EmbeddedAppKitView(make: make)
@@ -441,7 +443,10 @@ private struct SettingsHarnessRows: View {
         }
     }
 
-    private func detail(_ harness: AgentHarness) -> String {
+    private func detail(_ harness: AgentHarness, _ readiness: HarnessReadiness) -> String {
+        if readiness == .missing {
+            return "Not found on this Mac. Install it, then reopen Settings."
+        }
         switch harness {
         case .claudeCode: return "Signs in with your Claude account."
         case .codex: return "Signs in with your ChatGPT account."
@@ -451,9 +456,10 @@ private struct SettingsHarnessRows: View {
 
     var body: some View {
         ForEach(AgentHarness.allCases, id: \.self) { harness in
-            let (status, symbol, tone, canSignIn) = describe(model.readiness(of: harness))
+            let readiness = model.readiness(of: harness)
+            let (status, symbol, tone, canSignIn) = describe(readiness)
             StatusRow(title: harness.rawValue, status: status, symbol: symbol, tone: tone,
-                      detail: detail(harness),
+                      detail: detail(harness, readiness),
                       actionTitle: canSignIn && model.onSignIn != nil ? "Sign In…" : nil,
                       action: { model.onSignIn?(harness) })
                 .settingsAnchor("harness.\(harness.rawValue)", model: model)
