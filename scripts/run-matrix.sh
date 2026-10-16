@@ -446,6 +446,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 # captured rpc frames through the translator and projection; own arm because
 # the bare CoreChecks run is KNOWN-RED.
 run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -495,6 +496,9 @@ run_app_check .build/debug/Array --managed-agent-model-spawn-check
 run_app_check .build/debug/Array --workspace-api-pi-bridge-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
 run_app_check .build/debug/Array --settings-panel-check
+# Launch polish: settings as an in-window modal, and its search.
+run_app_check .build/debug/Array --settings-modal-check
+run_app_check .build/debug/Array --settings-search-check
 run_app_check .build/debug/Array --agent-awareness-check
 run_app_check .build/debug/Array --completion-awareness-check
 run_app_check .build/debug/Array --throbber-timeline-check
@@ -627,6 +631,16 @@ run_app_check .build/debug/Array --leader-zone-jump-check
 run_app_check .build/debug/Array --composer-key-routing-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
+# Launch polish: hold-⌥ Quick Jump over text input, ⌥+arrow dock in the
+# mounted scene, leader recovery with no focused surface, per-harness ⌘K
+# agents, reveal in Finder, spawn-then-settle saves, and slide-between.
+run_app_check .build/debug/Array --nav-overlay-visible-check
+run_app_check .build/debug/Array --leader-jump-visible-indicators-check
+run_app_check .build/debug/Array --leader-modal-recovery-check
+run_app_check .build/debug/Array --palette-agent-harness-check
+run_app_check .build/debug/Array --reveal-in-finder-check
+run_app_check .build/debug/Array --spawn-arrange-commit-check
+run_app_check .build/debug/Array --tile-insert-slide-check
 # M1.11 (.plans/46): the toolbar "+" creates an EMPTY workspace and switches into
 # it, which releases every controller. openProfilePalette guarded on
 # activeController, so Cmd+K and the Add button then did nothing at all --

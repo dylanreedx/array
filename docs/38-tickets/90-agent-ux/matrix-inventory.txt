@@ -108,6 +108,8 @@ check --layout-commit-truth-check
 check --layout-pressure-check
 check --leader-activation-check
 check --leader-jump-check
+check --leader-jump-visible-indicators-check
+check --leader-modal-recovery-check
 check --leader-snap-check
 check --leader-zone-jump-check
 check --live-model-catalog-check
@@ -116,6 +118,7 @@ check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
 check --multi-zone-render-check
 check --nav-mode-check
+check --nav-overlay-visible-check
 check --new-tile-cwd-check
 check --note-click-focus-check
 check --note-conversion-writer-check
@@ -123,6 +126,7 @@ check --note-file-tile-spawn-check
 check --observer-sweep-badge-check
 check --onboarding-foundation-check
 check --onboarding-panel-check
+check --palette-agent-harness-check
 check --palette-browser-spawn-check
 check --palette-captures-keys-over-browser-check
 check --palette-duplicate-root-check
@@ -157,16 +161,21 @@ check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
 check --retired-flat-write-check
+check --reveal-in-finder-check
 check --run-artifacts-tile-check
 check --session-observer-check
 check --session-resume-check
+check --settings-modal-check
 check --settings-panel-check
+check --settings-schema-check
+check --settings-search-check
 check --sidebar-lifecycle-check
 check --sidebar-production-corpus-check
 check --sidebar-screenshot-check
 check --sidebar-truth-check
 check --sidebar-ux-check
 check --single-zone-compat-check
+check --spawn-arrange-commit-check
 check --spawn-focus-policy-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
@@ -191,6 +200,7 @@ check --ticket-queue-tile-check
 check --tile-action-check
 check --tile-chrome-scale-check
 check --tile-drag-grab-check
+check --tile-insert-slide-check
 check --tile-materialize-check
 check --tile-project-scope-check
 check --tile-reveal-work-check
@@ -369,6 +379,8 @@ leg run_app_check .build/debug/Array --language-server-release-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
+leg run_app_check .build/debug/Array --leader-jump-visible-indicators-check
+leg run_app_check .build/debug/Array --leader-modal-recovery-check
 leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --location-action-surface-check
@@ -376,12 +388,14 @@ leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check
+leg run_app_check .build/debug/Array --nav-overlay-visible-check
 leg run_app_check .build/debug/Array --new-tile-cwd-check
 leg run_app_check .build/debug/Array --note-click-focus-check
 leg run_app_check .build/debug/Array --note-conversion-writer-check
 leg run_app_check .build/debug/Array --note-file-tile-spawn-check
 leg run_app_check .build/debug/Array --observer-sweep-badge-check
 leg run_app_check .build/debug/Array --onboarding-panel-check
+leg run_app_check .build/debug/Array --palette-agent-harness-check
 leg run_app_check .build/debug/Array --palette-browser-spawn-check
 leg run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
 leg run_app_check .build/debug/Array --palette-duplicate-root-check
@@ -414,15 +428,19 @@ leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
 leg run_app_check .build/debug/Array --retired-flat-write-check
+leg run_app_check .build/debug/Array --reveal-in-finder-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
 leg run_app_check .build/debug/Array --session-observer-check
 leg run_app_check .build/debug/Array --session-resume-check
+leg run_app_check .build/debug/Array --settings-modal-check
 leg run_app_check .build/debug/Array --settings-panel-check
+leg run_app_check .build/debug/Array --settings-search-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check
 leg run_app_check .build/debug/Array --single-zone-compat-check
+leg run_app_check .build/debug/Array --spawn-arrange-commit-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
@@ -447,6 +465,7 @@ leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
 leg run_app_check .build/debug/Array --tile-drag-grab-check
+leg run_app_check .build/debug/Array --tile-insert-slide-check
 leg run_app_check .build/debug/Array --tile-materialize-check
 leg run_app_check .build/debug/Array --tile-project-scope-check
 leg run_app_check .build/debug/Array --tile-reveal-work-check
@@ -540,6 +559,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
@@ -571,7 +591,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 164
+count ContinuumRevivedCoreChecks 166
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
