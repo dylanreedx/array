@@ -641,6 +641,8 @@ run_app_check .build/debug/Array --palette-agent-harness-check
 run_app_check .build/debug/Array --reveal-in-finder-check
 run_app_check .build/debug/Array --spawn-arrange-commit-check
 run_app_check .build/debug/Array --tile-insert-slide-check
+run_app_check .build/debug/Array --settle-closes-tile-check
+run_app_check .build/debug/Array --inbox-parent-fold-check
 # M1.11 (.plans/46): the toolbar "+" creates an EMPTY workspace and switches into
 # it, which releases every controller. openProfilePalette guarded on
 # activeController, so Cmd+K and the Add button then did nothing at all --
