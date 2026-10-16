@@ -2656,6 +2656,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--reveal-in-finder-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try RevealInFinderChecks.run()
+                print("ContinuumRevivedRevealInFinderChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-modal-recovery-check") {
             do {
                 _ = NSApplication.shared
@@ -9257,6 +9269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnTerminalFromProfile("nvim", trigger: "shortcut:quick-spawn-4")
         case "view.toggleWorkspaceSidebar":
             toggleWorkspaceSidebar()
+        case "tile.revealInFinder":
+            return revealFocusedTileInFinder()
         default:
             return false
         }
@@ -9646,6 +9660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func contextualPaletteActions(for focusedTileId: UUID?) -> [LaunchPaletteAction] {
         var actions: [LaunchPaletteAction] = []
         if tileKind(for: focusedTileId) == .browser { actions.append(.openInspectorForFocusedBrowser) }
+        if let focusedTileId, revealInFinderURL(forTile: focusedTileId) != nil { actions.append(.revealFocusedTileInFinder) }
         let zoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
             ?? canvasView?.activeProjectZonePlacement?.zoneId
             ?? canvasView?.activeZone?.zoneId
@@ -15629,6 +15644,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return workspaceRuntime?.workspaceId == workspaceId && workspaceRuntime?.workspaceId != before
         case .openInspectorForFocusedBrowser:
             return openInspectorForFocusedBrowserFromPalette()
+        case .revealFocusedTileInFinder:
+            return revealFocusedTileInFinder()
         case let .spawnHarnessRole(role):
             spawnHarnessRoleFromPalette(role)
             return false // Developer action; intentionally never recent.
@@ -15662,6 +15679,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             replayGettingStarted()
             return true
         }
+    }
+
+    /// The file a note or file tile is backed by, when it exists on disk. A note
+    /// lives at `<project root>/.array/notes/<noteId>.md`; a file tile is its
+    /// document. Nil for every other kind, a note never saved, and a document
+    /// with no file yet — the Reveal in Finder item is then disabled or absent.
+    /// Read-only: it stats a path and writes nothing.
+    func revealInFinderURL(forTile tileId: UUID) -> URL? {
+        guard let tile = canvasView?.tileRecord(for: tileId) else { return nil }
+        let url: URL
+        switch tile.kind {
+        case .note:
+            guard let noteId = tile.metadata.noteId,
+                  let root = controller(owningTile: tileId)?.projectRoot else { return nil }
+            url = ProjectStoreLayout(projectRoot: root).noteFile(id: noteId)
+        case .file:
+            if let path = tile.metadata.documentLocation?.path, path.hasPrefix("/") {
+                url = URL(fileURLWithPath: path)
+            } else if let path = tile.metadata.filePath, !path.isEmpty {
+                if path.hasPrefix("/") {
+                    url = URL(fileURLWithPath: path)
+                } else if let root = controller(owningTile: tileId)?.projectRoot {
+                    url = root.appendingPathComponent(path)
+                } else { return nil }
+            } else { return nil }
+        default:
+            return nil
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        return url
+    }
+
+    /// ⌘K Reveal in Finder and ⌥⌘R: the focused tile's backing file. False (the
+    /// chord passes through) when the focused tile has none.
+    @discardableResult
+    private func revealFocusedTileInFinder() -> Bool {
+        guard let tileId = paletteContextTileId ?? focusedTileIdForPaletteContext(),
+              let canvasView, let url = revealInFinderURL(forTile: tileId) else { return false }
+        canvasView.revealInFinder(url)
+        return true
     }
 
     @discardableResult
@@ -17818,6 +17876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// inline, a leg's rename reached a nil `onZoneRenamed` and persisted nothing.
     func wireCanvasCallbacks(_ canvasView: CanvasNSView) {
         canvasView.delegate = self
+        canvasView.tileRevealURLProvider = { [weak self] tileId in self?.revealInFinderURL(forTile: tileId) }
         canvasView.onTileCloseRequested = { [weak self] tileId in
             self?.deleteTile(id: tileId)
         }

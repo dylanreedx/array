@@ -5460,6 +5460,12 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    /// The backing file a tile can show in Finder, or nil when it has none on disk
+    /// (a note never saved, an untitled document). Set by the app; read-only.
+    var tileRevealURLProvider: ((UUID) -> URL?)?
+    /// Shows a file in Finder. Injectable so a check records the URL instead.
+    var revealInFinder: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
+
     /// QA (`--nav-overlay-visible-check`): the installed overlay view itself, so a
     /// witness can ask AppKit where it is and what it draws.
     var qaNavModeOverlayView: NSView? { navModeOverlayView }

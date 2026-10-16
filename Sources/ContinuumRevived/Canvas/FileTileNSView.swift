@@ -191,6 +191,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         bumpSurfaceEpoch()
     }
 
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [makeRevealInFinderMenuItem()] }
+
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
         // Before targeting a view inside the body: while surfaced, that view is

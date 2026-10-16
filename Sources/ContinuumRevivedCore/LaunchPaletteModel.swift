@@ -37,6 +37,9 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case deleteWorkspace(UUID)
     case switchWorkspace(UUID)
     case openInspectorForFocusedBrowser
+    /// Show the focused note's or file's backing file in Finder. Contextual:
+    /// offered only while the focused tile has a file on disk.
+    case revealFocusedTileInFinder
     case spawnHarnessRole(HarnessRole)
     case jumpToTile(UUID)
     case jumpToZone(UUID)
@@ -100,6 +103,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Switch Workspace…"
         case .openInspectorForFocusedBrowser:
             return "Open Inspector for Focused Browser"
+        case .revealFocusedTileInFinder:
+            return "Reveal in Finder"
         case let .spawnHarnessRole(role):
             return "Run \(role.displayName) Agent…"
         case .jumpToTile:
@@ -172,6 +177,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["switch", "workspace", "canvas"]
         case .openInspectorForFocusedBrowser:
             return ["open", "inspector", "focused", "browser", "continuum", "tile"]
+        case .revealFocusedTileInFinder:
+            return ["reveal", "show", "finder", "file", "folder", "note"]
         case let .spawnHarnessRole(role):
             return ["run", "spawn", "agent", "harness", "role", role.id, role.displayName.lowercased()]
         case .jumpToTile:
@@ -837,6 +844,7 @@ public enum LaunchPaletteModel {
         case let .deleteWorkspace(id): return item(row, .developer, "Delete workspace", nil, "trash", [], false, false, "workspace-delete:\(id.uuidString)")
         case let .switchWorkspace(id): return item(row, .workspacesAndProjects, "Switch workspace", nil, "square.grid.2x2", [], false, true, "workspace-switch:\(id.uuidString)")
         case .openInspectorForFocusedBrowser: return item(row, .developer, "Inspect current browser", "Open Web Inspector", "wrench.and.screwdriver", ["focused"], false, true, "action:browser-inspector")
+        case .revealFocusedTileInFinder: return item(row, .actions, "Reveal in Finder", "Show this tile's file in Finder", "folder", ["finder", "show in finder", "reveal"], false, false, "action:reveal-in-finder")
         case let .spawnHarnessRole(role): return item(row, .developer, role.displayName, "Harness agent", "hammer", ["run", "spawn", "role"], false, false, "harness:\(role.id)")
         case let .jumpToTile(id): return item(row, .agentsAndTiles, "Tile", nil, "rectangle.on.rectangle", ["jump"], false, true, "tile:\(id.uuidString)")
         case let .jumpToZone(id): return item(row, .agentsAndTiles, "Zone", nil, "square.dashed", ["jump"], false, true, "zone:\(id.uuidString)")

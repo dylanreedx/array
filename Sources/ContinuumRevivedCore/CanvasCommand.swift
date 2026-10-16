@@ -81,6 +81,15 @@ public enum CommandRegistry {
                 shortcuts: [globalShortcut("global.toggleWorkspaceSidebar", command: "view.toggleWorkspaceSidebar", keyCode: 1, modifiers: [.command, .shift])]
             ),
             definition("help.replayGettingStarted", .replayGettingStarted, aliases: ["onboarding", "learn Array"]),
+            // The focused note's or file's backing file. Its ⌘K row is contextual
+            // (`revealFocusedTileInFinder`), so no static row here.
+            CommandDefinition(
+                id: "tile.revealInFinder",
+                title: "Reveal in Finder",
+                aliases: ["show in finder", "finder"],
+                paletteVisible: false,
+                shortcuts: [globalShortcut("global.revealInFinder", command: "tile.revealInFinder", keyCode: 15, modifiers: [.command, .option])]
+            ),
             definition("workspace.new", .newWorkspace, aliases: ["canvas"]),
             // M1.11: the only add route a workspace with no projects has.
             definition("project.add", .addProject, aliases: ["register project", "open folder"]),
