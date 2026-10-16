@@ -1,14 +1,16 @@
 import { guidedLayout } from './guided-layout';
+import type { GuidedInsert } from './guided-timeline';
+import { toolbarReleasePoint, toolbarSnapshot, TOOLBAR_TOUR, type ToolbarSnapshot } from './guided-toolbar';
 
 export const WORLD_WIDTH = 2060;
 export const WORLD_HEIGHT = 1320;
-export type DemoStep = 'landing' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
+export type DemoStep = 'landing' | 'toolbar' | 'creation' | 'task' | 'providers' | 'approval' | 'verification' | 'layout' | 'overview';
 export type DemoAgent = 'stabilize' | 'verify' | 'audit';
 export type DemoTile = DemoAgent | 'browser' | 'shell' | 'note';
 type Point = { x: number; y: number };
 export const STEPS = [
   { id: 'landing', start: 0, end: .27, focus: { x: 900, y: 575 }, caption: 'Your project and its supporting tiles land together.' },
-  { id: 'creation', start: .27, end: .38, focus: { x: 285, y: 365 }, caption: 'Choose a model. Create an agent beside the work.' },
+  { id: 'creation', start: .27, end: .38, focus: { x: 285, y: 365 }, caption: 'Press ⌘K to add or jump. Choose a model and create an agent.' },
   { id: 'task', start: .38, end: .445, focus: { x: 285, y: 365 }, caption: 'Focus the new agent, then give it a task.' },
   { id: 'providers', start: .445, end: .595, focus: { x: 740, y: 325 }, caption: 'Let Claude and Codex work in parallel.' },
   { id: 'approval', start: .595, end: .73, focus: { x: 740, y: 350 }, caption: 'Review the next action before it runs.' },
@@ -16,13 +18,20 @@ export const STEPS = [
   { id: 'layout', start: .86, end: .985, focus: { x: 1250, y: 905 }, caption: 'Rearrange the canvas. Give each tile the space its work needs.' },
   { id: 'overview', start: .985, end: 1, focus: { x: 900, y: 575 }, caption: 'Keep the whole project in view, and pick up anywhere.' },
 ] as const;
+/** Captions for the beats inserted into the authored scroll (see guided-timeline). */
+export const INSERT_CAPTIONS = {
+  toolbar: 'Add anything from the toolbar. Drag it to any edge of the canvas.',
+  terminal: 'Open a terminal from the toolbar, right beside the work.',
+} as const;
+/** When the toolbar's terminal arrives, in authored progress. */
+export const SHELL_AT = .815;
 export const DEMO_TEXT = {
   stabilize: 'Fix zone placement. Keep tiles aligned while zooming.',
   verify: 'Check the zone placement fix and run the canvas tests.',
   audit: 'Review the native spacing, colors, and canvas controls.',
 } as const;
 export type CreationStage = 'absent' | 'command' | 'models' | 'spawning' | 'focused' | 'sent';
-export type CursorTarget = 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
+export type CursorTarget = 'toolbar-zone' | 'toolbar-agent' | 'toolbar-terminal' | 'toolbar-menu-shell' | 'command-trigger' | 'command-agent' | 'creation-model' | 'stabilize-composer' | 'stabilize-send' | 'verify-provider' | 'verify-composer' | 'verify-send' | 'audit-composer' | 'audit-send' | 'verify-allow' | 'board-placement' | 'editor-line' | 'shell-input' | 'stabilize-header' | 'editor-header' | 'editor-resize' | 'stabilize-resize' | 'shell-resize' | null;
 export interface TileFrameSnapshot {
   x: number; y: number; width: number; height: number; visible: boolean; selected: boolean; zIndex: number;
   drag: { active: boolean; lift: number; rotation: number; scaleX: number; scaleY: number };
@@ -49,7 +58,11 @@ export interface GuidedSnapshot {
   boardProgress: number;
   boardDetail: boolean;
   editorProgress: number;
-  cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget };
+  /** `screen` pins the hand in canvas pixels; `fromScreen` starts an approach from there. */
+  cursor: Point & { visible: boolean; pressed: boolean; approach: number; fromTarget: CursorTarget; screen: Point | null; fromScreen: Point | null };
+  toolbar: ToolbarSnapshot;
+  /** The ⌘K keystroke readout, 0 hidden … 1 shown. */
+  keyHud: number;
   terminal: { lines: number; typed: string; phase: 'idle' | 'typing' | 'running' | 'done' };
   typing: Record<DemoAgent, string>;
   status: Record<DemoAgent, string>;
@@ -65,12 +78,8 @@ const mix = (a: number, b: number, p: number) => a + (b - a) * p;
 const type = (text: string, p: number, a: number, b: number) => text.slice(0, Math.floor(text.length * between(p, a, b)));
 type TerminalLine = { at: number; kind: 'prompt' | 'out' | 'dim' | 'ok' | 'suite' | 'pass'; text: string; time?: string };
 const passLine = (at: number, name: string, time: string): TerminalLine => ({ at, kind: 'pass', text: name, time });
-/** The build terminal: a believable `swift test`, revealed line by line with scroll. */
+/** The build terminal, opened fresh from the toolbar: a believable `swift test`, revealed line by line with scroll. */
 export const TERMINAL_LINES: readonly TerminalLine[] = [
-  { at: 0, kind: 'prompt', text: 'swift build' },
-  { at: 0, kind: 'out', text: 'Building for debugging...' },
-  { at: 0, kind: 'dim', text: '[1287/1287] Linking ContinuumRevived' },
-  { at: 0, kind: 'ok', text: 'Build complete!', time: '41.37s' },
   { at: .8355, kind: 'out', text: 'Building for debugging...' },
   { at: .8365, kind: 'dim', text: '[14/14] Linking ContinuumRevivedTests' },
   { at: .8375, kind: 'ok', text: 'Build complete!', time: '3.84s' },
@@ -189,36 +198,57 @@ function cameraAt(p: number, width: number, height: number) {
   }
   return { x: width / 2 - center.x * scale, y: height / 2 - center.y * scale, scale, center };
 }
+/**
+ * The toolbar's terminal is revealed the way the app reveals a new tile: the
+ * camera leaves the editor as the tile arrives, and is already on the terminal
+ * when the authored story resumes.
+ */
+function guidedCamera(p: number, insert: GuidedInsert | null, width: number, height: number) {
+  const terminal = .84;
+  if (insert?.id === 'terminal') {
+    const from = cameraAt(SHELL_AT, width, height), to = cameraAt(terminal, width, height), t = smooth(between(insert.t, .62, 1));
+    const scale = mix(from.scale, to.scale, t), center = { x: mix(from.center.x, to.center.x, t), y: mix(from.center.y, to.center.y, t) };
+    return { x: width / 2 - center.x * scale, y: height / 2 - center.y * scale, scale, center };
+  }
+  return cameraAt(p >= SHELL_AT && p < terminal ? terminal : p, width, height);
+}
 function focusAt(p: number): DemoTile | null {
   if (p >= .34 && p < .445) return 'stabilize';
   if (p >= .47 && p <= .55) return 'verify';
   if (p >= .56 && p <= .595) return 'audit';
   if (p >= .615 && p < .70) return 'verify';
   if (p >= .735 && p < .775) return 'note';
-  if (p >= .78 && p < .82) return 'browser';
-  if (p >= .82 && p < .86) return 'shell';
+  if (p >= .78 && p < SHELL_AT) return 'browser';
+  if (p >= SHELL_AT && p < .86) return 'shell';
   if (p >= .873 && p < .902) return 'stabilize';
   if (p >= .909 && p < .923 || p >= .93 && p < .95) return 'browser';
   if (p >= .957 && p < .970) return 'stabilize';
   if (p >= .976 && p < .985) return 'shell';
   return null;
 }
-function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null): Record<DemoTile, TileFrameSnapshot> {
+function frameSnapshots(p: number, mobile: boolean, selected: DemoTile | null, shell: number): Record<DemoTile, TileFrameSnapshot> {
   const layout = guidedLayout(p, mobile);
   return Object.fromEntries(Object.entries(layout.frames).map(([id, frame]) => [id, {
-    ...frame, visible: id !== 'stabilize' || p >= .34, selected: id === selected,
+    ...frame, visible: id === 'stabilize' ? p >= .34 : id === 'shell' ? shell > 0 : true, selected: id === selected,
     zIndex: id === selected ? 20 : 2,
     drag: { active: layout.moving === id, lift: 0, rotation: 0, scaleX: 1, scaleY: 1 },
   }])) as Record<DemoTile, TileFrameSnapshot>;
 }
-function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>): Record<DemoTile, TileMotion> {
-  return Object.fromEntries(Object.entries(frames).map(([id, frame]) => [id,
-    { x: 0, y: 0, scale: 1, rotation: 0, opacity: frame.visible ? 1 : 0, emphasis: frame.selected && !frame.drag.active ? 1 : 0 },
-  ])) as Record<DemoTile, TileMotion>;
+function tileMotions(frames: Record<DemoTile, TileFrameSnapshot>, shell: number): Record<DemoTile, TileMotion> {
+  return Object.fromEntries(Object.entries(frames).map(([id, frame]) => {
+    // The new terminal grows into its slot, like a spawned tile in the app.
+    const arrival = id === 'shell' ? shell : 1;
+    return [id, { x: 0, y: 0, scale: frame.visible ? mix(.9, 1, 1 - Math.pow(1 - arrival, 3)) : 1, rotation: 0,
+      opacity: frame.visible ? smooth(Math.min(1, arrival * 2.2)) : 0, emphasis: frame.selected && !frame.drag.active ? 1 : 0 }];
+  })) as Record<DemoTile, TileMotion>;
+}
+/** How far the toolbar's terminal has arrived: 0 absent … 1 settled. */
+function shellArrival(p: number, insert: GuidedInsert | null) {
+  if (insert?.id === 'terminal') return between(insert.t, .62, 1) || (insert.t >= .62 ? .001 : 0);
+  return p >= SHELL_AT ? 1 : 0;
 }
 function targetAt(p: number): CursorTarget {
-  if (p >= .27 && p < .285) return 'command-trigger';
-  if (p >= .285 && p < .295) return 'command-agent';
+  if (p >= .27 && p < .295) return 'command-agent';
   if (p >= .295 && p < .335) return 'creation-model';
   if (p >= .385 && p < .425) return 'stabilize-composer';
   if (p >= .425 && p < .445) return 'stabilize-send';
@@ -229,8 +259,8 @@ function targetAt(p: number): CursorTarget {
   if (p >= .595 && p < .615) return 'audit-send';
   if (p >= .625 && p < .695) return 'verify-allow';
   if (p >= .735 && p < .775) return 'board-placement';
-  if (p >= .775 && p < .82) return 'editor-line';
-  if (p >= .82 && p < .86) return 'shell-input';
+  if (p >= .775 && p < SHELL_AT) return 'editor-line';
+  if (p >= SHELL_AT && p < .86) return 'shell-input';
   if (p >= .86 && p < .903) return 'stabilize-header';
   if (p >= .903 && p < .923) return 'editor-header';
   if (p >= .923 && p < .95) return 'editor-resize';
@@ -238,35 +268,63 @@ function targetAt(p: number): CursorTarget {
   if (p >= .970 && p < .985) return 'shell-resize';
   return null;
 }
+type InsertCursor = { target: CursorTarget; from: CursorTarget; fromScreen: Point | null; approach: number; screen: Point | null; pressed: boolean };
+/** The hand during an inserted beat. Targets are the real toolbar buttons and menu rows. */
+function insertCursor(insert: GuidedInsert, width: number, height: number): InsertCursor {
+  const t = insert.t;
+  if (insert.id === 'toolbar') {
+    const tour = TOOLBAR_TOUR, none = { fromScreen: null, screen: null };
+    if (t >= tour.drag[1]) return { ...none, target: null, from: null, approach: 1, screen: toolbarReleasePoint(width, height), pressed: false };
+    const pressed = t >= tour.press;
+    if (t < tour.zone[1]) return { ...none, target: 'toolbar-zone', from: null, fromScreen: { x: width * .52, y: height * .5 }, approach: smooth(between(t, 0, tour.zone[0])), pressed };
+    if (t < tour.agent[1]) return { ...none, target: 'toolbar-agent', from: 'toolbar-zone', approach: smooth(between(t, tour.zone[1], tour.agent[0])), pressed };
+    return { ...none, target: 'toolbar-terminal', from: 'toolbar-agent', approach: smooth(between(t, tour.agent[1], tour.terminal[0])), pressed };
+  }
+  const pressed = (t >= .26 && t < .29) || (t >= .58 && t < .61);
+  if (t < .3) return { target: 'toolbar-terminal', from: 'editor-line', fromScreen: null, approach: smooth(between(t, 0, .2)), screen: null, pressed };
+  return { target: 'toolbar-menu-shell', from: 'toolbar-terminal', fromScreen: null, approach: smooth(between(t, .3, .48)), screen: null, pressed };
+}
 /** A complete seekable state: reverse/direct jumps never accumulate animation. */
-export function guidedSnapshot(value: number, options: { width: number; height: number; reducedMotion?: boolean }): GuidedSnapshot {
+export function guidedSnapshot(value: number, options: { width: number; height: number; reducedMotion?: boolean; insert?: GuidedInsert | null }): GuidedSnapshot {
   const reducedMotion = options.reducedMotion ?? false;
   const p = reducedMotion ? 1 : clamp(value);
+  const insert = reducedMotion ? null : options.insert ?? null;
   const width = Math.max(1, options.width), height = Math.max(1, options.height);
   const step = STEPS.find(s => p >= s.start && p < s.end) ?? STEPS.at(-1)!;
   const focusedTile = reducedMotion ? null : focusAt(p);
   const selectedTile = focusedTile ?? (p >= .34 && p < .38 ? 'stabilize' : null);
-  const tileFrames = frameSnapshots(p, width < 700, selectedTile);
-  const creationStage: CreationStage = p < .27 ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
+  const shell = shellArrival(p, insert);
+  const tileFrames = frameSnapshots(p, width < 700, selectedTile, shell);
+  const creationStage: CreationStage = p < .27 || insert?.id === 'toolbar' ? 'absent' : p < .295 ? 'command' : p < .335 ? 'models' : p < .38 ? 'spawning' : p < .435 ? 'focused' : 'sent';
   const layout = guidedLayout(p, width < 700);
   const resizing: DemoTile | null = p >= .93 && p < .95 ? 'browser' : p >= .957 && p < .970 ? 'stabilize' : p >= .976 && p < .985 ? 'shell' : null;
-  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
+  const approaches: ReadonlyArray<readonly [number, number, CursorTarget]> = [[SHELL_AT, .83, 'toolbar-menu-shell'], [.86, .873, 'shell-input'], [.903, .909, 'stabilize-header'], [.923, .93, 'editor-header'], [.95, .957, 'editor-resize'], [.970, .976, 'stabilize-resize']];
   const approach = approaches.find(([start, end]) => p >= start && p < end);
+  // After the toolbar beat the hand travels from where it let go of the bar to the palette.
+  const fromRelease = p >= .27 && p < .283 && !insert;
+  const inserted = insert && !reducedMotion ? insertCursor(insert, width, height) : null;
+  const pressTimes = [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835];
   const held = tileFrames.stabilize.drag.active || tileFrames.browser.drag.active || !!resizing;
   const typed = p >= TERMINAL_COMMAND.typed ? 'swift test' : type('swift test', p, TERMINAL_COMMAND.start, TERMINAL_COMMAND.typed);
   return {
-    progress: p, step: step.id, caption: step.caption,
+    progress: p, step: insert?.id === 'toolbar' ? 'toolbar' : step.id, caption: insert ? INSERT_CAPTIONS[insert.id] : step.caption,
     heroOpacity: 1 - between(p, 0, .18), chromeOpacity: smooth(between(p, .10, .18)), takeover: smooth(between(p, .08, .26)),
-    camera: cameraAt(p, width, height), tiles: tileMotions(tileFrames), tileFrames,
+    camera: guidedCamera(p, insert, width, height), tiles: tileMotions(tileFrames, shell), tileFrames,
     mainCreated: p >= .34, selectedTile, focusedTile,
     creation: { stage: creationStage, query: creationStage === 'command' ? type('Agent', p, .272, .285) : '', provider: 'Codex', model: 'GPT-5.6 Sol' },
-    cursorTarget: reducedMotion ? null : targetAt(p),
+    cursorTarget: reducedMotion ? null : inserted ? inserted.target : targetAt(p),
     menuTarget: creationStage === 'command' ? 'creation-agent' : creationStage === 'models' ? 'creation-model' : p >= .47 && p < .505 ? 'verify-provider' : null,
     snapPreview: reducedMotion ? null : layout.preview,
     resizeReadout: !reducedMotion && resizing ? { tile: resizing, width: Math.round(tileFrames[resizing].width), height: Math.round(tileFrames[resizing].height - 24) } : null,
     boardProgress: between(p, .735, .845), boardDetail: !reducedMotion && p >= .755 && p < .775, editorProgress: between(p, .775, .82),
-    cursor: { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .985, approach: approach ? smooth(between(p, approach[0], approach[1])) : 1, fromTarget: approach?.[2] ?? null,
-      pressed: held || [.285, .332, .435, .49, .555, .605, .68, .755, .80, .835].some(time => p >= time && p < time + .009) },
+    cursor: inserted
+      ? { ...cursorAt(p), visible: true, approach: inserted.approach, fromTarget: inserted.from, screen: inserted.screen, fromScreen: inserted.fromScreen, pressed: inserted.pressed }
+      : { ...cursorAt(p), visible: !reducedMotion && p >= .27 && p < .985,
+        approach: fromRelease ? smooth(between(p, .27, .283)) : approach ? smooth(between(p, approach[0], approach[1])) : 1,
+        fromTarget: fromRelease ? null : approach?.[2] ?? null, screen: null, fromScreen: fromRelease ? toolbarReleasePoint(width, height) : null,
+        pressed: held || pressTimes.some(time => p >= time && p < time + .009) },
+    toolbar: toolbarSnapshot(p, insert, width, height),
+    keyHud: reducedMotion || insert ? 0 : smooth(between(p, .27, .273)) * (1 - smooth(between(p, .284, .288))),
     typing: { stabilize: type(DEMO_TEXT.stabilize, p, .385, .425), verify: type(DEMO_TEXT.verify, p, .515, .55), audit: type(DEMO_TEXT.audit, p, .565, .595) },
     status: { stabilize: p < .435 ? 'Ready' : p < .855 ? 'Working' : 'Complete',
       verify: p < .56 ? 'Ready' : p < .595 ? 'Working' : p < .68 ? 'Needs approval' : p < .855 ? 'Working' : 'Passed',

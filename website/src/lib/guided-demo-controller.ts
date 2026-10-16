@@ -1,6 +1,8 @@
 import type { AssemblySnapshot } from './assembly-controller';
 import { installGuidedGyros } from '../components/demo/agent/AgentGyroModel';
-import { guidedSnapshot, type DemoTile, type DemoAgent } from './guided-demo';
+import { guidedSnapshot, type DemoTile, type DemoAgent, type GuidedSnapshot } from './guided-demo';
+import type { GuidedInsert } from './guided-timeline';
+import { TOOLBAR } from './guided-toolbar';
 const clamp = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 const between = (p: number, a: number, b: number) => clamp((p - a) / (b - a));
 const smooth = (p: number) => p * p * (3 - 2 * p);
@@ -13,6 +15,7 @@ export function installGuidedDemo() {
   const pin = root.querySelector<HTMLElement>('[data-assembly-chrome="canvas"]') ?? root.querySelector<HTMLElement>('[data-assembly-pin]') ?? root;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let progress = 0;
+  let insert: GuidedInsert | null = null;
   const nodes = <T extends HTMLElement | SVGElement>(selector: string) => Array.from(root.querySelectorAll<T>(selector));
   const typings = nodes<HTMLElement>('[data-demo-typing]');
   const statuses = nodes<HTMLElement>('[data-demo-status]');
@@ -30,14 +33,56 @@ export function installGuidedDemo() {
   const editorLines = nodes<HTMLElement>('[data-demo-editor-line]');
   const boardDetails = nodes<HTMLElement>('[data-demo-board-detail]');
   const text = (node: HTMLElement, value: string) => { if (node.textContent !== value) node.textContent = value; };
-  const write = (p: number) => {
+  const toolbar = root.querySelector<HTMLElement>('[data-demo-toolbar]');
+  const toolbarBar = toolbar?.querySelector<HTMLElement>('[data-demo-toolbar-bar]');
+  const toolbarButtons = toolbar ? Array.from(toolbar.querySelectorAll<HTMLElement>('[data-toolbar-item]')) : [];
+  const toolbarPills = toolbar ? Array.from(toolbar.querySelectorAll<HTMLElement>('[data-toolbar-pill]')) : [];
+  const toolbarMenus = toolbar ? Array.from(toolbar.querySelectorAll<HTMLElement>('[data-toolbar-menu]')) : [];
+  // The bar from its pivot and angle; the pill and menu beside the button,
+  // away from the edge the bar rests on (FloatingToolbarGeometry.besideFrame).
+  const writeToolbar = (snapshot: GuidedSnapshot) => {
+    if (!toolbar || !toolbarBar) return;
+    const bar = snapshot.toolbar, angle = snapshot.reducedMotion ? 0 : bar.angle;
+    toolbar.dataset.edge = bar.edge;
+    toolbar.dataset.dragging = String(bar.dragging);
+    toolbar.style.setProperty('--toolbar-angle', `${angle}deg`);
+    toolbarBar.style.transform = snapshot.reducedMotion ? '' : `translate(${bar.x}px, ${bar.y}px) rotate(${angle}deg) scale(${bar.scale})`;
+    for (const button of toolbarButtons) {
+      const id = button.dataset.toolbarItem;
+      button.dataset.state = id === bar.active ? 'active' : id === bar.hovered ? 'hover' : 'rest';
+    }
+    const canvas = toolbar.getBoundingClientRect();
+    const barRect = toolbarBar.getBoundingClientRect();
+    const beside = (anchor: HTMLElement | undefined, node: HTMLElement) => {
+      const rect = anchor?.getBoundingClientRect();
+      if (!rect) return;
+      const width = node.offsetWidth, height = node.offsetHeight, gap = TOOLBAR.beside;
+      let left: number, top: number;
+      if (bar.edge === 'left') { left = barRect.right - canvas.left + gap; top = rect.top + rect.height / 2 - canvas.top - height / 2; }
+      else { left = rect.left + rect.width / 2 - canvas.left - width / 2; top = barRect.top - canvas.top - gap - height; }
+      left = Math.min(Math.max(left, gap), canvas.width - gap - width);
+      top = Math.min(Math.max(top, gap), canvas.height - gap - height);
+      node.style.transform = `translate(${left}px, ${top}px)`;
+    };
+    for (const pill of toolbarPills) {
+      pill.hidden = snapshot.reducedMotion || pill.dataset.toolbarPill !== bar.pill;
+      if (!pill.hidden) beside(toolbarButtons.find(button => button.dataset.toolbarItem === pill.dataset.toolbarPill), pill);
+    }
+    for (const menu of toolbarMenus) {
+      const state = bar.menu?.kind === menu.dataset.toolbarMenu ? bar.menu : null;
+      menu.dataset.open = String(!!state?.open && !snapshot.reducedMotion);
+      for (const row of menu.querySelectorAll<HTMLElement>('[data-toolbar-choice]')) row.dataset.highlighted = String(row.dataset.toolbarChoice === state?.highlighted);
+      if (state) beside(toolbarButtons.find(button => button.dataset.toolbarItem === menu.dataset.toolbarMenu), menu);
+    }
+  };
+  const write = (p: number, beat: GuidedInsert | null = null) => {
     // Resize the screen itself before measuring its canvas. Camera, native UI,
     // focus border and cursor therefore share one coordinate system throughout
     // the preview → full-screen → preview transition.
     const frame = reduced.matches ? 0 : smooth(between(p, .10, .18)) * (1 - smooth(between(p, .18, .26))) + smooth(between(p, .985, 1));
     root.style.setProperty('--demo-frame', String(frame));
     root.dataset.demoFramed = String(frame > .001);
-    const snapshot = guidedSnapshot(p, { width: pin.clientWidth || innerWidth, height: pin.clientHeight || innerHeight, reducedMotion: reduced.matches });
+    const snapshot = guidedSnapshot(p, { width: pin.clientWidth || innerWidth, height: pin.clientHeight || innerHeight, reducedMotion: reduced.matches, insert: beat });
     root.dataset.demoProgress = String(snapshot.progress);
     root.dataset.demoStep = snapshot.step;
     root.dataset.demoReducedMotion = String(snapshot.reducedMotion);
@@ -242,6 +287,11 @@ export function installGuidedDemo() {
       terminal.scrollTop = terminal.scrollHeight; // A terminal keeps its newest line in view.
     }
     for (const node of captions) text(node, snapshot.caption);
+    writeToolbar(snapshot);
+    root.style.setProperty('--demo-toolbar-bottom', String(snapshot.reducedMotion ? 0 : snapshot.toolbar.bottomness));
+    const hud = root.querySelector<HTMLElement>('[data-demo-key-hud]');
+    if (hud) { hud.hidden = snapshot.keyHud < .01; hud.style.setProperty('--demo-key-hud', String(.86 + .14 * snapshot.keyHud)); hud.style.opacity = String(snapshot.keyHud); }
+    root.querySelector<HTMLElement>('[data-demo-menu-trigger="toolbar"]')?.setAttribute('data-pressed', String(snapshot.keyHud > .01));
     for (const node of menus) {
       const command = node.dataset.demoMenu === 'toolbar';
       const provider = node.dataset.demoMenu === 'provider';
@@ -279,7 +329,12 @@ export function installGuidedDemo() {
       const viewport = pin.getBoundingClientRect();
       let x = viewport.left - (origin?.left ?? 0) + snapshot.camera.x + snapshot.cursor.x * snapshot.camera.scale;
       let y = viewport.top - (origin?.top ?? 0) + snapshot.camera.y + snapshot.cursor.y * snapshot.camera.scale;
+      // Canvas-pixel positions: where the hand let go of the toolbar.
+      const onCanvas = (point: { x: number; y: number }) => [viewport.left - (origin?.left ?? 0) + point.x, viewport.top - (origin?.top ?? 0) + point.y];
+      if (snapshot.cursor.screen) [x, y] = onCanvas(snapshot.cursor.screen);
       const targetSelectors = {
+        'toolbar-zone': '[data-toolbar-item="zone"]', 'toolbar-agent': '[data-toolbar-item="agent"]',
+        'toolbar-terminal': '[data-toolbar-item="terminal"]', 'toolbar-menu-shell': '[data-toolbar-menu="terminal"] [data-toolbar-choice="Shell"]',
         'command-trigger': '[data-demo-menu-trigger="toolbar"]', 'command-agent': '[data-demo-command-agent]',
         'creation-model': '[data-demo-command-model]',
         'stabilize-composer': '[data-interaction-id="agent-composer-stabilize"]', 'stabilize-send': '[data-interaction-id="agent-send-stabilize"]',
@@ -304,7 +359,7 @@ export function installGuidedDemo() {
         if (from?.width) {
           x = from.left + (snapshot.cursor.fromTarget?.endsWith('header') ? Math.min(100, from.width * .3) : from.width / 2) - (origin?.left ?? 0);
           y = from.top + from.height / 2 - (origin?.top ?? 0);
-        }
+        } else if (snapshot.cursor.fromScreen) [x, y] = onCanvas(snapshot.cursor.fromScreen);
         x += (targetX - x) * snapshot.cursor.approach;
         y += (targetY - y) * snapshot.cursor.approach;
       }
@@ -323,13 +378,16 @@ export function installGuidedDemo() {
   // Assembly already coalesces scroll events into one rAF. Write in that event
   // rather than scheduling a second frame that leaves camera and tiles behind.
   root.addEventListener('array:assembly', event => {
-    progress = (event as CustomEvent<AssemblySnapshot>).detail.progress;
-    write(progress);
+    const detail = (event as CustomEvent<AssemblySnapshot>).detail;
+    progress = detail.progress;
+    insert = detail.insert ?? null;
+    write(progress, insert);
   });
   root.addEventListener('array:assembly-measure', event => {
-    write((event as CustomEvent<boolean>).detail ? 0 : progress);
+    if ((event as CustomEvent<boolean>).detail) write(0);
+    else write(progress, insert);
   });
-  reduced.addEventListener('change', () => write(progress));
+  reduced.addEventListener('change', () => write(progress, insert));
   write(0); // Establish the world camera before assembly measures float targets.
   const disposeGyros = installGuidedGyros(root);
   const focusPath = root.querySelector<SVGElement>('[data-demo-focus-path]');

@@ -8,6 +8,7 @@ import islandStyles from './DemoIsland.module.css';
 import { NativeBoardTile, NativeBoardDetails, NativeBoardChrome } from './board/NativeBoardTile';
 import { NativeEditorTile, NativeEditorChrome } from './editor/NativeEditorTile';
 import { GuidedTerminal } from './tools/GuidedTerminal';
+import { CanvasToolbar } from './toolbar/CanvasToolbar';
 import styles from './GuidedWorkspace.module.css';
 
 const worldTiles = [
@@ -136,6 +137,7 @@ export default function GuidedWorkspace() {
 
             <div className={styles.canvasShell} data-assembly-chrome="canvas-shell" role="region" aria-label="Workspace canvas">
               <div className={styles.canvas} data-demo-canvas data-assembly-chrome="canvas">
+                <CanvasToolbar />
                 <div className={styles.world} data-guided-world data-assembly-chrome="world">
                   <section className={styles.zone} data-assembly-chrome="zone-runtime" aria-label="Array project zone">
                     <header className={styles.zoneHeader}>
@@ -152,8 +154,8 @@ export default function GuidedWorkspace() {
                         className={styles.tile}
                         data-assembly-surface={tile.id}
                         data-tile-kind={tile.kind}
-                        data-demo-visible={tile.id === 'stabilize' ? 'false' : 'true'}
-                        data-demo-created={tile.id === 'stabilize' ? 'false' : 'true'}
+                        data-demo-visible={tile.id === 'stabilize' || tile.id === 'shell' ? 'false' : 'true'}
+                        data-demo-created={tile.id === 'stabilize' || tile.id === 'shell' ? 'false' : 'true'}
                         aria-label={`${tile.title}, ${tile.kind} tile`}
                         style={{ left: tile.x, top: tile.y, width: tile.id === 'browser' ? 'var(--demo-editor-initial-width, 560px)' : tile.width, height: tile.height }}
                       >
@@ -187,6 +189,7 @@ export default function GuidedWorkspace() {
                 <svg className={styles.focusOutline} data-demo-focus-outline style={{ display: 'none' }} aria-hidden="true"><rect data-demo-focus-path fill="none" rx="14" /></svg>
                 <div className={styles.snapPreview} data-demo-snap-preview hidden />
                 <div className={styles.resizeReadout} data-demo-resize-readout hidden />
+                <div className={styles.keyHud} data-demo-key-hud hidden aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></div>
                 <div className={styles.commandMenu} data-demo-menu="toolbar" hidden aria-hidden="true">
                   <div className={styles.commandSearch}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.2" /><path d="m10.2 10.2 3.1 3.1" /></svg><span data-demo-command-query>Agent</span><kbd>esc</kbd></div>
                   <div data-demo-command-root>

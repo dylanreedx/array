@@ -294,7 +294,7 @@
 .caption {
   position: absolute;
   right: auto;
-  bottom: calc(44px + var(--demo-frame, 0) * 7%);
+  bottom: calc(44px + var(--demo-frame, 0) * 7% + var(--demo-toolbar-bottom, 1) * 96px);
   left: calc(50% + 140px);
   width: max-content;
   max-width: calc(100% - 330px - var(--demo-frame, 0) * 12%);
@@ -369,7 +369,7 @@
   .agentMount :global([data-agent-id="verify"] aside[aria-label="Pending approval"]) { padding: 11px; }
 
   .commandMenu { left: 50%; width: calc(100vw - 32px); }
-  .caption { right: auto; bottom: calc(38px + var(--demo-frame, 0) * 7%); left: 50%; max-width: calc(100% - 24px - var(--demo-frame, 0) * 12%); padding: 8px 12px; font-size: 12px; line-height: 17px; }
+  .caption { right: auto; bottom: calc(38px + var(--demo-frame, 0) * 7% + var(--demo-toolbar-bottom, 1) * 82px); left: 50%; max-width: calc(100% - 24px - var(--demo-frame, 0) * 12%); padding: 8px 12px; font-size: 12px; line-height: 17px; }
 }
 
 @media (max-width: 380px) {
@@ -506,3 +506,10 @@
 .outerStatus[data-status="done"] { background: rgb(117 201 149 / 16%); }
 .outerStatus[data-status="done"] i { background: #75c995; }
 @media (max-width: 700px) { .agentMount :global(textarea) { font-size: 18px; line-height: 23px; } .agentMount :global([data-kind="assistant"] p),.agentMount :global([data-kind="user"] p) { font-size: 16px; line-height: 21px; } }
+
+/* The ⌘K keystroke, shown as the command palette opens. */
+.keyHud { position: absolute; z-index: 61; bottom: 92px; left: 50%; display: flex; gap: 6px; padding: 8px; border-radius: 14px; background: rgb(16 19 24 / 94%); box-shadow: 0 8px 24px rgb(0 0 0 / 30%); transform: translateX(-50%) scale(var(--demo-key-hud, 1)); opacity: var(--demo-key-hud, 1); }
+.keyHud[hidden] { display: none; }
+.keyHud kbd { display: grid; min-width: 38px; height: 38px; place-items: center; box-sizing: border-box; padding: 0 8px; border-radius: 9px; color: #f2f4f8; background: #232935; box-shadow: inset 0 -2px 0 rgb(0 0 0 / 35%); font: 500 18px/1 var(--font-sans, system-ui, sans-serif); }
+.commandButton[data-pressed="true"] { background: #2b3547; }
+@media (prefers-reduced-motion: reduce) { .keyHud { display: none; } }

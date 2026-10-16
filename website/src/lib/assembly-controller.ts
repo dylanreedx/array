@@ -1,7 +1,10 @@
+import { guidedTimeline, scrollForProgress, type GuidedInsert } from './guided-timeline';
 export type AssemblyPhase = 'glimpse' | 'opening' | 'assembly' | 'mac' | 'companion' | 'ready';
 
 export interface AssemblySnapshot {
   progress: number;
+  /** The guided demo's inserted beat playing at this scroll position, if any. */
+  insert?: GuidedInsert | null;
   phase: AssemblyPhase;
   phaseProgress: number;
   reducedMotion: boolean;
@@ -162,13 +165,14 @@ export function installAssembly() {
     }
   };
 
-  const landingTop = () => trackTop + (trackHeight - innerHeight) * (guided ? .26 : READY_LANDING_POINT);
+  const landingTop = () => trackTop + (trackHeight - innerHeight) * (guided ? scrollForProgress(.26) : READY_LANDING_POINT);
 
   const update = () => {
     queued = false;
     const available = Math.max(1, trackHeight - innerHeight);
     const scrollProgress = clamp((scrollY - trackTop) / available);
-    const snapshot = presentationFor(guided ? scrollProgress : assemblyProgressForScroll(scrollProgress), reduced.matches);
+    const timeline = guided ? guidedTimeline(scrollProgress) : null;
+    const snapshot: AssemblySnapshot = { ...presentationFor(timeline ? timeline.progress : assemblyProgressForScroll(scrollProgress), reduced.matches), insert: timeline?.insert ?? null };
     detachProgress = 1 - Math.min(1, snapshot.progress / (guided ? .26 : .72));
     if (guided) {
       for (const surface of surfaces) {

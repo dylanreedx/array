@@ -1,11 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { scrollForProgress } from '../src/lib/guided-timeline';
 const tileIDs = ['stabilize', 'verify', 'audit', 'browser', 'shell', 'note'];
-async function seek(page: Page, progress: number) {
+/** Seek by authored progress; an inserted beat's own point lands on its first frame. */
+async function seek(page: Page, progress: number, insertT?: number) {
   await page.locator('[data-assembly-root]').evaluate((el, value) => {
     const top = el.getBoundingClientRect().top + scrollY;
     scrollTo({ top: top + (el.getBoundingClientRect().height - innerHeight) * value, behavior: 'instant' });
-  }, progress);
+  }, scrollForProgress(progress, insertT));
   await expect.poll(async () => Number(await page.locator('[data-guided-demo]').getAttribute('data-demo-progress')))
     .toBeCloseTo(progress, 2);
 }
@@ -731,4 +733,86 @@ test('without JavaScript the product explanation and download remain readable', 
   expect(await page.locator('[data-assembly-root]').evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(844);
   await expect(page.locator('[data-testid=download-main]').first()).toHaveAttribute('href', /Array\.dmg$/);
   await context.close();
+});
+test('the canvas toolbar tours, drags to the left edge, and opens the terminal', async ({ page }) => {
+  await page.goto('/');
+  const toolbar = page.locator('[data-demo-toolbar]');
+  const bar = toolbar.locator('[data-demo-toolbar-bar]');
+  let canvas = await page.locator('[data-demo-canvas]').boundingBox();
+  const cursorTip = () => page.locator('[data-demo-cursor]').evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.left + 3, y: r.top + 2 }; });
+  const inside = (box: { x: number; y: number; width: number; height: number } | null) => {
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(canvas!.x - .5);
+    expect(box!.y).toBeGreaterThanOrEqual(canvas!.y - .5);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(canvas!.x + canvas!.width + .5);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(canvas!.y + canvas!.height + .5);
+  };
+
+  // Landing, full screen: a flat capsule centred on the bottom edge.
+  await seek(page, .265);
+  canvas = await page.locator('[data-demo-canvas]').boundingBox();
+  const resting = await bar.boundingBox();
+  expect(resting!.width).toBeGreaterThan(resting!.height * 5);
+  expect(Math.abs(resting!.x + resting!.width / 2 - (canvas!.x + canvas!.width / 2))).toBeLessThan(1);
+  expect(canvas!.y + canvas!.height - (resting!.y + resting!.height)).toBeCloseTo(12, 0);
+
+  // The tour: the hovered button fills, its pill names it whole, beside the bar.
+  await seek(page, .27, .3);
+  await expect(page.locator('[data-guided-demo]')).toHaveAttribute('data-demo-step', 'toolbar');
+  await expect(toolbar.locator('[data-toolbar-item="agent"]')).toHaveAttribute('data-state', 'hover');
+  const pill = toolbar.locator('[data-toolbar-pill="agent"]');
+  await expect(pill).toBeVisible();
+  await expect(pill).toHaveText('Agent⌘N');
+  inside(await pill.boundingBox());
+  expect((await pill.boundingBox())!.y + (await pill.boundingBox())!.height).toBeLessThanOrEqual(resting!.y);
+  expect(await pill.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  const agent = await toolbar.locator('[data-toolbar-item="agent"]').boundingBox();
+  const tip = await cursorTip();
+  expect(Math.hypot(tip.x - (agent!.x + agent!.width / 2), tip.y - (agent!.y + agent!.height / 2))).toBeLessThan(4);
+  const caption = await page.locator('[data-demo-caption]').boundingBox();
+  expect(caption!.y + caption!.height).toBeLessThanOrEqual((await pill.boundingBox())!.y);
+
+  // Mid-drag the hand holds the Terminal button while the bar swings.
+  await seek(page, .27, .7);
+  await expect(toolbar).toHaveAttribute('data-dragging', 'true');
+  const held = await toolbar.locator('[data-toolbar-item="terminal"]').boundingBox();
+  const handTip = await cursorTip();
+  expect(Math.hypot(handTip.x - (held!.x + held!.width / 2), handTip.y - (held!.y + held!.height / 2))).toBeLessThan(4);
+  inside(await bar.boundingBox());
+
+  // Landed: standing on the left edge, centred, every icon upright.
+  await seek(page, .5);
+  await expect(toolbar).toHaveAttribute('data-edge', 'left');
+  const left = await bar.boundingBox();
+  expect(left!.height).toBeGreaterThan(left!.width * 5);
+  expect(left!.x - canvas!.x).toBeCloseTo(12, 0);
+  expect(Math.abs(left!.y + left!.height / 2 - (canvas!.y + canvas!.height / 2))).toBeLessThan(1);
+  const glyph = await toolbar.locator('[data-toolbar-item="terminal"] svg').first().evaluate(el => new DOMMatrix(getComputedStyle(el.parentElement!.closest('[data-demo-toolbar-bar]')!).transform).multiply(new DOMMatrix(getComputedStyle(el.parentElement!).transform)));
+  expect(Math.abs(glyph.b)).toBeLessThan(1e-6);
+
+  // The terminal comes from the toolbar's menu, beside the bar.
+  await seek(page, .815, .52);
+  const menu = toolbar.locator('[data-toolbar-menu="terminal"]');
+  await expect(menu).toHaveAttribute('data-open', 'true');
+  await expect(menu.locator('p')).toHaveText('New terminal');
+  await expect(menu.locator('[data-toolbar-choice="Shell"]')).toHaveAttribute('data-highlighted', 'true');
+  const menuBox = await menu.boundingBox();
+  inside(menuBox);
+  expect(menuBox!.x).toBeGreaterThanOrEqual(left!.x + left!.width);
+  await expect(page.locator('[data-assembly-surface="shell"]')).toHaveAttribute('data-demo-visible', 'false');
+  await seek(page, .815, .9);
+  await expect(menu).toHaveAttribute('data-open', 'false');
+  await expect(page.locator('[data-assembly-surface="shell"]')).toHaveAttribute('data-demo-visible', 'true');
+  await seek(page, .82);
+  await expect(page.locator('[data-assembly-surface="shell"]')).toBeInViewport();
+});
+test('reduced motion still shows the toolbar, lying flat above the tiles', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  const bar = page.locator('[data-demo-toolbar-bar]');
+  await bar.scrollIntoViewIfNeeded();
+  await expect(bar).toBeVisible();
+  const box = await bar.boundingBox();
+  expect(box!.width).toBeGreaterThan(box!.height * 5);
+  await expect(page.locator('[data-toolbar-pill]:visible')).toHaveCount(0);
 });

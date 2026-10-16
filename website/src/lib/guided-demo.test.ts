@@ -5,11 +5,13 @@ const desktop = { width: 1440, height: 900 };
 const mobile = { width: 390, height: 760 };
 
 describe('native golden workspace flow', () => {
-  test('five supporting tiles preexist; main birth follows both palette levels', () => {
+  test('four supporting tiles preexist; main birth follows both palette levels', () => {
     const initial = guidedSnapshot(.26, desktop);
     expect(initial.mainCreated).toBe(false);
     expect(initial.tileFrames.stabilize.visible).toBe(false);
-    expect(Object.values(initial.tileFrames).filter(frame => frame.visible)).toHaveLength(5);
+    // The build terminal is opened from the toolbar later in the story.
+    expect(initial.tileFrames.shell.visible).toBe(false);
+    expect(Object.values(initial.tileFrames).filter(frame => frame.visible)).toHaveLength(4);
     expect(guidedSnapshot(.29, desktop)).toMatchObject({ creation: { stage: 'command', query: 'Agent' }, menu: 'toolbar', cursorTarget: 'command-agent' });
     expect(guidedSnapshot(.32, desktop)).toMatchObject({ creation: { stage: 'models', model: 'GPT-5.6 Sol' }, menu: 'models', mainCreated: false, cursorTarget: 'creation-model' });
     expect(guidedSnapshot(.35, desktop)).toMatchObject({ creation: { stage: 'spawning' }, mainCreated: true, selectedTile: 'stabilize' });
@@ -102,8 +104,9 @@ describe('native golden workspace flow', () => {
   });
   test('the terminal runs a practical swift test that fills the tile line by line', () => {
     expect(TERMINAL_LINES.every(line => (line.kind === 'pass' ? 4 + 26 + (line.time?.length ?? 0) : line.text.length + (line.time ? line.time.length + 3 : 0) + (line.kind === 'prompt' ? 15 : 0)) <= 40)).toBe(true);
-    const idle = guidedSnapshot(.81, desktop).terminal, typing = guidedSnapshot(.828, desktop).terminal;
-    expect(idle).toEqual({ lines: 4, typed: '', phase: 'idle' });
+    // A fresh shell from the toolbar: only the prompt until the command is typed.
+    const idle = guidedSnapshot(.816, desktop).terminal, typing = guidedSnapshot(.828, desktop).terminal;
+    expect(idle).toEqual({ lines: 0, typed: '', phase: 'idle' });
     expect(typing.phase).toBe('typing');
     expect(typing.typed.length).toBeGreaterThan(0);
     expect(typing.typed.length).toBeLessThan('swift test'.length);
@@ -188,7 +191,7 @@ describe('native golden workspace flow', () => {
   });
   test('same six mounted identities remain visible after main creation', () => {
     const ids = ['audit', 'browser', 'note', 'shell', 'stabilize', 'verify'];
-    for (const p of [.35, .64, .80, .885, .945, .99]) {
+    for (const p of [.82, .885, .945, .99]) {
       const state = guidedSnapshot(p, desktop);
       expect(Object.keys(state.tileFrames).sort()).toEqual(ids);
       expect(Object.values(state.tileFrames).every(frame => frame.visible)).toBe(true);

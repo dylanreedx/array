@@ -1,0 +1,80 @@
+/* Tokens from the app's dark theme: SurfaceToken.overlay, AgentSurfaceRole
+   rowHover / rowSelected, LineToken.separator. No borders, no accent colour. */
+.layer {
+  --toolbar-overlay: #232935;
+  --toolbar-hover: #1b2028;
+  --toolbar-active: #2b3547;
+  --toolbar-separator: #2e343e;
+  --toolbar-angle: 0deg;
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  opacity: var(--demo-chrome-opacity, 0);
+}
+.bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border-radius: 22px;
+  background: var(--toolbar-overlay);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 45%);
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+.divider { position: relative; flex: none; width: 13px; height: 18px; }
+.divider::after { content: ""; position: absolute; top: 0; left: 6px; width: 1px; height: 18px; background: var(--toolbar-separator); }
+.button { position: relative; display: grid; flex: none; width: 36px; height: 36px; place-items: center; border-radius: 50%; color: #f2f4f8; }
+.button[data-state="hover"] { background: var(--toolbar-hover); }
+.button[data-state="active"] { background: var(--toolbar-active); }
+/* Icons stay upright at any angle; the circle behind them is round anyway. */
+.upright { position: relative; display: grid; width: 36px; height: 36px; place-items: center; transform: rotate(calc(-1 * var(--toolbar-angle))); }
+.upright>svg:first-child { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.45; stroke-linecap: round; stroke-linejoin: round; }
+.chevron { position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px; fill: none; stroke: #afb6c2; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 13px;
+  color: #f2f4f8;
+  background: var(--toolbar-overlay);
+  box-shadow: 0 1px 8px rgb(0 0 0 / 40%);
+  font: 500 12px/1 var(--font-sans, system-ui, sans-serif);
+  white-space: nowrap;
+}
+.pill[hidden] { display: none; }
+.pill kbd { color: #afb6c2; font: 400 11px/1 var(--font-sans, system-ui, sans-serif); }
+.menu {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 184px;
+  padding: 6px;
+  border-radius: 12px;
+  color: #f2f4f8;
+  background: var(--toolbar-overlay);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 45%);
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+.menu[data-open="false"] { visibility: hidden; }
+.menu p { height: 24px; margin: 0; padding: 5px 8px 0; box-sizing: border-box; color: #afb6c2; font-size: 11px; font-weight: 500; }
+.menu span { display: flex; align-items: center; height: 28px; padding: 0 8px; border-radius: 7px; font-size: 13px; white-space: nowrap; }
+.menu span[data-highlighted="true"] { background: var(--toolbar-hover); }
+
+@media (prefers-reduced-motion: reduce) {
+  /* The static workspace keeps the bar visible above the tiles, lying flat. */
+  .layer { position: relative; inset: auto; display: flex; justify-content: center; padding: 16px 0 0; opacity: 1; }
+  .bar { position: relative; margin: 0 !important; transform: none !important; }
+  .pill, .menu { display: none; }
+}
