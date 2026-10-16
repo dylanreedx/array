@@ -221,6 +221,10 @@ enum SidebarTruthChecks {
         try agentStore.upsert(settled)
 
         let app = AppDelegate()
+        // Fold choices (launch polish, item Q) persist through the app's settings
+        // defaults: a private suite here, never `.standard`.
+        let settingsSuite = "array.qa.sidebar-truth.\(UUID().uuidString)"
+        app.qaSettingsDefaults = QAIsolatedDefaults(isolatedSuiteName: settingsSuite)
         app.registryStore = registryStore
         try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         let runners = Runners()
@@ -304,6 +308,7 @@ enum SidebarTruthChecks {
             browserEngine: browserEngine,
             restoreDefaults: {
                 unpinAmbientSelection()
+                UserDefaults(suiteName: settingsSuite)?.removePersistentDomain(forName: settingsSuite)
                 for (shelf, value) in storedShelves {
                     if let value {
                         defaults.set(value, forKey: WorkspaceSidebarConfig.shelfKey(shelf))
@@ -541,6 +546,11 @@ enum SidebarTruthChecks {
 
         // W4 · a parent with two observed children. Closing the parent's tile
         // takes the group: no child may be left behind as a top-level row.
+        // Launch polish, item Q: the shipped sidebar starts the group folded; open
+        // it the way a person does, so its children are rows this leg can follow.
+        try expect(inbox.collapsedParentsForQA.contains(parentAgent.rawValue)
+                   && inbox.clickDisclosureForQA(id: parentAgent.rawValue),
+                   "setup: the shipped sidebar must start the parent's group folded, and open it on a click")
         for child in [childOne, childTwo] {
             try expect(block(world, child) == "live",
                        "setup: a live parent's child is drawn under it — got \(String(describing: block(world, child)))")

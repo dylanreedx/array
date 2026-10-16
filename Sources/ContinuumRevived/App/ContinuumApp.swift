@@ -1134,6 +1134,19 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--inbox-parent-fold-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await InboxParentFoldChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("inbox-parent-fold check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--settle-closes-tile-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -11162,6 +11175,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             history: WorkspaceSidebarConfig.isShelfExpanded(.history))
         sidebar.agentInbox.onShelfExpansionChange = { shelf, expanded in
             WorkspaceSidebarConfig.setShelfExpanded(shelf, expanded)
+        }
+        // Groups start folded, and each parent's fold is kept as it was left
+        // (launch polish, item Q).
+        sidebar.agentInbox.foldsUntouchedGroups = true
+        sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
+        sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
+            guard let self else { return }
+            WorkspaceSidebarConfig.setParentFolds(folds, defaults: self.settingsDefaults)
         }
         // The header's New agent button makes the same agent ⌘K's New Agent does.
         sidebar.agentInbox.onNewAgent = { [weak self] in
@@ -34296,8 +34317,22 @@ extension AppDelegate {
     WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: standardDefaults)
     let restoreScopeSectionShelves = WorkspaceSidebarConfig.qaIsolateShelves(defaults: standardDefaults)
     defer { restoreScopeSectionShelves() }
+    // Launch polish, item Q: the shipped sidebar starts a group folded and
+    // persists a fold through the app's settings defaults — a private suite
+    // here, never `.standard`.
+    guard let foldDefaults = QAIsolatedDefaults(isolatedSuiteName: "array.qa.inbox-scope-folds.\(UUID().uuidString)") else {
+        throw CheckError.failed("setup: no isolated defaults suite for the fold choices")
+    }
+    defer { foldDefaults.removePersistentDomain(forName: foldDefaults.suiteDomainName) }
+    app.qaSettingsDefaults = foldDefaults
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
+    sidebar.inboxForQA.layoutForQA()
+    // This section is about scope membership, so open the headless agent's
+    // group the way a person does; the child is a row of 'Default' either way.
+    try expect(sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
+               && sidebar.inboxForQA.clickDisclosureForQA(id: headlessId.rawValue),
+               "item Q: the shipped sidebar must start the headless agent's group folded, and open it on a click")
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
