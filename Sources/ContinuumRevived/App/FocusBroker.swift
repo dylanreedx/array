@@ -148,8 +148,18 @@ final class FocusBroker {
         if modalSnapshots.isEmpty {
             tileSpawnedDuringModal = false
         }
-        guard shouldRestoreSnapshot, let snapshot else { return }
-        _ = requestFocus(snapshot, reason: .modalDismissed)
+        if shouldRestoreSnapshot, let snapshot {
+            _ = requestFocus(snapshot, reason: .modalDismissed)
+        }
+        // A closed modal must never remain the active surface. With nothing to
+        // restore (the modal opened over no scope), or a snapshot whose surface
+        // left while it was up, the broker used to stay parked on the modal — and
+        // the hold-⌥ leader refuses to arm over any modal, so Quick Jump was dead
+        // until something else took focus (`--leader-modal-recovery-check`).
+        if activeSurface == .modal(kind) {
+            recoverToCanvas(reason: .modalDismissed)
+            if activeSurface == .modal(kind) { activeSurface = nil }
+        }
     }
 
     func applicationDidBecomeActive() {

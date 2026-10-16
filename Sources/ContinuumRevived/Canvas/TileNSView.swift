@@ -169,6 +169,23 @@ class TileNSView: NSView, TokenThemed {
 
     func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
 
+    /// "Reveal in Finder" for a tile with a backing file: enabled with an action
+    /// only while that file exists, disabled (no action) otherwise.
+    func makeRevealInFinderMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Reveal in Finder", action: nil, keyEquivalent: "")
+        if canvas?.tileRevealURLProvider?(tile.id) != nil {
+            item.action = #selector(revealBackingFileInFinder(_:))
+            item.target = self
+        }
+        item.isEnabled = item.action != nil
+        return item
+    }
+
+    @objc private func revealBackingFileInFinder(_ sender: Any?) {
+        guard let canvas, let url = canvas.tileRevealURLProvider?(tile.id) else { return }
+        canvas.revealInFinder(url)
+    }
+
     func titleBarContextMenuForQA() -> NSMenu {
         titleBar?.makeTileContextMenu() ?? NSMenu(title: "Tile")
     }

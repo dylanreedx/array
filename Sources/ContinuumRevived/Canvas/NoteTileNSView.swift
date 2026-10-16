@@ -89,6 +89,8 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         setSaveState(saveState)
     }
 
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [makeRevealInFinderMenuItem()] }
+
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
         // While surfaced, `textView` is parked; focusing it there would send every

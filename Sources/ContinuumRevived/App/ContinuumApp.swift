@@ -963,6 +963,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-agent-harness-check") {
+            do {
+                _ = NSApplication.shared
+                try LaunchProfilePalette.runAgentHarnessSelfCheck()
+                print("ContinuumRevivedPaletteAgentHarnessChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-duplicate-root-check") {
             do {
                 _ = NSApplication.shared
@@ -2648,6 +2660,42 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let summary = try AppDelegate.runComposerKeyRoutingSelfCheck()
                 print("ContinuumRevivedComposerKeyRoutingChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--reveal-in-finder-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try RevealInFinderChecks.run()
+                print("ContinuumRevivedRevealInFinderChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--leader-modal-recovery-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try LeaderModalRecoveryChecks.run()
+                print("ContinuumRevivedLeaderModalRecoveryChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--nav-overlay-visible-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try NavOverlayVisibleChecks.run()
+                print("ContinuumRevivedNavOverlayVisibleChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -8214,8 +8262,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile, so the ⌘ that came up after a jump was never the inbox's event.
         updateInboxJumpHints(modifiers: modifiers)
         let leaderModifier = navKeymap.leaderHoldModifier
-        // Text input owns ⌥: word movement, ⌥↩ (queue) and ⌥-characters.
-        if !leaderModifier.isEmpty, modifiers == leaderModifier, !focusedResponderIsTextInput() {
+        // Every focus context arms the leader, text input included: an agent tile
+        // keeps its composer focused, so gating on text input killed Quick Jump
+        // whenever an agent was selected. The dwell keeps quick ⌥-chords in text
+        // (⌥↩, ⌥←/→, ⌥3 = #) from ever seeing it, and once it is open over text
+        // the keys text owns pass straight through (`leaderKeyBelongsToText`).
+        if !leaderModifier.isEmpty, modifiers == leaderModifier {
             scheduleLeaderActivation()
         } else {
             disarmLeader()
@@ -8377,7 +8429,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// An editable text view (the agent composer, a note, any field editor) or
-    /// the code editor. The hold-⌥ leader never opens over one.
+    /// the code editor. The hold-⌥ leader opens over one, but hands it the keys
+    /// it owns, and a quick ⌥-chord there never jumps.
     private func focusedResponderIsTextInput() -> Bool {
         guard let responder = window?.firstResponder else { return false }
         if let text = responder as? NSTextView { return text.isEditable }
@@ -8409,9 +8462,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func handleHotkey(_ event: NSEvent) -> Bool {
         // A key while the hold-leader dwell is pending makes ⌥ a chord, not a
         // hold: the leader must not open under it, now or when the dwell ends.
+        // Off text input, a chord on a jump label or zone key IS the leader's —
+        // the fast ⌥+label jump — so the leader opens now and takes it below.
         if let pending = leaderDwellWorkItem {
             pending.cancel()
             leaderDwellWorkItem = nil
+            if leaderChordJumpsDuringDwell(event) { activateLeader() }
         }
         // Settings is a modal INSIDE the main window: while it is open it owns that
         // window's keyboard and nothing below runs, so canvas and global shortcuts
@@ -8617,11 +8673,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func activateLeader() {
-        guard focusBroker.activeSurface != .modal(.leader), !focusedResponderIsTextInput() else { return }
+        guard focusBroker.activeSurface != .modal(.leader) else { return }
         focusBroker.openModal(.leader)
         canvasView?.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
         canvasView?.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
         canvasView?.setLeaderOverlayVisible(true)
+    }
+
+    /// A key pressed while the dwell is still pending: does it jump? Only off
+    /// text input and off a terminal surface (both type ⌥-letters), only with
+    /// the leader modifier alone, and only when the key names a label or zone
+    /// the overlay would show.
+    private func leaderChordJumpsDuringDwell(_ event: NSEvent) -> Bool {
+        guard let canvas = canvasView,
+              FocusKeyModifiers(modifierFlags: event.modifierFlags) == navKeymap.leaderHoldModifier,
+              !focusedResponderIsTextInput(), !focusedResponderIsTerminalSurface() else { return false }
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        guard !key.isEmpty else { return false }
+        canvas.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
+        canvas.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
+        return canvas.leaderZoneJumpTarget(forKey: key) != nil || canvas.leaderJumpTarget(forLabel: key) != nil
+    }
+
+    /// Keys a focused text input owns even while the leader is open over it:
+    /// ⌥↩ (queue), ⌥←/→/↑/↓ (word and paragraph moves), ⌥⌫ and ⌥⌦ (word
+    /// deletes). Labels, zone keys and Esc keep their leader meaning.
+    private func leaderKeyBelongsToText(_ event: NSEvent) -> Bool {
+        guard focusedResponderIsTextInput() else { return false }
+        return [36, 76, 123, 124, 125, 126, 51, 117].contains(event.keyCode)
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
@@ -8643,6 +8722,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// centers the labeled tile (Phase C). Any other key is not the leader's: it
     /// closes the leader and reaches content, so an ⌥-character still types.
     private func handleLeaderKey(_ event: NSEvent) -> Bool {
+        if leaderKeyBelongsToText(event) {
+            disarmLeader()
+            return false
+        }
         if event.keyCode == 53 { // Esc
             cancelLeaderSnap() // restore the tile if a dock is in flight (no-op otherwise)
             disarmLeader()
@@ -8707,13 +8790,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the other way); a perpendicular direction restarts from the origin. Always
     /// computed against the tile's ORIGINAL frame so the leapfrog index is stable.
     private func leaderSnapStep(direction: TileArrangement.Direction) {
+        // Resolve through the navigation snapshot (WORLD frames) and the tile
+        // record, never `canvasState.tiles`: once the workspace scene mounts, the
+        // flat list is retired and empty, and ⌥+arrow silently did nothing.
         guard let canvas = canvasView,
               let tileId = canvas.canvasState.lastActiveTileId,
-              let tile = canvas.canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+              let tile = canvas.tileRecord(for: tileId),
+              let current = canvas.navigationTileSnapshot(for: tileId)?.worldFrame else { return }
 
         if leaderSnapTileId != tileId || leaderSnapOriginalFrame == nil {
             leaderSnapTileId = tileId
-            leaderSnapOriginalFrame = tile.frame
+            leaderSnapOriginalFrame = current
             leaderSnapDirection = direction
             leaderSnapIndex = 0
             canvas.beginGeometryEdit(.dockTile, tileIds: [tileId], includeAllZones: true)
@@ -8731,14 +8818,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         guard let original = leaderSnapOriginalFrame, let dir = leaderSnapDirection else { return }
-        let others = canvas.canvasState.tiles.filter { $0.id != tileId }.map(\.frame)
+        let others = canvas.navigationTileSnapshots().filter { $0.tileId != tileId }.map(\.worldFrame)
         let candidates = TileArrangement.dockCandidates(ahead: original, direction: dir, among: others)
         guard !candidates.isEmpty else { leaderSnapIndex = 0; return }
         let index = min(max(leaderSnapIndex, 0), candidates.count - 1)
         leaderSnapIndex = index
         let dest = TileArrangement.dockDestination(original, direction: dir, against: candidates[index], gap: TileGapResolver.resolvedGap())
+        // `dest` is WORLD; the record is in its own model's space (zone-local in
+        // a ZoneLayer). Move it by the world delta so either space stays right.
         var moved = tile
-        moved.frame = dest
+        moved.frame = TileFrame(
+            x: tile.frame.x + (dest.x - current.x), y: tile.frame.y + (dest.y - current.y),
+            width: dest.width, height: dest.height)
         canvas.updateTile(moved, recalculateZoneBounds: false, notifyChange: false)
     }
 
@@ -9252,6 +9343,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnTerminalFromProfile("nvim", trigger: "shortcut:quick-spawn-4")
         case "view.toggleWorkspaceSidebar":
             toggleWorkspaceSidebar()
+        case "tile.revealInFinder":
+            return revealFocusedTileInFinder()
         default:
             return false
         }
@@ -9641,6 +9734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func contextualPaletteActions(for focusedTileId: UUID?) -> [LaunchPaletteAction] {
         var actions: [LaunchPaletteAction] = []
         if tileKind(for: focusedTileId) == .browser { actions.append(.openInspectorForFocusedBrowser) }
+        if let focusedTileId, revealInFinderURL(forTile: focusedTileId) != nil { actions.append(.revealFocusedTileInFinder) }
         let zoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
             ?? canvasView?.activeProjectZonePlacement?.zoneId
             ?? canvasView?.activeZone?.zoneId
@@ -9666,8 +9760,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         palette.onSelectProfile = { [weak self] profileId in
             self?.spawnTerminalFromProfile(profileId, trigger: "palette:\(profileId)") ?? false
         }
-        palette.onSelectAgentModel = { [weak self] modelID in
-            self?.spawnManagedAgentFromPalette(model: modelID) ?? false
+        palette.onSelectAgentModel = { [weak self] harness, modelID in
+            self?.spawnManagedAgentFromPalette(harness: harness, model: modelID) ?? false
         }
         palette.onSelectAction = { [weak self] action in
             self?.performPaletteAction(action) ?? false
@@ -14603,9 +14697,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {
+    private func spawnManagedAgentFromPalette(harness: AgentHarness? = nil, model: String? = nil) -> Bool {
         guard resolvedCreationScope() != nil else {
-            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentFromPalette(model: model) }
+            requestCreationScope { [weak self] in _ = self?.spawnManagedAgentFromPalette(harness: harness, model: model) }
             return false
         }
         guard let spawner = spawnerForFilesystemCreation() else { return false }
@@ -14618,7 +14712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The refusal is SHOWN, in the workspace notification: File > New > Agent and
         // ⌘K both close on dispatch, and a beep plus a stderr line is invisible in a
         // GUI app — the person heard a beep and saw nothing happen.
-        switch spawner.spawnManagedAgentForSelectedModel(model, announceRefusal: { [weak self] message in
+        switch spawner.spawnManagedAgentForSelectedModel(model, harness: harness, announceRefusal: { [weak self] message in
             self?.presentSpawnRefusal(message)
         }, wire: { tileId, providerSettings in
             wireManagedAgentTile(tileId, initialLaunchSelection: providerSettings)
@@ -15668,6 +15762,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return workspaceRuntime?.workspaceId == workspaceId && workspaceRuntime?.workspaceId != before
         case .openInspectorForFocusedBrowser:
             return openInspectorForFocusedBrowserFromPalette()
+        case .revealFocusedTileInFinder:
+            return revealFocusedTileInFinder()
         case let .spawnHarnessRole(role):
             spawnHarnessRoleFromPalette(role)
             return false // Developer action; intentionally never recent.
@@ -15701,6 +15797,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             replayGettingStarted()
             return true
         }
+    }
+
+    /// The file a note or file tile is backed by, when it exists on disk. A note
+    /// lives at `<project root>/.array/notes/<noteId>.md`; a file tile is its
+    /// document. Nil for every other kind, a note never saved, and a document
+    /// with no file yet — the Reveal in Finder item is then disabled or absent.
+    /// Read-only: it stats a path and writes nothing.
+    func revealInFinderURL(forTile tileId: UUID) -> URL? {
+        guard let tile = canvasView?.tileRecord(for: tileId) else { return nil }
+        let url: URL
+        switch tile.kind {
+        case .note:
+            guard let noteId = tile.metadata.noteId,
+                  let root = controller(owningTile: tileId)?.projectRoot else { return nil }
+            url = ProjectStoreLayout(projectRoot: root).noteFile(id: noteId)
+        case .file:
+            if let path = tile.metadata.documentLocation?.path, path.hasPrefix("/") {
+                url = URL(fileURLWithPath: path)
+            } else if let path = tile.metadata.filePath, !path.isEmpty {
+                if path.hasPrefix("/") {
+                    url = URL(fileURLWithPath: path)
+                } else if let root = controller(owningTile: tileId)?.projectRoot {
+                    url = root.appendingPathComponent(path)
+                } else { return nil }
+            } else { return nil }
+        default:
+            return nil
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        return url
+    }
+
+    /// ⌘K Reveal in Finder and ⌥⌘R: the focused tile's backing file. False (the
+    /// chord passes through) when the focused tile has none.
+    @discardableResult
+    private func revealFocusedTileInFinder() -> Bool {
+        guard let tileId = paletteContextTileId ?? focusedTileIdForPaletteContext(),
+              let canvasView, let url = revealInFinderURL(forTile: tileId) else { return false }
+        canvasView.revealInFinder(url)
+        return true
     }
 
     @discardableResult
@@ -17890,6 +18027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// inline, a leg's rename reached a nil `onZoneRenamed` and persisted nothing.
     func wireCanvasCallbacks(_ canvasView: CanvasNSView) {
         canvasView.delegate = self
+        canvasView.tileRevealURLProvider = { [weak self] tileId in self?.revealInFinderURL(forTile: tileId) }
         canvasView.onTileCloseRequested = { [weak self] tileId in
             self?.deleteTile(id: tileId)
         }
@@ -26116,12 +26254,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(frameOf(aId) == dockB, "releasing ⌥ should commit the dock (no restore); got \(String(describing: frameOf(aId)))")
         try expect(app.focusBroker.activeSurface == .tile(aId), "release exits the leader to the prior tile scope")
 
+        // The same dock in the scene production mounts (flat list retired).
+        let mounted = try runLeaderSnapMountedArm()
+
         let manifest: [String: Any] = [
             "check": "leader-snap",
             "path": "synthesized .flagsChanged + arrow .keyDown NSEvents → handleHotkey → handleLeaderKey (real input path)",
             "dockNearest": ["x": dockB.x, "y": dockB.y],
             "leapfrog": ["x": dockC.x, "y": dockC.y],
             "gap": gap,
+            "mounted": mounted,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -26241,6 +26383,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(openOverlay.zoneBadgeCount == 2, "nav mode overlay should render one ordinal badge per zone")
         try expect(openOverlay.hitTestPassesThrough, "nav mode overlay should not intercept mouse events")
         try expect(openOverlay.hintLine.contains("hjkl move") && openOverlay.hintLine.contains("esc exit"), "nav mode overlay should expose key hints")
+        // The pixel guard runs here, while the overlay is up and before any later
+        // assertion can stop the check short of it.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("nav-mode", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let screenshot = directory.appendingPathComponent("nav-overlay.png")
+        if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
+            overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
+            let pixels = VisualSnapshot.metrics(of: rep)
+            guard !pixels.isBlank else {
+                throw NSError(domain: "NavModeCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "nav-mode overlay render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
+            }
+        }
         let selectedRight = CanvasEngine.nearestTile(from: selectedTileId, direction: .right, tiles: overlayCanvas.canvasState.tiles)
         try expect(selectedRight == rightTileId, "nav mode l should select nearest tile to the right; got \(String(describing: selectedRight))")
         let selectedDown = CanvasEngine.nearestTile(from: selectedTileId, direction: .down, tiles: overlayCanvas.canvasState.tiles)
@@ -26424,6 +26583,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Switch to Main Canvas Workspace", "nav w should select a switch-workspace row, not New Workspace; selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
         navApp.profilePalette?.close()
 
+
+        overlayCanvas.setNavModeOverlayVisible(false)
+        try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
+
+        // Last on purpose: this is the documented KNOWN-RED product defect (⌘K
+        // ranks "Create Zone…" above a zone named Alpha for "z"). Run first, it
+        // hid every assertion above behind its failure.
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("z", keyCode: 6))
         try expect(navApp.focusBroker.activeSurface == .modal(.palette), "nav z should hand off from nav mode to the palette modal")
@@ -26435,26 +26601,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Jump to Alpha", "nav z should default-select the first jump-to-zone row (Alpha); selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
         try expect(zoneFilteredNames.contains { $0.contains("Review Zone") }, "nav z filtered rows must include the Review Zone project row; filtered=\(zoneFilteredNames)")
         navApp.profilePalette?.close()
-
-        overlayCanvas.setNavModeOverlayVisible(false)
-        try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
-
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("qa-runs", isDirectory: true)
-            .appendingPathComponent(timestamp, isDirectory: true)
-            .appendingPathComponent("nav-mode", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        overlayCanvas.setNavModeOverlayVisible(true)
-        let screenshot = directory.appendingPathComponent("nav-overlay.png")
-        if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
-            overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
-            try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
-            let pixels = VisualSnapshot.metrics(of: rep)
-            guard !pixels.isBlank else {
-                throw NSError(domain: "NavModeCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "nav-mode overlay render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
-            }
-        }
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "nav-mode",

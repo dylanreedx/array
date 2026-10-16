@@ -3272,26 +3272,31 @@ final class AgentSupervisor {
     /// The rule itself, over a record and a catalogue — pure enough to pin every
     /// refusing state in the matrix without a store, a home directory, or the
     /// shared catalogue's global state.
+    /// Why `harness` cannot start or continue a turn right now, in the words the
+    /// composer uses; nil when it is ready. Shared with ⌘K's New <Harness> Agent
+    /// rows so a harness that cannot run says the same thing everywhere.
+    static func readinessRefusal(for harness: AgentHarness, catalog: AgentModelCatalog = .shared, retry: String) -> String? {
+        switch catalog.snapshot(for: harness).readiness {
+        case .checking:
+            return "\(harness.rawValue) is still starting up — try again in a moment."
+        case .missing:
+            return "\(harness.rawValue) is not installed. Open Help ▸ Environment Setup…"
+        case .loggedOut:
+            // CLAUDE.md non-negotiable 3: the CLI's own login, never a key.
+            return "\(harness.rawValue) is signed out — \(signInInstruction(for: harness)), then \(retry)."
+        case .unavailable(let reason):
+            return "\(harness.rawValue) is unavailable (\(reason)). Open Help ▸ Environment Setup…"
+        case .ready:
+            return nil
+        }
+    }
+
     static func sendRefusal(record: AgentRecord, catalog: AgentModelCatalog = .shared) -> String? {
         guard let harness = record.harness else {
             return "This agent's harness ownership is unresolved. Choose Claude Code, Codex, or Pi and a model it owns."
         }
         let snapshot = catalog.snapshot(for: harness)
-        guard snapshot.readiness.canRun else {
-            switch snapshot.readiness {
-            case .checking:
-                return "\(harness.rawValue) is still starting up — try again in a moment."
-            case .missing:
-                return "\(harness.rawValue) is not installed. Open Help ▸ Environment Setup…"
-            case .loggedOut:
-                // CLAUDE.md non-negotiable 3: the CLI's own login, never a key.
-                return "\(harness.rawValue) is signed out — \(signInInstruction(for: harness)), then send again."
-            case .unavailable(let reason):
-                return "\(harness.rawValue) is unavailable (\(reason)). Open Help ▸ Environment Setup…"
-            case .ready:
-                return nil
-            }
-        }
+        if let refusal = readinessRefusal(for: harness, catalog: catalog, retry: "send again") { return refusal }
         // A model Array RETIRED from a harness's offer list is not a model that
         // harness cannot run. Pi still speaks anthropic; Array simply stopped
         // offering it (`PiCatalogPolicy`). An agent already persisted on such a
@@ -15756,7 +15761,7 @@ private func checkHeadlessAgents(
     // The ⌘K model step gave this a parameter and a result; the scan string went
     // stale and this leg has been reading as BLIND (a throw) behind the KNOWN-RED
     // naming section ever since. Pinned to the real signature again.
-    let managedBranch = try paletteAgentSpawnBranch("private func spawnManagedAgentFromPalette(model: String? = nil) -> Bool {")
+    let managedBranch = try paletteAgentSpawnBranch("private func spawnManagedAgentFromPalette(harness: AgentHarness? = nil, model: String? = nil) -> Bool {")
     // `spawnManagedAgent` is in the pattern because of the negative test: a headless
     // branch that simply CALLS the managed one creates a tile without naming the
     // spawner, and the first draft of this pattern passed that mutation.
