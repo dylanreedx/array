@@ -6932,6 +6932,7 @@ final class TileSpawner {
             "check": "file-tree-hardening",
             "debounceFlush": try FileTreeTileNSView.runDebounceFlushSelfCheck(),
             "truncatedOutline": try FileTreeTileNSView.runTruncatedOutlineSelfCheck(),
+            "zoomedLegacyScrollers": try FileTreeTileNSView.runZoomedLegacyScrollerSelfCheck(),
             "sidecarValidation": scenarios
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
