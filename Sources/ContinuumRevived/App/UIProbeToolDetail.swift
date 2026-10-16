@@ -524,7 +524,139 @@ extension UIProbeGeometry {
         try await runRealTranslatorSupplyChecks()
         try await runDelegationSupplyChecks()
         try await runPiDelegationSupplyChecks()
-        return 28
+        try await runFailedOutputKeepsTailPinnedCheck()
+        return 32
+    }
+
+    /// A reader following a live transcript must still be at its end after a
+    /// failed command's output opens.
+    ///
+    /// The seam (seen in the launch film's Order export tile): a failed tool row
+    /// arrives first, from the runtime event, with no output yet. Its exit code and
+    /// output reach the transcript later, through the host-local detail store
+    /// (`refreshVisibleToolDetails`). A failed row is open by default, so that is the
+    /// moment it grows by its whole output. The refresh asked the scroll controller to
+    /// stick to the bottom BEFORE the collection view had laid out the taller row, so
+    /// it scrolled to the old end; the row then grew below the fold, and the next
+    /// update found the reader more than the near-bottom threshold away and raised
+    /// "Jump to latest" instead of following.
+    ///
+    /// Outcome assertions only: the viewport's distance from the document end, the
+    /// failed row's last point inside the viewport, and no "Jump to latest" after the
+    /// next ordinary arrival.
+    private static func runFailedOutputKeepsTailPinnedCheck() async throws {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func fail(_ message: String) -> GeometryError { GeometryError(message: "failed output pin: " + message) }
+        let scope = AgentToolDetailScope(
+            agentID: "pin-agent", threadID: "pin-thread", turnID: "pin-turn", provider: "runtime"
+        )!
+        let itemID: AgentToolDetailID = "pin-failed-shell"
+        let identity = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+        let store = AgentToolDetailStore()
+        let list = AgentTranscriptListView(toolDetailStore: store)
+        list.frame = NSRect(x: 0, y: 0, width: 360, height: 280)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        func settle() {
+            host.layoutSubtreeIfNeeded()
+            list.collectionView.layoutSubtreeIfNeeded()
+        }
+        let scrollView = list.qaScrollViewForChecks
+        /// Points between the viewport's bottom edge and the end of the document.
+        func distanceFromEnd() -> CGFloat {
+            let clip = scrollView.contentView.bounds
+            let height = scrollView.documentView?.frame.height ?? 0
+            return max(0, height - clip.height) - clip.origin.y
+        }
+
+        // Earlier work, long enough to scroll; the reader is at the end.
+        let prose = (0..<30).map { index in
+            AgentBlock(
+                id: id("pin-prose-\(index)"), revision: 1, kind: .paragraph,
+                payload: .paragraph([.text("Step \(index): the export streams a page of orders and writes it out.")])
+            )
+        }
+        let proseEntry = AgentEntry(
+            id: id("pin-prose"), revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "pin fixture"), blocks: prose
+        )
+        try list.enqueue(
+            document: AgentDocument(version: 1, entries: [proseEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: prose.map(\.id))
+        )
+        list.flushPendingVisualUpdate()
+        settle()
+        list.collectionView.scroll(NSPoint(x: 0, y: max(0, (scrollView.documentView?.frame.height ?? 0) - scrollView.contentView.bounds.height)))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        guard distanceFromEnd() <= 1, list.qaIsNearBottom else {
+            throw fail("fixture did not start at the end (\(distanceFromEnd()) pt above it)")
+        }
+
+        // The failed row arrives from the runtime event, before its detail.
+        let toolBlock = AgentBlock(
+            id: id("pin-tool"), revision: 1, kind: .toolCall,
+            payload: .toolCall(AgentToolCallPayload(name: "Shell", summary: "npm test -- orders", status: .failed))
+        )
+        let toolEntry = AgentEntry(
+            id: id("pin-tool-entry"), revision: 1, role: .assistant,
+            provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [toolBlock]
+        )
+        list.bindToolDetailIdentity(identity, to: toolEntry.id)
+        try list.enqueue(
+            document: AgentDocument(version: 2, entries: [proseEntry, toolEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, inserted: [toolBlock.id])
+        )
+        list.flushPendingVisualUpdate()
+        settle()
+        await list.qaWaitForToolDetailRefresh()
+        settle()
+        guard distanceFromEnd() <= 1 else {
+            throw fail("the failed row's arrival left the reader \(distanceFromEnd()) pt above the end")
+        }
+
+        // Its exit code and output land afterwards, through the detail store.
+        let output = (1...14).map { "  FAIL tests/orders.test.ts > ordersCsv > case \($0)" }.joined(separator: "\n")
+            + "\n\nTests  14 failed | 8 passed (22)"
+        _ = await store.recordStart(AgentToolDetailStart(identity: identity, toolName: "shell"))
+        _ = await store.recordEnd(AgentToolDetailEnd(identity: identity, output: output, status: .failed, exitCode: 1))
+        let heightBefore = scrollView.documentView?.frame.height ?? 0
+        list.refreshToolDetailPresentation()
+        await list.qaWaitForToolDetailRefresh()
+        settle()
+        let grown = (scrollView.documentView?.frame.height ?? 0) - heightBefore
+        guard grown > 48 else {
+            throw fail("the failed output did not open (the row grew \(grown) pt; the seam needs more than the 48 pt threshold)")
+        }
+        let toolIndex = prose.count
+        guard let rowFrame = list.collectionView.layoutAttributesForItem(at: IndexPath(item: toolIndex, section: 0))?.frame else {
+            throw fail("the failed row has no layout attributes")
+        }
+        let visible = scrollView.contentView.bounds
+        guard distanceFromEnd() <= 1, rowFrame.maxY <= visible.maxY + 1 else {
+            throw fail("after the output opened the reader is \(distanceFromEnd()) pt above the end; "
+                + "the failed row ends at \(rowFrame.maxY), the viewport at \(visible.maxY)")
+        }
+
+        // The next ordinary arrival follows the tail instead of raising Jump to latest.
+        let after = AgentBlock(
+            id: id("pin-after"), revision: 1, kind: .paragraph,
+            payload: .paragraph([.text("One test fails: names with commas are not quoted yet.")])
+        )
+        let afterEntry = AgentEntry(
+            id: id("pin-after-entry"), revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "pin fixture"), blocks: [after]
+        )
+        try list.enqueue(
+            document: AgentDocument(version: 3, entries: [proseEntry, toolEntry, afterEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, inserted: [after.id])
+        )
+        list.flushPendingVisualUpdate()
+        settle()
+        guard distanceFromEnd() <= 1, !list.qaShowsJumpToLatest else {
+            throw fail("the next arrival left the reader \(distanceFromEnd()) pt above the end, Jump to latest "
+                + (list.qaShowsJumpToLatest ? "showing" : "hidden"))
+        }
     }
 
     /// TR-03 — a delegation row must be able to say WHAT it delegated.

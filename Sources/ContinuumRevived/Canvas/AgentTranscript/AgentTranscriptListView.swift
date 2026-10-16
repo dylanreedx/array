@@ -3187,6 +3187,12 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                     guard let self else { return }
                     transcriptLayout.invalidate(changedIDs: changed)
                     try updateVisibleHosts(ids: changed)
+                    // Lay the re-measured rows out INSIDE the update, as the document
+                    // path does. The stick-to-bottom below reads the document height
+                    // right after this returns; left to the next layout pass, a failed
+                    // row opening on its output grew after the reader had been scrolled
+                    // to the old end, and the next arrival raised "Jump to latest".
+                    layoutSubtreeIfNeeded()
                 }
             )
         } catch {
