@@ -141,6 +141,8 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        // The state dot is a capsule at Default and Rounded, square at Sharp.
+        stateDot.layer?.cornerRadius = CornerStyle.current == .sharp ? 0 : CGFloat(pageZoom.scaled(3))
         let theme = effectiveTokenTheme
         nameLabel.textColor = TextToken.textPrimary.color.nsColor(for: theme)
         stateLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
@@ -313,13 +315,15 @@ final class AgentTileOverflowButton: NSControl, TokenThemed, AgentPageZoomScalab
         }
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard window?.firstResponder === self else { return }
-        AgentLineRole.focusRing.color.nsColor(in: self).setStroke()
+    // Keyboard focus is the SYSTEM focus ring, drawn by AppKit around this
+    // mask at the user's own accessibility settings. It replaced a hand-drawn
+    // 2pt stroke: the system ring is the one border the app-wide 0.5pt
+    // ceiling exempts, because it is the accessibility affordance.
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
         let radius = CGFloat(pageZoom.scaled(Radius.card))
-        let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius)
-        ring.lineWidth = 2
-        ring.stroke()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
     }
 
     func applyTokens() {

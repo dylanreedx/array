@@ -133,6 +133,9 @@ final class FloatingToolbarHostView: NSView {
     func install(in pane: NSView) {
         frame = pane.bounds
         pane.addSubview(self, positioned: .above, relativeTo: nil)
+        // Canvas menus (the zone project chooser and its cancel confirmation)
+        // keep clear of the bar, wherever it rests.
+        ChoicePopoverController.registerObstacle(toolbar)
         settle()
     }
 
@@ -828,6 +831,8 @@ final class FloatingToolbarView: NSView, TokenThemed {
 
     /// Draws the capsule and places every item for the current `angle`, about
     /// the centre of `bounds`.
+    private var capsuleRadius: CGFloat { CornerStyle.current == .sharp ? 0 : Self.thickness / 2 }
+
     func render() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -837,7 +842,9 @@ final class FloatingToolbarView: NSView, TokenThemed {
         var transform = CGAffineTransform(translationX: center.x, y: center.y).rotated(by: angle)
         let path = CGPath(
             roundedRect: CGRect(x: -length / 2, y: -Self.thickness / 2, width: length, height: Self.thickness),
-            cornerWidth: Self.thickness / 2, cornerHeight: Self.thickness / 2, transform: &transform)
+            // A capsule at Default and Rounded, a rectangle at Sharp (Settings ›
+            // Appearance › Corner style).
+            cornerWidth: capsuleRadius, cornerHeight: capsuleRadius, transform: &transform)
         capsule.frame = bounds
         capsule.path = path
         capsule.shadowPath = path
@@ -933,7 +940,7 @@ final class ToolbarIconButton: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        layer?.cornerRadius = bounds.height / 2
+        layer?.applyCapsule()
         icon.frame = bounds
         chevron?.frame = NSRect(x: bounds.maxX - 11, y: bounds.minY + 3, width: 8, height: 8)
     }
@@ -1081,6 +1088,7 @@ final class ToolbarHoverPillView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
+        layer?.applyCapsule()
         var x = Self.padding
         for label in [titleLabel] + (shortcutLabel.map { [$0] } ?? []) {
             let size = label.cell?.cellSize ?? label.intrinsicContentSize
@@ -1106,7 +1114,7 @@ final class ToolbarHoverPillView: NSView, TokenThemed {
 
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(in: self)
-        layer?.cornerRadius = Self.height / 2
+        layer?.applyCapsule()
         layer?.borderWidth = 0
         layer?.shadowColor = NSColor.black.withAlphaComponent(effectiveTokenTheme == .dark ? 0.4 : 0.14).cgColor
         titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
@@ -1167,7 +1175,7 @@ final class ToolbarChoicesMenuView: NSView, TokenThemed {
 
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(in: self)
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 12))
         layer?.borderWidth = 0
         layer?.shadowColor = NSColor.black.withAlphaComponent(effectiveTokenTheme == .dark ? 0.45 : 0.16).cgColor
         heading.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -1201,7 +1209,7 @@ final class ToolbarChoiceRowView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 7))
         let size = label.cell?.cellSize ?? label.intrinsicContentSize
         label.frame = NSRect(x: 8, y: ((bounds.height - size.height) / 2).rounded(), width: bounds.width - 16, height: ceil(size.height))
     }

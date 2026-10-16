@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 public enum CanvasShortcutRailConfig {
@@ -134,6 +135,19 @@ public enum BuiltInSettingRegistry {
         consumerID: "canvas.shortcutRail"
     )
 
+    public static let cornerStyle = SettingDefinition(
+        id: SettingID(rawValue: CornerStyle.defaultsKey),
+        category: .appearance,
+        title: "Corner Style",
+        description: "How round every corner in the app is: Sharp, Default or Rounded.",
+        defaultValue: CornerStyle.fallback.rawValue,
+        control: .labeledEnum(options: Dictionary(uniqueKeysWithValues: CornerStyle.allCases.map { ($0.rawValue, $0.title) })),
+        validation: SettingValidation { CornerStyle(rawValue: $0) == nil ? "Choose Sharp, Default or Rounded." : nil },
+        applicationPolicy: .live,
+        keywords: ["corners", "radius", "rounded", "sharp", "square", "bubbly", "roundness"],
+        consumerID: "appearance.cornerStyle"
+    )
+
     public static let floatingToolbarVisible = SettingDefinition(
         id: SettingID(rawValue: FloatingToolbarConfig.visibleKey),
         category: .canvasAndZones,
@@ -255,6 +269,7 @@ public enum BuiltInSettingRegistry {
             tileGap.erased,
             shortcutRail.erased,
             floatingToolbarVisible.erased,
+            cornerStyle.erased,
             agentContextAutoCompact.erased,
             agentContextAutoCompactPercent.erased,
         ] + floatingToolbarItemVisibility.map { $0.erased } + [

@@ -361,8 +361,8 @@ private final class BoardAssignmentHint: NSView {
     init(frame: NSRect, name: String) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.borderWidth = 2
-        layer?.cornerRadius = 12
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 12))
         layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
         let label = NSTextField(labelWithString: "Drop to assign · " + name)
         label.frame = NSRect(x: 14, y: 12, width: max(0, frame.width - 28), height: 24)

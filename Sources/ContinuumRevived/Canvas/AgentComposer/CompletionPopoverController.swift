@@ -368,7 +368,7 @@ final class CompletionPopoverController {
         guard let list = popover.listView else { return nil }
         return list.items.first(where: { $0.id == list.focusedID })?.title
     }
-    var qaPanelFrame: NSRect? { popover.panel?.frame }
+    var qaPanelFrame: NSRect? { popover.surfaceFrame }
     var qaBreadcrumb: String? { popover.qaCompletionBreadcrumb }
     var qaFooter: String? { popover.qaCompletionFooter }
     var qaFocusedRowIsVisible: Bool { popover.listView?.qaFocusedRowIsVisible ?? false }

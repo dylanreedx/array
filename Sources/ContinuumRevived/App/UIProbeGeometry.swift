@@ -6805,10 +6805,10 @@ enum UIProbeGeometry {
             controller.present(
                 items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
             ) { _ in }
-            guard let panel = controller.panel, panel.isVisible, controller.listView != nil else {
+            guard let panel = controller.panel, panel.isVisible, controller.listView != nil,
+                  let frame = controller.surfaceFrame else {
                 throw fail("choice popover: present did not attach a visible panel")
             }
-            let frame = panel.frame
             let placedBelow = frame.maxY <= screenAnchor.minY
             let placedAbove = frame.minY >= screenAnchor.maxY
             guard visible.contains(frame),
@@ -6850,11 +6850,12 @@ enum UIProbeGeometry {
             takesFocus: false
         ) { _ in }
         guard let completionPanel = controller.panel,
+              let completionSurface = controller.surfaceFrame,
               let completionList = controller.listView,
-              visible.insetBy(dx: 8, dy: 8).contains(completionPanel.frame),
-              completionPanel.frame.width >= 360,
-              completionPanel.frame.width <= 520,
-              completionPanel.frame.height <= 356,
+              visible.insetBy(dx: 8, dy: 8).contains(completionSurface),
+              completionSurface.width >= 360,
+              completionSurface.width <= 520,
+              completionSurface.height <= 356,
               let viewportHeight = controller.qaCompletionViewportHeight,
               viewportHeight <= ChoiceListView.rowHeight * 8 + 8,
               let documentHeight = controller.qaCompletionDocumentHeight,
@@ -6868,8 +6869,8 @@ enum UIProbeGeometry {
         }
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             completionPanel.appearance = NSAppearance(named: appearance)
-            guard completionPanel.contentView?.layer?.backgroundColor != nil,
-                  completionPanel.contentView?.layer?.borderWidth == ChoiceListView.panelBorderWidth else {
+            guard controller.surfaceView?.layer?.backgroundColor != nil,
+                  controller.surfaceView?.layer?.borderWidth == ChoiceListView.panelBorderWidth else {
                 throw fail("choice popover: bounded file completion lost its token-painted chrome in \(appearance.rawValue)")
             }
         }
@@ -6903,8 +6904,8 @@ enum UIProbeGeometry {
             relativeTo: anchor,
             placementFrame: constrainedViewport
         ) { _ in }
-        guard let constrainedPanel = controller.panel,
-              constrainedViewport.insetBy(dx: 8, dy: 8).contains(constrainedPanel.frame) else {
+        guard let constrainedSurface = controller.surfaceFrame,
+              constrainedViewport.insetBy(dx: 8, dy: 8).contains(constrainedSurface) else {
             throw fail("choice popover: contextual placement escaped its canvas viewport")
         }
         controller.dismiss()

@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
@@ -45,10 +46,10 @@ final class SettingsOverlayView: NSView {
         addSubview(shadowView)
 
         card.wantsLayer = true
-        card.layer?.cornerRadius = 14
+        card.layer?.applyCorner(.modal)
         card.layer?.cornerCurve = .continuous
         card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 0.5
+        card.layer?.borderWidth = CGFloat(LineWidth.hairline)
         card.setAccessibilityIdentifier(Self.cardIdentifier)
         addSubview(card)
         hosting.translatesAutoresizingMaskIntoConstraints = true
@@ -101,7 +102,11 @@ final class SettingsOverlayView: NSView {
         let frame = Self.cardFrame(in: bounds)
         card.frame = frame
         shadowView.frame = frame
-        shadowView.layer?.shadowPath = CGPath(roundedRect: shadowView.bounds, cornerWidth: 14, cornerHeight: 14, transform: nil)
+        // Corner style (Settings › Appearance): the card and its shadow share
+        // the modal radius, re-resolved on every layout.
+        let radius = CornerRole.modal.cgRadius()
+        card.layer?.cornerRadius = radius
+        shadowView.layer?.shadowPath = CGPath(roundedRect: shadowView.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         hosting.frame = card.bounds
         closeButton.frame = NSRect(x: card.bounds.width - 40, y: card.bounds.height - 40, width: 24, height: 24)
     }

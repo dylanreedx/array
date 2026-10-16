@@ -387,13 +387,16 @@ final class KanbanCardView: NSView, TokenThemed {
     // MARK: - Tokens
 
     func applyTokens() {
+        // Corner style (Settings › Appearance › Corner style).
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 7))
+        thumbnail.layer?.cornerRadius = CGFloat(CornerRole.radius(base: 4))
         // A resting card paints its own fill — the token, never `.clear`. A
         // painted transparent reads to the colour census as an unregistered
         // literal (hazard 8).
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(in: self)
         // Selection is a ring; a resting card has NO border, which is what lets
         // the shadow do the separating.
-        layer?.borderWidth = (isSelected || isEditing) ? 2 : 0
+        layer?.borderWidth = (isSelected || isEditing) ? CGFloat(LineWidth.hairline) : 0
         layer?.borderColor = (isSelected || isEditing)
             ? LineToken.borderStrong.color.cgColor(in: self) : nil
         layer?.shadowColor = NSColor.black.cgColor

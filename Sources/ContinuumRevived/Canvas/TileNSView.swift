@@ -470,7 +470,7 @@ class TileNSView: NSView, TokenThemed {
         WorkspaceSwitchCounters.tileViewsBuilt += 1
         wantsLayer = true
         applyTokens()
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         // P1.11: `Radius.container`, per Metrics' own mapping table (6 → 10). The
         // tile CONTAINS cards, and P1.10 moved those to `Radius.card` (6) — this is
         // the other half of righting the inverted nesting.
@@ -509,6 +509,8 @@ class TileNSView: NSView, TokenThemed {
     /// boundary at all. `borderStrong` on `canvas` measures 6.91:1 light / 6.09:1
     /// dark (P1.3's provenance table), and `--ui-contrast-check` asserts it.
     func applyTokens() {
+        // Corner style (Settings › Appearance › Corner style): the tile radius.
+        layer?.applyCorner(.tile)
         layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
     }
@@ -1836,7 +1838,8 @@ private final class TitleBarView: NSView, TokenThemed {
         // documented pairs, whereas an accent at 16% over a surface is a composite
         // no gate can predict — so the READ comes from the dot and the outline.
         color.withAlphaComponent(0.16).setFill()
-        NSBezierPath(roundedRect: pillRect, xRadius: pillHeight / 2, yRadius: pillHeight / 2).fill()
+        let pillRadius = CornerStyle.current == .sharp ? 0 : pillHeight / 2
+        NSBezierPath(roundedRect: pillRect, xRadius: pillRadius, yRadius: pillRadius).fill()
         color.setFill()
         NSBezierPath(ovalIn: NSRect(
             x: pillRect.minX + Self.statusPillPad, y: pillRect.midY - dot / 2,

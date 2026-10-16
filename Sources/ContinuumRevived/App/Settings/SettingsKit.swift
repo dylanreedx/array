@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
@@ -6,6 +7,21 @@ import SwiftUI
 // the left, the control on the right, inside a grouped Form. Every row carries
 // its registry anchor (`settingsAnchor`), which gives it an accessibility
 // identifier, a scroll target, the search highlight, and a census entry.
+
+extension View {
+    /// Keep `style` on the app's corner style (Settings › Appearance › Corner
+    /// style), so a SwiftUI shape drawn from it re-renders live.
+    func onCornerStyleChange(_ style: Binding<CornerStyle>) -> some View {
+        onReceive(NotificationCenter.default.publisher(for: CornerStyleController.didChangeNotification)) { _ in
+            style.wrappedValue = CornerStyle.current
+        }
+    }
+}
+
+extension CornerStyle {
+    /// The radius this style draws for a Default radius of `base`.
+    func cgRadius(_ base: Double) -> CGFloat { CGFloat(radius(base)) }
+}
 
 /// Frames of anchored rows, in the pane's coordinate space.
 struct SettingsAnchorFrameKey: PreferenceKey {
@@ -34,6 +50,7 @@ extension EnvironmentValues {
 private struct SettingsAnchorModifier: ViewModifier {
     let anchor: String
     let model: SettingsModel
+    @State private var cornerStyle = CornerStyle.current
     @Environment(\.settingsPaneID) private var paneID
 
     func body(content: Content) -> some View {
@@ -42,9 +59,10 @@ private struct SettingsAnchorModifier: ViewModifier {
             .id(anchor)
             .accessibilityIdentifier(anchor)
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerStyle.cgRadius(6), style: .continuous)
                     .fill(Color.accentColor.opacity(highlighted ? 0.22 : 0))
                     .padding(-6)
+                    .onCornerStyleChange($cornerStyle)
                     .animation(.easeOut(duration: highlighted ? 0.15 : 0.6), value: highlighted)
             )
             .background(GeometryReader { proxy in
@@ -139,18 +157,25 @@ struct ToggleRow: View {
 struct PickerRow: View {
     let row: SettingsRow
     let model: SettingsModel
+    /// A short, ordered set of looks (Corner style's Sharp / Default / Rounded)
+    /// reads as a segmented control rather than a menu.
+    var segmented = false
 
     var body: some View {
         if case let .choice(_, label, options, _, _) = row.field {
             let binding = model.binding(for: row.field)
-            Picker(selection: Binding(get: { binding.string }, set: { binding.set(.string($0)) })) {
+            let picker = Picker(selection: Binding(get: { binding.string }, set: { binding.set(.string($0)) })) {
                 ForEach(options, id: \.self) { option in
                     Text(row.field.displayTitle(forOption: option)).tag(option)
                 }
             } label: {
                 SettingsRowLabel(title: label, help: row.help)
             }
-            .pickerStyle(.menu)
+            if segmented {
+                picker.pickerStyle(.segmented)
+            } else {
+                picker.pickerStyle(.menu)
+            }
         }
     }
 }

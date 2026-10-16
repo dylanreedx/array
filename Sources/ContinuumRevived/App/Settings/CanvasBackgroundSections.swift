@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
@@ -9,6 +10,7 @@ import SwiftUI
 struct CanvasBackgroundSections: View {
     let editor: CanvasBackgroundEditor
     let model: SettingsModel
+    @State private var cornerStyle = CornerStyle.current
 
     private typealias E = CanvasBackgroundEditor
 
@@ -143,7 +145,8 @@ struct CanvasBackgroundSections: View {
         Section {
             CanvasBackgroundPreview(configuration: config)
                 .frame(height: 140)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(8), style: .continuous))
+                .onCornerStyleChange($cornerStyle)
                 .accessibilityHidden(true)
                 .settingsFrame(E.previewIdentifier)
             anchored(E.resetIdentifier) {

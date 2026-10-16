@@ -236,7 +236,6 @@ final class AgentReferenceChipView: NSButton {
     /// it sits in the same rhythm rather than in a taller card of its own.
     static let height = CGFloat(30)
     private static let controlHeight = CGFloat(26)
-    private static let cornerRadius = CGFloat(8)
     private static let horizontalPadding = CGFloat(Space.l)
     private static let glyphSide = CGFloat(14)
     private static let contentGap = CGFloat(Space.s)
@@ -246,7 +245,8 @@ final class AgentReferenceChipView: NSButton {
     // properties above remain the 100% values.
     static func height(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
     static func controlHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(26)) }
-    private static func cornerRadius(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(8)) }
+    /// Corner style (Settings › Appearance › Corner style): an artifact chip.
+    private static func cornerRadius(zoom: AgentPageZoom) -> CGFloat { CornerRole.artifact.cgRadius(zoom: zoom) }
     private static func horizontalPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.l)) }
     private static func glyphSide(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(14)) }
     private static func contentGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s)) }
@@ -317,7 +317,9 @@ final class AgentReferenceChipView: NSButton {
             ?? CanvasSymbolImage.image(named: "person.2", pointSize: glyphPointSize, weight: .semibold)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         font = NSFont.token(.label, zoom: zoom)
-        layer?.borderWidth = CGFloat(zoom.scaled(1))
+        // A hairline is a device property, not a metric: it does not scale
+        // with the page zoom (same rule as `ChoiceListView.panelBorderWidth`).
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.cornerRadius = Self.cornerRadius(zoom: zoom)
     }
 

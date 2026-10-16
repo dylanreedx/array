@@ -67,12 +67,122 @@ public enum Space {
 /// that, and the violation is the regression witness in `MetricsChecks`.
 public enum Radius {
     /// A transcript card, a user-input card, a text field — anything nested.
-    public static let card = 6.0
-    /// A tile, a dock, a popover — anything that CONTAINS cards.
-    public static let container = 10.0
+    /// Resolved through the app-wide `CornerStyle`: 6 at Default.
+    public static var card: Double { CornerRole.card.radius }
+    /// A tile, a dock, a popover — anything that CONTAINS cards. 10 at Default.
+    public static var container: Double { CornerRole.popover.radius }
     /// Fully rounded. Large enough that any view clamps it to half its height,
-    /// so a status chip stays a pill at every height it is ever given.
-    public static let pill = 999.0
+    /// so a status chip stays a pill at every height it is ever given. A pill
+    /// stays a capsule at Default and Rounded and becomes a rectangle at Sharp.
+    public static var pill: Double { CornerRole.pill.radius }
+}
+
+// MARK: - Corner style
+
+/// The app-wide corner roundness the owner picks in Settings › Appearance ›
+/// Corner style. Every rounded surface resolves its radius through a
+/// `CornerRole`, and a role's radius through the current style:
+///
+///  * **Sharp** — 0 everywhere. Pills become rectangles.
+///  * **Default** — exactly the radii the app has always drawn.
+///  * **Rounded** — friendly and bubbly but realistic: each Default radius
+///    × `roundedScale`, rounded to a whole point and capped at `roundedCap`.
+///    A capsule stays a capsule.
+///
+/// Rounded is a function of the Default radius alone, so ONE rule covers every
+/// role and the corner census (`--corner-style-check`) can predict any surface's
+/// radius under any style from what it draws at Default.
+public enum CornerStyle: String, CaseIterable, Sendable {
+    case sharp
+    case standard = "default"
+    case rounded
+
+    /// The `UserDefaults` key of the setting.
+    public static let defaultsKey = "array.appearance.cornerStyle"
+    public static let fallback: CornerStyle = .standard
+    public static let roundedScale = 1.8
+    public static let roundedCap = 28.0
+
+    /// The style every radius resolves against. Written only by the app's
+    /// corner-style controller (which also re-renders what is on screen);
+    /// checks that are not about corner style see `.standard`.
+    nonisolated(unsafe) public static var current: CornerStyle = .standard
+
+    public static func resolve(_ rawValue: String?) -> CornerStyle {
+        rawValue.flatMap(CornerStyle.init(rawValue:)) ?? fallback
+    }
+
+    public var title: String {
+        switch self {
+        case .sharp: return "Sharp"
+        case .standard: return "Default"
+        case .rounded: return "Rounded"
+        }
+    }
+
+    /// The radius this style draws for a surface whose Default radius is
+    /// `base`. A capsule base (`CornerRole.pill`'s) is left a capsule.
+    public func radius(_ base: Double) -> Double {
+        switch self {
+        case .sharp: return 0
+        case .standard: return base
+        case .rounded:
+            guard base < CornerRole.capsuleBase else { return base }
+            return min((base * Self.roundedScale).rounded(), max(base, Self.roundedCap))
+        }
+    }
+}
+
+/// What a rounded surface IS, which decides its radius. Each role's Default
+/// value is the radius that surface already drew; `radius` resolves it in the
+/// current `CornerStyle`.
+public enum CornerRole: String, CaseIterable, Sendable {
+    /// A canvas tile and its chrome.
+    case tile
+    /// A zone, its outline and fill, and the moving highlight that previews one.
+    case zone
+    /// The settings card, the ⌘K palette, the task detail sheet.
+    case modal
+    /// A menu, popover, hover card, toast, dock: anything that CONTAINS rows.
+    case popover
+    /// A nested card or row: transcript cards, menu rows, inbox cards.
+    case card
+    /// A structured transcript artifact: code, tables, tool rows, plans.
+    case artifact
+    /// The composer's field.
+    case input
+    /// A button or small control.
+    case control
+    /// A small badge or chip.
+    case badge
+    /// A capsule: status pills, the floating toolbar, hover labels.
+    case pill
+
+    /// The Default radius for a capsule: large enough that every view clamps
+    /// it to half its height.
+    public static let capsuleBase = 999.0
+
+    public var base: Double {
+        switch self {
+        case .tile: return 10
+        case .zone: return 12
+        case .modal: return 14
+        case .popover: return 10
+        case .card: return 6
+        case .artifact: return 8
+        case .input: return 10
+        case .control: return 6
+        case .badge: return 8
+        case .pill: return Self.capsuleBase
+        }
+    }
+
+    /// This role's radius in the current style.
+    public var radius: Double { CornerStyle.current.radius(base) }
+
+    /// A one-off Default radius (a surface that predates the roles and draws a
+    /// value no role has) resolved in the current style.
+    public static func radius(base: Double) -> Double { CornerStyle.current.radius(base) }
 }
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
@@ -88,15 +198,15 @@ public enum Radius {
 /// may still contain a `Radius.card` (6), so the whole ladder is strictly
 /// decreasing: 12 > 10 > 8 > 6.
 public enum AgentTileRadius {
-    /// The tile itself.
-    public static let tile = 12.0
-    /// The composer's field surface.
-    public static let composer = 10.0
-    /// A structured artifact: tool call, plan, diff, fenced code.
-    public static let artifact = 8.0
+    /// The tile itself. 12 at Default (resolved through `CornerStyle`).
+    public static var tile: Double { CornerRole.radius(base: 12) }
+    /// The composer's field surface. 10 at Default.
+    public static var composer: Double { CornerRole.input.radius }
+    /// A structured artifact: tool call, plan, diff, fenced code. 8 at Default.
+    public static var artifact: Double { CornerRole.artifact.radius }
 
     /// Outermost-first, for the checks that gate the nesting rule.
-    public static let ladder: [Double] = [tile, composer, artifact]
+    public static var ladder: [Double] { [tile, composer, artifact] }
 }
 
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P0.5-row-token-vocabulary.md
@@ -111,6 +221,14 @@ public enum LineWidth {
     /// border in the app onto it. One declaration, so "at most 0.5 pt" is a
     /// value `runSidebarSurfaceChecks` pins rather than a convention call
     /// sites remember. `Double`, like every metric here — views convert.
+    ///
+    /// It is also the CEILING on every border in the app: the sweep is done,
+    /// and `--border-census-check` walks the real chrome (every tile kind, the
+    /// composer, sidebar, palette, settings card, toast, zone chrome, canvas
+    /// menus) and fails on any outline wider than this outside its listed
+    /// exemptions (the focus ring, the moving highlight, glyph strokes, native
+    /// control chrome). A hairline is a device property, not a metric: it never
+    /// scales with a page zoom.
     public static let hairline = 0.5
     /// An authorship rule: a state-bearing edge, not a decorative boundary, so
     /// it does not reuse `hairline` or `Space.xs` (a SPACING token that happens

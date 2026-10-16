@@ -7,6 +7,58 @@ private final class ChoicePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// The panel's content: a transparent margin that carries the surface's shadow,
+/// with the surface itself inset by `margin`.
+///
+/// The shadow is drawn here rather than by the window server on purpose. A
+/// borderless panel with `hasShadow` gets the server's shadow RIM with it — a
+/// light outline around the window shape that no layer property can turn off.
+/// Over the 0.5pt hairline the surface already paints, that rim read as a thick
+/// light border (the zone-creation cancel menu, and the same note on the first
+/// floating toolbar, which was also a shadowed panel).
+@MainActor
+final class ChoicePanelShadowView: NSView {
+    static let margin: CGFloat = 16
+    let surface: NSView
+    private let shadowLayer = CALayer()
+
+    init(surface: NSView) {
+        self.surface = surface
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        shadowLayer.shadowColor = NSColor.black.cgColor
+        shadowLayer.shadowOpacity = 0.22
+        shadowLayer.shadowRadius = 10
+        shadowLayer.shadowOffset = CGSize(width: 0, height: -3)
+        layer?.addSublayer(shadowLayer)
+        addSubview(surface)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        surface.frame = bounds.insetBy(dx: Self.margin, dy: Self.margin)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shadowLayer.frame = surface.frame
+        // Follows the surface's own radius, so the shadow can never show a
+        // corner the surface does not have.
+        let radius = min(surface.layer?.cornerRadius ?? 0, surface.bounds.height / 2, surface.bounds.width / 2)
+        shadowLayer.shadowPath = CGPath(
+            roundedRect: shadowLayer.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        CATransaction.commit()
+    }
+
+    /// The margin is not part of the menu: a press there must not land on it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return surface.frame.contains(local) ? super.hitTest(point) : nil
+    }
+}
+
 struct CompletionPopoverLayout: Equatable {
     let breadcrumb: String
     let footer: String
@@ -58,7 +110,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
         super.init(frame: .zero)
         listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
 
         breadcrumbLabel.lineBreakMode = .byTruncatingMiddle
@@ -150,6 +202,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         layer?.borderWidth = ChoiceListView.panelBorderWidth
@@ -167,7 +220,7 @@ final class CompletionPopoverContentView: NSView, TokenThemed, AgentPageZoomScal
     /// breadcrumb's own attributed fonts, and pass the rung to the embedded list.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         footerLabel.font = .token(.caption, zoom: pageZoom)
         listView.applyPageZoom(pageZoom)
         applyBreadcrumb(theme: effectiveTokenTheme)
@@ -216,7 +269,7 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
         super.init(frame: .zero)
         listView.applyPageZoom(zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -255,13 +308,14 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
     /// the embedded list.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         listView.applyPageZoom(pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
         layer?.borderWidth = ChoiceListView.panelBorderWidth
@@ -276,6 +330,29 @@ final class CommandPopoverContentView: NSView, TokenThemed, AgentPageZoomScalabl
 final class ChoicePopoverController {
     private(set) var panel: NSPanel?
     private(set) var listView: ChoiceListView?
+    /// The visible menu surface inside `panel` (the panel itself is larger by
+    /// `ChoicePanelShadowView.margin` on every side, which holds the shadow).
+    private(set) weak var surfaceView: NSView?
+
+    /// Canvas chrome a menu must never cover: the floating toolbar registers its
+    /// bar here when it is installed. Weak, so a removed toolbar stops counting.
+    private static let obstacleViews = NSHashTable<NSView>.weakObjects()
+
+    static func registerObstacle(_ view: NSView) { obstacleViews.add(view) }
+
+    /// The screen frames of the registered obstacles that are on screen in
+    /// `window`. A bar in another window, or a hidden one, is not in the way.
+    static func obstacleScreenFrames(in window: NSWindow) -> [NSRect] {
+        obstacleViews.allObjects.compactMap { view in
+            guard view.window === window, !view.isHiddenOrHasHiddenAncestor else { return nil }
+            return window.convertToScreen(view.convert(view.bounds, to: nil))
+        }
+    }
+
+    /// The menu surface in screen coordinates, without the shadow margin.
+    var surfaceFrame: NSRect? {
+        panel.map { $0.frame.insetBy(dx: ChoicePanelShadowView.margin, dy: ChoicePanelShadowView.margin) }
+    }
     private(set) var lastAccessibilityAnnouncementForQA: String?
     private weak var completionContentView: CompletionPopoverContentView?
 
@@ -338,7 +415,13 @@ final class ChoicePopoverController {
         listView = list
         guard let window = view.window else { return }
 
-        let screenFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+        // A window on no screen (a check fixture parked off every display) has
+        // no screen to clamp to: falling back to the main screen put its menu ON
+        // that screen, far from its anchor.
+        let screenFrame = window.screen?.visibleFrame
+            ?? placementFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? window.frame
         let requestedFrame = placementFrame.map { $0.intersection(screenFrame) }
         let visibleFrame: NSRect
         if let requestedFrame, !requestedFrame.isNull, !requestedFrame.isEmpty {
@@ -348,6 +431,11 @@ final class ChoicePopoverController {
         }
         let windowAnchor = view.convert(anchor, to: nil)
         let screenAnchor = window.convertToScreen(windowAnchor)
+        // Only a menu confined to a canvas viewport (`placementFrame`) steers
+        // around canvas chrome. A screen-wide menu — a composer picker, a
+        // sidebar row menu — keeps its own placement: the toolbar is not in its
+        // way, and cutting the screen around it would move menus nowhere near it.
+        let obstacles = placementFrame == nil ? [] : Self.obstacleScreenFrames(in: window)
         let contentView: NSView
         let contentSize: NSSize
         let placementFrame: NSRect
@@ -357,7 +445,7 @@ final class ChoicePopoverController {
             contentSize = list.intrinsicContentSize
             placementFrame = visibleFrame
         case .completion(let configuration):
-            let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
+            let safeFrame = Self.region(visibleFrame.insetBy(dx: 8, dy: 8), clearOf: obstacles, zoom: pageZoom)
             let container = CompletionPopoverContentView(
                 listView: list, layout: configuration, zoom: pageZoom)
             completionContentView = container
@@ -373,7 +461,7 @@ final class ChoicePopoverController {
             container.layoutSubtreeIfNeeded()
             placementFrame = safeFrame
         case .commands(let configuration):
-            let safeFrame = visibleFrame.insetBy(dx: 8, dy: 8)
+            let safeFrame = Self.region(visibleFrame.insetBy(dx: 8, dy: 8), clearOf: obstacles, zoom: pageZoom)
             let container = CommandPopoverContentView(listView: list, zoom: pageZoom)
             contentView = container
             contentSize = Self.commandContentSize(
@@ -394,19 +482,24 @@ final class ChoicePopoverController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // See `ChoicePanelShadowView`: the server's shadow brings a rim with it.
+        panel.hasShadow = false
         panel.level = .popUpMenu
         panel.collectionBehavior = [.transient, .moveToActiveSpace]
-        panel.contentView = contentView
+        let chrome = ChoicePanelShadowView(surface: contentView)
+        panel.contentView = chrome
+        let margin = ChoicePanelShadowView.margin
         panel.setFrame(Self.panelFrame(
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
-            visibleFrame: placementFrame,
+            visibleFrame: Self.region(placementFrame, clearOf: obstacles, zoom: pageZoom),
             zoom: pageZoom
-        ), display: false)
+        ).insetBy(dx: -margin, dy: -margin), display: false)
+        chrome.layoutSubtreeIfNeeded()
 
         self.panel = panel
+        surfaceView = contentView
         listView = list
         anchorView = view
         self.focusReturnView = focusReturnView
@@ -471,6 +564,7 @@ final class ChoicePopoverController {
         let window = parentWindow
         panel = nil
         listView = nil
+        surfaceView = nil
         completionContentView = nil
         anchorView = nil
         focusReturnView = nil
@@ -485,6 +579,42 @@ final class ChoicePopoverController {
         let handler = cancellationHandler
         dismiss()
         handler?()
+    }
+
+    /// Resizes the presented surface to `width`, keeping its origin. The panel
+    /// grows with it, margin included.
+    func setSurfaceWidth(_ width: CGFloat) {
+        guard let panel, let surfaceView else { return }
+        let margin = ChoicePanelShadowView.margin
+        var frame = panel.frame
+        frame.size.width = width + margin * 2
+        panel.setFrame(frame, display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        surfaceView.needsLayout = true
+        surfaceView.layoutSubtreeIfNeeded()
+    }
+
+    /// `frame` less every obstacle in it: for each obstacle (grown by the menu
+    /// gap) that cuts the frame, keep the largest of the four bands either side
+    /// of it. The floating toolbar rests on one canvas edge, so this keeps the
+    /// whole menu on the open side of the bar rather than nudging it off one
+    /// corner. A frame no obstacle touches is returned unchanged.
+    static func region(_ frame: NSRect, clearOf obstacles: [NSRect], zoom: AgentPageZoom = .default) -> NSRect {
+        var region = frame
+        let gap = CGFloat(zoom.scaled(Space.s))
+        for obstacle in obstacles {
+            let cut = obstacle.insetBy(dx: -gap, dy: -gap).intersection(region)
+            guard !cut.isNull, !cut.isEmpty else { continue }
+            let bands = [
+                NSRect(x: region.minX, y: region.minY, width: region.width, height: cut.minY - region.minY),
+                NSRect(x: region.minX, y: cut.maxY, width: region.width, height: region.maxY - cut.maxY),
+                NSRect(x: region.minX, y: region.minY, width: cut.minX - region.minX, height: region.height),
+                NSRect(x: cut.maxX, y: region.minY, width: region.maxX - cut.maxX, height: region.height),
+            ].filter { $0.width > 0 && $0.height > 0 }
+            guard let largest = bands.max(by: { $0.width * $0.height < $1.width * $1.height }) else { continue }
+            region = largest
+        }
+        return region
     }
 
     /// Places below when it fits, otherwise above, then clamps both axes to the
@@ -558,9 +688,7 @@ final class ChoicePopoverController {
                 min(CGFloat(zoom.scaled(Double(configuration.maximumWidth))), list.intrinsicContentSize.width)
             )
         )
-        let rowHeight = list.presentation == .slashCommands
-            ? ChoiceListView.slashCommandRowHeight(zoom: zoom)
-            : ChoiceListView.commandRowHeight(zoom: zoom)
+        let rowHeight = list.layoutRowHeight
         let maxHeight = CGFloat(configuration.maximumVisibleRows) * rowHeight
             + ChoiceListView.verticalPadding(zoom: zoom) * 2
         let height = min(maxHeight, max(1, list.intrinsicContentSize.height))

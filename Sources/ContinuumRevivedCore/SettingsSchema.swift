@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// Ordered user-wide settings surface. Zone project/Home, color, name, layout
@@ -53,6 +54,14 @@ public enum SettingsSchema {
                         keywords: ["theme", "dark", "light", "look", "colour", "color"], groups: [
             SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
                 SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
+            ]),
+            SettingsGroup(id: "appearance.corners", title: "Corners", rows: [
+                SettingsRow(.choice(key: CornerStyle.defaultsKey, label: "Corner style",
+                                    options: CornerStyle.allCases.map(\.rawValue),
+                                    default: CornerStyle.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: CornerStyle.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Tiles, zones, menus, the command menu, Settings and every card follow it right away.",
+                            keywords: ["corners", "radius", "rounded", "sharp", "square", "bubbly", "roundness"]),
             ]),
             SettingsGroup(id: "appearance.focus", title: "Focus", rows: [
                 SettingsRow(.toggle(key: FocusBorderConfig.enabledKey, label: "Outline the focused tile", default: FocusBorderConfig.defaultEnabled),

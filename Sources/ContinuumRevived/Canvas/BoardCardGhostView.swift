@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// KB-01. The insertion preview inside a lane.
@@ -13,19 +14,22 @@ import ContinuumRevivedCore
 /// they get the same preview. A second, different-looking preview for cards
 /// would be a new visual idea for a verb the app already has one for.
 @MainActor
-final class BoardCardGhostView: NSView {
+final class BoardCardGhostView: NSView, CornerStyled {
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.borderWidth = 2
+        applyCornerStyle()
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         isHidden = true
         applyAccent()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Corner style (Settings › Appearance › Corner style): a kanban card's radius.
+    func applyCornerStyle() { layer?.cornerRadius = CGFloat(CornerRole.radius(base: 7)) }
 
     /// Draw only — never consume mouse events. A preview that swallowed the
     /// pointer would end the drag it is previewing.

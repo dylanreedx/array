@@ -309,6 +309,7 @@ final class KanbanColumnView: NSView, TokenThemed {
     // MARK: - Tokens
 
     func applyTokens() {
+        layer?.applyCorner(.popover)
         // The lane is the RECESSED surface; its cards are raised above it.
         layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
         addButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)

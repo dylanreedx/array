@@ -82,7 +82,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     init(title: String = "Choose") {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.stringValue = title
         titleLabel.font = .token(.label, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -231,7 +231,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// it; the trigger forwards the rung to its own controller instead.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.font = .token(.label, zoom: pageZoom)
         popoverController.pageZoom = pageZoom
         invalidateIntrinsicContentSize()
@@ -239,6 +239,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         leadingIcon.contentTintColor = BrandMark96.foreground(in: self)
         let focused = window?.firstResponder === self
@@ -303,15 +304,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     }
 
     private func pinPopoverWidthIfNeeded() {
-        guard let preferredPopoverWidth,
-              let panel = popoverController.panel,
-              let list = popoverController.listView else { return }
-        var frame = panel.frame
-        frame.size.width = preferredPopoverWidth
-        panel.setFrame(frame, display: false)
-        list.frame = NSRect(origin: .zero, size: frame.size)
-        list.needsLayout = true
-        list.layoutSubtreeIfNeeded()
+        guard let preferredPopoverWidth, popoverController.listView != nil else { return }
+        popoverController.setSurfaceWidth(preferredPopoverWidth)
     }
 
     func handleSelection(_ item: ChoiceItem) {
@@ -329,7 +323,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var qaRenderedTitle: String { titleLabel.stringValue }
     var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
     var qaPresentedItems: [ChoiceItem] { popoverController.listView?.qaItems ?? [] }
-    var qaPopoverWidth: CGFloat? { popoverController.panel?.frame.width }
+    var qaPopoverWidth: CGFloat? { popoverController.surfaceFrame?.width }
     var qaIsPopoverPresented: Bool { popoverController.isPresented }
     func dismissPopoverForQA() { popoverController.dismiss(); applyTokens() }
     @discardableResult

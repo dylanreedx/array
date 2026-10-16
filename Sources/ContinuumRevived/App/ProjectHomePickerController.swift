@@ -42,6 +42,11 @@ final class ProjectHomePickerController {
     private var confirmsDestructiveCancellation = false
 
     var isPresented: Bool { popover.isPresented }
+    /// QA: the presented menu, for geometry and paint assertions.
+    var qaPopover: ChoicePopoverController { popover }
+    /// QA: ask to leave the way Esc or an outside click does, through the same
+    /// path — for a new zone that is the cancel confirmation.
+    func qaRequestDismissal() { handleDismissalRequest() }
 
     func present(
         projects: [ProjectEntry],

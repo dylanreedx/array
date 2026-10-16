@@ -188,7 +188,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// Constraints whose constant is `-internalPadding`.
     private var trailingPaddingConstraints: [NSLayoutConstraint] = []
 
-    static let cornerRadius = CGFloat(AgentTileRadius.composer)
+    static var cornerRadius: CGFloat { CGFloat(AgentTileRadius.composer) }
     static let internalPadding = CGFloat(Space.l)
 
     /// `cornerRadius` at a page-zoom rung. Identity at 100%.
@@ -203,8 +203,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     /// The padding ring this shell is currently drawing.
     var internalPadding: CGFloat { Self.internalPadding(zoom: pageZoom) }
-    static let idleBorderWidth: CGFloat = 1
-    static let focusedBorderWidth: CGFloat = 2
+    /// Both states draw THE hairline (`LineWidth.hairline`, the app-wide border
+    /// ceiling). Focus is carried by the line's colour — `focusRing` against the
+    /// resting `decorativeHairline` — not by a 2pt ring, which read as the thick
+    /// grey frame the owner asked to remove.
+    static let idleBorderWidth = CGFloat(LineWidth.hairline)
+    static let focusedBorderWidth = CGFloat(LineWidth.hairline)
     static let maximumVisibleLines = AgentComposerVariant.fullTurn.maximumVisibleLines
     static let compactMaximumVisibleLines = AgentComposerVariant.compactFreeform.maximumVisibleLines
 
@@ -748,6 +752,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func applyTokens() {
+        layer?.cornerRadius = Self.cornerRadius(zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
         layer?.borderColor = (isEditorFocused ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)

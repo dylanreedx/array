@@ -132,7 +132,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
             ?? items.first(where: \.enabled)?.id
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
         destructiveSeparator.wantsLayer = true
         destructiveSeparator.isHidden = true
@@ -209,7 +209,14 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
 
     private var renderedRowHeight: CGFloat {
         switch presentation {
-        case .commands: return Self.commandRowHeight(zoom: pageZoom)
+        case .commands:
+            // A command row that carries a subtitle needs the two-line height.
+            // Every row of the list takes it, so a menu never mixes 30pt and 40pt
+            // rows; at 30pt the title and subtitle of the zone cancel menu's
+            // "Keep Choosing" row overlapped by seven points.
+            return items.contains(where: { $0.detail != nil })
+                ? Self.slashCommandRowHeight(zoom: pageZoom)
+                : Self.commandRowHeight(zoom: pageZoom)
         case .slashCommands: return Self.slashCommandRowHeight(zoom: pageZoom)
         case .choices, .completions: return Self.rowHeight(zoom: pageZoom)
         }
@@ -308,6 +315,11 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
     var qaHasDestructiveSeparator: Bool { !destructiveSeparator.isHidden }
     var qaRenderedRowHeight: CGFloat { renderedRowHeight }
+    /// The row height this list lays out with, for the panel that sizes to it.
+    var layoutRowHeight: CGFloat { renderedRowHeight }
+    var qaRowTitleColors: [(id: String, color: NSColor?)] {
+        rows.map { ($0.item.id, $0.qaTitleColor) }
+    }
     var qaRowTextFrames: [(title: NSRect, detail: NSRect?)] {
         rows.map { ($0.qaTitleFrame, $0.qaDetailFrame) }
     }
@@ -337,6 +349,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     func applyTokens() {
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = chrome == .standalone
             ? SurfaceToken.overlay.color.cgColor(for: theme) : nil
@@ -352,7 +365,7 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     /// to the rows, which own their own text and glyph metrics.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         for row in rows { row.applyPageZoom(pageZoom) }
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -446,6 +459,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     var qaLeadingImageHidden: Bool { leadingImageView.isHidden }
     var qaTitleFrame: NSRect { titleLabel.frame }
     var qaDetailFrame: NSRect? { detailLabel.isHidden ? nil : detailLabel.frame }
+    var qaTitleColor: NSColor? { titleLabel.textColor }
 
     init(
         item: ChoiceItem, presentation: ChoiceListPresentation,
@@ -456,7 +470,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         self.reservesLeadingSlot = reservesLeadingSlot
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.stringValue = item.title
         titleLabel.font = .token(.body, zoom: pageZoom)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -505,12 +519,19 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             let singleHeight = CGFloat(pageZoom.scaled(20))
             titleLabel.frame = NSRect(x: textX, y: floor((bounds.height - singleHeight) / 2), width: textWidth, height: singleHeight)
         } else {
+            // Title over subtitle as ONE block, centred in the row. The old
+            // layout pinned the title 20pt below the top and the subtitle 2pt
+            // above the bottom, so the pair only cleared each other in a row at
+            // least 33pt tall — a 30pt command row put the title's baseline
+            // inside the subtitle.
             let titleHeight = CGFloat(pageZoom.scaled(17))
             let detailHeight = CGFloat(pageZoom.scaled(14))
-            let titleTopInset = CGFloat(pageZoom.scaled(20))
-            let detailBaseline = CGFloat(pageZoom.scaled(2))
-            titleLabel.frame = NSRect(x: textX, y: bounds.height - titleTopInset, width: textWidth, height: titleHeight)
-            detailLabel.frame = NSRect(x: textX, y: detailBaseline, width: textWidth, height: detailHeight)
+            let gap = CGFloat(pageZoom.scaled(Space.xs))
+            let block = titleHeight + gap + detailHeight
+            let bottom = max(0, floor((bounds.height - block) / 2))
+            detailLabel.frame = NSRect(x: textX, y: bottom, width: textWidth, height: detailHeight)
+            titleLabel.frame = NSRect(
+                x: textX, y: bottom + detailHeight + gap, width: textWidth, height: titleHeight)
         }
     }
 
@@ -540,7 +561,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     /// on a row already showing its item.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.font = .token(.body, zoom: pageZoom)
         detailLabel.font = .token(.caption, zoom: pageZoom)
         invalidateIntrinsicContentSize()
@@ -555,6 +576,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         // Owner correction (P4.10): rows never paint a perimeter border. State is
         // fill plus checkmark — selected fill, soft hover/keyboard-focus fill,
@@ -572,10 +594,11 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         }
         layer?.borderWidth = 0
         leadingImageView.isHidden = presentation == .choices ? (item.icon == nil && !selected) : item.icon == nil
-        // Keep destructive copy calm, but tint its icon with the established failure
-        // accent: native command-menu hierarchy without turning a whole row into an
-        // alarm before the person has even chosen it.
-        let foreground = item.enabled ? TextToken.textPrimary.color : TextToken.textSecondary.color
+        // A destructive command reads as one in its title and its icon: the
+        // failure accent, which is the app's destructive colour. The row's FILL
+        // stays the ordinary hover ladder, so nothing alarms before it is chosen.
+        let foreground = !item.enabled ? TextToken.textSecondary.color
+            : item.destructive ? AccentToken.accentFailed.color : TextToken.textPrimary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
         detailLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
         leadingImageView.contentTintColor = presentation == .choices

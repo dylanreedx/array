@@ -48,7 +48,7 @@ final class ToolCallRenderer: AgentBlockRendering {
 }
 
 @MainActor
-final class ToolCallView: NSView {
+final class ToolCallView: NSView, CornerStyled {
     // Tightened 2026-08-24: 36pt for a one-line row, plus a 12pt row gap, read
     // as "spread out too much".
     static let rowHeight = CGFloat(Space.xxl + Space.xs)
@@ -122,7 +122,7 @@ final class ToolCallView: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        layer?.applyCorner(.artifact)
         layer?.masksToBounds = true
 
         disclosureButton.target = self
@@ -140,7 +140,7 @@ final class ToolCallView: NSView {
         summaryLabel.isSelectable = true
 
         outputScrollView.wantsLayer = true
-        outputScrollView.layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        outputScrollView.layer?.applyCorner(.artifact)
         outputScrollView.layer?.masksToBounds = true
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
@@ -184,6 +184,12 @@ final class ToolCallView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// Corner style (Settings › Appearance › Corner style), at this row's rung.
+    func applyCornerStyle() {
+        layer?.applyCorner(.artifact, zoom: zoom)
+        outputScrollView.layer?.applyCorner(.artifact, zoom: zoom)
+    }
+
     func apply(blockID: AgentNodeID, payload: AgentToolCallPayload, context: AgentRenderContext) {
         isClusterMember = payload.presentedIsClusterMember
         let previousBlockID = self.blockID
@@ -196,12 +202,12 @@ final class ToolCallView: NSView {
         // recycled — a row built at 100% and reused for a 150% tile would keep
         // the smaller type. Re-derive them here, from THIS context's zoom.
         let zoom = context.pageZoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         statusLabel.font = NSFont.token(.caption, zoom: zoom)
         summaryLabel.font = NSFont.token(.body, zoom: zoom)
         outputNoteLabel.font = NSFont.token(.caption, zoom: zoom)
-        outputScrollView.layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        outputScrollView.layer?.applyCorner(.artifact, zoom: zoom)
         outputCopyButton.applyZoom(zoom)
 
         isExpanded = context.actions.isExpanded(

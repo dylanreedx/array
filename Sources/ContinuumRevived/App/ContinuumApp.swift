@@ -2102,6 +2102,42 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--corner-style-check") {
+            do {
+                _ = NSApplication.shared
+                try CornerStyleChecks.run()
+                print("ContinuumRevivedCornerStyleChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--border-census-check") {
+            do {
+                _ = NSApplication.shared
+                try BorderCensusChecks.run()
+                print("ContinuumRevivedBorderCensusChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--zone-cancel-menu-check") {
+            do {
+                _ = NSApplication.shared
+                try ZoneCancelMenuChecks.run()
+                print("ContinuumRevivedZoneCancelMenuChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--provider-model-picker-check") {
             do {
                 _ = NSApplication.shared
@@ -5167,6 +5203,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // regardless of the user's system setting. Measured: labelColor goes
         // black@85% in Aqua, white@85% in DarkAqua.
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        // Settings › Appearance › Corner style, adopted before any surface is
+        // built. A check run keeps the Default so its geometry is the shipped one.
+        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
+            CornerStyleController.adoptSavedStyle(defaults: settingsDefaults)
+        }
 
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
         // a Component Lab gallery to a PNG and exits, with zero project/boot
@@ -14558,6 +14599,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installSettingsChangeObserver() {
         guard settingChangeObservers.isEmpty else { return }
         let center = NotificationCenter.default
+        // Settings › Appearance › Corner style: re-render every window live.
+        settingChangeObservers.append(CornerStyleController.observeSetting(defaults: settingsDefaults))
         settingChangeObservers.append(center.addObserver(
             forName: SettingChangeEvent.name(for: SettingID(rawValue: BrowserInspectionPolicy.userDefaultsKey)),
             object: nil, queue: nil

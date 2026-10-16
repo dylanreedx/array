@@ -18,7 +18,7 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
         label.font = .monospacedSystemFont(ofSize: CGFloat(zoom.scaled(10)), weight: .semibold)
-        layer?.cornerRadius = CGFloat(zoom.scaled(11))
+        layer?.cornerRadius = CGFloat(zoom.scaled(CornerRole.radius(base: 11)))
         updateSize()
     }
     private let icon = NSImageView()
@@ -28,8 +28,8 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.borderWidth = 1
+        layer?.cornerRadius = CGFloat(CornerRole.radius(base: 11))
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         icon.imageScaling = .scaleProportionallyDown
         label.font = .monospacedSystemFont(ofSize: 10, weight: .semibold)
         label.lineBreakMode = .byTruncatingTail
@@ -49,6 +49,8 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
 
     override func layout() {
         super.layout()
+        // Corner style (Settings › Appearance › Corner style), re-resolved here.
+        layer?.cornerRadius = CGFloat(pageZoom.scaled(CornerRole.radius(base: 11)))
         icon.frame = NSRect(x: pageZoom.scaled(7), y: pageZoom.scaled(4), width: pageZoom.scaled(14), height: pageZoom.scaled(14))
         label.frame = NSRect(x: pageZoom.scaled(25), y: pageZoom.scaled(3), width: max(0, bounds.width - pageZoom.scaled(31)), height: pageZoom.scaled(16))
     }
@@ -92,20 +94,23 @@ final class AgentSignalBadgeView: NSView, AgentPageZoomScalable {
 }
 
 @MainActor
-final class AgentSignalBorderView: NSView {
+final class AgentSignalBorderView: NSView, CornerStyled {
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.borderWidth = 2
+        applyCornerStyle()
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         isHidden = true
         setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() { layer?.applyCorner(.badge) }
 
     func apply(_ signal: AgentSignal?) {
         // Any incoming signal supersedes an acknowledgment in flight: a failure or

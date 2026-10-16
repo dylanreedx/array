@@ -73,7 +73,7 @@ final class CommandOutputView: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(AgentTileRadius.artifact)
+        layer?.applyCorner(.artifact)
         layer?.masksToBounds = true
 
         disclosureButton.target = self
@@ -122,7 +122,7 @@ final class CommandOutputView: NSView {
         // WS5: re-derived per apply, never left at the construction-time zoom —
         // this view is recycled across rows and across tiles.
         let zoom = context.pageZoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         titleLabel.font = NSFont.token(.label, zoom: zoom)
         statusLabel.font = NSFont.token(.caption, zoom: zoom)
         copyButton.applyZoom(zoom)

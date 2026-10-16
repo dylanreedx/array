@@ -49,7 +49,7 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         self.target = target
         self.action = action
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         iconView.imageScaling = .scaleProportionallyDown
         titleLabel.font = .token(.label, zoom: pageZoom)
         titleLabel.alignment = .center
@@ -142,6 +142,7 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         let active = isEnabled && presentation.primaryAction != .unavailable
         let accent: AccentToken = presentation.primaryAction == .stop ? .accentFailed : .accentInput
@@ -150,7 +151,8 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
         // preserves which operation is completing without implying it can be fired.
         let showsOperation = active || (presentation.isLoading && presentation.primaryAction != .unavailable)
         layer?.backgroundColor = (showsOperation ? accent.color : AgentSurfaceRole.composer.color).cgColor(for: theme)
-        layer?.borderWidth = window?.firstResponder === self ? 2 : 1
+        // One hairline in both states; keyboard focus is the focus-ring colour.
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
         layer?.borderColor = (window?.firstResponder === self ? AgentLineRole.focusRing : .controlBoundary).color.cgColor(for: theme)
         let foreground = showsOperation ? TextToken.textOnAccent.color : TextToken.textSecondary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
@@ -162,7 +164,7 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     /// on a button already showing a presentation — same contract as `applyTokens`.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.font = .token(.label, zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true

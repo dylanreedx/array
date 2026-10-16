@@ -127,7 +127,7 @@ final class AgentErrorNoticeView: NSView {
     /// zoom. A recycled notice runs this again from `finishApply`.
     private func applyZoomMetrics() {
         let zoom = self.zoom
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         titleLabel.font = NSFont.token(.title, zoom: zoom)
         statusLabel.font = NSFont.token(.caption, zoom: zoom)
         messageLabel.font = NSFont.token(.body, zoom: zoom)

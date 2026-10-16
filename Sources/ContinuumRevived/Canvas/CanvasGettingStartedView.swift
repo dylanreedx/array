@@ -1,11 +1,17 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// A nonblocking, production-action checklist. Rows complete only when the real
 /// command/navigation/zone callbacks record their milestones; the view itself
 /// never grants progress for being shown or clicked.
 @MainActor
-final class CanvasGettingStartedView: NSVisualEffectView {
+final class CanvasGettingStartedView: NSVisualEffectView, CornerStyled {
+
+    /// Corner style (Settings › Appearance › Corner style).
+    func applyCornerStyle() {
+        layer?.applyCorner(.popover)
+    }
     var onAddAgent: (() -> Void)?
     var onAddTerminal: (() -> Void)?
     var onOpenCommandCenter: (() -> Void)?
@@ -23,7 +29,7 @@ final class CanvasGettingStartedView: NSVisualEffectView {
         blendingMode = .withinWindow
         state = .active
         wantsLayer = true
-        layer?.cornerRadius = 10
+        applyCornerStyle()
         layer?.masksToBounds = true
         setAccessibilityIdentifier("ArrayGettingStartedTasks")
 

@@ -96,7 +96,7 @@ private final class ProviderRailButton: NSControl, TokenThemed, AgentPageZoomSca
         self.pageZoom = zoom
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         glyphLabel.stringValue = String(group.title.prefix(1)).uppercased()
         glyphLabel.font = .token(.body, zoom: pageZoom)
         glyphLabel.alignment = .center
@@ -118,7 +118,7 @@ private final class ProviderRailButton: NSControl, TokenThemed, AgentPageZoomSca
     /// WS5: re-derive every zoom-owned metric from scratch. Idempotent.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: pageZoom)
         glyphLabel.font = .token(.body, zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -152,6 +152,7 @@ private final class ProviderRailButton: NSControl, TokenThemed, AgentPageZoomSca
     }
 
     func applyTokens() {
+        layer?.applyCorner(.card, zoom: pageZoom)
         let theme = effectiveTokenTheme
         let background: TokenColor? = isSelectedProvider
             ? AgentSurfaceRole.rowSelected.color
@@ -230,9 +231,9 @@ final class ProviderModelPickerView: NSView, TokenThemed, AgentPageZoomScalable 
         super.init(frame: .zero)
 
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         layer?.masksToBounds = true
-        layer?.borderWidth = 1
+        layer?.borderWidth = CGFloat(LineWidth.hairline)
 
         indicator.wantsLayer = true
         // NOT scaled: `AgentPageZoom.scaled` quantizes to a half point and 1.25
@@ -270,7 +271,7 @@ final class ProviderModelPickerView: NSView, TokenThemed, AgentPageZoomScalable 
     /// buttons and the embedded list.
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
-        layer?.cornerRadius = CGFloat(pageZoom.scaled(Radius.container))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         // NOT scaled: `AgentPageZoom.scaled` quantizes to a half point and 1.25
         // does not survive that even at 100% (it lands on 1.5). The indicator is
         // a 2.5pt-wide pill, so this is its half-width by construction.
@@ -349,11 +350,14 @@ final class ProviderModelPickerView: NSView, TokenThemed, AgentPageZoomScalable 
     /// inner paint is flattened. Re-applied after layout/theme changes because
     /// the list's own applyTokens restores it.
     private func neutralizeInnerCard() {
-        listView?.layer?.cornerRadius = 0
+        listView?.layer?.applyCorner(base: 0)
         listView?.layer?.borderWidth = 0
     }
 
     func applyTokens() {
+        // The selected-provider bar is a capsule; square at Sharp.
+        indicator.layer?.cornerRadius = CornerStyle.current == .sharp ? 0 : CGFloat(pageZoom.scaled(1.25))
+        layer?.applyCorner(.popover, zoom: pageZoom)
         let theme = effectiveTokenTheme
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
         layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
@@ -447,17 +451,21 @@ final class ProviderModelPopoverController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // Same chrome as every choice menu: the shadow is drawn in a margin, not
+        // by the window server, whose shadow rim read as a thick light border.
+        panel.hasShadow = false
         panel.level = .popUpMenu
         panel.collectionBehavior = [.transient, .moveToActiveSpace]
-        panel.contentView = picker
+        panel.contentView = ChoicePanelShadowView(surface: picker)
+        let margin = ChoicePanelShadowView.margin
         panel.setFrame(ChoicePopoverController.panelFrame(
             contentSize: contentSize,
             anchor: anchor,
             relativeTo: view,
             visibleFrame: window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame,
             zoom: pageZoom
-        ), display: false)
+        ).insetBy(dx: -margin, dy: -margin), display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
 
         self.panel = panel
         anchorView = view

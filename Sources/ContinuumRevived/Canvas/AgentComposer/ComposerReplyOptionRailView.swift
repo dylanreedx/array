@@ -192,7 +192,7 @@ final class ComposerReplyOptionChipButton: NSButton {
         focusRingType = .exterior
         font = NSFont.token(.caption, zoom: zoom)
         wantsLayer = true
-        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: zoom)
         // Keep the AppKit exterior keyboard focus ring outside the rounded fill.
         layer?.masksToBounds = false
         setButtonType(.momentaryChange)
@@ -223,7 +223,7 @@ final class ComposerReplyOptionChipButton: NSButton {
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
         font = NSFont.token(.caption, zoom: zoom)
-        layer?.cornerRadius = CGFloat(zoom.scaled(Radius.card))
+        layer?.applyCorner(.card, zoom: zoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -252,6 +252,7 @@ final class ComposerReplyOptionChipButton: NSButton {
     }
 
     func applyTokens(theme: TokenTheme) {
+        layer?.applyCorner(.card, zoom: pageZoom)
         self.theme = theme
         contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
         applyFill()

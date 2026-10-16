@@ -33,7 +33,7 @@ final class DiffSummaryRenderer: AgentBlockRendering {
 }
 
 @MainActor
-final class AgentDiffSummaryView: NSView {
+final class AgentDiffSummaryView: NSView, CornerStyled {
     // Tightened 2026-08-24: the card was 40pt of header + 28pt per file row +
     // 16pt of bottom inset, so two changed files cost ~120pt of transcript for
     // four facts. A diffstat is a dense format; this reads as one.
@@ -293,8 +293,13 @@ final class AgentDiffSummaryView: NSView {
     ///
     /// The pooled file-row fonts are re-assigned in `syncFileRows`, which also
     /// owns their measured widths; the button re-derives its own.
+    /// Corner style (Settings › Appearance › Corner style), at this row's rung.
+    func applyCornerStyle() {
+        layer?.applyCorner(.artifact, zoom: context.pageZoom)
+    }
+
     private func applyPageZoomMetrics(_ zoom: AgentPageZoom) {
-        layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
+        layer?.applyCorner(.artifact, zoom: zoom)
         // A diffstat's subject is its numbers; the word "Changes" is an
         // EYEBROW, not a headline — uppercase with tracking, secondary colour,
         // so the summary sentence below it is the thing being read.
@@ -790,7 +795,7 @@ final class AgentDiffStatBar: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard !isEmpty, bounds.width > 0 else { return }
-        let radius = bounds.height / 2
+        let radius = CornerStyle.current == .sharp ? 0 : bounds.height / 2
         let addedWidth = (bounds.width * addedShare).rounded()
         if addedWidth > 0 {
             addedColor.setFill()

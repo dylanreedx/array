@@ -49,7 +49,7 @@ enum AgentStatusRowPlacement: String, CaseIterable, Sendable {
 }
 
 @MainActor
-final class ManagedAgentTileNSView: TileNSView {
+final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private let awarenessBadge = AgentSignalBadgeView()
     private let awarenessBorder = AgentSignalBorderView()
     /// P1.9: the three views this tile paints layer fills on are stored so
@@ -809,6 +809,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// `updateRenderContext`, which preserves the reader's semantic anchor — the
     /// widths it measures against are already the new ones. Doing it the other
     /// way round anchors the reader against a width that is about to change.
+    /// Corner style (Settings › Appearance › Corner style): re-deliver the
+    /// current rung through the content subtree and the transcript's render
+    /// context, which is where every agent surface resolves its radii.
+    func applyCornerStyle() { applyPageZoomToContent() }
+
     private func applyPageZoomToContent() {
         let zoom = pageZoom
         agentHeaderHeight?.constant = AgentTileHeaderView.preferredHeight(zoom: zoom)

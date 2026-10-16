@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import WebKit
 import UniformTypeIdentifiers
 import ContinuumRevivedCore
@@ -274,25 +275,30 @@ final class BoardTaskDetailController: NSObject, WKScriptMessageHandler, WKNavig
 /// A window-sized input shield. The document stays in screen coordinates even
 /// when its source board is zoomed or the canvas is moved behind it.
 @MainActor
-private final class BoardTaskModalView: NSView {
+private final class BoardTaskModalView: NSView, CornerStyled {
     var onDismiss: (() -> Void)?
     private let shell = NSView()
     private let editor: WKWebView
+    /// Corner style (Settings › Appearance › Corner style): a modal sheet.
+    func applyCornerStyle() {
+        shell.layer?.applyCorner(.modal)
+        editor.layer?.applyCorner(.modal)
+    }
+
     init(editor: WKWebView) {
         self.editor = editor
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.48).cgColor
         shell.wantsLayer = true
-        shell.layer?.cornerRadius = 14
         shell.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         shell.shadow = NSShadow()
         shell.shadow?.shadowColor = NSColor.black.withAlphaComponent(0.45)
         shell.shadow?.shadowBlurRadius = 32
         shell.shadow?.shadowOffset = NSSize(width: 0, height: -12)
         editor.wantsLayer = true
-        editor.layer?.cornerRadius = 14
         editor.layer?.masksToBounds = true
+        applyCornerStyle()
         addSubview(shell)
         shell.addSubview(editor)
         setAccessibilityRole(.group)
