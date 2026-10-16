@@ -1041,6 +1041,7 @@ run_app_check .build/debug/Array --transcript-turn-cards-check
 # (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
 # stay two cards, and pins that no card prints a count it did not measure.
 run_app_check .build/debug/Array --file-card-check
+run_app_check .build/debug/Array --shell-tool-row-check
 # The host-local tool-detail supply: immutable scope, expiry, and the real
 # translator sequences (claude search + delegation, pi delegation, codex exit
 # code) driven through the host's own capture path.
