@@ -6331,6 +6331,29 @@ final class AgentSupervisor {
         return true
     }
 
+    /// The sidebar's Undo (P4.11): put back the four lifecycle facts captured
+    /// before a settle, snooze or wake, verbatim. A capture, never a
+    /// reconstruction — an `.active` pin the action replaced comes back as a pin.
+    @discardableResult
+    func restoreLifecycle(
+        agentID id: AgentID, settledOverride: SettledOverride, settledAt: Date?,
+        snoozedUntil: Date?, snoozedAt: Date?
+    ) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.restoreLifecycle: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.settledOverride != settledOverride || record.settledAt != settledAt
+                || record.snoozedUntil != snoozedUntil || record.snoozedAt != snoozedAt else { return false }
+        record.settledOverride = settledOverride
+        record.settledAt = settledAt
+        record.snoozedUntil = snoozedUntil
+        record.snoozedAt = snoozedAt
+        records[id] = record
+        persist(record)
+        return true
+    }
+
     /// Explicit un-settle means keep this row active until real activity arrives;
     /// it is not the neutral clear used by an activity or a deliberately neutral
     /// human reset.

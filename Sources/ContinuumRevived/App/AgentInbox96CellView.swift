@@ -1359,6 +1359,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return true
     }
 
+    /// Presses the "All set?" nudge through its own target/action.
+    func clickSettleNudgeForQA() -> Bool {
+        guard !settleNudge.isHidden else { return false }
+        settleNudge.performClick(nil)
+        return true
+    }
+
     func setIncreasedContrast(_ enabled: Bool) { card.usesIncreasedContrast = enabled }
 
     var accessibilityStatusOwner: NSView { stateLabel }

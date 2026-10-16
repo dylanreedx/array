@@ -97,7 +97,9 @@ enum SidebarTruthChecks {
 
     // MARK: - World
 
-    static func makeWorld() throws -> World {
+    /// `zoneOriginA` moves workspace A's zone (and its tiles with it) off the
+    /// world origin, so a witness can tell a WORLD frame from a ZONE-LOCAL one.
+    static func makeWorld(zoneOriginA: ZonePoint = ZonePoint(x: 0, y: 0)) throws -> World {
         let fm = FileManager.default
         let now = Date()
         let root = fm.temporaryDirectory
@@ -134,9 +136,10 @@ enum SidebarTruthChecks {
         try storeB.saveProject(projectValueB)
 
         func agentTile(_ id: UUID, _ title: String, x: Double, zone: UUID) -> Tile {
+            let origin = zone == zoneA ? zoneOriginA : ZonePoint(x: 0, y: 0)
             var tile = Tile(
                 id: id, kind: .managedAgent, title: title,
-                frame: TileFrame(x: x, y: 40, width: 320, height: 240),
+                frame: TileFrame(x: origin.x + x, y: origin.y + 40, width: 320, height: 240),
                 zPosition: .fromLegacyRank(1), runtimeRef: nil,
                 metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: "."))
             tile.zoneId = zone
@@ -159,7 +162,7 @@ enum SidebarTruthChecks {
 
         func zone(_ id: UUID, _ projectId: UUID, _ name: String) -> ZonePlacement {
             ZonePlacement(
-                zoneId: id, projectId: projectId, origin: ZonePoint(x: 0, y: 0),
+                zoneId: id, projectId: projectId, origin: id == zoneA ? zoneOriginA : ZonePoint(x: 0, y: 0),
                 size: ZoneSize(width: 1_600, height: 800), color: "blue", collapsed: false,
                 hydrationPolicy: .automatic, name: name, navKey: "1")
         }

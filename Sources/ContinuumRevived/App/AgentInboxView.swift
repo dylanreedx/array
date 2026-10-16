@@ -2839,6 +2839,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return card.clickHoverSettleForQA()
     }
 
+    func clickSettleNudgeForQA(id: UUID) -> Bool {
+        guard let tableRow = tableRow(forAgentId: id),
+              let card = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
+        else { return false }
+        card.layoutSubtreeIfNeeded()
+        return card.clickSettleNudgeForQA()
+    }
+
     func clickBackgroundBringBackForQA(id: UUID) -> Bool {
         guard let tableRow = tableRow(forAgentId: id),
               let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
