@@ -98,6 +98,29 @@ SCENARIOS = [
         "resizes": [],
     },
     {
+        # Pointer-driven: over a sibling's outer quarter the move slides in
+        # between; over its middle half, or with option held, it swaps. Each
+        # pointer sits on the dragged tile's title bar, as in the native drag.
+        "id": "native-slide-between",
+        "baseline": {
+            "a-agent": frame(80, 110, 240, 160),
+            "b-verify": frame(328, 110, 300, 200),
+            "c-audit": frame(636, 110, 260, 180),
+            "d-shell": frame(904, 110, 320, 220),
+            "e-note": frame(80, 340, 240, 160),
+        },
+        "active": "d-shell",
+        "moves": [
+            {"id": "slide-before-b", "requested": frame(205.5, 110, 320, 220), "pointer": {"x": 365.5, "y": 122}},
+            {"id": "slide-latched-holds-row", "requested": frame(214, 308, 320, 220), "pointer": {"x": 374, "y": 320}, "latched": {"row": 0, "index": 1}},
+            {"id": "slide-unlatched-below-row", "requested": frame(214, 308, 320, 220), "pointer": {"x": 374, "y": 320}},
+            {"id": "swap-centre-b", "requested": frame(318, 110, 320, 220), "pointer": {"x": 478, "y": 122}},
+            {"id": "swap-option-b", "requested": frame(205.5, 110, 320, 220), "pointer": {"x": 365.5, "y": 122}, "preferSwap": True},
+            {"id": "back-home-no-latch", "requested": frame(880, 110, 320, 220), "pointer": {"x": 1040, "y": 122}, "latched": {"row": 0, "index": 1}},
+        ],
+        "resizes": [],
+    },
+    {
         "id": "native-resize-members",
         "baseline": {
             "a-main": frame(80, 120, 430, 550),
@@ -171,10 +194,7 @@ func run(_ input: [String: Any]) -> [String: Any] {
         let content = (scenario["content"] as? [String: Any]).map(frame) ?? defaultContent
         let zone = ZonePlacement(x:content.x,y:content.y,width:content.width,height:content.height)
         let baselineJSON = scenario["baseline"] as! [String: [String: Any]]
-        var labels = Array(baselineJSON.keys)
-        for move in scenario["moves"] as? [[String: Any]] ?? [] {
-            if let latch = move["latched"] as? String { labels.append(latch) }
-        }
+        let labels = Array(baselineJSON.keys)
         let ids = idMap(labels)
         var baseline = Dictionary(uniqueKeysWithValues: baselineJSON.map { (ids[$0.key]!, frame($0.value)) })
         if let setup = scenario["settleBaseline"] as? [String: Any], let moverLabel = setup["mover"] as? String {
@@ -193,22 +213,28 @@ func run(_ input: [String: Any]) -> [String: Any] {
                 (key, CanvasAutoLayoutEngine.LayoutTile(id:key, frame:value, zoneId:nil, minimumSize:CGSize(width:value.width,height:value.height)))
             })
             let requested = frame(move["requested"] as! [String: Any])
-            let latchLabel = move["latched"] as? String
+            let latchInput: CanvasAutoLayoutEngine.MoveLatch?
+            if let label = move["latched"] as? String { latchInput = .swap(ids[label]!) }
+            else if let slot = move["latched"] as? [String: Any] {
+                latchInput = .insert(row: (slot["row"] as! NSNumber).intValue, index: (slot["index"] as! NSNumber).intValue)
+            } else { latchInput = nil }
+            let pointer = (move["pointer"] as? [String: Any]).map { CGPoint(x: ($0["x"] as! NSNumber).doubleValue, y: ($0["y"] as! NSNumber).doubleValue) }
+            let preferSwap = (move["preferSwap"] as? Bool) ?? false
             var solvingTiles = nativeBaseline
             solvingTiles[active] = CanvasAutoLayoutEngine.LayoutTile(id:active, frame:requested, zoneId:nil, minimumSize:CGSize(width:requested.width,height:requested.height))
-            let result = CanvasAutoLayoutEngine.solveMemberMove(activeTile:active, originalFrame:baseline[active]!, memberIds:baseline.keys.sorted(by:CanvasAutoLayoutEngine.uuidLess), tiles:solvingTiles, zone:zone, gap:gap, padding:0, header:0, latched:latchLabel.flatMap { ids[$0] })
+            let result = CanvasAutoLayoutEngine.solveMemberMove(activeTile:active, originalFrame:baseline[active]!, memberIds:baseline.keys.sorted(by:CanvasAutoLayoutEngine.uuidLess), tiles:solvingTiles, zone:zone, gap:gap, padding:0, header:0, latched:latchInput, pointer:pointer, preferSwap:preferSwap)
             let snapped = (move["snapped"] as? [String: Any]).map(frame)
             var committed = result
             if let snapped {
                 var snappedTiles = nativeBaseline
                 snappedTiles[active] = CanvasAutoLayoutEngine.LayoutTile(id:active, frame:snapped, zoneId:nil, minimumSize:CGSize(width:snapped.width,height:snapped.height))
-                committed = CanvasAutoLayoutEngine.solveMemberMove(activeTile:active, originalFrame:baseline[active]!, memberIds:baseline.keys.sorted(by:CanvasAutoLayoutEngine.uuidLess), tiles:snappedTiles, zone:zone, gap:gap, padding:0, header:0, latched:result.latch)
+                committed = CanvasAutoLayoutEngine.solveMemberMove(activeTile:active, originalFrame:baseline[active]!, memberIds:baseline.keys.sorted(by:CanvasAutoLayoutEngine.uuidLess), tiles:snappedTiles, zone:zone, gap:gap, padding:0, header:0, latched:result.latch, pointer:pointer, preferSwap:preferSwap)
             }
             var releaseSource = committed.frames
             let isLatched = snapped != nil || result.latch != nil
             if let snapped {
                 releaseSource[active] = snapped
-            } else if let latch = result.latch, let slot = baseline[latch], var activeFrame = releaseSource[active] {
+            } else if result.latch != nil, let slot = result.slot, var activeFrame = releaseSource[active] {
                 activeFrame.x = slot.x; activeFrame.y = slot.y; releaseSource[active] = activeFrame
             }
             let releaseTiles = Dictionary(uniqueKeysWithValues:releaseSource.map { key, value in
@@ -218,7 +244,14 @@ func run(_ input: [String: Any]) -> [String: Any] {
             let name = move["id"] as! String
             let passive = settled.filter{$0.key != active}
             let isValid = settled[active].map { candidate in CanvasAutoLayoutEngine.valid(candidate, in: CGRect(x:content.x,y:content.y,width:content.width,height:content.height), against:Array(passive.values), gap:gap - 0.26) } ?? false
-            outputs[name] = ["requested":json(requested), "snapped":snapped.map(json) as Any? ?? NSNull(), "latchedInput":latchLabel as Any? ?? NSNull(), "liveFrames":mapped(result.frames, ids:ids), "committedFrames":snapped == nil ? NSNull() : mapped(committed.frames, ids:ids), "latch":result.latch.flatMap { id in ids.first(where:{$0.value == id})?.key } as Any? ?? NSNull(), "releaseSource":mapped(releaseSource,ids:ids), "releaseFrames":mapped(settled,ids:ids), "destination":settled[active].map(json) as Any? ?? NSNull(), "passiveFrames":mapped(passive,ids:ids), "valid":isValid]
+            func latchJSON(_ latch: CanvasAutoLayoutEngine.MoveLatch?) -> Any {
+                switch latch {
+                case let .swap(id)?: return ids.first(where:{$0.value == id})?.key ?? NSNull()
+                case let .insert(row, index)?: return ["row":row, "index":index]
+                case nil: return NSNull()
+                }
+            }
+            outputs[name] = ["requested":json(requested), "snapped":snapped.map(json) as Any? ?? NSNull(), "latchedInput":latchJSON(latchInput), "pointer":pointer.map { ["x":$0.x, "y":$0.y] } as Any? ?? NSNull(), "preferSwap":preferSwap, "liveFrames":mapped(result.frames, ids:ids), "committedFrames":snapped == nil ? NSNull() : mapped(committed.frames, ids:ids), "latch":latchJSON(result.latch), "slot":result.slot.map(json) as Any? ?? NSNull(), "releaseSource":mapped(releaseSource,ids:ids), "releaseFrames":mapped(settled,ids:ids), "destination":settled[active].map(json) as Any? ?? NSNull(), "passiveFrames":mapped(passive,ids:ids), "valid":isValid]
         }
         var resizeOutputs: [String: Any] = [:]
         for resize in scenario["resizes"] as? [[String: Any]] ?? [] {
@@ -250,7 +283,14 @@ def main() -> None:
         extract(source, "    private enum PushAxis"),
         extract(source, "    private static func pushAxis("),
         extract(source, "    private static func propagatePushes("),
+        extract(source, "    public enum MoveLatch"),
         extract(source, "    private static func solveMemberMove("),
+        extract(source, "    private static func memberRows("),
+        extract(source, "    private static func rowExtent("),
+        extract(source, "    private static func rectContains("),
+        extract(source, "    private static func swapOnlyLatch("),
+        extract(source, "    private static func slideOrSwapLatch("),
+        extract(source, "    private static func layoutInsertion("),
         extract(source, "    private static func settleMembers("),
         extract(source, "    private static func absorb("),
         extract(source, "    private static func contactPlacement("),
@@ -262,7 +302,7 @@ def main() -> None:
     # The extracted source declares most helpers private. The standalone driver
     # calls those helpers from outside the enum, so relax visibility only (all
     # function bodies and their signatures remain source-derived).
-    declarations = [d.replace("private static func", "static func").replace("private enum PushAxis", "enum PushAxis") for d in declarations]
+    declarations = [d.replace("private static func", "static func").replace("private enum PushAxis", "enum PushAxis").replace("public enum MoveLatch", "enum MoveLatch") for d in declarations]
     harness = SWIFT_PREFIX + "\n".join(declarations) + SWIFT_SUFFIX
     payload = {"gap": 8.0, "content": CONTENT, "scenarios": SCENARIOS}
     with tempfile.TemporaryDirectory(prefix="array-native-layout-") as temp:
@@ -277,7 +317,7 @@ def main() -> None:
             "source": "Sources/ContinuumRevivedCore/CanvasAutoLayoutEngine.swift",
             "generator": "website/scripts/native-layout-fixtures.py",
             "method": "The script extracts the named Swift declarations, relaxes only access modifiers so the standalone CLI driver can call them, compiles a temporary harness, and serializes its outputs. Function bodies are unchanged; no expected frame values are hand-authored.",
-            "nativeFunctions": ["resizeMembers", "solveMemberMove", "settleMembers", "pushAxis", "propagatePushes", "absorb", "contactPlacement", "valid", "isGapAdjacent", "clampIntoContent", "overlapsOrUnderGap", "squaredDistance", "uuidLess"],
+            "nativeFunctions": ["resizeMembers", "solveMemberMove", "memberRows", "rowExtent", "rectContains", "swapOnlyLatch", "slideOrSwapLatch", "layoutInsertion", "settleMembers", "pushAxis", "propagatePushes", "absorb", "contactPlacement", "valid", "isGapAdjacent", "clampIntoContent", "overlapsOrUnderGap", "squaredDistance", "uuidLess"],
             "idOrdering": "Fixture labels are sorted and assigned UUIDs in the same order so native UUID-string ordering matches TypeScript string ordering.",
         },
         "gap": payload["gap"],

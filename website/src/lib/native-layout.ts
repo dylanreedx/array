@@ -61,30 +61,102 @@ export function propagatePushes(sourceId: string, frames: Frames, baseline: Fram
     }
   }
 }
-export function solveMemberMove(baseline: Frames, active: string, requested: Frame, content: ContentRect, gap: number, latched: string | null = null): { frames: Frames; latch: string | null } {
+export interface Point { x: number; y: number }
+/** Source MoveLatch: a sibling id is `.swap(id)`; `{ row, index }` is `.insert`. */
+export type MoveLatch = string | { row: number; index: number } | null;
+/** Source memberRows: members whose vertical spans overlap (transitively),
+ * rows top to bottom, each row left to right. */
+export function memberRows(members: readonly string[], frames: Frames): string[][] {
+  const byTop = members.filter(id => frames[id]).sort((a, b) => frames[a].y - frames[b].y || (a < b ? -1 : a > b ? 1 : 0));
+  const rows: string[][] = [];
+  let rowBottom = -Infinity;
+  for (const id of byTop) {
+    const f = frames[id];
+    if (!rows.length || f.y >= rowBottom - .5) { rows.push([id]); rowBottom = bottom(f); }
+    else { rows[rows.length - 1].push(id); rowBottom = Math.max(rowBottom, bottom(f)); }
+  }
+  return rows.map(row => row.sort((a, b) => frames[a].x - frames[b].x || (a < b ? -1 : a > b ? 1 : 0)));
+}
+function rowExtent(row: readonly string[], frames: Frames): Frame {
+  const members = row.map(id => frames[id]).filter(Boolean);
+  if (!members.length) return { x: 0, y: 0, width: 0, height: 0 };
+  const x = Math.min(...members.map(f => f.x)), y = Math.min(...members.map(f => f.y));
+  return { x, y, width: Math.max(...members.map(right)) - x, height: Math.max(...members.map(bottom)) - y };
+}
+const rectContains = (f: Frame, p: Point, inset = 0) =>
+  p.x >= f.x - inset && p.x <= right(f) + inset && p.y >= f.y - inset && p.y <= bottom(f) + inset;
+/** Source swapOnlyLatch (⌥, or no pointer): enter a sibling to swap with it. */
+function swapOnlyLatch(probe: Point, home: Frame, siblings: readonly string[], baseline: Frames, latched: MoveLatch, band: number): MoveLatch {
+  let latch: string | null = null;
+  if (typeof latched === 'string' && baseline[latched] && siblings.includes(latched) && rectContains(baseline[latched], probe, band)) latch = latched;
+  if (rectContains(home, probe)) return null;
+  return siblings.find(id => baseline[id] && rectContains(baseline[id], probe)) ?? latch;
+}
+/** Source slideOrSwapLatch: middle half swaps, outer quarters and gaps slide in. */
+function slideOrSwapLatch(probe: Point, home: Frame, rows: readonly string[][], baseline: Frames, latched: MoveLatch, band: number): MoveLatch {
+  if (rectContains(home, probe)) return null;
+  const middleHalf = (id: string): Frame | null => baseline[id] ? { ...baseline[id], x: baseline[id].x + baseline[id].width / 4, width: baseline[id].width / 2 } : null;
+  if (typeof latched === 'string' && rows.some(row => row.includes(latched))) {
+    const half = middleHalf(latched);
+    if (half && rectContains(half, probe, band)) return latched;
+  }
+  const entered = rows.flat().find(id => { const half = middleHalf(id); return half !== null && rectContains(half, probe); });
+  if (entered) return entered;
+  const held = latched !== null && typeof latched === 'object' && latched.row >= 0 && latched.row < rows.length ? latched : null;
+  const heldRow = held && rectContains(rowExtent(rows[held.row], baseline), probe, band) ? held.row : null;
+  const found = rows.findIndex(row => rectContains(rowExtent(row, baseline), probe));
+  const rowIndex = heldRow ?? (found >= 0 ? found : null);
+  if (rowIndex === null) return null;
+  const row = rows[rowIndex];
+  const mids = row.filter(id => baseline[id]).map(id => baseline[id].x + baseline[id].width / 2);
+  let index = mids.filter(mid => mid < probe.x).length;
+  if (held && held.row === rowIndex) {
+    const surelyPast = mids.filter(mid => mid < probe.x - band).length;
+    const maybePast = mids.filter(mid => mid < probe.x + band).length;
+    index = Math.min(Math.max(held.index, surelyPast), maybePast);
+  }
+  const extent = rowExtent(row, baseline);
+  const homeInRow = home.y < bottom(extent) && extent.y < bottom(home);
+  if (homeInRow && index === mids.filter(mid => mid < home.x + home.width / 2).length) return null;
+  return { row: rowIndex, index };
+}
+/** Source layoutInsertion: the row reflows around the dragged tile's empty slot. */
+function layoutInsertion(row: readonly string[], index: number, active: Frame, home: Frame, baseline: Frames, frames: Frames, gap: number): Frame {
+  const extent = rowExtent(row, baseline);
+  const homeInRow = home.y < bottom(extent) && extent.y < bottom(home);
+  let x = homeInRow ? Math.min(extent.x, home.x) : extent.x;
+  const slot = { ...active, x, y: extent.y };
+  row.forEach((id, position) => {
+    if (position === index) { slot.x = x; x += active.width + gap; }
+    const f = baseline[id];
+    if (!f) return;
+    frames[id] = { ...f, x, y: extent.y };
+    x += f.width + gap;
+  });
+  if (index >= row.length) slot.x = x;
+  return slot;
+}
+/** Source solveMemberMove. `pointer` (world) decides slide vs swap; without
+ * one the tile's centre stands in and the move can only swap, as with ⌥. */
+export function solveMemberMove(baseline: Frames, active: string, requested: Frame, content: ContentRect, gap: number, latched: MoveLatch = null, pointer: Point | null = null, preferSwap = false): { frames: Frames; latch: MoveLatch; slot: Frame | null } {
   const original = baseline[active];
-  if (!original) return { frames: {}, latch: null };
-  const ordered = ids(baseline);
-  const center = { x: requested.x + requested.width / 2, y: requested.y + requested.height / 2 };
-  const contains = (f: Frame) => center.x >= f.x && center.x <= right(f) && center.y >= f.y && center.y <= bottom(f);
+  if (!original) return { frames: {}, latch: null, slot: null };
+  const probe = pointer ?? { x: requested.x + requested.width / 2, y: requested.y + requested.height / 2 };
   const releaseBand = Math.max(24, gap * 1.5);
-  let latch = latched && baseline[latched] && latched !== active ? latched : null;
-  if (latch) {
-    const f = baseline[latch];
-    if (!contains({ x: f.x - releaseBand, y: f.y - releaseBand, width: f.width + 2 * releaseBand, height: f.height + 2 * releaseBand })) latch = null;
-  }
-  if (contains(original)) latch = null;
-  else {
-    const entered = ordered.find(id => id !== active && contains(baseline[id]));
-    if (entered) latch = entered;
-  }
+  const rows = memberRows(ids(baseline).filter(id => id !== active), baseline);
+  const latch = preferSwap || pointer === null
+    ? swapOnlyLatch(probe, original, rows.flat(), baseline, latched, releaseBand)
+    : slideOrSwapLatch(probe, original, rows, baseline, latched, releaseBand);
   const frames = copy(baseline);
   frames[active] = { ...requested };
-  if (latch) {
+  let slot: Frame | null = null;
+  if (typeof latch === 'string') {
     frames[latch] = clampIntoContent({ ...frames[latch], x: original.x, y: original.y }, content);
     propagatePushes(latch, frames, baseline, new Set([active]), content, gap);
-  } else propagatePushes(active, frames, baseline, new Set(), content, gap);
-  return { frames, latch };
+    slot = { ...requested, x: baseline[latch].x, y: baseline[latch].y };
+  } else if (latch) slot = layoutInsertion(rows[latch.row], latch.index, requested, original, baseline, frames, gap);
+  else propagatePushes(active, frames, baseline, new Set(), content, gap);
+  return { frames, latch, slot };
 }
 /** Source resizeMembers: outward pressure follows baseline order and never
  * clamps against the zone; the caller grows the zone around this transaction. */
@@ -190,18 +262,19 @@ export function settleMembers(frames: Frames, content: ContentRect, gap: number,
 }
 /** Predicts a release using the same solved scene, including vacancy of passive
  * tiles. Magnetic target detection is a separate native subsystem. */
-export function predictMove(baseline: Frames, active: string, requested: Frame, content: ContentRect, gap: number, latched: string | null = null, snapped: Frame | null = null) {
-  const live = solveMemberMove(baseline, active, requested, content, gap, latched);
+export function predictMove(baseline: Frames, active: string, requested: Frame, content: ContentRect, gap: number, latched: MoveLatch = null, snapped: Frame | null = null, pointer: Point | null = null, preferSwap = false) {
+  const live = solveMemberMove(baseline, active, requested, content, gap, latched, pointer, preferSwap);
   // CanvasNSView.settleAutoLayoutAfterMove (honorSnap=false): a completed
-  // exchange inherits the sibling's pre-gesture origin before pinned settle.
+  // swap or slide takes its latched slot before the pinned settle.
   // TileNSView.mouseUp commits the snapped tile through canvas.updateTile
   // before honorSnap settle; updateTile re-solves from the gesture baseline.
   // Reusing raw-pointer passive pushes here would predict a different scene.
-  const committedLive = snapped ? solveMemberMove(baseline, active, snapped, content, gap, live.latch) : live;
+  const committedLive = snapped ? solveMemberMove(baseline, active, snapped, content, gap, live.latch, pointer, preferSwap) : live;
   const releaseSource = copy(committedLive.frames);
   if (snapped && releaseSource[active]) releaseSource[active] = { ...snapped };
-  else if (live.latch && baseline[live.latch] && releaseSource[active]) {
-    releaseSource[active] = { ...releaseSource[active], x: baseline[live.latch].x, y: baseline[live.latch].y };
+  else if (live.latch !== null && live.slot && releaseSource[active]) {
+    // A latched move (swap or slide) drops into its slot, then settles pinned.
+    releaseSource[active] = { ...releaseSource[active], x: live.slot.x, y: live.slot.y };
   }
   const releaseFrames = settleMembers(releaseSource, content, gap, active, snapped !== null || live.latch !== null);
   const destination = releaseFrames[active] ?? null;
