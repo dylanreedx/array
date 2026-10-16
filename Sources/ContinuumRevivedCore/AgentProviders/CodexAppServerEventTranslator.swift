@@ -278,12 +278,18 @@ public struct CodexAppServerEventTranslator {
                 kind: .webSearch, title: Self.webSearchToolName(item))]
 
         case "commandExecution":
-            // Same I5 posture as exec: `command`/`aggregatedOutput` are the
-            // sensitive payload, so the title is the generic literal "Shell",
-            // never the command itself.
+            // Same I5 posture as exec: the EVENT's title is the generic literal
+            // "Shell", never the command. The command (unwrapped) and, when it
+            // is not the agent's home, the cwd ride the host-local side channel
+            // only (launch polish, item J).
             if let onRuntimeObservation {
+                var fields: [(key: String, value: String)] = []
+                if let command = AgentShellObservation.commandField(item["command"]) { fields.append(command) }
+                if let cwd = AgentShellObservation.cwdField(item["cwd"] as? String, home: workingDirectory) {
+                    fields.append(cwd)
+                }
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
-                    phase: .started, toolName: "Shell", observedAt: now())))
+                    phase: .started, toolName: "Shell", fields: fields, observedAt: now())))
             }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .commandExecution, title: "Shell")]
 
@@ -450,10 +456,16 @@ public struct CodexAppServerEventTranslator {
                 let output = (item["aggregatedOutput"] as? String)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .flatMap { $0.isEmpty ? nil : $0 }
+                // codex measures the command itself (`durationMs`). The gap
+                // between our two observation instants cannot stand in for it:
+                // a quick command's started and completed frames arrive in the
+                // same millisecond, which read "0.0s" whatever it took.
+                let reported = (item["durationMs"] as? NSNumber).map { $0.doubleValue / 1000 }
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
                     phase: .ended,
                     outputPreview: output,
                     exitCode: exitCode,
+                    reportedDuration: reported,
                     observedAt: now())))
             }
             return [.itemCompleted(

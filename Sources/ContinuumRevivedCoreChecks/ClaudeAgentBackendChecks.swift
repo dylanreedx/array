@@ -177,8 +177,10 @@ private func runClaudeTranslatorMappingChecks() {
     // 5. `.plans/45` S2 — the toolDetail supply. One started+ended pair per
     //    TOP-LEVEL tool in stream order (sub-agent frames still skipped); the
     //    edit start carries the basename only; the result body rides as the
-    //    bounded outputPreview; and a Bash start carries NO field — the
-    //    command body never crosses even on the host-local channel.
+    //    bounded outputPreview; and a Bash start carries exactly its
+    //    `command` (launch polish, item J) — on this host-local channel and
+    //    nowhere else: the events above stay clean of it, and a SUBAGENT's
+    //    command never crosses at all.
     let details = observed.compactMap { observation -> (String, AgentToolDetailObservation)? in
         guard case let .toolDetail(itemId, detail) = observation else { return nil }
         return (itemId, detail)
@@ -187,14 +189,20 @@ private func runClaudeTranslatorMappingChecks() {
            "ClaudeEventTranslator: expected a started+ended detail pair per top-level tool, got \(details.map(\.0))")
     expect(details.map(\.1.phase) == [.started, .ended, .started, .ended],
            "ClaudeEventTranslator: detail phases out of order: \(details.map(\.1.phase))")
-    expect(details[0].1.fields.isEmpty && details[0].1.toolName == "Bash",
-           "ClaudeEventTranslator: a Bash start must carry no detail fields, got \(details[0].1.fields)")
+    expect(details[0].1.fields.map { "\($0.key)=\($0.value)" } == ["command=SECRET-COMMAND"]
+               && details[0].1.toolName == "Bash",
+           "ClaudeEventTranslator: a Bash start must carry its command and nothing else, got \(details[0].1.fields)")
     expect(details[1].1.outputPreview == "SECRET-TOOL-OUTPUT",
            "ClaudeEventTranslator: the tool_result body must ride as the bounded outputPreview, got \(String(describing: details[1].1.outputPreview))")
     expect(details[2].1.fields.map { "\($0.key)=\($0.value)" } == ["file=notes.txt"],
            "ClaudeEventTranslator: an Edit start must carry the basename only, got \(details[2].1.fields)")
     let detailDescription = String(describing: details)
-    for secret in ["SECRET-COMMAND", "SECRET-SUBAGENT-COMMAND", "SECRET-PATH", "toolu_sub"] {
+    let detailDescriptionWithoutCommand = String(describing: details.map { item in
+        (item.0, item.1.fields.filter { $0.key != AgentToolDetailObservation.shellCommandKey }, item.1.outputPreview)
+    })
+    expect(!detailDescriptionWithoutCommand.contains("SECRET-COMMAND"),
+           "ClaudeEventTranslator: the Bash command crossed somewhere other than its `command` field")
+    for secret in ["SECRET-SUBAGENT-COMMAND", "SECRET-PATH", "toolu_sub"] {
         expect(!detailDescription.contains(secret),
                "ClaudeEventTranslator: \(secret) leaked into the toolDetail channel")
     }

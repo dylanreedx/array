@@ -2587,8 +2587,9 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     /// `.plans/45` S6 — the live tool verb, derived from whitelisted detail
-    /// fields only (query/url/pattern/basename/description); a command body can
-    /// never reach the tail because it never enters an observation.
+    /// fields only (query/url/pattern/basename/description). A shell's
+    /// `command` does ride the observation now (for its transcript row), and is
+    /// deliberately not read here: the compact tail never prints a command.
     private func updateLiveToolVerb(for observation: AgentRuntimeObservation) {
         guard case let .toolDetail(itemID, detail) = observation else { return }
         switch detail.phase {

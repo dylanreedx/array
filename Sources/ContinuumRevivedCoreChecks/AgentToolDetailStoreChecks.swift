@@ -1035,14 +1035,11 @@ private func runAgentToolDetailPresentationChecks() async throws {
     let clock = ManualToolDetailClock(Date(timeIntervalSinceReferenceDate: 5_000))
     let store = AgentToolDetailStore(clock: { clock.now() }, timeToLive: 60)
     // TR-03. This block used to feed the store a `command` argument and assert
-    // the presenter said "Ran swift test --filter Core". No production
-    // translator has ever forwarded a command body: claude drops `Bash.command`
-    // on purpose, pi's whitelist has no command key, and codex's shell start
-    // carries no arguments at all (I5). So the most-asserted sentence in this
-    // suite described a branch that could not run, while the sentence a real
-    // shell row DOES get went unwitnessed. It is now the claude shape — a
-    // `description` and nothing else — asserted through `collapsed`, which is
-    // what production actually reads.
+    // a sentence no translator could produce. It is the claude shape with the
+    // command absent — a `description` and nothing else — asserted through
+    // `collapsed`, which is what production reads. (Since launch polish item J
+    // every translator forwards a shell's `command`; that row is witnessed end
+    // to end by the app's `--shell-tool-row-check`.)
     _ = await store.recordStart(AgentToolDetailStart(
         identity: testToolDetailKey("tool-command-summary"),
         toolName: "Bash",

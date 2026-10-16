@@ -259,7 +259,9 @@ private func runCodexTranslatorMappingChecks() {
     // 5. `.plans/45` S2 — the toolDetail supply. The ended detail for a
     //    command carries the INTEGER exit code and the aggregated output as a
     //    bounded preview; a file_change start carries every changed basename;
-    //    and the command body itself never crosses, even host-locally.
+    //    and a command start carries the command UNWRAPPED from codex's login
+    //    shell under `command` (launch polish, item J) — host-locally only;
+    //    the events above stay clean of it.
     let details = observed.compactMap { observation -> (String, AgentToolDetailObservation)? in
         guard case let .toolDetail(itemId, detail) = observation else { return nil }
         return (itemId, detail)
@@ -274,7 +276,13 @@ private func runCodexTranslatorMappingChecks() {
     expect(editStart?.fields.map { "\($0.key)=\($0.value)" } == ["file=note.txt"],
            "CodexEventTranslator: a file_change start must carry the changed basenames only, got \(String(describing: editStart?.fields))")
     let detailDescription = String(describing: details)
-    for secret in ["SECRET-COMMAND", "SECRET-FAILING-COMMAND", "SECRET-PATH"] {
+    let commandStarts = details.filter { $0.1.phase == .started && $0.1.toolName == "Shell" }
+        .map { $0.1.fields.map { "\($0.key)=\($0.value)" } }
+    expect(commandStarts == [["command=echo SECRET-COMMAND"], ["command=SECRET-FAILING-COMMAND"]],
+           "CodexEventTranslator: each command start must carry its unwrapped command and nothing else, got \(commandStarts)")
+    expect(!detailDescription.contains("zsh -lc"),
+           "CodexEventTranslator: the login-shell wrapper must be unwrapped before it crosses")
+    for secret in ["SECRET-PATH"] {
         expect(!detailDescription.contains(secret),
                "CodexEventTranslator: \(secret) leaked into the toolDetail channel")
     }

@@ -676,4 +676,7 @@ runParserPerformanceChecks()
 // The composer's reply-option offer, judged on real parsed Markdown.
 runReplyOptionChecks()
 
+// Launch polish, item J — the shell-invocation shape behind every command row.
+runShellInvocationChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")

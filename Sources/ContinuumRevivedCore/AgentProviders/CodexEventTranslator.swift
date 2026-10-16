@@ -129,14 +129,17 @@ public struct CodexEventTranslator {
                 let signals = AgentGitOperationClassifier.operations(in: command)
                 if !signals.isEmpty { semanticSignalsByItemID[itemId] = signals }
             }
-            // DROP `command` + `aggregated_output` (I5): the command is the
-            // sensitive payload, so the title is a generic literal, NOT the
-            // command (unlike claude, whose tool NAME is the safe title).
-            // `.plans/45` S2 — the start instant rides the side channel so the
-            // row can show a duration; codex offers no safe argument summary.
+            // `command` + `aggregated_output` stay out of the EVENT (I5): the
+            // title is the generic literal "Shell", never the command. The
+            // command itself, unwrapped from codex's login-shell wrapper, rides
+            // the host-local side channel only, with the start instant, so the
+            // row can say what ran (launch polish, item J).
             if let onRuntimeObservation {
+                let command = AgentShellObservation.commandField(item["command"])
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
-                    phase: .started, toolName: "Shell", observedAt: now())))
+                    phase: .started, toolName: "Shell",
+                    fields: command.map { [$0] } ?? [],
+                    observedAt: now())))
             }
             return [.itemStarted(threadId: threadId, itemId: itemId, kind: .commandExecution, title: "Shell")]
 

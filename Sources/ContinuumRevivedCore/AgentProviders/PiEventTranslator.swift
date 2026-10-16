@@ -274,9 +274,9 @@ public struct PiEventTranslator {
                 }
             }
             // `.plans/45` S2 — the detail supply. Whitelisted argument fields
-            // and the provider-authored start instant go out of band; pi has no
-            // Bash `description`, so a shell call carries NO field rather than
-            // its command body.
+            // and the provider-authored start instant go out of band. A shell
+            // call carries its `command` (launch polish, item J): pi has no
+            // Bash `description`, so without it the row could only say "Bash".
             if let onRuntimeObservation {
                 onRuntimeObservation(.toolDetail(itemId: toolCallId, detail: AgentToolDetailObservation(
                     phase: .started,
@@ -316,9 +316,18 @@ public struct PiEventTranslator {
             // the result text and the provider-authored end instant were both
             // parsed upstream and discarded here (C1's pi row of the table).
             if let onRuntimeObservation {
+                // pi's bash tool states its exit as the result's last line
+                // ("Command exited with code 2"); the row badges it, so the
+                // output keeps everything above it.
+                let preview = Self.resultPreview(object["result"])
+                let shell = AgentShellObservation.isShellTool(toolName)
+                    ? AgentShellObservation.piResult(text: preview)
+                    : AgentShellObservation.ShellResult(output: preview)
                 onRuntimeObservation(.toolDetail(itemId: toolCallId, detail: AgentToolDetailObservation(
                     phase: .ended,
-                    outputPreview: Self.resultPreview(object["result"]),
+                    outputPreview: shell.output,
+                    exitCode: shell.exitCode,
+                    shellOutcome: shell.outcome,
                     observedAt: Self.timestamp(from: object) ?? now()
                 )))
             }
@@ -681,7 +690,8 @@ public struct PiEventTranslator {
         // whose args used any other shape rendered as the bare word "search"
         // with no query and nothing to expand. The privacy rule is about KEYS,
         // not names: these five keys may cross for ANY tool, and everything
-        // else — command bodies, prompts, unknown schemas — never does.
+        // else — prompts, unknown schemas, any non-shell body — never does; a
+        // shell tool's `command` is the one body that crosses (below).
         var fields: [(key: String, value: String)] = []
         if let query = string("query") ?? string("q") ?? string("search_query") {
             fields.append((key: "query", value: query))
@@ -697,6 +707,11 @@ public struct PiEventTranslator {
         }
         if let description = string("description") {
             fields.append((key: "description", value: description))
+        }
+        // Launch polish, item J — a SHELL's command, host-local only.
+        if AgentShellObservation.isShellTool(toolName),
+           let command = AgentShellObservation.commandField(args["command"]) {
+            fields.append(command)
         }
         // TR-03 — the delegation ROLE, on the same reasoning the claude
         // translator already crosses `subagent_type` on: a role id is

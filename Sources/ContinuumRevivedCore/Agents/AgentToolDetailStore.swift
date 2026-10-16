@@ -13,6 +13,10 @@ public struct AgentToolDetailLimits: Equatable, Sendable {
     public var maxOutputLines: Int
     public var maxArguments: Int
     public var maxAffectedFiles: Int
+    /// A shell command's own bound. It is the row's headline and its expanded
+    /// body, so the 8-line field cap would cut an ordinary heredoc.
+    public var maxCommandBytes: Int
+    public var maxCommandLines: Int
 
     public init(
         maxToolNameBytes: Int = 160,
@@ -22,7 +26,9 @@ public struct AgentToolDetailLimits: Equatable, Sendable {
         maxOutputBytes: Int = 16_384,
         maxOutputLines: Int = 200,
         maxArguments: Int = 100,
-        maxAffectedFiles: Int = 50
+        maxAffectedFiles: Int = 50,
+        maxCommandBytes: Int = 4_096,
+        maxCommandLines: Int = 40
     ) {
         self.maxToolNameBytes = max(16, maxToolNameBytes)
         self.maxArgumentKeyBytes = max(16, maxArgumentKeyBytes)
@@ -32,6 +38,8 @@ public struct AgentToolDetailLimits: Equatable, Sendable {
         self.maxOutputLines = max(1, maxOutputLines)
         self.maxArguments = max(0, maxArguments)
         self.maxAffectedFiles = max(0, maxAffectedFiles)
+        self.maxCommandBytes = max(16, maxCommandBytes)
+        self.maxCommandLines = max(1, maxCommandLines)
     }
 }
 
@@ -157,6 +165,10 @@ public struct AgentToolDetailEnd: Equatable, Sendable {
     /// not this value.
     public var endedAt: Date?
     public var explicitSecrets: [String]
+    /// A shell's outcome beyond its exit code (timed out / interrupted /
+    /// backgrounded), and the provider's own measured duration.
+    public var shellOutcome: AgentShellStatus?
+    public var reportedDuration: TimeInterval?
 
     public init(
         identity: AgentToolDetailKey,
@@ -165,7 +177,9 @@ public struct AgentToolDetailEnd: Equatable, Sendable {
         exitCode: Int? = nil,
         affectedFiles: [URL] = [],
         endedAt: Date? = nil,
-        explicitSecrets: [String] = []
+        explicitSecrets: [String] = [],
+        shellOutcome: AgentShellStatus? = nil,
+        reportedDuration: TimeInterval? = nil
     ) {
         self.identity = identity
         self.output = output
@@ -174,6 +188,8 @@ public struct AgentToolDetailEnd: Equatable, Sendable {
         self.affectedFiles = affectedFiles
         self.endedAt = endedAt
         self.explicitSecrets = explicitSecrets
+        self.shellOutcome = shellOutcome
+        self.reportedDuration = reportedDuration
     }
 
 }
@@ -222,6 +238,8 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
     public var affectedFiles: [URL]
     public var fileChanges: [AgentToolDetailObservation.FileChange]
     public var parentItemID: String?
+    public var shellOutcome: AgentShellStatus?
+    public var reportedDuration: TimeInterval?
 
     var sensitiveStartFingerprints: Set<String>
     var latestEndExplicitFingerprints: Set<String>
@@ -287,6 +305,10 @@ public struct AgentToolDetailRecord: Equatable, Sendable {
         guard let startedAt, let endedAt else { return nil }
         return max(0, endedAt.timeIntervalSince(startedAt))
     }
+
+    /// The provider's own measurement when it made one, else the span between
+    /// the two observed instants.
+    public var measuredDuration: TimeInterval? { reportedDuration ?? duration }
 }
 
 public struct AgentToolDetailSanitizer: Sendable {
@@ -338,12 +360,13 @@ public struct AgentToolDetailSanitizer: Sendable {
                 return AgentToolDetailArgument(key: key, value: bounded, sensitiveKeyFiltered: true)
             }
             let redacted = SecretRedactor.redact(field.value, explicitSecrets: secrets)
+            let isCommand = key == AgentToolDetailObservation.shellCommandKey
             return AgentToolDetailArgument(
                 key: key,
                 value: boundText(
                     redacted,
-                    maxBytes: limits.maxFieldValueBytes,
-                    maxLines: limits.maxFieldValueLines,
+                    maxBytes: isCommand ? limits.maxCommandBytes : limits.maxFieldValueBytes,
+                    maxLines: isCommand ? limits.maxCommandLines : limits.maxFieldValueLines,
                     redacted: redacted != field.value
                 ),
                 sensitiveKeyFiltered: false
@@ -538,13 +561,17 @@ public struct AgentToolDetailSanitizer: Sendable {
         output: AgentToolDetailBoundedText?,
         status: AgentItemStatus,
         exitCode: Int?,
-        affectedFiles: [URL]
+        affectedFiles: [URL],
+        shellOutcome: AgentShellStatus? = nil,
+        reportedDuration: TimeInterval? = nil
     ) -> String {
         stableKey([
             stableTextKey(output),
             status.rawValue,
             exitCode.map(String.init) ?? "",
-            affectedFiles.map(\.absoluteString).sorted().joined(separator: "\u{1f}")
+            affectedFiles.map(\.absoluteString).sorted().joined(separator: "\u{1f}"),
+            shellOutcome?.rawValue ?? "",
+            reportedDuration.map { String($0) } ?? ""
         ])
     }
 
@@ -796,7 +823,9 @@ public actor AgentToolDetailStore {
             output: sanitizedOutput,
             status: end.status,
             exitCode: end.exitCode,
-            affectedFiles: sanitizedFiles
+            affectedFiles: sanitizedFiles,
+            shellOutcome: end.shellOutcome,
+            reportedDuration: end.reportedDuration
         )
         let existing = details[end.identity]
         var record = existing ?? AgentToolDetailRecord(identity: end.identity, updatedAt: observedAt)
@@ -810,6 +839,8 @@ public actor AgentToolDetailStore {
             record.output = sanitizedOutput
             record.status = end.status
             record.exitCode = end.exitCode
+            record.shellOutcome = end.shellOutcome
+            record.reportedDuration = end.reportedDuration
             record.endedAt = end.endedAt
             record.latestEndTimestamp = end.endedAt
             record.latestEndTieKey = tieKey
@@ -1113,6 +1144,17 @@ public enum AgentToolDetailPresenter {
         // "Delegate_agent" over "delegate_agent" — which no exact-match dedupe
         // could ever catch. A line that is only the tool name adds nothing over a
         // title that is only the tool name, so emit none.
+        // A shell row's body is the command itself (and where it ran), never an
+        // "Exit code: 0" line: the exit status is the row's badge, and only
+        // when it is not zero.
+        let shell = shellInvocation(detail)
+        if let shell, !shell.command.isEmpty {
+            // Any file the provider tied to the call stays listed: the command
+            // narrates, it does not name the file.
+            let label = AgentToolKind.shell.fileLineLabel
+            return ([shell.disclosureText] + observableAffectedFileNames(detail).map { "\(label): \($0)" })
+                .prefix(12).joined(separator: "\n")
+        }
         let actionLine = pureSummary(for: detail).map { shortLine($0) }
         let echo = actionLine
             ?? shortLine(capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName))))
@@ -1155,7 +1197,9 @@ public enum AgentToolDetailPresenter {
             guard !echo.contains(value) else { continue }
             lines.append("\(shortLine(argument.key, maxBytes: 48)): \(value)")
         }
-        if let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }
+        // A shell's exit status is its row's badge (and nothing at all when it
+        // is zero) — never a body line. Other tools keep theirs.
+        if shell == nil, let exitCode = detail.exitCode { lines.append("Exit code: \(exitCode)") }
         // No "Duration:" line. `.plans/45` — the row's trailing column already
         // reads "4.0s ✓"; a second copy underneath is the same echo the query
         // line was, and it cost a full body line on every settled row.
@@ -1274,12 +1318,9 @@ public enum AgentToolDetailPresenter {
     private static func pureSummary(for detail: AgentToolDetailRecord) -> String? {
         switch AgentToolKind.resolve(toolName: safeToolName(detail.toolName)) {
         case .shell:
-            // No production translator forwards a command body — claude's
-            // whitelist drops `Bash.command` on purpose, pi's carries no command
-            // key, and codex's shell start carries no arguments at all (I5). The
-            // `description` fallback below is where a claude shell row actually
-            // gets its sentence; there is deliberately no "Ran <command>" branch
-            // to promise a string that can never arrive.
+            // A shell row with a command is titled by `shellInvocation` (see
+            // `collapsed`) and never reaches here. What does is a shell whose
+            // command did not cross, which keeps claude's `description` below.
             break
         case .search:
             if let query = safeArgument(detail, keys: ["query", "pattern", "regex", "search"]) {
@@ -1323,13 +1364,57 @@ public enum AgentToolDetailPresenter {
     /// the trailing column. The tool name survives only as the fallback, and
     /// capitalized — pi reports names like "search" in lowercase (C6).
     public static func collapsed(_ detail: AgentToolDetailRecord) -> AgentToolDetailCollapsedPresentation {
-        AgentToolDetailCollapsedPresentation(
+        // A shell row is titled by what ran: claude's description when it gave
+        // one (the renderer sets the command beside it), else the command.
+        if let shell = shellInvocation(detail), !shell.command.isEmpty {
+            return AgentToolDetailCollapsedPresentation(
+                actionLine: shell.description.map(capitalizedPhrase) ?? shell.headline,
+                durationText: shell.durationText)
+        }
+        return AgentToolDetailCollapsedPresentation(
             actionLine: shortLine(
                 pureSummary(for: detail)
                     ?? capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName)))
             ),
             durationText: detail.duration.map(formatDuration)
         )
+    }
+
+    /// Launch polish, item J — the one shell shape every harness's command row
+    /// is drawn from. Nil for anything that is not a shell tool. A shell whose
+    /// command never crossed (an old record, a redacted key) still gets a
+    /// shape, with an empty command, so its exit status is still told the same
+    /// way.
+    public static func shellInvocation(_ detail: AgentToolDetailRecord) -> AgentShellInvocation? {
+        guard AgentToolKind.resolve(toolName: safeToolName(detail.toolName)) == .shell else { return nil }
+        func argument(_ key: String) -> String? {
+            detail.arguments.first { $0.key == key && !$0.sensitiveKeyFiltered }
+                .map { $0.value.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+        }
+        let status: AgentShellStatus
+        switch detail.status {
+        case .pending, .inProgress:
+            status = .running
+        case .interrupted, .cancelled:
+            status = detail.shellOutcome ?? .interrupted
+        case .completed, .failed:
+            if let outcome = detail.shellOutcome {
+                status = outcome
+            } else if let exitCode = detail.exitCode, exitCode != 0 {
+                status = .failed
+            } else {
+                status = detail.status == .failed ? .failed : .succeeded
+            }
+        }
+        return AgentShellInvocation(
+            command: argument(AgentToolDetailObservation.shellCommandKey) ?? "",
+            description: safeArgument(detail, keys: ["description"]),
+            cwd: argument(AgentToolDetailObservation.shellCwdKey),
+            output: detail.output?.text,
+            exitCode: detail.exitCode,
+            duration: detail.measuredDuration,
+            status: status)
     }
 
     private static func capitalizedPhrase(_ raw: String) -> String {

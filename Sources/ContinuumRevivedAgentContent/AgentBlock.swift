@@ -117,6 +117,10 @@ public struct AgentToolCallPayload: Codable, Equatable, Sendable {
     /// indented behind a left rail so the group reads as a group. Presentation
     /// only, excluded from CodingKeys.
     public var presentedIsClusterMember: Bool = false
+    /// The shell command this row ran, normalised across harnesses, when the
+    /// tool is a shell. Presentation only and excluded from CodingKeys like the
+    /// fields above: a command body is host-local detail (I5).
+    public var presentedShell: AgentShellInvocation?
 
     private enum CodingKeys: String, CodingKey {
         case name, summary, arguments, status

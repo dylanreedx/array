@@ -335,15 +335,24 @@ private func runCodexAppServerTranslatorMappingChecks() {
     for secret in ["SECRET-COMMAND", "SECRET-OUTPUT", "SECRET-PATH", "SECRET-DIFF", "SECRET-ERROR-BODY"] {
         expect(!encoded.contains(secret), "CodexAppServerEventTranslator I5: \(secret) crossed into the events")
     }
+    // Launch polish, item J — the command DOES cross the host-local channel,
+    // under the one key `command`, so the row can say what ran. Anywhere else
+    // on that channel (another field, the output preview) it must not appear.
     var observedFieldValues: [String] = []
+    var commandFields: [String] = []
     for observation in observationBox.snapshot() {
         if case let .toolDetail(_, detail) = observation {
-            observedFieldValues.append(contentsOf: detail.fields.map { $0.value })
+            for field in detail.fields {
+                if field.key == AgentToolDetailObservation.shellCommandKey { commandFields.append(field.value) }
+                else { observedFieldValues.append(field.value) }
+            }
             if let preview = detail.outputPreview { observedFieldValues.append(preview) }
         }
     }
+    expect(commandFields == ["echo SECRET-COMMAND"],
+           "CodexAppServerEventTranslator: the command must ride the host-local `command` field exactly once, got \(commandFields)")
     expect(!observedFieldValues.contains(where: { $0.contains("SECRET-COMMAND") }),
-           "CodexAppServerEventTranslator I5: the command body must never reach even the whitelisted observation channel")
+           "CodexAppServerEventTranslator I5: the command body crossed somewhere other than its `command` field")
 
     print("CodexAppServerEventTranslator mapping checks passed")
 }

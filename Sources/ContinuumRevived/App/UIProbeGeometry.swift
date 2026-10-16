@@ -7381,12 +7381,10 @@ enum UIProbeGeometry {
         // nil`); the captured `output` below is what the click/remeasure
         // assertions exist to witness expanding.
         //
-        // The argument is `description`, not `command`: TR-03 (`35ff1c58`)
-        // removed the dead "Ran <command>" branch because no production
-        // translator ever forwards a shell command body — claude drops
-        // `Bash.command` on purpose, pi carries no command key, and codex's
-        // shell start carries no arguments at all. `description` is the
-        // field claude's Bash tool actually publishes, and it is already
+        // The argument is `description` alone: this pins the shape of a shell
+        // record whose command did not cross (since launch polish item J the
+        // translators do forward it; `--shell-tool-row-check` witnesses that
+        // row). `description` is the field claude's Bash tool publishes, and it is already
         // capitalized the way a real one is, so the dedupe against the title
         // (`echoNamesFile`'s sibling exact-match check) does not double it.
         let record = AgentToolDetailRecord(
@@ -7446,9 +7444,17 @@ enum UIProbeGeometry {
             throw fail("host-local tool composition did not reflow the sanitized terminal summary")
         }
         assertions += 1
+        // Launch polish, item J — this used to require the collapsed row to be
+        // TALLER than one line, and the only thing that made it so was a
+        // second line reading "Exit code: 0". A successful shell now says
+        // nothing about its exit status, so the collapsed row is exactly one
+        // line; the output below is still what the disclosure opens onto.
         guard let collapsedToolHeight = list.qaTranscriptRowHeight(for: blockID),
-              collapsedToolHeight > ToolCallView.rowHeight else {
+              collapsedToolHeight >= ToolCallView.rowHeight else {
             throw fail("host-local tool composition produced no measured row height")
+        }
+        guard list.qaPresentedToolSummary(for: blockID)?.contains("Exit code") == false else {
+            throw fail("host-local tool composition still prints a successful shell's exit status")
         }
         assertions += 1
         guard list.qaPerformToolDisclosureClick(for: blockID),
