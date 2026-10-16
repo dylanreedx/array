@@ -289,7 +289,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func abandonConcreteGestureTransaction() {
         pendingGeometryEdit = nil
         autoLayoutGestureBaseline = nil
-        autoLayoutSwapLatch = nil
+        resetAutoLayoutMoveLatch()
     }
     private var zoneGesture: ZoneGesture = .none
     /// Tracks the latest placement during a render-model zone move (no ZoneLayer).
@@ -323,7 +323,12 @@ final class CanvasNSView: NSView, TokenThemed {
     var autoLayoutDefaults: UserDefaults = .standard
     private var lastAutoLayoutEnabled = CanvasAutoLayoutConfig.enabled()
     private var autoLayoutGestureBaseline: CanvasAutoLayoutEngine.Scene?
-    private var autoLayoutSwapLatch: UUID?
+    /// The live move's latch (a swap partner or a slot it slides into), the
+    /// slot it would drop into, and the pointer that drives both. Gesture state.
+    private var autoLayoutMoveLatch: CanvasAutoLayoutEngine.MoveLatch?
+    private(set) var autoLayoutLatchedSlot: TileFrame?
+    private var autoLayoutMovePointer: CGPoint?
+    private var autoLayoutPreferSwap = false
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
     private var autoLayoutUndoTimer: Timer?
@@ -487,8 +492,23 @@ final class CanvasNSView: NSView, TokenThemed {
         if autoLayoutDeferredUntilEdit { autoLayoutDeferredUntilEdit = false }
         if autoLayoutGestureBaseline == nil {
             autoLayoutGestureBaseline = autoLayoutScene()
-            autoLayoutSwapLatch = nil
+            resetAutoLayoutMoveLatch()
         }
+    }
+
+    private func resetAutoLayoutMoveLatch() {
+        autoLayoutMoveLatch = nil
+        autoLayoutLatchedSlot = nil
+        autoLayoutMovePointer = nil
+        autoLayoutPreferSwap = false
+    }
+
+    /// The pointer of a live tile move, in WINDOW coordinates, and whether ⌥ is
+    /// held. Whether the move slides in between tiles or swaps with one is
+    /// decided by where the pointer is, not by the tile's centre.
+    func setAutoLayoutMovePointer(windowPoint: NSPoint, preferSwap: Bool) {
+        autoLayoutMovePointer = CanvasEngine.screenToWorld(convert(windowPoint, from: nil), viewport: viewport)
+        autoLayoutPreferSwap = preferSwap
     }
 
     var isAutoLayoutEnabled: Bool { CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) }
@@ -509,10 +529,15 @@ final class CanvasNSView: NSView, TokenThemed {
             gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults),
             zonePadding: ZoneBoundsConfig.padding(defaults: autoLayoutDefaults),
             headerHeight: Double(ZoneChromeNSView.headerHeight),
-            latchedSwapTarget: autoLayoutSwapLatch
+            latched: autoLayoutMoveLatch,
+            pointer: autoLayoutMovePointer,
+            preferSwap: autoLayoutPreferSwap
         )
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
-        if case .tile = mutation { autoLayoutSwapLatch = transaction.swapTargetTileId }
+        if case .tile = mutation {
+            autoLayoutMoveLatch = transaction.moveLatch
+            autoLayoutLatchedSlot = transaction.latchedSlot
+        }
         let activeTileId: UUID?
         let activeZoneId: UUID?
         switch mutation {
@@ -784,7 +809,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
         autoLayoutGestureBaseline = nil
-        autoLayoutSwapLatch = nil
+        resetAutoLayoutMoveLatch()
         let current = autoLayoutScene()
         let oldTiles = firstWinsDictionary(baseline.tiles.map { ($0.id, $0.frame) })
         let oldZones = firstWinsDictionary(baseline.zones.map { ($0.zoneId, $0) })
@@ -2116,16 +2141,15 @@ final class CanvasNSView: NSView, TokenThemed {
         var scene = autoLayoutScene()
         guard let member = scene.tiles.first(where: { $0.id == tileId }),
               let zoneId = member.zoneId else { return }
-        // A latched exchange completes EXACTLY: the mover takes the displaced
-        // sibling's pre-gesture origin, so pointer jitter at the drop can never
-        // skew the inherited slot, and it settles PINNED — residents are pushed
-        // aside, never the mover into a different lane. (The latch and gesture
-        // baseline are still alive here — the gesture finishes in
-        // commitGeometryGesture.)
+        // A latched move completes EXACTLY: the mover takes its latched slot —
+        // a swapped sibling's pre-gesture origin, or the gap a slide opened —
+        // so pointer jitter at the drop can never skew it, and it settles
+        // PINNED: residents are pushed aside, never the mover into a different
+        // lane. (The latch and gesture baseline are still alive here — the
+        // gesture finishes in commitGeometryGesture.)
         var pinned = honorSnap
-        if !honorSnap, let latch = autoLayoutSwapLatch,
-           scene.tiles.first(where: { $0.id == latch })?.zoneId == zoneId,
-           let slot = autoLayoutGestureBaseline?.tiles.first(where: { $0.id == latch })?.frame {
+        if !honorSnap, autoLayoutMoveLatch != nil, let slot = autoLayoutLatchedSlot,
+           autoLayoutGestureBaseline?.tiles.first(where: { $0.id == tileId })?.zoneId == zoneId {
             applyLayoutTransaction(CanvasLayoutTransaction(
                 tileFrames: [tileId: TileFrame(x: slot.x, y: slot.y, width: member.frame.width, height: member.frame.height)]))
             pinned = true

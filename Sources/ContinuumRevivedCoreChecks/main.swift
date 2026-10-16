@@ -11945,7 +11945,7 @@ func runJellyTrajectoryProbe() {
                 width: activeStart.width, height: activeStart.height)
             let transaction = CanvasAutoLayoutEngine.solve(
                 scene: baseline, mutation: .tile(id: fixture.activeId, frame: requested),
-                gap: 16, zonePadding: 16, headerHeight: 32, latchedSwapTarget: latch)
+                gap: 16, zonePadding: 16, headerHeight: 32, latched: latch.map { .swap($0) })
             let latchChanged = transaction.swapTargetTileId != latch
             latch = transaction.swapTargetTileId
             var current = original
@@ -12236,13 +12236,13 @@ func runCanvasAutoLayoutChecks() {
     // returning home releases it and everything returns to baseline.
     let held = CanvasAutoLayoutEngine.solve(
         scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 272, y: 143, width: 320, height: 240)),
-        gap: 8, zonePadding: 8, headerHeight: 32, latchedSwapTarget: swapLeftId)
+        gap: 8, zonePadding: 8, headerHeight: 32, latched: .swap(swapLeftId))
     expect(held.swapTargetTileId == swapLeftId
                && (held.tileFrames[swapLeftId]?.x ?? 0) == swapTiles[1].frame.x,
            "jelly: the swap latch persists while the pointer sits between the exchange and home")
     let released = CanvasAutoLayoutEngine.solve(
         scene: swapScene, mutation: .tile(id: swapMiddleId, frame: TileFrame(x: 436, y: 141, width: 320, height: 240)),
-        gap: 8, zonePadding: 8, headerHeight: 32, latchedSwapTarget: swapLeftId)
+        gap: 8, zonePadding: 8, headerHeight: 32, latched: .swap(swapLeftId))
     expect(released.swapTargetTileId == nil && released.tileFrames[swapLeftId] == nil,
            "jelly: returning home releases the latch and the displaced sibling returns to baseline")
 

@@ -1171,6 +1171,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--tile-insert-slide-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileInsertSlideChecks.run()
+                print("ContinuumRevivedTileInsertSlideChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tile-insert-slide-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--zone-arming-check") {
             do {
                 _ = NSApplication.shared

@@ -889,12 +889,22 @@ class TileNSView: NSView, TokenThemed {
             freeTile.frame = moveFreeWorldFrame ?? canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
             let free = CanvasEngine.tile(freeTile, draggedByScreenDelta: delta, viewport: canvas.viewport).frame
             moveFreeWorldFrame = free
-            let placement = canvas.magneticPlacement(freeWorldFrame: free, tileId: tile.id, previous: magneticTarget)
+            canvas.setAutoLayoutMovePointer(
+                windowPoint: event.locationInWindow, preferSwap: event.modifierFlags.contains(.option))
+            // While the move is latched (a swap partner, or a slot it slides
+            // into) the latch owns the destination: no magnetic snap.
+            let placement = canvas.autoLayoutLatchedSlot == nil
+                ? canvas.magneticPlacement(freeWorldFrame: free, tileId: tile.id, previous: magneticTarget)
+                : MagneticPlacement.Result(frame: free, target: nil)
             magneticTarget = placement.target
             var next = tile
             next.frame = canvas.tileFrame(fromWorldFrame: placement.frame, tileId: tile.id)
             canvas.updateTile(next, recalculateZoneBounds: false, notifyChange: false)
-            if let target = placement.target {
+            if let slot = canvas.autoLayoutLatchedSlot {
+                magneticTarget = nil
+                dragSnapTarget = nil
+                canvas.showDragGhost(at: slot)
+            } else if let target = placement.target {
                 dragSnapTarget = target.frame
                 canvas.showDragGhost(at: target.frame)
             } else {
