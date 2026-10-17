@@ -367,6 +367,24 @@ if CommandLine.arguments.contains("--agent-composer-intent-check") {
     Foundation.exit(0)
 }
 
+// DI-01 dictation prototype. Fake engine only — no microphone, no `Speech`
+// framework, no display. The negative witness must be observed RED before the
+// gate below is believed.
+if CommandLine.arguments.contains("--dictation-session-negative-witness") {
+    try runMainActorCheck {
+        await runDictationSessionNegativeWitness()
+    }
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--dictation-check") {
+    try runMainActorCheck {
+        try await runDictationSessionChecks()
+        try await runDictationLevelMeterChecks()
+    }
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-prompt-history-isolation-negative-witness") {
     runAgentPromptHistoryIsolationNegativeWitness()
     Foundation.exit(0)
@@ -475,6 +493,38 @@ func runAsyncCheck(_ body: @escaping @Sendable () async throws -> Void) throws {
     try box.result!.get()
 }
 
+/// Runs a `@MainActor` check from top-level code.
+///
+/// `runAsyncCheck` above parks the main thread on a semaphore, which deadlocks
+/// for main-actor-isolated work: the body needs the very thread the wait is
+/// sitting on. Pumping the runloop instead lets the main-actor executor drain
+/// while we wait. The deadline turns a genuine hang into a reported failure
+/// rather than a check that never returns.
+func runMainActorCheck(_ body: @escaping @MainActor () async throws -> Void) throws {
+    final class Box: @unchecked Sendable {
+        var result: Result<Void, Error>?
+    }
+    let box = Box()
+    Task { @MainActor in
+        do {
+            try await body()
+            box.result = .success(())
+        } catch {
+            box.result = .failure(error)
+        }
+    }
+    let deadline = Date(timeIntervalSinceNow: 60)
+    while box.result == nil, Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.002))
+        usleep(200)
+    }
+    guard let result = box.result else {
+        fputs("FAIL: main-actor check did not finish within 60s\n", stderr)
+        Foundation.exit(1)
+    }
+    try result.get()
+}
+
 if CommandLine.arguments.contains("--local-pairing-endpoint-check") {
     try runAsyncCheck {
         try await runLocalPairingEndpointChecks()
@@ -486,6 +536,12 @@ if CommandLine.arguments.contains("--local-pairing-endpoint-check") {
 // focused flags above exist for packet-local diagnosis; they must not become
 // orphaned checks that the shared matrix never executes.
 try runAgentComposerIntentChecks()
+// DI-01: part of the ordinary CoreChecks matrix leg, not only the focused flag
+// above — a witness the shared gate never executes is not a witness.
+try runMainActorCheck {
+    try await runDictationSessionChecks()
+    try await runDictationLevelMeterChecks()
+}
 try runAsyncCheck {
     try await runAgentCompletionChecks()
 }

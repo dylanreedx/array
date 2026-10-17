@@ -131,7 +131,9 @@ if [[ -x "$APP/Contents/MacOS/array-workspace-mcp" ]]; then
   log "    signing nested: $APP/Contents/MacOS/array-workspace-mcp"
   codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/array-workspace-mcp" >>"$LOG" 2>&1
 fi
-codesign "${SIGN_FLAGS[@]}" "$APP" >>"$LOG" 2>&1
+# The outer app alone carries Array's entitlements (today: microphone input for
+# composer dictation). Nested code keeps its own, above.
+codesign "${SIGN_FLAGS[@]}" --entitlements "$ROOT_DIR/Packaging/Array.entitlements" "$APP" >>"$LOG" 2>&1
 codesign --verify --deep --strict --verbose=2 "$APP" >>"$LOG" 2>&1
 log "codesign verify: OK"
 

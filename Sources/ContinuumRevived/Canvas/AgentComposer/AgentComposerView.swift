@@ -93,6 +93,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     private var keyHintGapConstraint: NSLayoutConstraint!
     private var transientHint: String?
     private var transientHintToken = 0
+    /// DI-01 dictation. The tile's mic pill shows the session; the hint row
+    /// says which keys finish and discard it.
+    private lazy var dictation = ComposerDictationController(host: self)
+    /// True while dictation edits the editor: the draft store must not see a
+    /// hypothesis, and the edit is not the user touching the text.
+    private var isApplyingDictationEdit = false
+    /// The tile mirrors these into the mic and its pill.
+    var onDictationStateChange: ((DictationState) -> Void)?
+    var onDictationLevel: ((Float) -> Void)?
+    var onDictationPreparation: ((_ downloadingModel: Bool) -> Void)?
+    static let dictationKeyHint = "↩ done · esc discard"
     /// Callbacks the tile wires to `AgentSupervisor`. Direct manipulation of
     /// Array's queue; only send-now on a follow-up touches the turn in flight
     /// (D2's force send).
@@ -334,6 +345,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         ] + leadingPaddingConstraints + trailingPaddingConstraints)
 
         textView.composerObserver = self
+        for name in [NSNotification.Name.NSUndoManagerWillUndoChange, .NSUndoManagerWillRedoChange] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(undoManagerWillChange(_:)), name: name, object: nil)
+        }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(readabilityOptionsDidChange(_:)),
@@ -389,6 +404,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
+            dictation.cancel()
             completionController.dismiss()
         } else if isEditorFocused {
             refreshCompletionSuggestions()
@@ -422,6 +438,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// this again is the detach/re-attach seam: the newly bound agent's local
     /// draft replaces the editor contents when its load completes.
     func bindAttachmentStore(_ store: AgentComposerAttachmentStore, agentID: AgentID) {
+        if agentID != draftAgentID { dictation.cancel() }
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
         attachmentStore = store
@@ -429,6 +446,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func bindDraftStore(_ store: AgentComposerDraftStore, agentID: AgentID) {
+        if agentID != draftAgentID { dictation.cancel() }
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
         let generation = bindingGeneration
@@ -533,6 +551,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         agentID: AgentID,
         snapshot: AgentTileTurnSnapshot
     ) {
+        if agentID != draftAgentID { dictation.cancel() }
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
         selectedDraftCommand = nil
@@ -560,13 +579,15 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// Only a transient line (a refused rail edit) ever shows here. A busy
     /// composer, empty or typed, reads exactly like an idle one (2026-10-13).
     private func updateKeyHint() {
-        let hint = transientHint
+        // A live dictation session owns the row; a transient hint waits.
+        let hint = dictation.isActive ? Self.dictationKeyHint : transientHint
         keyHintLabel.stringValue = hint ?? ""
         keyHintLabel.toolTip = hint
         keyHintLabel.isHidden = hint == nil
+        let occupied = hint != nil
         let lineHeight = ceil(keyHintLabel.font.map { $0.ascender - $0.descender + $0.leading } ?? 0)
-        let height = hint == nil ? 0 : lineHeight
-        let gap = hint == nil ? 0 : CGFloat(pageZoom.scaled(Space.s))
+        let height = occupied ? lineHeight : 0
+        let gap = occupied ? CGFloat(pageZoom.scaled(Space.s)) : 0
         guard keyHintHeightConstraint.constant != height || keyHintGapConstraint.constant != gap else { return }
         keyHintHeightConstraint.constant = height
         keyHintGapConstraint.constant = gap
@@ -647,6 +668,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func unbindActionSink() {
+        dictation.cancel()
         cancelActionTaskForRebind()
         bindingGeneration &+= 1
         selectedDraftCommand = nil
@@ -676,6 +698,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func apply(_ newDraft: AgentComposerDraft) {
+        // A wholesale replacement leaves dictation's ranges pointing nowhere.
+        dictation.cancel()
         let utf16Count = (newDraft.text as NSString).length
         let location = min(max(newDraft.selection.location, 0), utf16Count)
         let length = min(max(newDraft.selection.length, 0), utf16Count - location)
@@ -776,6 +800,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             actualCharacterRange: nil
         )
         editorContentsChanged()
+        dictation.restyle()
     }
 
     @objc private func readabilityOptionsDidChange(_ notification: Notification) {
@@ -788,6 +813,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerTextDidChange(_ textView: ComposerTextView) {
+        if !isApplyingDictationEdit, !isApplyingDraft { dictation.userDidTouchText() }
         publishDraftChange()
         updatePlaceholder()
         // The chips withdraw as soon as there is a draft, and come back if the
@@ -799,6 +825,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerSelectionDidChange(_ textView: ComposerTextView) {
+        if !isApplyingDictationEdit, !isApplyingDraft { dictation.userDidTouchText() }
         publishDraftChange()
         refreshCompletionSuggestions()
     }
@@ -879,6 +906,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
+        // Leaving the editor keeps what was said, the same as ↩.
+        if !focused { dictation.finish() }
         applyTokens()
         if focused {
             refreshCompletionSuggestions()
@@ -905,6 +934,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     func composerRequestedSend(_ textView: ComposerTextView, modifier: AgentComposerSubmitModifier) {
+        // Never auto-send (DI-01): while a session is live, Send finishes it and
+        // the user sends what they see with a second press.
+        if dictation.isActive {
+            dictation.finish()
+            return
+        }
+        qaSendRequestCount += 1
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty || !importedAttachments.isEmpty || !importedFileReferences.isEmpty || draft.taskContext != nil else { return }
         if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
@@ -1234,7 +1270,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     }
 
     private func publishDraftChange() {
-        guard !isApplyingDraft else { return }
+        guard !isApplyingDraft, !isApplyingDictationEdit else { return }
         let textChanged = textView.string != draft.text
         draft = AgentComposerDraft(
             text: textView.string,
@@ -1780,6 +1816,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaDraftText: String { draft.text }
     var qaQueueRail: ComposerQueuedMessageRailView { queuedMessageRail }
     var qaKeyHint: String? { keyHintLabel.isHidden ? nil : keyHintLabel.stringValue }
+    var qaDictationProvisionalRange: NSRange? { dictation.qaProvisionalRange }
+    /// Sends that got past the dictation gate.
+    private(set) var qaSendRequestCount = 0
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {
         replyOptionRail.qaPressChip(titled: title)
@@ -1862,5 +1901,89 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         completionNavigationPath = nil
         completionContext = context
         refreshCompletionSuggestions()
+    }
+}
+
+// MARK: - Dictation (DI-01)
+
+extension AgentComposerView: ComposerDictationHost {
+    var dictationState: DictationState { dictation.state }
+
+    /// The mic button and ⇧⌘D. Takes the keyboard first, so the session's
+    /// anchor is the caret the user can see.
+    func toggleDictation() {
+        if !dictation.isActive, window?.firstResponder !== textView {
+            window?.makeFirstResponder(textView)
+        }
+        dictation.toggle()
+    }
+
+    /// Tile close, park, settings turned off.
+    func cancelDictation() {
+        dictation.cancel()
+    }
+
+    /// Keys a live session owns: Esc discards, ↩ finishes, ⇧⌘D toggles. Marked
+    /// text keeps every key, as it does for send.
+    func composerHandleDictationKey(_ textView: ComposerTextView, event: NSEvent) -> Bool {
+        guard !textView.hasMarkedText() else { return false }
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        if event.keyCode == 2, modifiers == [.shift, .command] {
+            guard ComposerDictationController.isOffered else { return false }
+            toggleDictation()
+            return true
+        }
+        guard dictation.isActive else { return false }
+        switch event.keyCode {
+        case 53:
+            dictation.cancel()
+            return true
+        case 36, 76 where modifiers != [.shift]:
+            dictation.finish()
+            return true
+        default:
+            return false
+        }
+    }
+
+    @objc fileprivate func undoManagerWillChange(_ notification: Notification) {
+        guard let manager = notification.object as? UndoManager, manager === textView.undoManager else { return }
+        dictation.undoWillRun()
+    }
+
+    // MARK: ComposerDictationHost
+
+    var dictationTextView: ComposerTextView { textView }
+
+    func performDictationEdit(_ edit: () -> Void) {
+        let wasApplying = isApplyingDictationEdit
+        isApplyingDictationEdit = true
+        defer { isApplyingDictationEdit = wasApplying }
+        edit()
+    }
+
+    func dictationStateDidChange(_ state: DictationState) {
+        updateKeyHint()
+        onDictationStateChange?(state)
+    }
+
+    func dictationLevelDidChange(_ level: Float) {
+        onDictationLevel?(level)
+    }
+
+    func dictationPreparationDidChange(downloadingModel: Bool) {
+        guard dictation.state == .preparing else { return }
+        onDictationPreparation?(downloadingModel)
+    }
+
+    func dictationSessionDidEnd(_ outcome: DictationOutcome) {
+        // The one write: what is on screen now, settled or withdrawn.
+        publishDraftChange()
+        updatePlaceholder()
+        updateKeyHint()
+        if case .failed(let failure) = outcome {
+            showTransientHint(failure.composerMessage)
+        }
+        onDictationStateChange?(dictation.state)
     }
 }

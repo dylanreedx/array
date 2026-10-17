@@ -172,6 +172,12 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: AgentStatusElement.contextMeter.settingKey, label: "Show the context meter", default: AgentStatusElement.contextMeter.defaultVisible),
                             keywords: ["context meter", "status", "tokens"]),
             ]),
+            SettingsGroup(id: "agents.dictation", title: "Dictation",
+                          footer: "Speech is transcribed on this Mac. No audio is kept or sent anywhere.", rows: [
+                SettingsRow(.toggle(key: DictationConfig.enabledKey, label: "Dictate into the composer", default: DictationConfig.defaultEnabled),
+                            help: "Shows a microphone button beside Send. Press ⇧⌘D to start or finish, Esc to discard.",
+                            keywords: ["dictation", "voice", "speech", "microphone", "mic", "talk"]),
+            ]),
             SettingsGroup(id: "agents.transcript", title: "Transcript", rows: [
                 SettingsRow(.toggle(key: TranscriptShellCommandConfig.key, label: "Show shell commands in transcripts",
                                     default: TranscriptShellCommandConfig.defaultEnabled),

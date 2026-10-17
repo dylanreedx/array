@@ -23,6 +23,18 @@ final class FlippedStackView: NSStackView {
 ///
 /// It no longer holds the tile. Echoing the accepted prompt was its only reason to,
 /// and that moved to the composer's synchronous submission seam.
+/// The provider-controls row. Its own `layout()` is the one moment its width
+/// is final, so that is where the dictation mic decides whether it fits.
+@MainActor
+private final class ProviderControlsRow: NSStackView {
+    var onLayoutWidth: ((CGFloat) -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayoutWidth?(bounds.width)
+    }
+}
+
 @MainActor
 private final class ManagedAgentTileActionAdapter: AgentTileActionSink {
     weak var supervisor: AgentSupervisor?
@@ -159,6 +171,17 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// 2026-10-13 — Steer (and its menu of queue / force send) beside a compact
     /// Stop, only while a turn works and there is a draft.
     private let v2SendChoice = ComposerSendChoiceView(frame: .zero)
+    /// DI-01 — the composer's microphone, beside Send. Absent below macOS 26
+    /// and when dictation is turned off in Settings.
+    private let v2DictationButton = ComposerDictationButton(frame: .zero)
+    /// What the mic grows into while a session is live, over the provider
+    /// controls. Not an arranged view: it moves by frame, so its spring never
+    /// reflows the row or re-runs the footer's measured fit.
+    private let v2DictationPill = ComposerDictationPillView(frame: .zero)
+    private var dictationDefaultsObserver: NSObjectProtocol?
+    /// False at tile widths where the mic would squeeze the provider controls
+    /// below their condensed tier (the 320 pt floor). ⇧⌘D still works there.
+    private var dictationFitsFooter = true
     /// Where the composer's pending steer/queue rail is docked: under the
     /// transcript, above the compose strip.
     private weak var v2PendingDock: PendingMessageDockView?
@@ -423,6 +446,31 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         v2ActionButton?.target = self
         v2ActionButton?.action = #selector(performV2PrimaryAction)
+        v2DictationButton.target = self
+        v2DictationButton.action = #selector(toggleV2Dictation)
+        v2Composer?.onDictationStateChange = { [weak self] state in
+            self?.dictationStateDidChange(state)
+        }
+        v2Composer?.onDictationLevel = { [weak self] level in
+            self?.v2DictationPill.waveform.record(level: level)
+        }
+        v2Composer?.onDictationPreparation = { [weak self] downloading in
+            self?.v2DictationPill.setMode(.preparing(downloadingModel: downloading))
+        }
+        v2DictationPill.onFinish = { [weak self] in self?.v2Composer?.toggleDictation() }
+        v2DictationPill.onExpansionChange = { [weak self] expansion in
+            guard let self else { return }
+            // What the pill covers fades as it grows; the mic hides the moment
+            // the pill leaves it, since the pill's stop button sits on it.
+            self.providerFooter.alphaValue = 1 - expansion
+            self.v2DictationButton.alphaValue = self.v2DictationPill.isHidden ? 1 : 0
+        }
+        updateDictationAvailability()
+        dictationDefaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateDictationAvailability() }
+        }
         v2SendChoice.isHidden = true
         v2SendChoice.onChoose = { [weak self] modifier in
             guard let composer = self?.v2Composer else { return }
@@ -444,6 +492,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     isolated deinit {
+        if let dictationDefaultsObserver { NotificationCenter.default.removeObserver(dictationDefaultsObserver) }
         prepareStreamingMarkupForTeardown(final: true)
         locationStaleTimer?.invalidate()
         compactStatusTickTimer?.invalidate()
@@ -1065,6 +1114,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             agentSource?.removeLocalNoticeObserver(localNoticeObserverToken, for: agentID)
             self.localNoticeObserverToken = nil
         }
+        // Before the flush: a closing or parked tile keeps no hypothesis, and
+        // the draft it flushes is the one the user had before speaking.
+        v2Composer?.cancelDictation()
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
         }
@@ -2377,7 +2429,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // fit. The shipped third-row stack predated measured fit (its comment
         // feared zero-width labels at the 320 pt floor) and was never what the
         // owner reviewed (P5.5 defect 4).
-        let footerRow = NSStackView(views: [providerFooter, actionButton, v2SendChoice])
+        let footerRow = ProviderControlsRow(views: [providerFooter, v2DictationButton, actionButton, v2SendChoice])
+        footerRow.onLayoutWidth = { [weak self] width in
+            self?.fitDictationButton(rowWidth: width)
+            self?.placeDictationPill()
+        }
+        v2DictationPill.isHidden = true
+        footerRow.addSubview(v2DictationPill)
         v2FooterRow = footerRow
         footerRow.orientation = .horizontal
         footerRow.alignment = .centerY
@@ -2385,6 +2443,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         footerRow.translatesAutoresizingMaskIntoConstraints = false
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        v2DictationButton.translatesAutoresizingMaskIntoConstraints = false
+        v2DictationButton.setContentHuggingPriority(.required, for: .horizontal)
+        v2DictationButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         v2SendChoice.translatesAutoresizingMaskIntoConstraints = false
         v2SendChoice.setContentHuggingPriority(.required, for: .horizontal)
         v2SendChoice.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -3126,6 +3187,73 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         return nil
     }
+
+    @objc private func toggleV2Dictation() {
+        v2Composer?.toggleDictation()
+    }
+
+    private func dictationStateDidChange(_ state: DictationState) {
+        v2DictationButton.apply(state)
+        switch state {
+        case .preparing, .listening:
+            v2DictationPill.setMode(state == .listening ? .listening : .preparing(downloadingModel: false))
+            placeDictationPill()
+            v2DictationPill.setExpanded(true)
+        case .finalizing:
+            v2DictationPill.setMode(.finalizing)
+        case .idle, .error:
+            v2DictationPill.setExpanded(false)
+        }
+    }
+
+    /// Pinned where the mic is — or would be, at widths where it hides — and
+    /// grown over the provider controls to the row's leading edge.
+    private func placeDictationPill() {
+        guard let actionButton = v2ActionButton, let row = v2FooterRow else { return }
+        let height = ComposerActionButton.controlHeight(zoom: pageZoom)
+        let maxX = v2DictationButton.isHidden ? actionButton.frame.minX - row.spacing : v2DictationButton.frame.maxX
+        v2DictationPill.place(.init(
+            maxX: maxX, midY: actionButton.frame.midY, height: height,
+            expandedWidth: maxX - providerFooter.frame.minX))
+    }
+
+    private func updateDictationAvailability() {
+        let offered = ComposerDictationController.isOffered
+        if !offered { v2Composer?.cancelDictation() }
+        let shown = offered && dictationFitsFooter
+        if v2DictationButton.isHidden == shown { v2DictationButton.isHidden = !shown }
+    }
+
+    /// Decided from the row's width and the other controls' fixed widths, never
+    /// from the mic's own visibility, so hiding it cannot flip the decision.
+    private func fitDictationButton(rowWidth: CGFloat) {
+        guard let actionButton = v2ActionButton, let row = v2FooterRow, rowWidth > 0 else { return }
+        let gap = row.spacing
+        var fixed = actionButton.intrinsicContentSize.width + gap
+            + v2DictationButton.intrinsicContentSize.width + gap
+        if !v2SendChoice.isHidden { fixed += v2SendChoice.intrinsicContentSize.width + gap }
+        let fits = rowWidth - fixed >= providerFooter.condensedFittingWidth
+        guard fits != dictationFitsFooter else { return }
+        dictationFitsFooter = fits
+        updateDictationAvailability()
+    }
+
+    var qaDictationButtonForChecks: ComposerDictationButton { v2DictationButton }
+    var qaDictationPillForChecks: ComposerDictationPillView { v2DictationPill }
+    /// Probe seam (hazard 8): the pill as a live session shows it, grown
+    /// through its own spring, so the census sees it paint.
+    func qaShowLiveDictationPill() {
+        layoutSubtreeIfNeeded()
+        v2DictationPill.setMode(.listening)
+        placeDictationPill()
+        v2DictationPill.setExpanded(true)
+        var steps = 0
+        while v2DictationPill.qaIsAnimating, steps < 240 {
+            v2DictationPill.advanceMotion(by: 1.0 / 60.0)
+            steps += 1
+        }
+    }
+    var qaProviderFooterAlpha: CGFloat { providerFooter.alphaValue }
 
     @objc private func performV2PrimaryAction() {
         guard let composer = v2Composer, let presentation = v2ActionButton?.presentation else { return }

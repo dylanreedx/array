@@ -24,6 +24,10 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Array listens only while you dictate into an agent’s composer. Speech is transcribed on this Mac and no audio is kept.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Array turns what you dictate into text on this Mac. Nothing you say leaves your computer.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>SUFeedURL</key>

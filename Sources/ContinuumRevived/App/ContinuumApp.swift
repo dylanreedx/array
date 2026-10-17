@@ -2779,6 +2779,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--composer-dictation-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try AppDelegate.runComposerDictationSelfCheck()
+                print("ContinuumRevivedComposerDictationChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--reveal-in-finder-check") {
             do {
                 _ = NSApplication.shared
