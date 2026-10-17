@@ -468,15 +468,21 @@ public enum InboxLifecycle: Equatable, Sendable {
     /// `snoozed` deliberately does not answer: its date is in the FUTURE (when the
     /// row comes back), and treating it as an end time would sort a snoozed row
     /// into history ahead of everything that really finished. `archived` answers
-    /// with its close time, which is what orders the History section — the two
-    /// dates never compete, because settled and archived rows are sorted in
-    /// separate blocks.
+    /// with its close time. Settled and archived rows share the History block
+    /// (decisions pass), so the two dates DO compete there, and that is the
+    /// point: one shelf, most recent ending first, whichever way it ended.
     public var endedAt: Date? {
         switch self {
         case .settled(let at): return at
         case .archived(let at): return at
         case .active, .snoozed: return nil
         }
+    }
+
+    /// Closed to History through Archive or a closed tile, as opposed to settled.
+    public var isArchived: Bool {
+        if case .archived = self { return true }
+        return false
     }
 }
 
