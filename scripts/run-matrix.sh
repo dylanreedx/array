@@ -394,6 +394,9 @@ run scripts/check-sidebar-native-ux-program.sh
 run_leg scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
+# .plans/73-film-studio: the film recorder is compiled only into the film build
+# (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
+run_leg scripts/check-film-absent.sh
 run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
