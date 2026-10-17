@@ -6189,7 +6189,7 @@ do {
         TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 900, height: 584), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
         TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 640), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
-        TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 320, height: 480), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 640, height: 560), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .fileTree, defaultSize: CGSize(width: 360, height: 520), minimumSize: CGSize(width: 220, height: 240), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .ticketQueue, defaultSize: CGSize(width: 520, height: 480), minimumSize: CGSize(width: 320, height: 240), aspect: .free, quantum: nil),
     ]

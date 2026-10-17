@@ -4524,7 +4524,7 @@ final class TileSpawner {
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
         // untouched by the centre policy: to the right of the anchor, top-aligned.
-        // File default size is 320x480. Under auto layout, post-spawn settle
+        // File default size is 640x560. Under auto layout, post-spawn settle
         // magnetizes zone members to the CONFIGURED gap (8), so the legacy
         // `anchoredFileGap` (24) is compacted: x = 680 + 640 + 8.
         let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
@@ -4537,7 +4537,7 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, anchoredFileId),
-                        TileFrame(x: 1328, y: 300, width: 320, height: 480),
+                        TileFrame(x: 1328, y: 300, width: 640, height: 560),
                         "an explicitly anchored file stays gap-adjacent to its anchor")
 
         // A file opened with no anchor and no point is an automatic spawn: it takes the
@@ -4545,7 +4545,7 @@ final class TileSpawner {
         // right side is now blocked by the anchored file, so the fully visible left
         // candidate wins on visibility over below/above (which are half off screen) and
         // over the outward right ring. Anchor 680..1320 x 300..700 -> left candidate
-        // x = 680-8-320, y = 500-240.
+        // x = 680-8-640, y = 500-280.
         let autoFilePath = layerFixture.root.appendingPathComponent("automatic.txt")
         try Data("automatic".utf8).write(to: autoFilePath)
         let autoFileId: UUID
@@ -4556,7 +4556,7 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, autoFileId),
-                        TileFrame(x: 352, y: 260, width: 320, height: 480),
+                        TileFrame(x: 32, y: 220, width: 640, height: 560),
                         "an anchorless file open docks beside the tile under the viewport centre")
 
         let manifest: [String: Any] = [

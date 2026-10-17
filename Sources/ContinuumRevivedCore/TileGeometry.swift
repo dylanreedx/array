@@ -42,7 +42,10 @@ public enum TileGeometry {
         case .note:
             return TilePreset(defaultSize: CGSize(width: 640, height: 400), aspect: .free, sizeQuantum: nil)
         case .file:
-            return TilePreset(defaultSize: CGSize(width: 320, height: 480), aspect: .free, sizeQuantum: nil)
+            // About 75 columns by 26 lines of 13 pt monospace, the width of an agent tile: a file
+            // opened beside an agent is readable where it lands. 320 x 480 held ~35 columns. Wider
+            // (800) made the centre policy clamp an anchorless open over its anchor in a small view.
+            return TilePreset(defaultSize: CGSize(width: 640, height: 560), aspect: .free, sizeQuantum: nil)
         case .fileTree:
             return TilePreset(defaultSize: CGSize(width: 360, height: 520), aspect: .free, sizeQuantum: nil)
         case .ticketQueue:
