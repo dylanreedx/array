@@ -195,6 +195,12 @@ final class WorkspaceRuntime {
         // The durable active id alone does not acquire its controller or spawner.
         _ = setActiveZone(placement.zoneId, reason: .explicit)
         ensureZoneLayer(forZone: placement.zoneId)
+        // The first arming acquired the project but could not move the CANVAS:
+        // `setActiveProjectZone` is a no-op until the zone has a layer, and the
+        // layer needs that controller. Arm again now the layer exists, or the
+        // canvas stays on the previous zone and the first ⌘K spawn lands there
+        // (`--zone-arming-check` §8).
+        _ = setActiveZone(placement.zoneId, reason: .explicit)
     }
 
     /// `deletingTileIds` are tiles the user asked to delete along with the zone.

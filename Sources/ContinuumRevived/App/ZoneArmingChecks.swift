@@ -590,5 +590,199 @@ enum ZoneArmingChecks {
               + "rect, click/focus/camera all re-armed, a group zone and empty canvas left the "
               + "arming alone, the choice persisted, and a zone reached after the mount got a "
               + "layer and its agent a record")
+
+        try runDrawnZoneSpawns()
+    }
+
+    // MARK: - 8. A zone the user DRAWS is a zone they can create into
+
+    /// The marquee route: draw a zone on empty canvas, pick a project in the
+    /// Home picker, then ⌘K a Board and an Agent.
+    ///
+    /// **The defect.** `WorkspaceRuntime.commitCreatedZone` wrote the zone into
+    /// the document and set `lastActiveZoneId` directly. It never went through
+    /// `setActiveZone`, so the canvas kept the old armed zone and nothing acquired
+    /// the project's controller; and it never installed a `ZoneLayer`, so the
+    /// zone had nowhere for tiles to live. The first spawn opened the project
+    /// picker again (no spawner) or landed in the previously armed zone, and a
+    /// forced spawn fell to the retired flat scene. "Add Project to Canvas…"
+    /// (`_addProjectZone`) never had this bug — it builds and installs the layer.
+    ///
+    /// Two shapes, because they fail differently: a registered project with no
+    /// zone anywhere (no controller), and a SECOND zone for a project that is
+    /// already placed (controller live, but no layer for the new zone).
+    ///
+    /// Shared invariants fixture: `mountWorkspaceSceneAtBoot` and launch's own
+    /// `wireCanvasCallbacks`, so the provisional zone reaches the real
+    /// `presentProjectHomePicker` → `commitProvisionalZone` → `onZoneCreated`.
+    private static func runDrawnZoneSpawns() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        let fixture = try Fixture(label: "drawn-zone")
+        defer { fixture.dispose() }
+
+        // A registered project placed in no workspace: the picker offers it and
+        // nothing has acquired it.
+        let projectElm = UUID(uuidString: "00000000-0000-0000-0000-00000000B2E1")!
+        let elmRoot = fixture.root.appendingPathComponent("Elm", isDirectory: true)
+        try FileManager.default.createDirectory(at: elmRoot, withIntermediateDirectories: true)
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        try ProjectStore(projectRoot: elmRoot).saveProject(Project(
+            id: projectElm, name: "Elm", rootPath: elmRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning)))
+        var registry = try fixture.registryStore.loadOrEmpty()
+        registry.projects.append(ProjectEntry(
+            id: projectElm, name: "Elm", rootPath: elmRoot.path, workspaceId: nil,
+            lastOpenedAt: now, pinned: false, missing: false))
+        try fixture.registryStore.save(registry)
+
+        // ⌘K "New Agent" needs a ready harness with a catalogued model. Volatile
+        // argument domain: read first by every `UserDefaults.standard` lookup,
+        // never persisted.
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        try fixture.mount()
+        let m = try fixture.requireMounted("drawn-zone")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+
+        // Any request for the creation-scope picker is the "picker opened again"
+        // half of the report. Counted, never presented.
+        var pickerRequests = 0
+        m.delegate.creationScopePickerPresenterForQA = { _ in pickerRequests += 1 }
+
+        /// Draw on empty canvas and confirm `project` through the picker's row.
+        func drawZone(_ label: String, screenRect: CGRect, project: UUID) throws -> UUID {
+            let zoneId = m.canvas.beginProvisionalZone(screenRect: screenRect)
+            try expect(m.delegate.qaConfirmProjectHomePicker(projectId: project, homeRelativePath: nil),
+                       "\(label): drawing a zone presented no Home picker offering the project")
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(m.runtime.document.zones.contains { $0.zoneId == zoneId && $0.projectId == project },
+                       "\(label): the confirmed zone must be in the document, bound to its project")
+            try expect(m.runtime.qaArmedZoneId == zoneId,
+                       "\(label): the document must arm the zone just drawn; got "
+                       + "\(String(describing: m.runtime.qaArmedZoneId))")
+            try expect(m.canvas.armedZoneId == zoneId,
+                       "\(label): the CANVAS must arm the zone just drawn — it is what the creation "
+                       + "scope and every placement read. `commitCreatedZone` wrote only "
+                       + "`document.lastActiveZoneId`, bypassing `setActiveZone`. Got "
+                       + "\(String(describing: m.canvas.armedZoneId))")
+            try expect(m.canvas.installedZoneLayerIds.contains(zoneId),
+                       "\(label): the zone must have a ZoneLayer, or a spawn into it falls to the "
+                       + "retired flat scene; installed: \(m.canvas.installedZoneLayerIds)")
+            try expect(m.runtime.controller(for: project)?.tileSpawner != nil,
+                       "\(label): the project's controller and spawner must be ready, or the first "
+                       + "spawn re-opens the project picker")
+            let scope = m.delegate.qaResolvedCreationScope
+            try expect(scope?.projectId == project && scope?.zoneId == zoneId,
+                       "\(label): creation must scope to the drawn zone and its project; got "
+                       + "\(String(describing: scope))")
+            return zoneId
+        }
+
+        /// One ⌘K action; returns the one tile it created, from either model.
+        func spawn(_ label: String, _ action: LaunchPaletteAction) throws -> UUID {
+            let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+            let picksBefore = pickerRequests
+            _ = m.delegate.qaPerformPaletteAction(action)
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(pickerRequests == picksBefore,
+                       "\(label): the spawn asked for a project again (\(pickerRequests - picksBefore) "
+                       + "picker request(s)) — the project was chosen when the zone was drawn")
+            let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+            guard created.count == 1, let tileId = created.first else {
+                throw Failure(message: "\(label): expected exactly one new installed tile; got \(created.count)")
+            }
+            return tileId
+        }
+
+        /// The tile's WORLD frame lies inside the zone as drawn.
+        func expectInside(_ label: String, _ tileId: UUID, zone zoneId: UUID) throws {
+            try expect(m.canvas.qaZoneMembership(of: tileId) == zoneId,
+                       "\(label): the tile must belong to the drawn zone; got "
+                       + "\(String(describing: m.canvas.qaZoneMembership(of: tileId)))")
+            guard let frame = m.canvas.allTilesInWorldFrames().first(where: { $0.id == tileId })?.frame,
+                  let zone = m.canvas.qaLiveZonePlacement(zoneId) else {
+                throw Failure(message: "\(label): could not read the tile's world frame or the zone")
+            }
+            let rect = CanvasEngine.zoneWorldFrame(zone)
+            try expect(frame.x >= rect.x - 0.001 && frame.y >= rect.y - 0.001
+                       && frame.x + frame.width <= rect.x + rect.width + 0.001
+                       && frame.y + frame.height <= rect.y + rect.height + 0.001,
+                       "\(label): world frame (\(frame.x), \(frame.y)) \(frame.width)x\(frame.height) "
+                       + "is not inside the drawn zone (\(rect.x), \(rect.y)) \(rect.width)x\(rect.height)")
+        }
+
+        // Case 1: a registered project with no zone anywhere. World
+        // (1600, 1010)+1200x700 — clear of every seeded zone (A2 ends at y 960,
+        // A3 at x 1500) under the seeded camera (300, -100).
+        let elmZone = try drawZone("unplaced project", screenRect: CGRect(x: 1300, y: 1110, width: 1200, height: 700),
+                                   project: projectElm)
+        let elmBoard = try spawn("unplaced project: board", .newBoard)
+        try expectInside("unplaced project: board", elmBoard, zone: elmZone)
+        let elmAgent = try spawn("unplaced project: agent", .newManagedAgent)
+        try expectInside("unplaced project: agent", elmAgent, zone: elmZone)
+        let supervisor = m.delegate.qaAgentSupervisor
+        guard let agentId = supervisor.agent(forTile: elmAgent), let record = supervisor.records[agentId] else {
+            throw Failure(message: "unplaced project: the agent tile has no agent record")
+        }
+        try expect(record.projectId == projectElm,
+                   "unplaced project: the agent must belong to Elm; got \(String(describing: record.projectId))")
+
+        // Case 2: a SECOND zone for a project already placed (Birch owns A2).
+        // World (2800, 200)+1000x800, right of everything.
+        let birchZone = try drawZone("placed project", screenRect: CGRect(x: 2500, y: 300, width: 1000, height: 800),
+                                     project: Fixture.projectA2)
+        let birchBoard = try spawn("placed project: board", .newBoard)
+        try expectInside("placed project: board", birchBoard, zone: birchZone)
+
+        // Durable: each tile in its own project's canvas, stamped with the
+        // drawn zone, at the frame on screen; and the zones in the workspace file.
+        try m.runtime.flushMountedWorkspaceState()
+        fixture.drain()
+        func expectPersisted(_ label: String, _ tileId: UUID, root: URL, zone zoneId: UUID) throws {
+            let persisted = ((try? ProjectStore(projectRoot: root).tryLoadCanvas()) ?? nil)?.tiles ?? []
+            guard let tile = persisted.first(where: { $0.id == tileId }) else {
+                throw Failure(message: "\(label): the tile is not in its project's canvas.json "
+                              + "(\(persisted.count) tile(s) there)")
+            }
+            try expect(tile.zoneId == zoneId,
+                       "\(label): persisted with zone \(String(describing: tile.zoneId)), expected the drawn zone")
+            if let live = m.canvas.allTilesInWorldFrames().first(where: { $0.id == tileId })?.frame {
+                try expect(abs(live.x - tile.frame.x) + abs(live.y - tile.frame.y) < 0.001,
+                           "\(label): persisted frame (\(tile.frame.x), \(tile.frame.y)) is not the WORLD "
+                           + "frame on screen (\(live.x), \(live.y))")
+            }
+        }
+        try expectPersisted("unplaced project: board", elmBoard, root: elmRoot, zone: elmZone)
+        try expectPersisted("unplaced project: agent", elmAgent, root: elmRoot, zone: elmZone)
+        try expectPersisted("placed project: board", birchBoard,
+                            root: fixture.projectRoots[Fixture.projectA2]!, zone: birchZone)
+        for other in [Fixture.projectA1] {
+            let tiles = ((try? ProjectStore(projectRoot: fixture.projectRoots[other]!).tryLoadCanvas()) ?? nil)?.tiles ?? []
+            try expect(!tiles.contains { [elmBoard, elmAgent, birchBoard].contains($0.id) },
+                       "a drawn zone's tile leaked into another project's canvas")
+        }
+        let onDisk = try fixture.readWorkspaceFile(Fixture.workspaceA).document
+        try expect(onDisk?.zones.contains { $0.zoneId == elmZone && $0.projectId == projectElm } == true
+                   && onDisk?.zones.contains { $0.zoneId == birchZone && $0.projectId == Fixture.projectA2 } == true,
+                   "both drawn zones must be in workspace A's file, bound to their projects")
+
+        print("ZoneArmingChecks: a drawn zone for an unplaced project and a second drawn zone for a "
+              + "placed one each armed, got a layer and a spawner; ⌘K Board and Agent landed inside "
+              + "them with no second picker and persisted into their own project")
     }
 }
