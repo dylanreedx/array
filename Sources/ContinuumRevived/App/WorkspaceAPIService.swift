@@ -115,6 +115,9 @@ final class WorkspaceAPIService {
     struct CachedBoardApply { let payloadHash: String; let result: BoardApplyResult }
     var boardApplyIdempotency: [AgentID: [String: CachedBoardApply]] = [:]
     var boardApplyIdempotencyOrder: [AgentID: [String]] = [:]
+    struct CachedAgentUpdate { let payloadHash: String; let result: AgentUpdateResult }
+    var agentUpdateIdempotency: [AgentID: [String: CachedAgentUpdate]] = [:]
+    var agentUpdateIdempotencyOrder: [AgentID: [String]] = [:]
     static let idempotencyCapacity = 64
     private static let recentOperationsCapacity = 16
 
@@ -259,6 +262,9 @@ final class WorkspaceAPIService {
         case .artifactOpen:
             return open(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                         payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+        case .agentUpdate:
+            return updateAgent(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                               payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
         case .agentFind:
             return findAgents(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload, runtime: runtime, canvas: canvas)
         case .agentInspect:

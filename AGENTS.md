@@ -278,6 +278,15 @@ in checks only; a live app whose probe found nothing offers nothing.
    `--pi-host-tool-bridge-check`. The bundled `continuum-workspace-tools.ts` is
    loaded by `-e` only and is never installed into `~/.pi`.
 
+   **What a new user-editable property owes (`.plans/77`).** Classify its real
+   coding key in `WorkspaceAPIExposure`: `exposed(operation)`,
+   `notExposed("reason")`, or `internal` for host-owned state. The matrix's
+   `--workspace-api-exposure-check` audits agent, tile, tile-metadata and zone
+   keys; a new unclassified field is RED. An exposed property also owes a
+   published operation and a witness through the production workspace API,
+   including grants, persistence and visible outcomes. Agent identity colour
+   uses `agent.update`; see [the API note](docs/internals/workspace-agent-colour.md).
+
 ## Running the app while Dylan is using it
 
 Two installs, split by ROLE. Never by project — see hazard 9.

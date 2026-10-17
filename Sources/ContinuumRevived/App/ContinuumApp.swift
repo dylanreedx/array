@@ -1321,6 +1321,17 @@ enum ContinuumApp {
         // CX-01 Phase 2a: agent.find ranking/ambiguity and agent.inspect evidence,
         // self-inspect in the preset, other-agent inspect through the trusted
         // prompt, byte caps, and zero lifecycle/presentation side effects.
+        if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIAgentColourChecks.run()
+                print("ContinuumRevivedWorkspaceAPIAgentColourChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agents-check") {
             do {
                 _ = NSApplication.shared
@@ -18272,8 +18283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
-            alert.messageText = "Allow \(prompt.agentDisplayName) to move and resize tiles in \(prompt.checkoutDisplayName)?"
-            detail = "The agent asked Array to change tile geometry on the canvas. Each change is one move or resize of one tile, goes through the same undo history as a drag, and never touches the camera, focus or selection."
+            alert.messageText = "Allow \(prompt.agentDisplayName) to arrange tiles and change agent colours in \(prompt.checkoutDisplayName)?"
+            detail = "This grants canvas writes in this checkout: moving or resizing tiles, and changing another agent’s identity colour. Geometry changes use the same undo history as a drag. These operations preserve the camera, focus and selection."
         } else {
             alert.messageText = "Allow \(prompt.agentDisplayName) to open files in \(prompt.checkoutDisplayName)?"
             detail = "The agent asked Array to open a document outside its own checkout."

@@ -16,7 +16,7 @@ public extension WorkspaceAPIOp {
     /// trusted approval UI, and "allow for session" covers the later ones.
     static let sessionPresetOperations: Set<WorkspaceAPIOp> = [
         .workspaceContext, .artifactOpen, .agentFind, .agentInspect,
-        .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply,
+        .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply, .agentUpdate,
     ]
 
     /// Outside the preset, but not refused: the service asks the user through

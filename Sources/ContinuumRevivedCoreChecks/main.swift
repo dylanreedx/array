@@ -120,6 +120,10 @@ if CommandLine.arguments.contains("--transcript-rehydration-check") {
 
 // CX-01 (`.plans/59`): targeted arms so the two new sections can run without the
 // process-spawning legs of the full run.
+if CommandLine.arguments.contains("--workspace-api-exposure-check") {
+    runWorkspaceAPIExposureChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--workspace-api-contract-check") {
     runWorkspaceAPIContractChecks()
     Foundation.exit(0)
@@ -12471,6 +12475,7 @@ runEditorPreferencesChecks()
 // handles, presentation intersection, the tolerant open-request decoder, result
 // round trips, the grant evaluator, and the pi bridge envelope parse/encode.
 runWorkspaceAPIContractChecks()
+runWorkspaceAPIExposureChecks()
 
 // CX-01 Phase 2a — agent.find / agent.inspect DTO round trips, the pure §11
 // ranker (exact id/name first, lexical then supporting evidence, ties are

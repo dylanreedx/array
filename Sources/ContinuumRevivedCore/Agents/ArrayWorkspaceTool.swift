@@ -27,6 +27,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case messageAgent = "array_message_agent"
     case boardQuery = "array_board_query"
     case boardApply = "array_board_apply"
+    case updateAgent = "array_update_agent"
 
     /// claude's prefix for a tool served by the `array_workspace` MCP server
     /// (`WorkspaceMCPConfiguration`).
@@ -42,7 +43,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     public var kind: AgentToolKind {
         switch self {
         case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery: return .read
-        case .canvasApply, .boardApply: return .edit
+        case .canvasApply, .boardApply, .updateAgent: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent: return .unknown
@@ -57,7 +58,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .openDocument, .canvasQuery: return "eye"
         case .canvasApply: return "arrow.up.and.down.and.arrow.left.and.right"
         case .boardQuery, .boardApply: return "rectangle.split.3x1"
-        case .findAgent, .inspectAgent, .revealAgent: return "person.crop.circle"
+        case .findAgent, .inspectAgent, .revealAgent, .updateAgent: return "person.crop.circle"
         case .delegate: return "person.2"
         case .messageAgent: return "bubble.left"
         case .getOperation: return "clock"
@@ -86,6 +87,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .messageAgent: return "Messaged an agent"
         case .boardQuery: return "Read the board"
         case .boardApply: return "Updated the board"
+        case .updateAgent: return "Changed an agent’s colour"
         }
     }
 

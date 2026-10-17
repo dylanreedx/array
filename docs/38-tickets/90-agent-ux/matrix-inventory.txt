@@ -237,10 +237,12 @@ check --unified-model-boot-check
 check --unreadable-canvas-store-check
 check --viewport-sanitize-check
 check --window-chrome-check
+check --workspace-api-agent-colour-check
 check --workspace-api-agents-check
 check --workspace-api-board-check
 check --workspace-api-canvas-check
 check --workspace-api-delegation-check
+check --workspace-api-exposure-check
 check --workspace-api-grants-check
 check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
@@ -511,6 +513,7 @@ leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --window-chrome-check
+leg run_app_check .build/debug/Array --workspace-api-agent-colour-check
 leg run_app_check .build/debug/Array --workspace-api-agents-check
 leg run_app_check .build/debug/Array --workspace-api-board-check
 leg run_app_check .build/debug/Array --workspace-api-canvas-check
@@ -592,6 +595,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
@@ -623,7 +627,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 173
+count ContinuumRevivedCoreChecks 175
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

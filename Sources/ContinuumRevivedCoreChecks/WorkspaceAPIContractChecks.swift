@@ -6,6 +6,7 @@ import Foundation
 // evaluator behave mechanically, and the pi bridge value types encode what the
 // extension parses. Pure — no processes, no filesystem.
 func runWorkspaceAPIContractChecks() {
+    checkAgentUpdateCoding()
     checkCheckoutHandleDerivation()
     checkArtifactHandleWireForm()
     checkPresentationIntersection()
@@ -229,4 +230,31 @@ private final class ContractCounter: @unchecked Sendable {
     private var storage = 0
     var value: Int { lock.lock(); defer { lock.unlock() }; return storage }
     func add(_ n: Int) { lock.lock(); storage += n; lock.unlock() }
+}
+
+private func checkAgentUpdateCoding() {
+    let id = AgentID(rawValue: UUID())
+    for color in ["blue", nil] as [String?] {
+        let request = AgentUpdateRequest(agentId: id, identityColor: color, idempotencyKey: "colour")
+        let encoded = try! contractEncoder.encode(request)
+        expect(try! contractDecoder.decode(AgentUpdateRequest.self, from: encoded) == request, "agent.update request round-trips")
+        let object = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        expect(object.keys.contains("identityColor"), "clear encodes an explicit null")
+        let result = AgentUpdateResult(operationId: "colour", agentId: id, identityColor: color,
+            revision: WorkspaceRevision(epoch: "colour", structure: 7), durability: .committed)
+        expect(try! contractDecoder.decode(AgentUpdateResult.self, from: contractEncoder.encode(result)) == result, "agent.update result round-trips")
+    }
+    for payload: [String: Any] in [["agentId": id.rawValue.uuidString], ["agentId": id.rawValue.uuidString, "identityColor": 42]] {
+        expect((try? contractDecoder.decode(AgentUpdateRequest.self, from: JSONSerialization.data(withJSONObject: payload))) == nil, "missing and mistyped identityColor refuse")
+    }
+    let tool = WorkspaceMCPToolCatalog.tool(named: "array_update_agent")
+    expect(tool?.operation == .agentUpdate && RoleRegistry.hostToolNames(for: .pi).contains("array_update_agent"), "both transports expose agent.update, including roled Pi")
+    if case let .object(properties)? = tool?.inputSchema["properties"],
+       case let .object(color)? = properties["identityColor"],
+       case let .array(values)? = color["enum"] {
+        expect(Set(values.compactMap { if case let .string(name) = $0 { return name }; return nil }) == Set(ZoneColorConfig.palette)
+               && values.contains(.null), "catalog palette matches the UI and permits null")
+    } else { expect(false, "agent.update palette schema missing") }
+    expect(ArrayWorkspaceTool(toolName: "array_update_agent")?.kind == .edit
+           && ArrayWorkspaceTool(toolName: "mcp__array_workspace__array_update_agent") == .updateAgent, "new tool has native transcript presentation")
 }

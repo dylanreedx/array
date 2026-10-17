@@ -942,7 +942,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // that does not always invert exactly in floating point).
     // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
     // conversion happens and the round-trip is exact.
-    private enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
