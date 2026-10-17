@@ -953,6 +953,11 @@ enum UIProbeAppearance {
         "CanvasNSView",
         "WorkspaceSidebarView",
         "WorkspaceTopBarView",
+        // The window chrome's icon buttons — the top bar's sidebar toggle, title
+        // menu and search, and the sidebar header's New Agent. `ToolbarIconButton`'s
+        // ladder: nothing at rest, row hover under the pointer, row selected while
+        // pressed or while the title menu is open.
+        "ChromeIconButton",
         // P3.6. The list's own `panel` fill, and the row card. 94/P1.1 took the
         // card's outline away and 94/P1.2 replaced its one-fill-in-every-state
         // `tileBody` with the `SidebarSurfaceRole` ladder, so what this owner
@@ -1096,7 +1101,7 @@ enum UIProbeAppearance {
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.focusRing.color.cgColor(for: theme)))
             values.insert(hex(AgentLineRole.decorativeHairline.color.cgColor(for: theme)))
-        case "ToolbarIconButton":
+        case "ToolbarIconButton", "ChromeIconButton":
             // Resting paints nothing; hover and an open menu use the row ladder.
             for role in [AgentSurfaceRole.rowHover, .rowSelected] {
                 values.insert(hex(role.color.cgColor(for: theme)))
@@ -1758,11 +1763,16 @@ enum UIProbeAppearance {
                     root.layoutSubtreeIfNeeded()
                 }
             ),
-            AdoptedSurface(id: "topBar", size: NSSize(width: 900, height: 44), make: {
-                let view = WorkspaceTopBarView(frame: .zero)
-                view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))
-                return view
-            }),
+            AdoptedSurface(
+                id: "topBar", size: NSSize(width: 900, height: 44),
+                make: {
+                    let view = WorkspaceTopBarView(frame: .zero)
+                    view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))
+                    return view
+                },
+                // A hovered icon: the one painted state a resting bar's buttons have.
+                prepare: { ($0 as? WorkspaceTopBarView)?.sidebarToggleForQA.isHovered = true }
+            ),
             AdoptedSurface(
                 id: "floatingToolbar", size: NSSize(width: 640, height: 64),
                 make: { FloatingToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 64)) },

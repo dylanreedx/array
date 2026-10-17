@@ -2873,7 +2873,7 @@ enum LabCatalog {
     private static var topBarCard: LabEntry {
         LabEntry(
             id: "chrome.topbar", category: "Chrome", title: "Workspace Top Bar",
-            summary: "Identity, counts, save state, and the workspace switcher.",
+            summary: "Sidebar icon, workspace title menu with the unsaved dot, and the Command Center icon.",
             content: .staticCard(preferredSize: NSSize(width: 720, height: 44)) {
                 let view = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 720, height: 44))
                 view.reload(LabFixtures.topBarModel(save: .unsavedChanges, message: nil))
