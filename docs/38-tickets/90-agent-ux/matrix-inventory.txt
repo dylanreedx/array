@@ -29,6 +29,7 @@ check --app-support-channel-check
 check --attention-notification-check
 check --board-interaction-check
 check --board-model-check
+check --board-task-transcript-check
 check --board-task-workflow-check
 check --board-tile-lifecycle-check
 check --border-census-check
@@ -564,6 +565,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check

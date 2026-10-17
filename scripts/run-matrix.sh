@@ -450,6 +450,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 # the bare CoreChecks run is KNOWN-RED.
 run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
