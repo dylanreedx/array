@@ -438,7 +438,7 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     /// "Model" trigger and no effort. A sibling control that would push the
     /// row below this yields instead (the dictation mic).
     var condensedFittingWidth: CGFloat {
-        requiredWidth(usingCompactLabels: true, condenseModelTrigger: true, includeEffort: false)
+        requiredWidth(for: .condensedModel)
     }
 
     var qaFitsCurrentTitles: Bool {

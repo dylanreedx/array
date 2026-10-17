@@ -1025,7 +1025,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The agent's identity tint, unmuted — nil when the agent has none or the
     /// tile follows no agent. Kept current on attach and on every record change;
     /// `identityColorDidChangeNotification` announces each change.
-    private(set) var identityColor: NSColor?
+    private(set) var identityColor: NSColor? {
+        // A live dictation session wears the agent's colour; none falls back
+        // to the input accent inside the pill.
+        didSet { v2DictationPill.tint = identityColor }
+    }
 
     private func setIdentityColorName(_ name: String?) {
         guard name != identityColorName else { return }

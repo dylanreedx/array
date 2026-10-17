@@ -118,6 +118,8 @@ enum AgentIdentityColorChecks {
         let purple = ZoneChromeNSView.color(named: "purple")
         try expect(same(tile.identityColor?.cgColor, purple.cgColor),
                    "the dictation hook reads the resolved tint: \(describe(tile.identityColor?.cgColor))")
+        try expect(same(tile.qaDictationPillForChecks.tint?.cgColor, purple.cgColor),
+                   "a purple agent's dictation pill draws purple: \(describe(tile.qaDictationPillForChecks.tint?.cgColor))")
         try expect(tile.qaIdentityColorMenuEntries().filter(\.isOn).map(\.title) == ["Purple"],
                    "the checkmark moved to Purple")
 
@@ -168,6 +170,7 @@ enum AgentIdentityColorChecks {
         try expect(supervisor.records[agentId]?.identityColor == nil, "None clears the record")
         let clearedOnDisk = try AgentStore(applicationSupportDirectory: storeRoot).load(id: agentId)
         try expect(clearedOnDisk != nil && clearedOnDisk?.identityColor == nil, "None is on disk too")
+        try expect(tile.qaDictationPillForChecks.tint == nil, "None returns the dictation pill to the input accent")
         try assertRest("after None in full-border mode")
         model.write(.string(AgentIdentityColorStyle.topBar.rawValue), to: styleField)
         try assertRest("after None in top-bar mode")
