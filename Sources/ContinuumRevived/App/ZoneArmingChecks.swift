@@ -594,6 +594,7 @@ enum ZoneArmingChecks {
         try runDrawnZoneSpawns()
         try runAutoLayoutSpawnsNeverOverlap()
         try runGrowthPushesNeighbours()
+        try runCloseTightensZone()
     }
 
     // MARK: - 8. A zone the user DRAWS is a zone they can create into
@@ -1099,5 +1100,177 @@ enum ZoneArmingChecks {
 
         print("ZoneArmingChecks: a zone that grew to take a new Agent kept its origin and pushed the "
               + "neighbour it ran into, tiles and all, so no two zones overlap")
+    }
+
+    // MARK: - 11. Closing a tile in an auto-layout zone closes the gap
+
+    /// Closing a member used to leave a hole: `CanvasNSView.removeTile` dropped the
+    /// view and ran no layout, so a row `A | Agent | B` became `A | _ | B` and stayed
+    /// that way. Every close the person makes commits through `AppDelegate.deleteTile`
+    /// — the title bar's ✕ (`onTileCloseRequested`), ⌘⌫, and closing an agent to
+    /// History from the sidebar (Archive, the close nudge) — so both legs below drive
+    /// one of those real entries, never `removeTile` or the solver.
+    ///
+    /// Roots is arranged at rest: `A | Agent | B` across the top, the file under A.
+    ///  - Leg 1 archives the Agent from the sidebar's row menu: B must move left into
+    ///    gap contact with A, on the same line.
+    ///  - Leg 2 closes A with its ✕: what is left must still be one gap-contact
+    ///    cluster.
+    /// After each: no member overlaps another, every member is inside the zone, the
+    /// zone and its neighbours are unchanged, and the project's canvas file on disk
+    /// holds the frames on screen.
+    private static func runCloseTightensZone() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        // Pinned, so whoever's preferences run this cannot move the arithmetic, and a
+        // close never stops on a confirmation alert.
+        arguments[TileGapResolver.userDefaultsKey] = 8.0
+        arguments[ZoneBoundsConfig.paddingKey] = 24.0
+        arguments[DeleteConfirmPolicy.userDefaultsKey] = DeleteConfirmPolicy.never.rawValue
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        let fixture = try Fixture(label: "close-tightens")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("close-tightens")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+        try expect(m.canvas.isAutoLayoutEnabled, "close tightens: auto layout must be ON for this witness")
+
+        let roots = Fixture.zoneA1
+        let gap = 8.0, padding = 24.0, header = Double(ZoneChromeNSView.headerHeight)
+        func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+        func zoneRect(_ id: UUID) throws -> TileFrame {
+            guard let zone = m.canvas.qaLiveZonePlacement(id) else {
+                throw Failure(message: "close tightens: zone \(id) vanished")
+            }
+            return CanvasEngine.zoneWorldFrame(zone)
+        }
+        func members() -> [UUID: TileFrame] {
+            Dictionary(m.canvas.allTilesInWorldFrames()
+                .filter { m.canvas.qaZoneMembership(of: $0.id) == roots }
+                .map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        try expect(m.runtime.setActiveZone(roots, reason: .click), "close tightens: Roots must arm")
+        let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newManagedAgent)
+        m.canvas.layoutSubtreeIfNeeded()
+        let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+        guard created.count == 1, let agentTile = created.first else {
+            throw Failure(message: "close tightens: ⌘K Agent created \(created.count) tile(s), expected one")
+        }
+        guard let agentId = m.delegate.qaAgentSupervisor.agent(forTile: agentTile) else {
+            throw Failure(message: "close tightens: the new Agent tile has no agent behind it")
+        }
+
+        // The arrangement, at rest: every member in gap contact, top-left at the
+        // zone's content corner.
+        let zone = try zoneRect(roots)
+        let cx = zone.x + padding, cy = zone.y + header + padding
+        let a = Fixture.noteA1a, b = Fixture.noteA1b, file = Fixture.fileA1
+        let arranged: [UUID: TileFrame] = [
+            a: TileFrame(x: cx, y: cy, width: 240, height: 160),
+            agentTile: TileFrame(x: cx + 248, y: cy, width: 320, height: 240),
+            b: TileFrame(x: cx + 248 + 328, y: cy, width: 240, height: 160),
+            file: TileFrame(x: cx, y: cy + 168, width: 240, height: 200)
+        ]
+        try expect(cx + 248 + 328 + 240 <= zone.x + zone.width - padding,
+                   "close tightens: Roots \(describe(zone)) is too narrow for the arranged row")
+        var applied = false
+        m.canvas.performGeometryEdit(.moveTile, includeAllTiles: true) {
+            applied = m.canvas.applyGeometrySnapshot(CanvasGeometrySnapshot(
+                tiles: arranged.map { CanvasTileGeometry(tileId: $0.key, frame: $0.value, zoneId: roots) },
+                zones: []), notifyCommit: false)
+        }
+        m.canvas.layoutSubtreeIfNeeded()
+        try expect(applied && members() == arranged,
+                   "close tightens: the arrangement did not land — \(members().mapValues(describe))")
+
+        let zonesBefore = try Dictionary(uniqueKeysWithValues: m.runtime.document.zones.map {
+            ($0.zoneId, try zoneRect($0.zoneId))
+        })
+        let projectStore = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+
+        func expectSettled(_ leg: String, closed: UUID) throws {
+            m.canvas.layoutSubtreeIfNeeded()
+            let now = members()
+            try expect(now[closed] == nil && !m.canvas.allTilesInWorldFrames().contains { $0.id == closed },
+                       "\(leg): the closed tile is still on the canvas")
+            for (id, was) in zonesBefore {
+                let rect = try zoneRect(id)
+                try expect(rect == was, "\(leg): closing a tile changed zone \(id) \(describe(was)) → \(describe(rect))")
+            }
+            for (id, f) in now {
+                try expect(f.x >= zone.x + padding - 0.001 && f.y >= zone.y + header + padding - 0.001
+                           && f.x + f.width <= zone.x + zone.width - padding + 0.001
+                           && f.y + f.height <= zone.y + zone.height - padding + 0.001,
+                           "\(leg): \(id) \(describe(f)) is not inside Roots \(describe(zone))")
+            }
+            let frames = Array(now.values)
+            for (index, p) in frames.enumerated() {
+                for q in frames.dropFirst(index + 1) {
+                    let overlap = p.x < q.x + q.width - 0.001 && q.x < p.x + p.width - 0.001
+                        && p.y < q.y + q.height - 0.001 && q.y < p.y + p.height - 0.001
+                    try expect(!overlap, "\(leg): \(describe(p)) overlaps \(describe(q))")
+                }
+            }
+            // One gap-contact cluster: the hole the closed tile left has closed.
+            var reached: Set<UUID> = [now.keys.sorted { $0.uuidString < $1.uuidString }[0]]
+            var grew = true
+            while grew {
+                grew = false
+                for (id, f) in now where !reached.contains(id)
+                    && reached.contains(where: { CanvasAutoLayoutEngine.isGapAdjacent(f, now[$0]!, gap: gap) }) {
+                    reached.insert(id)
+                    grew = true
+                }
+            }
+            try expect(reached.count == now.count,
+                       "\(leg): the zone kept the hole the closed tile left — the members are not one "
+                       + "gap-contact cluster: \(now.mapValues(describe))")
+            guard let persisted = try projectStore.tryLoadCanvas() else {
+                throw Failure(message: "\(leg): project Alder has no canvas on disk")
+            }
+            try expect(!persisted.tiles.contains { $0.id == closed },
+                       "\(leg): the closed tile is still in the canvas file")
+            for (id, f) in now {
+                let onDisk = persisted.tiles.first { $0.id == id }?.frame
+                try expect(onDisk == f, "\(leg): \(id) is at \(describe(f)) on screen but "
+                           + "\(onDisk.map(describe) ?? "absent") on disk")
+            }
+        }
+
+        // Leg 1: Archive from the sidebar's row menu, the verb the close nudge uses.
+        try expect(m.delegate.performInboxRowAction(.archive, on: [agentId.rawValue]),
+                   "close tightens: Archive refused the idle Agent")
+        try expectSettled("archive", closed: agentTile)
+        let afterArchive = members()
+        try expect(afterArchive[b] == TileFrame(x: cx + 248, y: cy, width: 240, height: 160),
+                   "archive: B must close up to A at (\(cx + 248), \(cy)); it is at "
+                   + "\(afterArchive[b].map(describe) ?? "nowhere")")
+        try expect(afterArchive[a] == arranged[a] && afterArchive[file] == arranged[file],
+                   "archive: A and the file were already in place and must not move")
+
+        // Leg 2: the title bar's ✕.
+        guard let closeRequested = m.canvas.onTileCloseRequested else {
+            throw Failure(message: "close tightens: the canvas has no close handler wired")
+        }
+        closeRequested(a)
+        try expectSettled("✕", closed: a)
+
+        print("ZoneArmingChecks: closing a tile in an auto-layout zone (Archive from the sidebar, and "
+              + "the ✕) closed the gap it left, kept the zone and its neighbours where they were, and "
+              + "persisted the result")
     }
 }

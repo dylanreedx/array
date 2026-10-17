@@ -3194,6 +3194,25 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    /// A tile the person CLOSED — ✕, ⌘⌫, or closing its agent to History, all of
+    /// which commit through `AppDelegate.deleteTile`. `removeTile` alone left a
+    /// hole where the tile was; here an auto-layout zone the tile leaves settles,
+    /// so the members behind it close up, exactly as the zone a tile is dragged
+    /// OUT of does (`reevaluateZoneMembership`). Settle moves members only: the
+    /// zone keeps its size and neighbouring zones stay put. Committed as a
+    /// geometry edit, so it persists like any other layout change.
+    /// `--zone-arming-check` §11.
+    func closeTile(id: UUID) {
+        let zoneId = autoLayoutScene().tiles.first { $0.id == id }?.zoneId
+        removeTile(id: id)
+        guard let zoneId, isAutoLayoutActive(inZone: zoneId) else { return }
+        let baseline = autoLayoutScene()
+        let began = beginGeometryEdit(
+            .autoLayout, tileIds: Set(baseline.tiles.map(\.id)), zoneIds: [zoneId])
+        applyAutoLayout(.settle(zoneId: zoneId, anchor: nil, pin: false), baseline: baseline)
+        if began { _ = commitGeometryEdit() }
+    }
+
     func markActive(tileId: UUID) {
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)

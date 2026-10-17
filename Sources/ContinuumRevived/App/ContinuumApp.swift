@@ -7044,7 +7044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
-        canvasView.removeTile(id: id)
+        canvasView.closeTile(id: id)
         recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
         // The OWNER's canvas file: it is the one still holding the tile.
         if let owner {
