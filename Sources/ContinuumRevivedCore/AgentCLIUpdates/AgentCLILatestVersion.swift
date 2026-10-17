@@ -1,5 +1,11 @@
 import Foundation
 
+/// Settings › Agents › "Check for agent CLI updates".
+public enum AgentCLIUpdateConfig {
+    public static let checksEnabledKey = "continuum.agents.cliUpdateChecks.enabled"
+    public static let checksEnabledDefault = true
+}
+
 public enum AgentCLILatestLookup: Equatable, Sendable {
     case found(String)
     /// No answer: offline, timeout, a malformed body, a non-200.

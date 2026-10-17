@@ -3944,6 +3944,20 @@ enum ContinuumApp {
             }
         }
 
+        // Agent CLI updates in Settings › Agents and ⌘K, against fake CLIs and an
+        // injected latest-version fetcher. Never runs a real CLI or the network.
+        if CommandLine.arguments.contains("--cli-update-settings-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentCLIUpdateSettingsChecks.run()
+                print("ContinuumRevivedCLIUpdateSettingsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-search-check") {
             do {
                 _ = NSApplication.shared
@@ -4981,6 +4995,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         submissionRecoveryStore: agentComposerDraftStore,
         transcriptStore: agentTranscriptStore
     )
+    /// Agent CLI versions and in-app updates (Settings › Agents, ⌘K). `shared`
+    /// stays inert unless `applicationDidFinishLaunching` enables it; a check
+    /// injects its own center here.
+    var cliUpdateCenter: AgentCLIUpdateCenter = .shared {
+        didSet { wireCLIUpdateCenter() }
+    }
     /// CX-01 (`.plans/59`): distinguishes this host instance in every issued
     /// revision, so a handle from a previous launch is re-resolved, not trusted.
     let hostEpoch = UUID().uuidString
@@ -5225,6 +5245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // pixel baseline and tour render therefore photographs a motionless
         // transcript — a frame captured mid-fade would be a flapping baseline.
         AgentTranscriptMotion.isEnabled = { true }
+        // Agent CLI update checks: interactive launch only, and `enableLive`
+        // refuses every QA shape on its own as well. The first check is 30s out.
+        wireCLIUpdateCenter()
+        cliUpdateCenter.enableLive()
         // C3: adopt any pre-2026-08-24 per-tile transcript directory under the
         // agent-stable key. Detached and non-blocking because it only ever moves
         // history the app is not yet reading, and idempotent, so a crash halfway
@@ -9828,7 +9852,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if zoneId != nil {
             actions += [.renameCurrentZone, .pickCurrentZoneColor, .changeCurrentZoneScope, .toggleCurrentZoneAutoLayout, .tidyCurrentZone]
         }
+        actions += cliUpdatePaletteActions()
         return actions
+    }
+
+    /// "Update <CLI>" only while a newer version exists and Array may run its
+    /// update; "Check for CLI Updates" whenever the center is live.
+    func cliUpdatePaletteActions() -> [LaunchPaletteAction] {
+        guard cliUpdateCenter.isActive else { return [] }
+        return cliUpdateCenter.updatableHarnesses.map(LaunchPaletteAction.updateAgentCLI) + [.checkAgentCLIUpdates]
     }
 
     private func contextualPaletteActionsForFocusedTile() -> [LaunchPaletteAction] {
@@ -10961,6 +10993,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         model.onSignIn = { [weak self] harness in
             self?.signInToAgentCLI(harness)
         }
+        model.cliUpdates = cliUpdateCenter
+        // Opening Settings re-reads each CLI's version.
+        let center = cliUpdateCenter
+        Task { await center.refresh() }
         let modal = SettingsModal(model: model)
         modal.onClose = { [weak self] in
             guard let self else { return }
@@ -11005,6 +11041,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         default:
             break
         }
+    }
+
+    /// The update runner reaches the agents through the supervisor. It calls
+    /// from its own queue; the supervisor is main-actor state.
+    private func wireCLIUpdateCenter() {
+        cliUpdateCenter.sessionGate = AgentCLISessionGate(
+            hasRunningTurn: { [weak self] harness in
+                Self.onMain { self?.agentSupervisor.hasRunningTurn(harness: harness) ?? false }
+            },
+            stopIdleSessions: { [weak self] harness in
+                Self.onMain { self?.agentSupervisor.stopIdleSessions(harness: harness) ?? 0 }
+            },
+            noteRunningSessionsNeedRestart: { [weak self] harness, version in
+                Self.onMain { self?.agentSupervisor.noteCLIUpdated(harness: harness, version: version) }
+            })
+    }
+
+    nonisolated private static func onMain<T: Sendable>(_ work: @MainActor @Sendable () -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated(work) }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated(work) }
     }
 
     private func makeWorkspaceContentView(canvasView: CanvasNSView, frame: NSRect) -> NSView {
@@ -15997,6 +16053,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return canvasView != nil
         case .replayGettingStarted:
             replayGettingStarted()
+            return true
+        case let .updateAgentCLI(harness):
+            guard cliUpdateCenter.status(harness).canUpdate else { return false }
+            cliUpdateCenter.update(harness)
+            // The run's output and result are in Settings › Agents.
+            openSettings(paneID: "agents")
+            if let model = settingsModal?.model,
+               let row = model.entries().first(where: { $0.anchor == "harness.\(harness.rawValue)" }) {
+                model.reveal(row)
+            }
+            return true
+        case .checkAgentCLIUpdates:
+            guard cliUpdateCenter.isActive else { return false }
+            let center = cliUpdateCenter
+            Task { await center.refresh(force: true) }
+            openSettings(paneID: "agents")
             return true
         }
     }

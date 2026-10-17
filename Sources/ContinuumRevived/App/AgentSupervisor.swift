@@ -1385,9 +1385,14 @@ final class AgentSupervisor {
         runners[id] = nil
         activeCompactionOperations.remove(id)
         compactingAgents.remove(id)
-        if runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
+        let retire = retireSessionAfterTurn.remove(id) != nil
+        if !retire && runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
             idleSessionRunners[id] = runner
             scheduleIdleReap(for: id, runner: runner)
+        } else if retire && runner.keepsSessionAliveBetweenTurns {
+            runner.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+            returnDeliveringSteers(for: id)
         }
         let phase = terminal?.phase ?? .indeterminate
         if var record = records[id] {
@@ -3540,6 +3545,54 @@ final class AgentSupervisor {
         // live watcher and timer outliving the session that started it.
         for parent in Array(observedRunWatchers.keys) { stopObservedRuns(for: parent) }
     }
+
+    // MARK: - Agent CLI updates
+
+    /// Agents whose session must end at the close of the turn now running,
+    /// because their CLI was updated under them (`noteCLIUpdated`).
+    private var retireSessionAfterTurn: Set<AgentID> = []
+
+    private func agents(of harness: AgentHarness, in ids: some Sequence<AgentID>) -> [AgentID] {
+        ids.filter { records[$0]?.harness == harness }
+    }
+
+    /// True while any agent on `harness` has a turn in flight. An npm-owned
+    /// update is refused then: npm deletes the files that turn is running from.
+    func hasRunningTurn(harness: AgentHarness) -> Bool {
+        !agents(of: harness, in: runners.keys).isEmpty
+    }
+
+    /// After a CLI update: stop that harness's IDLE persistent sessions exactly
+    /// as the idle reaper does, so each agent's next turn starts the new binary.
+    /// A running turn is never touched.
+    @discardableResult
+    func stopIdleSessions(harness: AgentHarness) -> Int {
+        var stopped = 0
+        for id in agents(of: harness, in: Array(idleSessionRunners.keys)) where runners[id] == nil {
+            guard let idle = idleSessionRunners.removeValue(forKey: id) else { continue }
+            idleReapTokens[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+            returnDeliveringSteers(for: id)
+            notifyTurnCapabilitiesChanged(id)
+            stopped += 1
+        }
+        return stopped
+    }
+
+    /// After a CLI update: each RUNNING agent on `harness` finishes its turn on
+    /// the old binary, says so, and does not keep that process for the next turn.
+    func noteCLIUpdated(harness: AgentHarness, version: String) {
+        for id in agents(of: harness, in: runners.keys) {
+            retireSessionAfterTurn.insert(id)
+            appendLocalNotice(
+                id: id, key: "cli-updated", title: "\(harness.rawValue) \(version) installed",
+                body: "This turn finishes on the previous version. Restarts on \(version) when it ends.")
+        }
+    }
+
+    /// QA: whether an agent's live process is pooled between turns.
+    func qaHasIdleSession(_ id: AgentID) -> Bool { idleSessionRunners[id] != nil }
 
     // MARK: - Orchestration (P2D.2)
 
@@ -8153,11 +8206,15 @@ final class AgentSupervisor {
             runners[id] = nil
             interruptingAgents.remove(id)
             openToolItems[id] = nil
-            let retained = runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn
+            // A CLI update landed while this turn ran: its session process is the
+            // old binary, so it ends here instead of serving the next turn.
+            let retire = retireSessionAfterTurn.remove(id) != nil
+            let retained = !retire && runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn
             if retained {
                 idleSessionRunners[id] = runner
                 scheduleIdleReap(for: id, runner: runner)
             } else {
+                if retire && runner.keepsSessionAliveBetweenTurns { runner.stop() }
                 // Claude owns mirrored children inside this process. If it exits
                 // or crashes before their matching tool_result, no later transport
                 // can close them. A retained process with background work closes

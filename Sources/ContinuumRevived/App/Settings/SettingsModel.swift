@@ -29,6 +29,8 @@ final class SettingsModel {
     @ObservationIgnored var actionHandlers: [String: () -> Void] = [:]
     /// Runs the CLI's OWN login flow (a terminal tile). Never a key field.
     @ObservationIgnored var onSignIn: ((AgentHarness) -> Void)?
+    /// Versions and in-app updates for the agent CLIs; nil draws readiness only.
+    @ObservationIgnored var cliUpdates: AgentCLIUpdateCenter?
     /// `.custom` rows that embed an AppKit view, by id.
     @ObservationIgnored var customViews: [String: () -> NSView] = [:]
     /// The Appearance pane's canvas background rows.
@@ -76,6 +78,9 @@ final class SettingsModel {
     /// The rows the selected pane has on screen.
     var renderedAnchors: [String: Int] { renderedAnchorsByPane[selectedPaneID] ?? [:] }
     @ObservationIgnored private(set) var anchorFrames: [String: CGRect] = [:]
+    /// Text a row actually rendered, by identifier, while it is on screen — the
+    /// census for rows whose words change with state (a CLI's version line).
+    @ObservationIgnored private(set) var renderedTexts: [String: String] = [:]
     @ObservationIgnored var viewportSize: CGSize = .zero
     @ObservationIgnored private var scrollToken = 0
     @ObservationIgnored private var highlightGeneration = 0
@@ -497,6 +502,7 @@ final class SettingsModel {
         renderedAnchorsByPane[pane]?[anchor] = count > 0 ? count : nil
         if count <= 0, pane == selectedPaneID { anchorFrames[anchor] = nil }
     }
+    func noteRenderedText(_ id: String, _ text: String?) { renderedTexts[id] = text }
     /// The pane's full set of row frames, as the latest layout reported it: rows
     /// that left the pane leave this too.
     func noteFrames(_ frames: [String: CGRect]) { anchorFrames = frames }

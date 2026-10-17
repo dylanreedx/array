@@ -50,6 +50,9 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case toggleCurrentZoneAutoLayout
     case tidyCurrentZone
     case replayGettingStarted
+    /// Offered only while a newer version exists and Array may run its update.
+    case updateAgentCLI(AgentHarness)
+    case checkAgentCLIUpdates
 
     public var displayName: String {
         switch self {
@@ -119,6 +122,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
         case .toggleCurrentZoneAutoLayout: return "Toggle This Zone Auto Layout"
         case .tidyCurrentZone: return "Tidy This Zone"
         case .replayGettingStarted: return "Replay Getting Started"
+        case let .updateAgentCLI(harness): return "Update \(harness.rawValue)"
+        case .checkAgentCLIUpdates: return "Check for CLI Updates"
         }
     }
 
@@ -193,6 +198,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
         case .toggleCurrentZoneAutoLayout: return ["this", "zone", "auto", "layout", "toggle"]
         case .tidyCurrentZone: return ["this", "zone", "tidy", "arrange", "layout"]
         case .replayGettingStarted: return ["replay", "getting", "started", "onboarding", "learn", "tutorial"]
+        case let .updateAgentCLI(harness): return ["update", "upgrade", "cli", "version", harness.rawValue.lowercased()]
+        case .checkAgentCLIUpdates: return ["check", "cli", "updates", "update", "upgrade", "version", "claude", "codex", "pi"]
         }
     }
 }
@@ -856,6 +863,8 @@ public enum LaunchPaletteModel {
         case .tidyCurrentZone: return item(row, .actions, "Tidy Now", "This Zone", "wand.and.stars", ["zone", "arrange"], true, false, "zone-action:tidy")
         case .replayGettingStarted: return item(row, .actions, "Replay Getting Started", "Reset learning tasks without changing the canvas", "arrow.counterclockwise", ["onboarding", "tutorial", "learn"], false, false, "action:replay-getting-started")
         case .tidyCanvas: return item(row, .actions, "Tidy canvas", "Restore spacing without changing tile sizes", "rectangle.3.group", ["tidy", "arrange", "layout"], true, true, "action:tidy-canvas")
+        case let .updateAgentCLI(harness): return item(row, .actions, "Update \(harness.rawValue)", "A newer version is available", "arrow.down.circle", ["upgrade", "cli", "version"], false, false, "cli-update:\(harness.rawValue)")
+        case .checkAgentCLIUpdates: return item(row, .actions, "Check for CLI Updates", "Claude Code, Codex and Pi", "arrow.triangle.2.circlepath", ["update", "upgrade", "version"], false, false, "action:check-cli-updates")
         }
     }
 

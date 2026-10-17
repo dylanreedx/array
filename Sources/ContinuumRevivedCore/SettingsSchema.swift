@@ -159,6 +159,10 @@ public enum SettingsSchema {
             SettingsGroup(id: "agents.clis", title: "Agent CLIs",
                           footer: "Each CLI signs in with its own login. Array never asks for an API key.", rows: [
                 SettingsRow(.custom(id: "harnessStatus", label: "Agent CLIs")),
+                SettingsRow(.toggle(key: AgentCLIUpdateConfig.checksEnabledKey, label: "Check for agent CLI updates",
+                                    default: AgentCLIUpdateConfig.checksEnabledDefault),
+                            help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
+                            keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
             SettingsGroup(id: "agents.context", title: "Context", rows: [
                 SettingsRow(.toggle(key: AgentContextAutoCompactionPolicy.enabledKey, label: "Compact context automatically", default: true),
@@ -386,7 +390,8 @@ public enum SettingsSchema {
         case .custom("harnessStatus", _):
             return AgentHarness.allCases.map { harness in
                 CustomEntry(anchor: "harness.\(harness.rawValue)", label: harness.rawValue,
-                            keywords: ["agent cli", "sign in", "login", "installed", "ready", "harness"])
+                            keywords: ["agent cli", "sign in", "login", "installed", "ready", "harness",
+                                       "version", "update", "upgrade", "npm"])
             }
         case .custom("canvasBackground", _):
             // Rows that only appear in some states (a custom colour, grid spacing,
