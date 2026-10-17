@@ -2684,7 +2684,10 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 let artifact = try AppDelegate.runLeaderZoneJumpSelfCheck()
-                print("ContinuumRevivedLeaderZoneJumpChecks passed: \(artifact.path)")
+                // The badge tints ride the matrix here; `--leader-jump-visible-indicators-check`,
+                // which also runs them, is not a matrix leg.
+                let badgeTint = try AppDelegate.runLeaderJumpBadgeTintCheck()
+                print("ContinuumRevivedLeaderZoneJumpChecks passed: \(artifact.path); \(badgeTint)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -10989,6 +10992,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// What a hold-⌥ jump badge on this tile says about its agent, read off the row
+    /// the sidebar is drawing so the two cannot disagree: the sidebar's mint `Done`
+    /// for a finished turn nobody has looked at, the approval amber while it waits
+    /// on you, nothing otherwise (and nothing for a row whose state is unconfirmed).
+    func leaderJumpBadgeAccent(forTile tileId: UUID) -> AccentToken? {
+        guard let agentId = agentSupervisor.agent(forTile: tileId),
+              let row = workspaceSidebarView?.agentInbox.row(forAgentId: agentId.rawValue),
+              !row.isUnconfirmed else { return nil }
+        if AgentInbox96CellView.isUnseen(row) { return .accentReview }
+        switch row.state {
+        case .approval, .input: return .accentApproval
+        case .working, .failed, .ready: return nil
+        }
+    }
+
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
         topBar.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
         topBar.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
@@ -17769,6 +17787,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView.onTileStopRunRequested = { [weak self] tileId in
             self?.stopHarnessRun(tileId: tileId)
+        }
+        canvasView.leaderJumpBadgeAccentProvider = { [weak self] tileId in
+            self?.leaderJumpBadgeAccent(forTile: tileId)
         }
         canvasView.onZoneCreated = { [weak self] placement in
             self?.persistCreatedGroupZone(placement)
@@ -25030,12 +25051,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect((p["indicatorRectInsideVisibleIntersection"] as? Bool) == true, "drawn indicator rect must be inside visible intersection and viewport")
         }
 
+        let badgeTint = try runLeaderJumpBadgeTintCheck()
+
         let manifest: [String: Any] = [
             "check": "leader-jump-visible-indicators",
             "path": "synthesized .flagsChanged -> production leaderJumpAssignments -> overlay placement seam",
             "viewportBounds": rectJSON(viewportBounds),
             "placements": placements,
             "offscreenTilesLabeled": assignments.filter { $0.tileId == offscreenId }.count,
+            "badgeTint": badgeTint,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -37470,6 +37494,66 @@ static func makeAgentGlanceFixture(label: String) throws -> AgentGlanceFixture {
     }
     return AgentGlanceFixture(app: app, canvas: canvas, sidebar: sidebar, window: window, supervisor: supervisor,
                               working: working, asking: asking, done: done, note: note, root: root)
+}
+
+/// The hold-⌥ badges tinted by what each agent needs, in the sidebar's own colours,
+/// read through the seam the overlay paints with. Opened through the real
+/// `.flagsChanged` path.
+@MainActor
+static func runLeaderJumpBadgeTintCheck() throws -> String {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError(description: "leader badge tint: " + message) }
+    }
+    let f = try makeAgentGlanceFixture(label: "leader")
+    defer { f.window.orderOut(nil); try? FileManager.default.removeItem(at: f.root) }
+    f.app.leaderDwell = 0
+    guard let option = NSEvent.keyEvent(
+        with: .flagsChanged, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 58) else {
+        throw CheckError(description: "leader badge tint: could not synthesize .flagsChanged")
+    }
+    f.app.handleFlagsChanged(option)
+    try expect(f.canvas.navModeOverlayQASnapshot().isInstalled, "holding ⌥ must open the jump HUD")
+    let labelled = Set(f.canvas.leaderJumpAssignments().map(\.tileId))
+    try expect(labelled == Set([f.working.tile, f.asking.tile, f.done.tile, f.note]),
+               "every tile must carry a letter — got \(labelled.count)")
+
+    let inbox = f.sidebar.agentInbox
+    let now = Date()
+    func sidebarColour(_ agent: AgentID) throws -> NSColor {
+        guard let row = inbox.row(forAgentId: agent.rawValue) else {
+            throw CheckError(description: "leader badge tint: no sidebar row for \(agent.rawValue)")
+        }
+        return AgentInbox96CellView.accentColour(row, now: now, in: f.canvas)
+    }
+    func badge(_ tile: UUID) -> AccentToken? { f.canvas.leaderJumpBadgeAccent(for: tile) }
+
+    let doneWord = inbox.row(forAgentId: f.done.agent.rawValue).flatMap { AgentInbox96CellView.stateWord($0, now: now) }
+    let doneRow = inbox.row(forAgentId: f.done.agent.rawValue)
+    try expect(doneWord == "Done", "the finished agent's row must read Done (unseen) — got \(doneWord ?? "nil"); "
+               + "row state \(doneRow.map { "\($0.state)" } ?? "nil"), unconfirmed \(doneRow?.isUnconfirmed ?? false), "
+               + "terminal \(String(describing: doneRow?.terminalEvent)), unread \(f.supervisor.records[f.done.agent]?.isUnread ?? false)")
+    try expect(badge(f.done.tile) == .accentReview,
+               "a finished, unseen agent's letter must be the sidebar's Done mint — got \(String(describing: badge(f.done.tile)))")
+    let doneRowColour = try sidebarColour(f.done.agent)
+    try expect(badge(f.done.tile)?.color.nsColor(in: f.canvas) == doneRowColour,
+               "the Done letter must be the very colour the sidebar paints that row")
+    try expect(badge(f.asking.tile) == .accentApproval,
+               "an agent waiting on an approval must have an amber letter — got \(String(describing: badge(f.asking.tile)))")
+    let askingRowColour = try sidebarColour(f.asking.agent)
+    try expect(badge(f.asking.tile)?.color.nsColor(in: f.canvas) == askingRowColour,
+               "the amber letter must be the very colour the sidebar paints that row")
+    try expect(badge(f.working.tile) == nil, "a working agent's letter keeps the accent — got \(String(describing: badge(f.working.tile)))")
+    try expect(badge(f.note) == nil, "a tile with no agent keeps the accent")
+
+    // Looking at the finished agent is what retires its Done — and its mint. A
+    // deliberate focus of its tile is how that look arrives.
+    f.supervisor.focusTile(f.done.tile)
+    f.app.refreshAgentSurfaces(notify: false)
+    try expect(badge(f.done.tile) == nil,
+               "once read, the finished agent's letter goes back to the accent — got \(String(describing: badge(f.done.tile)))")
+    return "leader badges: Done mint and approval amber matching the sidebar, accent otherwise, mint gone once read"
 }
 
 /// The hover card says what the agent is doing and the last thing it said, from the

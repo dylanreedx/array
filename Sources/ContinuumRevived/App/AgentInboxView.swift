@@ -686,6 +686,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the ones that survived the current scope, which would make every scope but
     /// `.all` a one-way door.
     private var allRows: [AgentInboxRow] = []
+    /// One agent's row as last handed over, whatever the scope or search hides —
+    /// for a surface that has to say what the row says (the ⌥ jump badges).
+    func row(forAgentId id: UUID) -> AgentInboxRow? { allRows.first { $0.id == id } }
     /// The entries in the popup, parallel to the menu items' tags.
     private var scopeEntries: [InboxScope] = []
     /// Search is view-local filter state. It never participates in ordering or persistence.

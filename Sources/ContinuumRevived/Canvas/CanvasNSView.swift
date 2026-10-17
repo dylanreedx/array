@@ -5462,6 +5462,20 @@ final class CanvasNSView: NSView, TokenThemed {
         leaderJumpAssignments().first { $0.label == label }?.tileId
     }
 
+    /// The app's answer to "what is this tile's agent asking for", in the sidebar's
+    /// own words (`AppDelegate.leaderJumpBadgeAccent(forTile:)`). nil means nothing.
+    var leaderJumpBadgeAccentProvider: ((UUID) -> AccentToken?)?
+
+    /// The tint of a hold-⌥ jump badge, so the letters say where to look: mint for
+    /// an agent that finished and nobody has looked at (the sidebar's `Done`),
+    /// amber for one that needs you (the attention ring's colour, which a tile with
+    /// a ring but no managed agent also gets). nil keeps the system accent.
+    /// `--leader-zone-jump-check`.
+    func leaderJumpBadgeAccent(for tileId: UUID) -> AccentToken? {
+        if let accent = leaderJumpBadgeAccentProvider?(tileId) { return accent }
+        return attentionTileIds.contains(tileId) ? .accentApproval : nil
+    }
+
     /// Returns the key→zone mapping for the current zone-jump leader state,
     /// pairing each zone in `navZoneRenderModels` order with its assigned key
     /// (configured `navKey` or auto-ordinal from `leaderZoneOrdinalAlphabet`).
@@ -13511,7 +13525,8 @@ private final class NavModeOverlayNSView: NSView {
         for assignment in canvas.leaderJumpAssignments() {
             let badge = JumpIndicatorPlacementEngine.indicatorRect(for: assignment.placement, normalBadgeSize: badgeSize)
             let badgePath = NSBezierPath(roundedRect: badge, xRadius: min(8, badge.width / 2), yRadius: min(8, badge.height / 2))
-            NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
+            let tint = canvas.leaderJumpBadgeAccent(for: assignment.tileId)?.color.nsColor(in: self)
+            (tint ?? NSColor.controlAccentColor).withAlphaComponent(0.95).setFill()
             badgePath.fill()
             let text = assignment.label.uppercased()
             let attributes: [NSAttributedString.Key: Any] = [
