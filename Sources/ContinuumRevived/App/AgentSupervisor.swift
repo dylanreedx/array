@@ -19881,11 +19881,12 @@ private func checkPerAgentProviderSettings(
         foreignSupervisor.setProviderSettings(agentID: agentId, model: model, thinking: thinking)
     }
     footer.layoutSubtreeIfNeeded()
-    guard footer.qaModelTitles == (AgentModelConfig.modelOptions + [foreign.model]).map(AgentComposerFooterView.abbreviatedModel),
-          footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(AgentComposerFooterView.abbreviatedEffort),
+    guard footer.qaFitTier > .full,
+          footer.qaModelTitles == AgentModelConfig.modelOptions + [foreign.model],
+          footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized),
           footer.modelButton.accessibilityLabel() == "Model, next turn",
           footer.effortButton.accessibilityLabel() == "Reasoning effort, next turn" else {
-        throw fail("provider-settings: the custom footer diverged from AgentModelConfig, hid the off-catalog model, or lost its next-turn accessibility labels")
+        throw fail("provider-settings: the custom footer diverged from AgentModelConfig, hid the off-catalog model, shortened its menu rows, or lost its next-turn accessibility labels")
     }
     footer.setFrameSize(NSSize(width: 640, height: 48))
     footer.layoutSubtreeIfNeeded()
@@ -19922,7 +19923,7 @@ private func checkPerAgentProviderSettings(
     reciprocalFooter.onSettingsWrite = { model, thinking in
         foreignSupervisor.setProviderSettings(agentID: legacyEffortID, model: model, thinking: thinking)
     }
-    guard reciprocalFooter.qaEffortTitles.last == AgentComposerFooterView.abbreviatedEffort(legacyEffort),
+    guard reciprocalFooter.qaEffortTitles.last == legacyEffort.capitalized,
           reciprocalFooter.qaPickModel(secondModel),
           foreignSupervisor.providerSettings(for: legacyEffortID) == .init(model: secondModel, thinking: legacyEffort),
           try store.load(id: legacyEffortID)?.thinking == legacyEffort else {

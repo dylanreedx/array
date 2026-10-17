@@ -23,10 +23,7 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     private var settings = AgentModelConfig.resolvedFromDefaults()
     private var recordHarness = AgentHarnessConfig.resolved()
     private var selectedHarness = AgentHarnessConfig.resolved()
-    private var usesCompactLabels = false
-    private var usesCondensedModelTrigger = false
-    private var usesIconOnlyHarnessTrigger = false
-    private var hidesEffort = false
+    private var fitTier: FitTier = .full
     /// True only while `layout()` is installing the tier it just decided on, so
     /// that rebuild does not ask for the very layout pass it is running inside.
     private var isInstallingFitDecision = false
@@ -150,38 +147,32 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         needsLayout = true
     }
 
+    /// How far the CLOSED triggers shorten to fit the row, least lossy first.
+    /// Each rung shortens one more control, so a row a few points short of the
+    /// full titles loses one word, not all three. The popover rows never
+    /// shorten: a menu is sized to its own content, not to this row.
+    ///
+    /// The provider/harness control must remain reachable at every supported
+    /// tile width (hiding it made a Pi agent impossible to switch away from Pi).
+    /// At the 320pt tile floor the footer cannot physically hold three custom
+    /// popup controls, so effort yields first; then the model trigger reads
+    /// "Model"; then the harness keeps only its mark. Accessibility values keep
+    /// the exact selection throughout.
+    enum FitTier: Int, CaseIterable, Comparable {
+        case full, shortHarness, shortEffort, shortModel, hiddenEffort, condensedModel, iconOnlyHarness
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
     override func layout() {
         super.layout()
         guard bounds.width > 0 else { return }
-        // Measured fit, not a guessed threshold: abbreviate exactly when the full
-        // titles do not fit the width this row actually has (P5.5 defect 4 — the
-        // old hard-coded 390 was compact where full fits and full where it
-        // clipped, depending entirely on the catalogue's string lengths).
-        let compact = requiredWidth(usingCompactLabels: false) > bounds.width
-        // The provider/harness control must remain reachable at every supported
-        // tile width. Hiding it made a Pi agent impossible to switch away from Pi.
-        // At the 320pt tile floor the footer cannot physically hold three custom
-        // popup controls (their chrome alone is wider than the available space),
-        // so effort yields first. If provider + model still do not fit, shorten
-        // only the CLOSED model trigger to "Model"; its popover rows and
-        // accessibility value retain the exact selected model.
-        let shouldHideEffort = requiredWidth(
-            usingCompactLabels: true, condenseModelTrigger: false) > bounds.width
-        let condensesModelTrigger = shouldHideEffort && requiredWidth(
-            usingCompactLabels: true, condenseModelTrigger: false,
-            includeEffort: false) > bounds.width
-        let iconOnlyHarness = condensesModelTrigger && requiredWidth(
-            usingCompactLabels: true, condenseModelTrigger: true,
-            includeEffort: false) > bounds.width
-        if compact != usesCompactLabels
-            || condensesModelTrigger != usesCondensedModelTrigger
-            || iconOnlyHarness != usesIconOnlyHarnessTrigger
-            || shouldHideEffort != hidesEffort {
-            usesCompactLabels = compact
-            usesCondensedModelTrigger = condensesModelTrigger
-            usesIconOnlyHarnessTrigger = iconOnlyHarness
-            hidesEffort = shouldHideEffort
-            effortButton.isHidden = shouldHideEffort
+        // Measured fit, not a guessed threshold (P5.5 defect 4): the first rung
+        // whose titles fit the width this row actually has.
+        let tier = FitTier.allCases.first { requiredWidth(for: $0) <= bounds.width } ?? .iconOnlyHarness
+        if tier != fitTier {
+            fitTier = tier
+            effortButton.isHidden = tier >= .hiddenEffort
             isInstallingFitDecision = true
             rebuildChoices()
             isInstallingFitDecision = false
@@ -199,31 +190,36 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
             : (AgentModelCatalog.shared.displayName(for: model) ?? model)
     }
 
-    /// The row's fitting width for the CURRENT selection's titles: the same
-    /// per-button expression `ChoiceButton` measures itself with, so this cannot
-    /// drift from what the buttons actually need.
-    private func requiredWidth(
-        usingCompactLabels compact: Bool,
-        condenseModelTrigger: Bool? = nil,
-        includeEffort: Bool = true
-    ) -> CGFloat {
-        let condensed = condenseModelTrigger ?? usesCondensedModelTrigger
+    /// What each closed trigger reads at `tier`; nil is the selected item's own
+    /// (full) title.
+    private func triggerOverrides(for tier: FitTier) -> (harness: String?, model: String?, effort: String?) {
+        let harness = tier >= .iconOnlyHarness ? ""
+            : tier >= .shortHarness ? Self.abbreviatedHarness(selectedHarness) : nil
+        let model = tier >= .condensedModel ? "Model"
+            : tier >= .shortModel ? Self.abbreviatedModel(settings.model) : nil
+        let effort = tier >= .shortEffort ? Self.abbreviatedEffort(settings.thinking) : nil
+        return (harness, model, effort)
+    }
+
+    /// The row's fitting width for the CURRENT selection's titles at `tier`: the
+    /// same per-button expression `ChoiceButton` measures itself with, so this
+    /// cannot drift from what the buttons actually need.
+    private func requiredWidth(for tier: FitTier) -> CGFloat {
         // `selectedHarness`, not `recordHarness`: `rebuildChoices` installs the
         // titles from `snapshot(for: selectedHarness)` and shows that harness on
         // the trigger, so measuring the other one sizes the row against a string
         // it never draws.
         let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
-        let modelTitle = compact && condensed
-            ? "Model"
-            : (compact ? Self.abbreviatedModel(settings.model) : (snapshot.displayNames[settings.model] ?? settings.model))
-        let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
-        let harnessTitle = compact ? Self.abbreviatedHarness(selectedHarness) : selectedHarness.rawValue
+        let overrides = triggerOverrides(for: tier)
+        let harnessTitle = overrides.harness ?? selectedHarness.rawValue
+        let modelTitle = overrides.model ?? (snapshot.displayNames[settings.model] ?? settings.model)
+        let effortTitle = overrides.effort ?? settings.thinking.capitalized
         let gap = CGFloat(pageZoom.scaled(Space.m))
         let providerAndModel = ChoiceButton.fittingWidth(forTitle: harnessTitle, zoom: pageZoom) + CGFloat(pageZoom.scaled(22))
             + gap + ChoiceButton.fittingWidth(forTitle: modelTitle, zoom: pageZoom) + CGFloat(pageZoom.scaled(22))
-        return includeEffort
-            ? providerAndModel + gap + ChoiceButton.fittingWidth(forTitle: effortTitle, zoom: pageZoom)
-            : providerAndModel
+        return tier >= .hiddenEffort
+            ? providerAndModel
+            : providerAndModel + gap + ChoiceButton.fittingWidth(forTitle: effortTitle, zoom: pageZoom)
     }
 
     var controlsEnabled: Bool {
@@ -284,21 +280,23 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     private func rebuildChoices() {
         harnessButton.selectedIcon = .provider(selectedHarness == .claudeCode ? "anthropic/" : selectedHarness == .codex ? "openai/" : "pi")
         harnessButton.items = AgentHarness.allCases.map { harness in
-            ChoiceItem(id: harness.rawValue, title: usesCompactLabels ? Self.abbreviatedHarness(harness) : harness.rawValue, icon: .provider(harness == .claudeCode ? "anthropic/" : harness == .codex ? "openai/" : "pi"))
+            ChoiceItem(id: harness.rawValue, title: harness.rawValue, icon: .provider(harness == .claudeCode ? "anthropic/" : harness == .codex ? "openai/" : "pi"))
         }
         harnessButton.selectedID = selectedHarness.rawValue
-        harnessButton.selectedTitleOverride = usesIconOnlyHarnessTrigger ? "" : nil
+        let overrides = triggerOverrides(for: fitTier)
+        harnessButton.selectedTitleOverride = overrides.harness
         harnessButton.toolTip = selectedHarness.rawValue
         let snapshot = AgentModelCatalog.shared.snapshot(for: selectedHarness)
         var models = snapshot.models
         if selectedHarness == recordHarness, !models.contains(settings.model) { models.append(settings.model) }
         modelButton.items = models.map { model in
-            ChoiceItem(id: model, title: usesCompactLabels ? Self.abbreviatedModel(model) : (snapshot.displayNames[model] ?? model), icon: .provider(model))
+            ChoiceItem(id: model, title: snapshot.displayNames[model] ?? model, icon: .provider(model))
         }
-        modelButton.selectedTitleOverride = usesCondensedModelTrigger ? "Model" : nil
+        modelButton.selectedTitleOverride = overrides.model
         var efforts = AgentModelConfig.thinkingOptions
         if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }
-        effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: usesCompactLabels ? Self.abbreviatedEffort(effort) : effort.capitalized) }
+        effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: effort.capitalized) }
+        effortButton.selectedTitleOverride = overrides.effort
         modelButton.selectedIcon = selectedHarness == recordHarness ? .provider(settings.model) : harnessButton.selectedIcon
         modelButton.selectedID = selectedHarness == recordHarness ? settings.model : nil
         effortButton.selectedID = settings.thinking
@@ -427,8 +425,10 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
         return containsVisibleContext(self)
     }
     var qaFitTiersDescription: String {
-        "compact=\(usesCompactLabels) condensedModel=\(usesCondensedModelTrigger) hidesEffort=\(hidesEffort) reqFull=\(requiredWidth(usingCompactLabels: false)) reqCompact=\(requiredWidth(usingCompactLabels: true, condenseModelTrigger: false)) reqNoEffort=\(requiredWidth(usingCompactLabels: true, condenseModelTrigger: false, includeEffort: false))"
+        "tier=\(fitTier) width=\(bounds.width) " + FitTier.allCases.map { "\($0)=\(requiredWidth(for: $0))" }.joined(separator: " ")
     }
+    var qaFitTier: FitTier { fitTier }
+    func qaRequiredWidth(for tier: FitTier) -> CGFloat { requiredWidth(for: tier) }
     var qaModelTitles: [String] { modelButton.items.map(\.title) }
     var qaEffortTitles: [String] { effortButton.items.map(\.title) }
     /// The row's own measured-fit verdict for what is currently installed: when

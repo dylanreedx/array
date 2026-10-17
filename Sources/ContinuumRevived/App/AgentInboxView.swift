@@ -1234,7 +1234,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton = ChoiceButton(title: InboxScope.allTitle)
         scopeButton.translatesAutoresizingMaskIntoConstraints = false
         scopeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        scopeButton.preferredPopoverWidth = 124
         scopeButton.setAccessibilityLabel("Agent scope")
         searchField = NSTextField(frame: .zero)
         // Before any other configuration: the field forwards isEditable, the font
@@ -1255,7 +1254,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchField.drawsBackground = false
         searchField.focusRingType = .none
         searchField.font = .token(.label)
-        searchField.placeholderString = "Search agents"
+        searchField.placeholderString = Self.searchPlaceholder
         searchField.setAccessibilityElement(true)
         searchField.setAccessibilityRole(.textField)
         searchField.setAccessibilityLabel("Search agents")
@@ -1438,12 +1437,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
-        // T3 nightly's one row: [search ………][scope][+]. The scope control yields
-        // width before the search field does not exist at all.
-        let scopeMax = scopeButton.widthAnchor.constraint(lessThanOrEqualToConstant: 104)
-        // …and never more than 30% of the sidebar, so at 220pt the search field
-        // keeps a usable width (T3's scope is an icon; this one names its scope).
-        let scopeShare = scopeButton.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.3)
+        // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
+        // to its title and search takes the rest, down to the room its glyph and a
+        // one-word placeholder need; only below that does the scope label yield.
+        // Capping the scope instead (104pt, or 30% of the sidebar) ellipsized
+        // "This workspace" beside a search field that was mostly empty.
+        let searchFloor = searchField.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.searchFieldFloorWidth)
+        // Both stay under `defaultLow`: nothing in this row may outrank the
+        // sidebar's own width, or the row widens the pane at 220pt instead of
+        // yielding. The floor only has to beat the scope's compression.
+        searchFloor.priority = Self.searchFloorPriority
         oneRowHeaderConstraints = [
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
             searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
@@ -1451,8 +1455,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: Space.s),
             scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scopeMax,
-            scopeShare,
+            searchFloor,
             newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
             newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
@@ -1590,6 +1593,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// whole identity at rest.
     private static let searchIconSide: CGFloat = 14
 
+    /// The search field's two reserved edges (the glyph, the clear button).
+    private static var searchFieldChromeWidth: CGFloat { (searchIconSide + CGFloat(Space.s) * 3) * 2 }
+    static let searchPlaceholder = "Search agents"
+    private static let oneRowScopeCompressionPriority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue - 10)
+    private static let searchFloorPriority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue - 5)
+    static let shortSearchPlaceholder = "Search"
+    /// The narrowest the one-row search field gets before the scope label yields:
+    /// both reserved edges and the one-word placeholder, drawn whole.
+    static var searchFieldFloorWidth: CGFloat {
+        searchFieldChromeWidth
+            + ChoiceLabelMetrics.labelWidth(for: shortSearchPlaceholder, font: .token(.label))
+    }
+    private static let searchPlaceholderWidth = ChoiceLabelMetrics.labelWidth(
+        for: searchPlaceholder, font: .token(.label))
+
+    /// The placeholder the field can draw whole: the full one, or "Search" once
+    /// the scope label has taken the room. The glyph already says what it is.
+    private func fitSearchPlaceholder() {
+        let room = searchField.bounds.width
+            - ((searchField.cell as? InsetTextFieldCell).map { $0.leadingInset + $0.trailingInset } ?? 0)
+        let placeholder = room + 0.5 >= Self.searchPlaceholderWidth ? Self.searchPlaceholder : Self.shortSearchPlaceholder
+        if searchField.placeholderString != placeholder { searchField.placeholderString = placeholder }
+    }
+
     private func applyHeaderStyle() {
         let oneRow = headerStyleOverride?.oneRow == true
         let stacked = !oneRow && headerStyleOverride?.stacked == true
@@ -1599,11 +1626,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             defaultHeaderConstraints + stackedHeaderConstraints + oneRowHeaderConstraints)
         NSLayoutConstraint.activate(chosen)
         newAgentButton.isHidden = !oneRow
-        // In one row the scope control is the part that yields: its label
-        // truncates before the row can force the sidebar wider than it is.
+        // In one row the scope control holds its title against everything but
+        // the search field's floor: below that its label truncates, rather than
+        // the row forcing the sidebar wider than it is.
         scopeButton.setContentCompressionResistancePriority(
-            oneRow ? .defaultLow : .required, for: .horizontal)
+            oneRow ? Self.oneRowScopeCompressionPriority : .required, for: .horizontal)
+        scopeButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         // The glyph steals the field's leading edge, so the text has to start
         // after it — otherwise the placeholder sits underneath the magnifier.
         let chrome = headerStyleOverride?.fieldChrome == true
@@ -1726,6 +1756,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         defer { syncElapsedTickTimer() }
         let columnWidthAtLayoutEntry = column.width
         super.layout()
+        fitSearchPlaceholder()
         let viewportHeight = scrollView.contentView.bounds.height
         if lastSpacerViewportHeight != viewportHeight {
             lastSpacerViewportHeight = viewportHeight
@@ -5444,6 +5475,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the constraint does.
     var undoToastFrameForQA: NSRect { undoToast.frame }
     var bulkBarFrameForQA: NSRect { bulkBar.frame }
+    var bulkActionMenuTruncatedTitlesForQA: [String]? { bulkBar.qaActionMenuTruncatedRowTitles }
     /// What an Undo would put back. The captured values themselves, so a check can
     /// compare them against what was read before the action rather than against what
     /// the host happened to be handed.
@@ -7080,7 +7112,6 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
-        actionButton.preferredPopoverWidth = 150
         actionButton.popoverPresentation = .commands
         // An action is a command, not the trigger's selected value. Keeping the
         // neutral title here also keeps it stable while the host owns a modal confirm.
@@ -7174,6 +7205,12 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         return countLabel.frame.width + 0.5 >= needed
     }
     var qaActionTitleDrawsWithoutTruncation: Bool { actionButton.qaTitleDrawsWithoutTruncation }
+    /// Opens the real Actions menu, reads which rows ellipsize, and closes it.
+    var qaActionMenuTruncatedRowTitles: [String]? {
+        actionButton.presentPopover()
+        defer { actionButton.dismissPopoverForQA() }
+        return actionButton.qaTruncatedPresentedRowTitles
+    }
     var qaActionTriggerTitle: String { actionButton.qaRenderedTitle }
     var qaActionAccessibilityValue: String? { actionButton.accessibilityValue() as? String }
     @discardableResult

@@ -323,6 +323,12 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     var qaRowTextFrames: [(title: NSRect, detail: NSRect?)] {
         rows.map { ($0.qaTitleFrame, $0.qaDetailFrame) }
     }
+    /// Every row whose title its own label cell cannot draw whole at the width
+    /// it was laid out with — measured from the installed label, never from the
+    /// expression the list sized itself with.
+    var qaTruncatedRowTitles: [String] {
+        rows.filter { !$0.qaTitleDrawsWhole }.map(\.item.title)
+    }
     var qaFocusedRowIsVisible: Bool {
         guard let focusedID,
               let row = rows.first(where: { $0.item.id == focusedID }),
@@ -458,6 +464,9 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
     var qaCheckHidden: Bool { presentation != .choices || leadingImageView.isHidden }
     var qaLeadingImageHidden: Bool { leadingImageView.isHidden }
     var qaTitleFrame: NSRect { titleLabel.frame }
+    var qaTitleDrawsWhole: Bool {
+        titleLabel.frame.width + 0.5 >= ChoiceLabelMetrics.drawingWidth(of: titleLabel)
+    }
     var qaDetailFrame: NSRect? { detailLabel.isHidden ? nil : detailLabel.frame }
     var qaTitleColor: NSColor? { titleLabel.textColor }
 
