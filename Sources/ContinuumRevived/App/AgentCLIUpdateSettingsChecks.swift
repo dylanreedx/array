@@ -13,8 +13,8 @@ import Foundation
 /// not run it); pressing Update streams output into the row and ends with the
 /// verified result; idle sessions of that CLI stop while the running one is left
 /// to finish and then retires; the opt-out switch suppresses checks; ⌘K offers
-/// "Update <CLI>" only while an update is available; and the version-change
-/// notice fires once per change.
+/// "Update <CLI>" only while an update is available; the version-change notice
+/// fires once per change; and a finished sign-in terminal re-probes readiness.
 @MainActor
 enum AgentCLIUpdateSettingsChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -254,9 +254,27 @@ enum AgentCLIUpdateSettingsChecks {
         try expect(fetcher.callCount > callsBefore, "⌘K 'Check for CLI Updates' still checks when asked")
         settings.binding(for: toggle.field).set(.bool(true))
 
+        // 9. A sign-in terminal that exits re-probes readiness, chained after the
+        // exit handling the install already wired.
+        let ghostty = try GhosttyRuntimeContext()
+        let runtime = GhosttyTerminalRuntime(
+            tileId: UUID(), title: "sign-in",
+            launchProfile: LaunchProfile(command: "/usr/bin/true", arguments: [], cwd: root, title: "sign-in"),
+            ghostty: ghostty)
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 400, height: 240))
+        fixture.window.contentView?.addSubview(host, positioned: .below, relativeTo: nil)
+        teardown.append { runtime.terminate(policy: .force); host.detachRuntime(); host.removeFromSuperview() }
+        let installHandler = Box(false)
+        runtime.onRuntimeExited = { _, _ in installHandler.value = true }
+        let refreshesBefore = readinessRefreshes
+        delegate.wireAgentCLISignInCompletion(runtime, harness: .codex)
+        host.attach(runtime: runtime)
+        try waitFor("the sign-in process to exit", timeout: 10) { readinessRefreshes > refreshesBefore }
+        try expect(installHandler.value, "the install's own exit handler must still run")
+
         let touched = standardGuard.finish()
         try expect(touched.isEmpty, "CLI updates wrote the standard defaults domain: \(touched)")
-        print("cli-update-settings: version rows, Update streams and verifies, sessions handled, opt-out, ⌘K, notice once; inert without injection")
+        print("cli-update-settings: version rows, Update streams and verifies, sessions handled, opt-out, ⌘K, notice once, sign-in re-probe; inert without injection")
     }
 
     final class Box<T>: @unchecked Sendable {

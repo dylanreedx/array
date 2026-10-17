@@ -10994,7 +10994,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.signInToAgentCLI(harness)
         }
         model.cliUpdates = cliUpdateCenter
-        // Opening Settings re-reads each CLI's version.
+        // Opening Settings re-reads what the rows show: readiness (throttled, as
+        // the row text promises "reopen Settings") and each CLI's version.
+        AgentModelCatalog.shared.requestRefresh()
         let center = cliUpdateCenter
         Task { await center.refresh() }
         let modal = SettingsModal(model: model)
@@ -11036,10 +11038,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                                            title: "\(harness.rawValue) sign-in") {
         case let .spawned(runtime):
             installSpawnedTerminal(runtime, from: spawner)
+            wireAgentCLISignInCompletion(runtime, harness: harness)
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: command.executable)
         default:
             break
+        }
+    }
+
+    /// When the sign-in terminal's process exits, readiness is probed again, so
+    /// Settings and the agent pickers learn the CLI is signed in without waiting
+    /// for the next throttled probe. Chains the exit handler the install wired.
+    func wireAgentCLISignInCompletion(_ runtime: GhosttyTerminalRuntime, harness: AgentHarness) {
+        let previous = runtime.onRuntimeExited
+        runtime.onRuntimeExited = { [weak self] runtimeId, exitCode in
+            previous?(runtimeId, exitCode)
+            self?.cliUpdateCenter.signInFinished(harness)
         }
     }
 

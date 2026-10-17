@@ -37,7 +37,7 @@ final class AgentCLIUpdateCenter {
         var environment: [String: String]
         var testedVersions: [AgentHarness: String]
         var deliverNotice: @MainActor (String) -> Void
-        /// Re-probe readiness (signed in / ready) after an update.
+        /// Re-probe readiness (signed in / ready) after an update or a sign-in.
         var refreshReadiness: @MainActor () -> Void
 
         static func live() -> Dependencies {
@@ -243,6 +243,11 @@ final class AgentCLIUpdateCenter {
             defaults.set(to, forKey: Self.lastSeenVersionKeyPrefix + harness.rawValue)
         }
         if case let .unchanged(version, _) = result { statuses[harness]?.installed = version }
+        dependencies.refreshReadiness()
+    }
+
+    /// A sign-in terminal for this harness closed: readiness may have changed.
+    func signInFinished(_ harness: AgentHarness) {
         dependencies.refreshReadiness()
     }
 }
