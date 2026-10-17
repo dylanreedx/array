@@ -1197,9 +1197,23 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: nudgeSize.width, height: nudgeSize.height))
         bandY += proposal.bandTop + proposal.gapTop
 
-        // Band 2 — the subject. Never sacrificed, at any width.
+        // Band 2 — the subject. Never sacrificed, at any width. An identity
+        // colour leads it as a small dot; with none, the title starts where it
+        // always has — the slot is not reserved.
+        var titleLeft = textLeft
+        if let name = shown?.row.identityColor {
+            let side = AgentInboxView.identityDotSide
+            decorations.identityDot = NSRect(
+                x: textLeft, y: bandY + (proposal.bandTitle - side) / 2,
+                width: side, height: side)
+            decorations.identityDotColour = AgentInboxView.identityDotColour(named: name)
+            titleLeft += side + CGFloat(Space.s)
+        } else {
+            decorations.identityDot = nil
+            decorations.identityDotColour = nil
+        }
         titleLabel.frame = inCard(NSRect(
-            x: textLeft, y: bandY, width: max(0, textRight - textLeft),
+            x: titleLeft, y: bandY, width: max(0, textRight - titleLeft),
             height: proposal.bandTitle))
         bandY += proposal.bandTitle + proposal.gapBottom
 
@@ -1510,6 +1524,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             ? nil : disclosureButton.convert(disclosureButton.bounds, to: self)
     }
     var qaTitleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+    /// The identity dot as painted, in this cell's coordinates, or nil.
+    var qaIdentityDotForQA: (frame: NSRect, colour: NSColor)? {
+        guard let slot = decorations.identityDot, let colour = decorations.identityDotColour else { return nil }
+        return (decorations.convert(slot, to: self), colour)
+    }
     /// The model-id tooltips this row registers: the whole-layer one (must be
     /// nil — it spanned the title) and the provider-mark rect, in cell space.
     var qaDecorationsToolTipForQA: String? { decorations.toolTip }
@@ -1706,6 +1725,9 @@ private final class Decorations: NSView {
     var border: SidebarRowAnatomy.Border = .none
     var borderWidth: CGFloat = 0
     var paintsBorder = false
+    /// The agent's identity colour dot, beside the name. nil draws nothing.
+    var identityDot: NSRect?
+    var identityDotColour: NSColor?
 
     override var isFlipped: Bool { true }
     /// Decoration only — every click belongs to the row beneath it.
@@ -1713,6 +1735,10 @@ private final class Decorations: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if paintsBorder { drawBorder() }
+        if let slot = identityDot, let identityDotColour {
+            identityDotColour.setFill()
+            NSBezierPath(ovalIn: slot).fill()
+        }
         if let slot = branchSlot, drawsBranchGlyph {
             InkAlignedSymbol.draw(
                 "arrow.triangle.branch", in: slot, colour: muted,

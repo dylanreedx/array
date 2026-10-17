@@ -300,7 +300,8 @@ public enum AgentInboxRowBuilder {
                 ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
             } ?? false,
             closingSince: closingSince,
-            hasLiveRunner: observedFacts.hasLiveRunner
+            hasLiveRunner: observedFacts.hasLiveRunner,
+            identityColor: record?.identityColor
         )
     }
 

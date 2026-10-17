@@ -332,6 +332,12 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// to `.managed` on ANY decode failure, so a new field there would reset
     /// legacy capabilities.
     public var workspaceToolsEnabled: Bool = false
+    /// The agent's identity colour: a `ZoneColorConfig.palette` NAME, never a
+    /// colour value, so the tile, the sidebar and anything later share one
+    /// vocabulary with zones and the tint stays outside `DesignTokens` exactly as
+    /// a zone's does. nil — the default — is no colour. Optional and
+    /// decode-tolerant, no schema bump: the `snoozedAt` convention.
+    public var identityColor: String? = nil
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -940,7 +946,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
-        case spawnResultHandle, workspaceToolsEnabled
+        case spawnResultHandle, workspaceToolsEnabled, identityColor
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -1012,6 +1018,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
         spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
         workspaceToolsEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .workspaceToolsEnabled)) ?? false
+        identityColor = (try? container.decodeIfPresent(String.self, forKey: .identityColor)) ?? nil
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
@@ -1110,6 +1117,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
         try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
         if workspaceToolsEnabled { try container.encode(true, forKey: .workspaceToolsEnabled) }
+        try container.encodeIfPresent(identityColor, forKey: .identityColor)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)

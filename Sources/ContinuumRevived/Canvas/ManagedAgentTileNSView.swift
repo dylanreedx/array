@@ -215,6 +215,18 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var localNoticeObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var displayNameObserverToken: UUID?
+    private var identityColorObserverToken: UUID?
+    /// The agent's identity colour NAME as the record holds it (a zone-palette
+    /// name), nil for none. `identityColor` is its resolved, unmuted tint.
+    private var identityColorName: String?
+    /// The top-bar treatment. Created only while a colour is set and removed when
+    /// it is cleared, so a colourless tile carries no extra view at all — every
+    /// census and every rest-state witness sees exactly the tile it saw before.
+    /// Where the style setting is read. `.standard` in the app; a check injects a
+    /// suite so it never reads or writes the real domain.
+    var identityStyleDefaults: UserDefaults = .standard {
+        didSet { applyIdentityChrome() }
+    }
     private let toolDetailStore = AgentToolDetailStore()
     private let managedImageThumbnailPipeline = ComposerImageIOThumbnailPipeline()
     private var managedImageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
@@ -407,6 +419,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         )
         super.init(tile: tile)
         addSubview(awarenessBorder, positioned: .above, relativeTo: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(identityStyleSettingChanged(_:)),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: AgentIdentityColorConfig.styleKey)),
+            object: nil)
         agentHeader.installStatusBadge(awarenessBadge)
         enableTitleBarActions()
         compactStatusRow.hideLocationActions()
@@ -650,6 +666,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self.refreshTitleBarIdentity()
             self.applyAgentHeader(status: self.descriptor.status)
         }
+        identityColorObserverToken = supervisor.addIdentityColorObserver(for: agentID) { [weak self] name in
+            self?.setIdentityColorName(name)
+        }
+        setIdentityColorName(supervisor.records[agentID]?.identityColor)
         locationProjectName = projectName
         applyBranchContext(supervisor.branchContext(for: agentID))
         refreshLocationStatus()
@@ -983,7 +1003,92 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let location = projectedAgentID.flatMap { locationMenuProvider?($0) }
         let locationItems = location?.items ?? []
         locationItems.forEach { location?.removeItem($0) }
-        return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root] + makeWorkspaceToolsMenuItems()
+        return locationItems + (locationItems.isEmpty ? [] : [.separator()]) + makePageZoomMenuItems() + [root]
+            + makeIdentityColorMenuItems() + makeWorkspaceToolsMenuItems()
+    }
+
+    // MARK: - Identity colour
+
+    /// Posted (object: the tile) whenever `identityColor` changes, for views that
+    /// borrow the agent's tint — the composer's dictation waveform is the first.
+    static let identityColorDidChangeNotification = Notification.Name("array.agentTile.identityColorChanged")
+    /// The title bar's wash over `tileChrome`. A zone tint at full strength is
+    /// the loudest thing on a tile; this keeps the hue identifiable and quiet,
+    /// and the title legible on it.
+    static let identityBarAlpha: CGFloat = 0.3
+    /// Full border mode: a stroke a muted tint still reads at, kept under
+    /// `LineWidth.rule` (the state-bearing edge) and drawn under the canvas's
+    /// focus and attention overlays, which therefore still win.
+    static let identityBorderWidth = CGFloat(LineWidth.hairline * 2)
+    static let identityBorderAlpha: CGFloat = 0.7
+
+    /// The agent's identity tint, unmuted — nil when the agent has none or the
+    /// tile follows no agent. Kept current on attach and on every record change;
+    /// `identityColorDidChangeNotification` announces each change.
+    private(set) var identityColor: NSColor?
+
+    private func setIdentityColorName(_ name: String?) {
+        guard name != identityColorName else { return }
+        identityColorName = name
+        identityColor = name.map { ZoneChromeNSView.color(named: $0) }
+        applyIdentityChrome()
+        NotificationCenter.default.post(name: Self.identityColorDidChangeNotification, object: self)
+    }
+
+    @objc private func identityStyleSettingChanged(_ notification: Notification) {
+        applyIdentityChrome()
+    }
+
+    /// The tile's resting perimeter and the identity treatment, from scratch.
+    /// With no colour this is exactly the shipped rest state: no title-bar wash and a
+    /// zero-width outline. The style is read only when there is something to draw.
+    private func applyIdentityChrome() {
+        let theme = effectiveTokenTheme
+        let style = identityColor == nil ? nil : AgentIdentityColorConfig.style(defaults: identityStyleDefaults)
+        if let tint = identityColor, style == .border {
+            layer?.borderWidth = Self.identityBorderWidth
+            layer?.borderColor = tint.withAlphaComponent(Self.identityBorderAlpha).cgColor
+        } else {
+            layer?.borderWidth = 0
+            layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        }
+        setTitleBarTint(style == .topBar ? identityColor?.withAlphaComponent(Self.identityBarAlpha) : nil)
+    }
+
+    /// "Color" — None and the zone palette, the current one checked. The same
+    /// vocabulary and order as a zone's Color submenu, so an agent and the zone
+    /// it sits in can be matched by name. ABSENT for a tile with no agent: the
+    /// colour belongs to the agent's record, never to the tile.
+    private func makeIdentityColorMenuItems() -> [NSMenuItem] {
+        guard let agentID = attachedAgentID,
+              let record = agentSource?.records[agentID] else { return [] }
+        let root = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
+        root.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor")
+        let menu = NSMenu(title: "Color")
+        let current = record.identityColor?.lowercased()
+        let none = NSMenuItem(title: "None", action: #selector(selectIdentityColor(_:)), keyEquivalent: "")
+        none.target = self
+        none.representedObject = ""
+        none.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor.none")
+        none.state = current == nil ? .on : .off
+        menu.addItem(none)
+        menu.addItem(.separator())
+        for color in ZoneColorConfig.palette {
+            let item = NSMenuItem(title: color.capitalized, action: #selector(selectIdentityColor(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = color
+            item.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor.\(color)")
+            item.state = current == color ? .on : .off
+            menu.addItem(item)
+        }
+        root.submenu = menu
+        return [root]
+    }
+
+    @objc private func selectIdentityColor(_ sender: NSMenuItem) {
+        guard let agentID = attachedAgentID, let supervisor = agentSource,
+              let raw = sender.representedObject as? String else { return }
+        _ = supervisor.setIdentityColor(agentID: agentID, raw.isEmpty ? nil : raw)
     }
 
     /// CX-01 (`.plans/59` §14.1): the per-agent workspace-tools policy, offered on
@@ -1105,6 +1210,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         if let displayNameObserverToken, let agentID = attachedAgentID {
             agentSource?.removeDisplayNameObserver(displayNameObserverToken, for: agentID)
             self.displayNameObserverToken = nil
+        }
+        // The colour stays on screen with the transcript a detached view keeps
+        // showing; only the subscription ends, so a later pick on another view of
+        // the agent cannot repaint a view that no longer follows it.
+        if let identityColorObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeIdentityColorObserver(identityColorObserverToken, for: agentID)
+            self.identityColorObserverToken = nil
         }
         if let promptEchoObserverToken, let agentID = attachedAgentID {
             agentSource?.removePromptEchoObserver(promptEchoObserverToken, for: agentID)
@@ -2376,9 +2488,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         compactStatusRow.applyTokens()
         // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
         // Keyboard focus and needs-attention remain the canvas-owned strong
-        // overlays; the surface ladder supplies the quiet containment.
-        layer?.borderWidth = 0
-        layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        // overlays; the surface ladder supplies the quiet containment. The one
+        // exception is an identity colour in Full border mode, which
+        // `applyIdentityChrome` owns — it re-runs here so an appearance flip
+        // cannot reset the outline under it.
+        applyIdentityChrome()
         agentHeader.applyTokens()
         v2Composer?.applyTokens()
         // In the live tile this is an interactive text boundary, not a
@@ -3521,6 +3635,34 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             .first(where: { $0.identifier?.rawValue == "agentTile.workspaceTools.toggle" })
         else { return nil }
         return (title: item.title, isOn: item.state == .on)
+    }
+
+    /// The identity Color submenu as offered: (identifier, title, checked), or
+    /// empty when the tile offers none.
+    func qaIdentityColorMenuEntries() -> [(id: String, title: String, isOn: Bool)] {
+        guard let submenu = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.identityColor" })?.submenu
+        else { return [] }
+        return submenu.items.compactMap { item in
+            guard let id = item.identifier?.rawValue else { return nil }
+            return (id: id, title: item.title, isOn: item.state == .on)
+        }
+    }
+
+    /// Invoke one identity-colour item exactly as AppKit would, target and all.
+    @discardableResult
+    func qaInvokeIdentityColorMenuItem(_ identifier: String) -> Bool {
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.identityColor" })?.submenu?
+            .items.first(where: { $0.identifier?.rawValue == identifier }),
+            let action = item.action, let target = item.target else { return false }
+        _ = target.perform(action, with: item)
+        return true
+    }
+
+    /// The title bar's identity wash as drawn: the bar's frame and the colour, or nil.
+    var qaIdentityBar: (frame: NSRect, color: CGColor?)? {
+        qaTitleBarTint.map { (qaTitleBarFrame, $0.cgColor) }
     }
 
     /// Invoke the workspace-tools item exactly as AppKit would, target and all.

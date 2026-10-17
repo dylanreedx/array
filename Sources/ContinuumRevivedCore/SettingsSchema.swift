@@ -164,6 +164,14 @@ public enum SettingsSchema {
                             help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
                             keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
+            SettingsGroup(id: "agents.identity", title: "Agent colour", rows: [
+                SettingsRow(.choice(key: AgentIdentityColorConfig.styleKey, label: "Agent colour shows as",
+                                    options: AgentIdentityColorStyle.allCases.map(\.rawValue),
+                                    default: AgentIdentityColorConfig.defaultStyle.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentIdentityColorStyle.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Agents have no colour until you pick one from the tile's menu.",
+                            keywords: ["color", "colour", "identity", "tint", "border", "stripe"]),
+            ]),
             SettingsGroup(id: "agents.context", title: "Context", rows: [
                 SettingsRow(.toggle(key: AgentContextAutoCompactionPolicy.enabledKey, label: "Compact context automatically", default: true),
                             keywords: ["tokens", "summarize"]),
