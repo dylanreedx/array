@@ -39,9 +39,9 @@ public enum ManagedSessionEndReason: String, Codable, Equatable, Sendable, CaseI
     public var displayText: String {
         switch self {
         case .continuumRestarted:
-            return "Cancelled because Continuum restarted before this work finished."
+            return "Cancelled because Array restarted before this work finished."
         case .continuumQuit:
-            return "Cancelled because Continuum quit before this work finished."
+            return "Cancelled because Array quit before this work finished."
         case .userStopped:
             return "Stopped because you ended it."
         case .runtimeError:

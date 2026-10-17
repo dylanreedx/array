@@ -79,7 +79,14 @@ public enum CanvasAutoLayoutEngine {
         /// (a completed slot exchange): the anchor never relocates — residents
         /// it presses on are pushed aside instead, so a horizontal exchange can
         /// never resolve into a different lane.
-        case settle(zoneId: UUID, anchor: UUID?, pin: Bool)
+        /// `grow` lets an unpinned anchor that finds no gap-contact slot inside
+        /// the zone take the nearest one beyond its right or bottom edge; the
+        /// caller grows the zone around it. A SPAWN asks for this: a zone too
+        /// small for its new tile otherwise leaves it overlapping a sibling.
+        /// Growth is right/down only, so the zone origin — and every member's
+        /// exact world frame — never has to move. A neighbour the growth runs
+        /// into is pushed afterwards (`pushPeers(ofGrownZone:)`).
+        case settle(zoneId: UUID, anchor: UUID?, pin: Bool, grow: Bool = false)
     }
 
     /// What a member move is latched to.
@@ -146,7 +153,7 @@ public enum CanvasAutoLayoutEngine {
         let targetZoneIds: [UUID]
         switch mutation {
         case let .tidy(zoneId): targetZoneIds = zoneId.map { [$0] } ?? zones.keys.sorted(by: uuidLess)
-        case let .settle(zoneId, _, _): targetZoneIds = [zoneId]
+        case let .settle(zoneId, _, _, _): targetZoneIds = [zoneId]
         case let .zone(id, _): targetZoneIds = [id]
         case let .tile(id, _): targetZoneIds = tiles[id]?.zoneId.map { [$0] } ?? []
         }
@@ -224,8 +231,8 @@ public enum CanvasAutoLayoutEngine {
 
             // Rest-state magnetism: tidy and settle pull members into exact
             // gap-contact with the cluster instead of running the packer.
-            var settleMover: (mover: UUID?, pin: Bool)?
-            if case let .settle(_, anchor, pin) = mutation { settleMover = (anchor, pin) }
+            var settleMover: (mover: UUID?, pin: Bool, grow: Bool)?
+            if case let .settle(_, anchor, pin, grow) = mutation { settleMover = (anchor, pin, grow) }
             if explicitTidy {
                 let compacted = compactMembers(memberIds: memberIds, tiles: tiles, gap: gap)
                 for (id, frame) in compacted { tiles[id]?.frame = frame }
@@ -238,10 +245,11 @@ public enum CanvasAutoLayoutEngine {
                 }
                 continue
             }
-            if let (mover, pin) = settleMover {
+            if let (mover, pin, grow) = settleMover {
                 let settled = settleMembers(
                     memberIds: memberIds, tiles: tiles, zone: zone,
-                    gap: gap, padding: padding, header: header, mover: mover, pinMover: pin)
+                    gap: gap, padding: padding, header: header, mover: mover, pinMover: pin,
+                    growMover: grow)
                 for (id, frame) in settled { tiles[id]?.frame = frame }
                 continue
             }
@@ -741,7 +749,8 @@ public enum CanvasAutoLayoutEngine {
     /// gap-contact never move.
     private static func settleMembers(
         memberIds: [UUID], tiles: [UUID: LayoutTile], zone: ZonePlacement,
-        gap: Double, padding: Double, header: Double, mover: UUID?, pinMover: Bool
+        gap: Double, padding: Double, header: Double, mover: UUID?, pinMover: Bool,
+        growMover: Bool = false
     ) -> [UUID: TileFrame] {
         let content = contentRect(zone: zone, padding: padding, header: header)
         guard content.width > 0, content.height > 0 else { return [:] }
@@ -769,7 +778,14 @@ public enum CanvasAutoLayoutEngine {
         }!
         var cluster: [TileFrame] = [result[anchor]!]
         pending.removeAll { $0 == anchor }
-        absorb(pending: &pending, cluster: &cluster, result: &result, mover: mover, content: content, gap: gap)
+        // A growing mover may look past the right and bottom edges; the zone
+        // follows it there (the origin, top and left edges stay put).
+        let growContent = growMover && mover != nil
+            ? CGRect(x: content.minX, y: content.minY,
+                     width: content.width + 1_000_000, height: content.height + 1_000_000)
+            : nil
+        absorb(pending: &pending, cluster: &cluster, result: &result, mover: mover, content: content, gap: gap,
+               growContent: growContent)
         // A mover that found no contact placement (e.g. dropped against the
         // wall where its exchanged slot needs the row to shift) may still press
         // on the cluster: resolve it with the same minimal single-axis pushes
@@ -788,7 +804,7 @@ public enum CanvasAutoLayoutEngine {
     /// always joins last.
     private static func absorb(
         pending: inout [UUID], cluster: inout [TileFrame], result: inout [UUID: TileFrame],
-        mover: UUID?, content: CGRect, gap: Double
+        mover: UUID?, content: CGRect, gap: Double, growContent: CGRect? = nil
     ) {
         while !pending.isEmpty {
             let wave = pending.contains { $0 != mover } ? pending.filter { $0 != mover } : pending
@@ -813,6 +829,10 @@ public enum CanvasAutoLayoutEngine {
                 if best == nil || cost < best!.cost || (cost == best!.cost && uuidLess(id, best!.id)) {
                     best = (id, placement, cost)
                 }
+            }
+            if best == nil, let growContent, let mover, wave == [mover], let frame = result[mover],
+               let placement = contactPlacement(for: frame, cluster: cluster, content: growContent, gap: gap) {
+                best = (mover, placement, squaredDistance(placement, frame))
             }
             if let best {
                 result[best.id] = best.frame
@@ -1037,7 +1057,46 @@ public enum CanvasAutoLayoutEngine {
         return attempt(preserveExisting: true) ?? attempt(preserveExisting: false)
     }
 
-    private static func resolveOuterCollisions(tiles: inout [UUID: LayoutTile], zones: inout [UUID: ZonePlacement], scene: Scene, activeZone: UUID?, preferredGap: Double) {
+    /// A zone that GREW to take a spawned tile pushes what its growth ran into,
+    /// exactly as a dragged zone does: the zone that grew keeps its place and the
+    /// neighbouring zones (with their members) and bare tiles move away. Only a
+    /// peer the growth reached FURTHER into is pushed: one the zone touched at
+    /// `previous` and grows no deeper into stays put, so growing right never
+    /// shoves a neighbour on the left.
+    public static func pushPeers(ofGrownZone zoneId: UUID, from previous: ZonePlacement, scene: Scene, gap preferredGap: Double) -> CanvasLayoutTransaction {
+        let gap = max(0, preferredGap.isFinite ? preferredGap : 0)
+        var tiles = autoLayoutFirstWinsDictionary(scene.tiles.map { ($0.id, $0) })
+        var zones = autoLayoutFirstWinsDictionary(scene.zones.map { ($0.zoneId, $0) })
+        guard zones[zoneId] != nil else { return CanvasLayoutTransaction() }
+        func rect(_ z: ZonePlacement) -> TileFrame {
+            TileFrame(x: z.origin.x, y: z.origin.y, width: z.size.width, height: z.size.height)
+        }
+        let before = rect(previous)
+        let grown = rect(zones[zoneId]!)
+        // How far a zone rect, widened by the gap, reaches into a peer.
+        func intrusion(_ z: TileFrame, _ peer: TileFrame) -> Double {
+            max(0, min(z.x + z.width + gap, peer.x + peer.width) - max(z.x - gap, peer.x))
+                * max(0, min(z.y + z.height + gap, peer.y + peer.height) - max(z.y - gap, peer.y))
+        }
+        let reachedNoDeeper = { (peer: TileFrame) in intrusion(grown, peer) <= intrusion(before, peer) + 0.001 }
+        let touching = Set(
+            scene.zones.filter { $0.zoneId != zoneId && reachedNoDeeper(rect($0)) }.map(\.zoneId)
+            + scene.tiles.filter { $0.zoneId == nil && reachedNoDeeper($0.frame) }.map(\.id))
+        var baseline = scene
+        if let index = baseline.zones.firstIndex(where: { $0.zoneId == zoneId }) { baseline.zones[index] = previous }
+        resolveOuterCollisions(tiles: &tiles, zones: &zones, scene: baseline, activeZone: zoneId,
+                               preferredGap: gap, exempt: touching)
+        var result = CanvasLayoutTransaction()
+        for original in scene.tiles where tiles[original.id]?.frame != original.frame {
+            result.tileFrames[original.id] = tiles[original.id]?.frame
+        }
+        for original in scene.zones where zones[original.zoneId] != original {
+            result.zonePlacements[original.zoneId] = zones[original.zoneId]
+        }
+        return result
+    }
+
+    private static func resolveOuterCollisions(tiles: inout [UUID: LayoutTile], zones: inout [UUID: ZonePlacement], scene: Scene, activeZone: UUID?, preferredGap: Double, exempt: Set<UUID> = []) {
         enum Peer: Hashable { case zone(UUID), tile(UUID) }
         var peers = zones.keys.map(Peer.zone) + tiles.values.filter { $0.zoneId == nil }.map { Peer.tile($0.id) }
         peers.sort { String(describing: $0) < String(describing: $1) }
@@ -1055,6 +1114,9 @@ public enum CanvasAutoLayoutEngine {
             case let .zone(id): return zones[id].map { TileFrame(x: $0.origin.x, y: $0.origin.y, width: $0.size.width, height: $0.size.height) }
             case let .tile(id): return tiles[id]?.frame
             }
+        }
+        func id(_ peer: Peer) -> UUID {
+            switch peer { case let .zone(id), let .tile(id): return id }
         }
         func baselineFrame(_ peer: Peer) -> TileFrame? {
             switch peer {
@@ -1076,6 +1138,7 @@ public enum CanvasAutoLayoutEngine {
             let source = queue.removeFirst()
             guard let a = frame(source) else { continue }
             for other in peers where other != source && other != active {
+                if source == active, exempt.contains(id(other)) { continue }
                 guard let b = frame(other), overlapsOrUnderGap(a, b, gap: preferredGap) else { continue }
                 // Push along the pair's own relation axis (how they were
                 // separated before the gesture), not a global drag axis: a

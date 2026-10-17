@@ -32,6 +32,7 @@ func runBoardChecks() {
     runBoardAtomicTaskCommandCheck()
     runBoardAttachmentWireCheck()
     runBoardTaskContentCheck()
+    runBoardTaskTranscriptChecks()
     runBoardSurfaceChecks()
     runBoardLargeDragPerformanceCheck()
     print("Board checks: B1-B13, CX-01, and board.large-drag passed")

@@ -5561,6 +5561,21 @@ final class AgentSupervisor {
         transcriptProjections[id]?.document
     }
 
+    /// The newest line of the agent's latest assistant message, for the sidebar's
+    /// hover card: the last line with words in it, leading list, heading and quote
+    /// markers dropped, code fences skipped. A read of the same projection as above (an open stream
+    /// included, so a working agent shows what it is saying now); nil when no
+    /// assistant text has reached it in this session.
+    func latestAssistantLine(for id: AgentID) -> String? {
+        guard let text = transcriptProjections[id]?.finalAssistantText else { return nil }
+        for line in text.split(whereSeparator: \.isNewline).reversed()
+        where !line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+            let trimmed = line.drop { "#>*-+` \t".contains($0) }.trimmingCharacters(in: .whitespaces)
+            if trimmed.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) { return trimmed }
+        }
+        return nil
+    }
+
     /// Operational state for one tile. State comes only from explicit lifecycle
     /// and request events. Transport occupancy affects capability acceptance, not
     /// the label: a process that has emitted Ready still presents Ready.
@@ -10396,6 +10411,8 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 21 · a status tick never rewrites the document (C10)
 
     let agentReferenceStatusReport = try await checkAgentReferenceLiveStatus(config: config, cwd: cwd, fail: fail)
+    // A board card dropped on an agent and sent with nothing typed keeps its turn.
+    print("AgentSupervisor: " + (try await checkTaskOnlySendKeepsItsTurn(cwd: cwd, fail: fail)))
 
     // MARK: 22 · B7.2 — `/clear` is one transaction, not a notice alone
 
@@ -13865,8 +13882,8 @@ private func checkAgentBlockRendererRegistry<Failure: Error>(
     // exact roster size, and that no kind is listed twice, which a bare count
     // cannot tell apart from a missing one.
     // 22: `.compaction` joined the roster — its renderer had been written and
-    // never registered.
-    guard AgentBlockRendererRegistry.builtInKinds.count == 22,
+    // never registered. 23: board-task sends added `.taskReference`.
+    guard AgentBlockRendererRegistry.builtInKinds.count == 23,
           Set(AgentBlockRendererRegistry.builtInKinds).count
             == AgentBlockRendererRegistry.builtInKinds.count else {
         throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")

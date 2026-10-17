@@ -108,8 +108,10 @@ final class KanbanColumnView: NSView, TokenThemed {
 
     /// Reconciles the rendered cards against `cards`, reusing existing views by
     /// id so a re-render during a drag does not destroy the view under the
-    /// pointer.
-    func setCards(_ cards: [BoardCard], assigneeName: @escaping (AgentID) -> String?) {
+    /// pointer. Returns the views it removed, so the tile can animate a card
+    /// leaving this lane (`KanbanTileNSView.animateBoardChange`).
+    @discardableResult
+    func setCards(_ cards: [BoardCard], assigneeName: @escaping (AgentID) -> String?) -> [KanbanCardView] {
         measurementCards.removeAll(keepingCapacity: true)
         var existing = Dictionary(uniqueKeysWithValues: cardViews.map { ($0.cardId, $0) })
         var next: [KanbanCardView] = []
@@ -135,6 +137,16 @@ final class KanbanColumnView: NSView, TokenThemed {
         countLabel.stringValue = "\(cards.count)"
         emptyLabel.isHidden = true
         needsLayout = true
+        return Array(existing.values)
+    }
+
+    /// The trailing add row reflows with the cards, so a change that slides the
+    /// cards must slide it too. Card-container coordinates.
+    var addButtonOrigin: NSPoint { addButton.frame.origin }
+
+    func slideAddButton(from origin: NSPoint) {
+        guard let layer = addButton.layer else { return }
+        KanbanCardMotion.slide(layer, in: cardsContainer, from: origin, to: addButton.frame.origin)
     }
 
     func cardView(for id: UUID) -> KanbanCardView? {

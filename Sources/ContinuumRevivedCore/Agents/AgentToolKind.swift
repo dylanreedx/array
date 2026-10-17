@@ -66,6 +66,9 @@ public enum AgentToolKind: String, Equatable, Sendable, CaseIterable {
     public static func resolve(toolName: String?) -> AgentToolKind {
         guard let name = toolName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !name.isEmpty else { return .unknown }
+        // Array's own workspace tools carry their kind; "array_find_agent" must
+        // not tokenize into a search nor "array_delegate" fall to unknown.
+        if let tool = ArrayWorkspaceTool(toolName: name) { return tool.kind }
         let raw = name.lowercased()
         if delegationCompounds.contains(where: { raw.contains($0) }) { return .delegate }
         if delegationWholeNames.contains(raw) { return .delegate }
@@ -123,6 +126,12 @@ public enum AgentToolKind: String, Equatable, Sendable, CaseIterable {
         let words = raw.split(separator: "_", omittingEmptySubsequences: true).map(String.init)
         guard let first = words.first else { return raw }
         return ([first] + words.dropFirst().map { $0.lowercased() }).joined(separator: " ")
+    }
+
+    /// The icon a row for this tool NAME draws: the kind's glyph, or an Array
+    /// workspace tool's own (`ArrayWorkspaceTool.symbolName`).
+    public static func symbolName(forToolName name: String?) -> String {
+        ArrayWorkspaceTool(toolName: name)?.symbolName ?? resolve(toolName: name).symbolName
     }
 
     /// The SF Symbol for the row's icon column. `unknown` keeps the wrench, so a

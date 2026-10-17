@@ -139,6 +139,123 @@ enum BoardInteractionChecks {
         view.setFocusState(.selected(card.id))
         view.render(movedBoard)
         expect(view.cardView(for: card.id)?.isSelected == true, "selection survives a move into a rebuilt lane")
+        try runChangeAnimationChecks(expect)
         if !failures.isEmpty { throw Failure(messages: failures) }
+    }
+
+    /// A board change that did not come from this tile's own drag animates on
+    /// Core Animation layers — the film harness steps CA time, so that is what a
+    /// capture sees. Driven through the real runtime: `attach` is the hydration
+    /// render, `apply` → broadcast → `render` is the path an agent's
+    /// `array_board_apply` takes. The keys are asserted on the CARD layers.
+    private static func runChangeAnimationChecks(_ expect: (Bool, String) -> Void) throws {
+        let enterKey = "kanban.card.enter", moveKey = "kanban.card.move", exitKey = "kanban.card.exit"
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("board-animation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func keys(_ view: KanbanCardView?) -> Set<String> {
+            Set(view?.layer?.animationKeys() ?? []).intersection([enterKey, moveKey, exitKey])
+        }
+        func fixture(reduceMotion: Bool) throws -> (KanbanTileNSView, BoardRuntime, Board, NSWindow) {
+            let store = ProjectStore(projectRoot: root.appendingPathComponent(UUID().uuidString, isDirectory: true))
+            let todo = BoardColumn(id: UUID(), name: "To do", position: .fromLegacyRank(0))
+            let doing = BoardColumn(id: UUID(), name: "Doing", position: .fromLegacyRank(1))
+            let cards = (0..<2).map { index in
+                BoardCard(id: UUID(), columnId: todo.id, position: .fromLegacyRank(index),
+                          title: "Seed task \(index)", createdAt: Date(), updatedAt: Date())
+            }
+            let board = Board(id: UUID(), title: "Tasks", columns: [todo, doing], cards: cards)
+            try store.saveBoard(board)
+            let tile = Tile(id: UUID(), kind: .kanban, title: "Tasks",
+                            frame: TileFrame(x: 0, y: 0, width: 640, height: 480),
+                            zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            let host = FlippedContainerView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+            window.contentView = host
+            let view = KanbanTileNSView(tile: tile, board: board)
+            view.prefersReducedMotion = { reduceMotion }
+            view.frame = NSRect(x: 20, y: 20, width: 640, height: 480)
+            host.addSubview(view)
+            window.orderFrontOffscreenForChecks()
+            let runtime = BoardRuntime(projectStore: store)
+            runtime.attach(view, to: board.id)
+            view.layoutSubtreeIfNeeded()
+            return (view, runtime, board, window)
+        }
+
+        let (view, runtime, board, window) = try fixture(reduceMotion: false)
+        defer { window.orderOut(nil) }
+        let todo = board.orderedColumns[0].id, doing = board.orderedColumns[1].id
+        let seeds = board.orderedCards(in: todo).map(\.id)
+        expect(seeds.allSatisfy { keys(view.cardView(for: $0)).isEmpty },
+               "first render and hydration attach no card animation")
+
+        // (a) An insert above the seeds pops in, and the seeds below slide down.
+        let inserted = UUID()
+        runtime.apply(.createCard(id: inserted, columnId: todo, title: "Agent task", after: nil, before: seeds[0]),
+                      to: board.id)
+        expect(keys(view.cardView(for: inserted)).contains(enterKey),
+               "a card created outside a drag attaches the entrance animation")
+        expect(seeds.allSatisfy { keys(view.cardView(for: $0)).contains(moveKey) },
+               "cards below an inserted card slide down rather than jump")
+
+        // (b) A cross-column move slides the card from where it WAS on screen.
+        // The lane's clip would cut it, so its old view flies above the lanes
+        // and the landed card stays hidden until the flight ends.
+        runtime.apply(.moveCard(id: seeds[1], toColumn: doing, after: nil, before: nil), to: board.id)
+        let flying = view.departingCardViews.first { $0.cardId == seeds[1] }
+        let delta = (flying?.layer?.animation(forKey: moveKey) as? CABasicAnimation)?.fromValue as? NSValue
+        expect(delta.map { $0.pointValue.x < -100 } == true,
+               "a cross-column move animates the card from its old lane (dx \(delta.map { "\($0.pointValue.x)" } ?? "none"))")
+        expect(flying?.superview != nil && flying?.superview !== view.cardView(for: seeds[1])?.superview
+               && flying?.ignoresHitTesting == true,
+               "the flying card is hosted above the lanes and ignores hits")
+        expect(view.cardView(for: seeds[1])?.layer?.animation(forKey: "kanban.card.arrive") != nil,
+               "the landed card waits for the flight on CA time")
+
+        // A delete fades the card out in place; the next render purges it.
+        runtime.apply(.deleteCard(id: seeds[0]), to: board.id)
+        let leaving = view.departingCardViews.first { $0.cardId == seeds[0] }
+        expect(keys(leaving) == [exitKey] && leaving?.layer?.opacity == 0 && view.cardView(for: seeds[0]) == nil,
+               "a removed card fades out and ends invisible without a completion handler")
+        expect(view.departingCardViews.allSatisfy { $0.cardId != seeds[1] },
+               "a new render purges the previous change's departing views")
+
+        // A local drop is the drag's own settle; its render must not FLIP.
+        let lane = view.allColumnViews[0]
+        guard let dragged = view.cardView(for: inserted) else { return expect(false, "inserted card is rendered") }
+        dragged.layer?.removeAllAnimations()
+        view.allColumnViews.flatMap(\.cardViews).forEach { $0.layer?.removeAllAnimations() }
+        let start = dragged.convert(NSPoint(x: 20, y: 20), to: nil)
+        let target = view.allColumnViews[1]
+        let end = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.maxY - 60), to: nil)
+        func mouse(_ type: NSEvent.EventType, _ at: NSPoint, _ number: Int) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: TimeInterval(number),
+                               windowNumber: window.windowNumber, context: nil, eventNumber: number,
+                               clickCount: 1, pressure: 1)!
+        }
+        dragged.mouseDown(with: mouse(.leftMouseDown, start, 100))
+        dragged.mouseDragged(with: mouse(.leftMouseDragged, end, 101))
+        expect(view.dragSession?.target != nil, "fixture drag resolves a lane target")
+        dragged.mouseUp(with: mouse(.leftMouseUp, end, 102))
+        let dropped = view.cardView(for: inserted)
+        expect(runtime.board(id: board.id)?.card(inserted)?.columnId == doing && dropped?.superview !== lane.ghostHost,
+               "the fixture drop moved the card to the other lane")
+        expect(keys(dropped).isEmpty && view.departingCardViews.isEmpty,
+               "a local drop keeps the drag's own settle and adds no change animation")
+
+        // Reduce Motion: the same insert presents instantly.
+        let (still, stillRuntime, stillBoard, stillWindow) = try fixture(reduceMotion: true)
+        defer { stillWindow.orderOut(nil) }
+        let quiet = UUID()
+        stillRuntime.apply(.createCard(id: quiet, columnId: stillBoard.orderedColumns[0].id, title: "Quiet",
+                                       after: nil, before: stillBoard.orderedCards(in: stillBoard.orderedColumns[0].id)[0].id),
+                           to: stillBoard.id)
+        expect(still.cardView(for: quiet) != nil
+               && still.allColumnViews.flatMap(\.cardViews).allSatisfy { keys($0).isEmpty },
+               "Reduce Motion presents a board change with no animation")
     }
 }

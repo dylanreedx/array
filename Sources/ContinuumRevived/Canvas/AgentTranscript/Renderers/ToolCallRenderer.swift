@@ -558,7 +558,7 @@ final class ToolCallView: NSView, CornerStyled {
     static let fallbackSymbolName = AgentToolKind.unknown.symbolName
 
     static func symbolName(forToolNamed name: String?) -> String {
-        AgentToolKind.resolve(toolName: name).symbolName
+        AgentToolKind.symbolName(forToolName: name)
     }
 
     /// What a row will actually SHOW, once the lines that merely restate the

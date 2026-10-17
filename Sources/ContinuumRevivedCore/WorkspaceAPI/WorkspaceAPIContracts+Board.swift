@@ -231,10 +231,19 @@ public struct BoardApplyResult: Codable, Equatable, Sendable {
     public var undoRegistered: Bool
     public var revision: UInt64
     public var card: BoardQueryCard?
+    /// What a reader needs to say what changed, by NAME — the request carries
+    /// only ids. `cardTitle` is the card's title after the change, or the title
+    /// of the card a `delete` removed (whose `card` is nil); `columnName` is the
+    /// column holding the card afterwards; `assigneeName` is the display name of
+    /// its assignee afterwards. Optional, so a reply without them still decodes.
+    public var cardTitle: String?
+    public var columnName: String?
+    public var assigneeName: String?
 
     public init(
         operationId: String, op: BoardApplyRequest.Op, boardId: UUID, cardId: UUID,
-        outcome: Outcome, undoRegistered: Bool, revision: UInt64, card: BoardQueryCard?
+        outcome: Outcome, undoRegistered: Bool, revision: UInt64, card: BoardQueryCard?,
+        cardTitle: String? = nil, columnName: String? = nil, assigneeName: String? = nil
     ) {
         self.operationId = operationId
         self.op = op
@@ -244,5 +253,8 @@ public struct BoardApplyResult: Codable, Equatable, Sendable {
         self.undoRegistered = undoRegistered
         self.revision = revision
         self.card = card
+        self.cardTitle = cardTitle
+        self.columnName = columnName
+        self.assigneeName = assigneeName
     }
 }

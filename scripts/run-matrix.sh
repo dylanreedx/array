@@ -425,6 +425,9 @@ run_leg scripts/capture-cli-fixtures.sh check
 run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+# Film phase 1: the pairing page and the user-facing copy that must say Array.
+# Standalone because the bare CoreChecks run stops at its KNOWN-RED pin first.
+run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
 # Confidence pass S4: the record/context/row-builder sections sit after the
 # KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check

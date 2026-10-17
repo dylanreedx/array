@@ -254,7 +254,7 @@ public enum CanvasMirrorPresentation {
         guard hasCanvasData else {
             switch freshness.state {
             case .unpaired:
-                return CanvasMirrorFreshnessDisplay(title: "Pair this phone", detail: "Connect to your Continuum instance", asOf: nil)
+                return CanvasMirrorFreshnessDisplay(title: "Pair this phone", detail: "Connect to your Array instance", asOf: nil)
             default:
                 return CanvasMirrorFreshnessDisplay(title: "Waiting for desktop canvas", detail: "No desktop canvas snapshot has arrived", asOf: nil)
             }
@@ -285,7 +285,7 @@ public enum CanvasMirrorPresentation {
         case .stale(let lastFreshAt):
             return CanvasMirrorFreshnessDisplay(title: "Stale", detail: "Showing cached canvas", asOf: spatialFreshAt ?? lastFreshAt)
         case .unpaired:
-            return CanvasMirrorFreshnessDisplay(title: "Pair this phone", detail: "Connect to your Continuum instance", asOf: nil)
+            return CanvasMirrorFreshnessDisplay(title: "Pair this phone", detail: "Connect to your Array instance", asOf: nil)
         case .desktopSleeping, .offline:
             return CanvasMirrorFreshnessDisplay(title: freshness.title, detail: "Showing cached canvas", asOf: freshness.lastFreshAt)
         }

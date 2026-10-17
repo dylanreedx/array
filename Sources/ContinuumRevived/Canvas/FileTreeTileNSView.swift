@@ -313,7 +313,12 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
-        scrollView.hasHorizontalScroller = true
+        // No horizontal scroller: the single column tracks the clip width and rows
+        // truncate, so there is nothing to scroll sideways. On a zoomed canvas the
+        // outline and clip snap to different sub-pixel widths, and an auto-hiding
+        // legacy scroller toggled on that mismatch until AppKit raised mid-layout
+        // (`runZoomedLegacyScrollerSelfCheck`).
+        scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
         scrollView.documentView = outlineView
 
@@ -676,6 +681,76 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     private func persist() {
         onPersist?(fileTreeTile)
+    }
+
+    /// `--file-tree-hardening-check`: the outline settles at every canvas zoom under
+    /// legacy (always-visible) scrollers, which macOS picks whenever a mouse is
+    /// attached. The outline's one column tracks the clip width and truncates, so
+    /// there is never anything to scroll sideways; but at a non-integral zoom the
+    /// world-plane scale snaps the outline and its clip view to different sub-pixel
+    /// widths. With an auto-hiding horizontal scroller that mismatch showed the
+    /// scroller, the 17 pt it took re-sized the outline back under the clip width,
+    /// which hid it again — a layout loop AppKit ends by raising "more Update
+    /// Constraints in Window passes than there are views in the window" (the
+    /// film harness's board-story zoom-out, 2026-10-05).
+    static func runZoomedLegacyScrollerSelfCheck() throws -> [String: Any] {
+        struct CheckError: Error, CustomStringConvertible { let description: String }
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("continuum-file-tree-zoom-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000001123")!
+        let worldFrame = NSRect(x: 40, y: 860, width: 360, height: 580)
+        let tile = Tile(
+            id: tileId, kind: .fileTree, title: "Files",
+            frame: TileFrame(x: worldFrame.minX, y: worldFrame.minY, width: worldFrame.width, height: worldFrame.height),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(filePath: root.path)
+        )
+        let fileTreeTile = FileTreeTile(
+            tileId: tileId, rootPath: root.path, expandedPaths: ["Sources"], selectedPath: nil,
+            searchQuery: "", ignoredNames: [], gitBadges: .off
+        )
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: FileTreeViewModel())
+        let names = (0..<12).map { "Sources/File\($0).swift" }
+        view.apply(FileTreeSnapshot(root: root, nodes:
+            [FileTreeNode(relativePath: "Sources", displayName: "Sources", isDirectory: true, childCount: names.count, isIgnored: false, gitStatus: nil)]
+            + names.map { FileTreeNode(relativePath: $0, displayName: URL(fileURLWithPath: $0).lastPathComponent, isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil) }
+            + [FileTreeNode(relativePath: "README.md", displayName: "README.md", isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil)]
+        ))
+        // Pinned, not left to the host's mouse: the defect needs scrollers that take space.
+        view.scrollView.scrollerStyle = .legacy
+
+        // The production camera: the tile in a bounds-scaled `CanvasWorldPlaneView`.
+        let viewport = CGSize(width: 1440, height: 810)
+        let window = NSWindow(contentRect: CGRect(origin: .zero, size: viewport), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let plane = CanvasWorldPlaneView()
+        plane.frame = CGRect(origin: .zero, size: viewport)
+        window.contentView = plane
+        plane.addSubview(view)
+        view.frame = worldFrame
+
+        var zooms = 0
+        var scrollerShown: [String] = []
+        for step in 0...400 {
+            let zoom = 0.2 + Double(step) * 0.002
+            plane.applyCamera(viewportSize: viewport, worldOrigin: CGPoint(x: -20, y: 600), zoom: zoom)
+            view.rootStack.needsLayout = true
+            view.scrollView.needsLayout = true
+            window.layoutIfNeeded()
+            zooms += 1
+            let clip = view.scrollView.contentView.frame.height
+            if view.scrollView.horizontalScroller.map({ !$0.isHidden }) == true || abs(clip - view.scrollView.bounds.height) > 1 {
+                scrollerShown.append(String(format: "%.3f (clip %.2f of %.2f)", zoom, clip, view.scrollView.bounds.height))
+            }
+        }
+        guard scrollerShown.isEmpty else {
+            throw CheckError(description: "file tree showed a horizontal scroller at \(scrollerShown.count) of \(zooms) zooms, e.g. \(scrollerShown.prefix(3))")
+        }
+        return ["check": "file-tree-zoomed-legacy-scrollers", "zooms": zooms, "rows": view.outlineView.numberOfRows]
     }
 
     static func runTruncatedOutlineSelfCheck() throws -> [String: Any] {

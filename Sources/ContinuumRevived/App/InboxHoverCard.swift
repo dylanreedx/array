@@ -211,6 +211,12 @@ final class InboxHoverCardView: NSView, TokenThemed {
     /// What the card is saying, in order, for a gate that must assert the card
     /// carries a fact rather than merely that a card appeared.
     var qaLinesForQA: [String] { [titleLabel.stringValue] + lineRows.map(\.label.stringValue) }
+    /// The lines drawn cut short: their text is wider than the room they were laid out in.
+    var qaTruncatedLinesForQA: [String] {
+        layoutSubtreeIfNeeded()
+        return lineRows.filter { $0.label.intrinsicContentSize.width > $0.label.frame.width + 0.5 }
+            .map(\.label.stringValue)
+    }
     var qaBrandMarksAreTemplatesForQA: Bool {
         let marks = lineRows.filter(\.isBrandMark)
         return !marks.isEmpty && marks.allSatisfy { $0.icon.image?.isTemplate == true }

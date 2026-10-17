@@ -60,6 +60,8 @@ public enum PiExtensionInstaller {
         // The original fire-and-forget spawn_agent (a8ab0b40, shipped by
         // 5e4ac132; both commits carry byte-identical content).
         "3e536320b6c99957255bb26b7709acdf838b075c99212c57211cf5f34831bd5a",
+        // The wait_agents-era copy, before its descriptions said "Array".
+        "369697d2298cdef5a5b04ccb58005df665bc696db1270c7bce0b9c4ec8caa95c",
     ]
 
     public static func sha256Hex(_ data: Data) -> String {

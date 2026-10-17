@@ -113,6 +113,13 @@ final class CanvasCameraDriver: NSObject {
     private var lastPinchTimestamp: TimeInterval?
     private var pinchLogVelocity: Double = 0
 
+    // Navigation flight (`fly`): a jump's eased move, display-linked.
+    private var flight: CameraFlight?
+    private var flightStart: TimeInterval = 0
+    /// True while a flight step is inside `applyViewport`. Programmatic: the
+    /// canvas must not report it as the user moving the camera (CX-01).
+    private(set) var isFlying = false
+
     // Glide state.
     private(set) var glideActive = false
     private var glideVelocity: Double = 0
@@ -146,6 +153,7 @@ final class CanvasCameraDriver: NSObject {
     // MARK: - Input taps
 
     func noteScrollPan(dx: CGFloat, dy: CGFloat, location: CGPoint) {
+        cancelFlight()
         pendingPanDX += dx
         pendingPanDY += dy
         anchor = location
@@ -154,6 +162,7 @@ final class CanvasCameraDriver: NSObject {
     }
 
     func noteScrollZoom(deltaY: Double, location: CGPoint) {
+        cancelFlight()
         pendingLogZoom += deltaY * tuning.scrollZoomGain
         anchor = location
         noteActivity(zoom: true)
@@ -164,6 +173,7 @@ final class CanvasCameraDriver: NSObject {
         switch phase {
         case .began:
             cancelGlide()
+            cancelFlight()
             pinchActive = true
             pinchLogVelocity = 0
             lastPinchTimestamp = timestamp
@@ -200,6 +210,7 @@ final class CanvasCameraDriver: NSObject {
     /// path, where every `setViewport` call lands here.
     func noteExternalViewportChange() {
         if glideActive { cancelGlide() }
+        if flight != nil { cancelFlight() }
         pendingPanDX = 0
         pendingPanDY = 0
         pendingLogZoom = 0
@@ -256,6 +267,44 @@ final class CanvasCameraDriver: NSObject {
         if glideActive, zoomRequested, abs(currentViewport().zoom - zoomBefore) < 1e-9 {
             cancelGlide()
         }
+    }
+
+    // MARK: - Flight
+
+    /// Fly the camera along `flight`, one step per display frame. A trackpad
+    /// pan, zoom or pinch, a pointer pan, or any other camera write takes the
+    /// camera from it mid-air; a second jump starts a new flight from wherever
+    /// this one had got to.
+    func fly(_ flight: CameraFlight) {
+        cancelGlide()
+        pendingPanDX = 0
+        pendingPanDY = 0
+        pendingLogZoom = 0
+        pinchActive = false
+        self.flight = flight
+        flightStart = nowProvider()
+        noteActivity(zoom: false)
+    }
+
+    func cancelFlight() { flight = nil }
+
+    var isFlightActive: Bool { flight != nil }
+    /// Where an in-flight jump is taking the camera.
+    var flightTarget: CanvasViewport? { flight?.to }
+
+    /// Commit the flight's camera at `now`; the last step lands exactly on target.
+    private func stepFlight(at now: TimeInterval) {
+        guard let flight else { return }
+        let t = now - flightStart
+        let done = t >= flight.duration
+        isApplying = true
+        isFlying = true
+        applyViewport(flight.viewport(at: done ? flight.duration : t))
+        isFlying = false
+        isApplying = false
+        lastCommitTime = now
+        lastActivityTime = now
+        if done { self.flight = nil }
     }
 
     // MARK: - Glide
@@ -320,7 +369,8 @@ final class CanvasCameraDriver: NSObject {
             lastActivityTime = now
         }
         applyPending(at: now)
-        if !glideActive, now - lastActivityTime >= tuning.settleQuiet {
+        stepFlight(at: now)
+        if !glideActive, flight == nil, now - lastActivityTime >= tuning.settleQuiet {
             stopDisplayLink()
             markSettled()
         }
@@ -341,7 +391,7 @@ final class CanvasCameraDriver: NSObject {
     private func backstopFired() {
         backstopTimer = nil
         let now = nowProvider()
-        if glideActive, displayLink != nil, now - lastActivityTime < tuning.settleQuiet {
+        if glideActive || flight != nil, displayLink != nil, now - lastActivityTime < tuning.settleQuiet {
             // The link is alive and ticking (it refreshed lastActivityTime);
             // this was just the periodic re-arm.
             armBackstop()
@@ -350,6 +400,7 @@ final class CanvasCameraDriver: NSObject {
         // Link stalled or gone: finish what is in flight rather than freeze it.
         cancelGlide()
         applyPending(at: now)
+        if let flight { flightStart = now - flight.duration; stepFlight(at: now) }
         if now - lastActivityTime >= tuning.settleQuiet {
             stopDisplayLink()
             markSettled()
@@ -390,6 +441,8 @@ final class CanvasCameraDriver: NSObject {
     }
 
     var qaGlideActive: Bool { glideActive }
+    /// Step the flight at the injected clock's `now`, exactly as a link tick would.
+    func qaStepFlight() { stepFlight(at: nowProvider()) }
     var qaPinchLogVelocity: Double { pinchLogVelocity }
     var qaHasPendingInput: Bool { pendingPanDX != 0 || pendingPanDY != 0 || pendingLogZoom != 0 }
     func qaMarkSettledNow() {

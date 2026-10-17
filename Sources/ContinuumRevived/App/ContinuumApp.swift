@@ -2022,6 +2022,7 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 try CanvasCameraDriverChecks.runMomentum()
+                try CanvasCameraDriverChecks.runNavigationFlight()
                 print("ContinuumRevivedCanvasZoomMomentumChecks passed")
                 Foundation.exit(0)
             } catch {
@@ -2830,7 +2831,10 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 let artifact = try AppDelegate.runLeaderZoneJumpSelfCheck()
-                print("ContinuumRevivedLeaderZoneJumpChecks passed: \(artifact.path)")
+                // The badge tints ride the matrix here; `--leader-jump-visible-indicators-check`,
+                // which also runs them, is not a matrix leg.
+                let badgeTint = try AppDelegate.runLeaderJumpBadgeTintCheck()
+                print("ContinuumRevivedLeaderZoneJumpChecks passed: \(artifact.path); \(badgeTint)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -5225,7 +5229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     static let topologyMigrationNoteShownKey = "continuum.topology.migrationNoteShown"
     static let onboardingShownKey = "continuum.onboarding.shown"
     static let topologyMigrationInformativeText = """
-    Continuum now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
+    Array now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -5293,7 +5297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             companionAuthService = try CompanionAuthService(
                 authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: appSupportDir),
-                instanceDisplayName: Host.current().localizedName ?? "Continuum"
+                instanceDisplayName: Host.current().localizedName ?? "Array"
             )
             let registry = try registryStore.loadOrEmpty()
             self.registryStore = registryStore
@@ -6687,6 +6691,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Z1"), CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Z2")]
         )
         canvas.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 900, height: 620)
+        // This window is the app's real one, on screen, so jumps would fly; this
+        // check reads each jump's camera back at once. The flight has its own
+        // witness (`--canvas-zoom-momentum-check`, runNavigationFlight).
+        canvas.navigationFlightOverrideForQA = false
         canvas.autoresizingMask = [.width, .height]
         self.canvasView?.detachFocusBroker()
         self.canvasView = canvas
@@ -7282,7 +7290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
-        canvasView.removeTile(id: id)
+        canvasView.closeTile(id: id)
         recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
         // The OWNER's canvas file: it is the one still holding the tile.
         if let owner {
@@ -8080,10 +8088,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard runtime.tileConfigurator == nil else { return runtime }
         let projectID = controller.project.id
         let attachmentStore = BoardAttachmentStore(projectRoot: controller.projectRoot)
-        runtime.onCommittedTransaction = { [weak self, weak runtime] transaction in
+        runtime.onCommittedTransaction = { [weak self, weak runtime] transaction, actingAgent in
             guard let self, let runtime else { return }
             self.synchronizeBoardTaskContexts(
-                transaction, runtime: runtime, projectID: projectID,
+                transaction, actingAgent: actingAgent, runtime: runtime, projectID: projectID,
                 attachmentStore: attachmentStore)
         }
         runtime.tileConfigurator = { [weak self, weak runtime] view in
@@ -8140,9 +8148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// One post-commit path for UI, API, lifecycle automation and undo. The
     /// board assignment is authoritative even when an agent tile is absent;
     /// composer context is a best-effort view of that durable fact and never
-    /// sends by itself.
+    /// sends by itself. `actingAgent` is the agent whose workspace-API call
+    /// made the commit; it is never handed its own task.
     private func synchronizeBoardTaskContexts(
         _ transaction: BoardTransaction,
+        actingAgent: AgentID?,
         runtime: BoardRuntime,
         projectID: UUID,
         attachmentStore: BoardAttachmentStore
@@ -8168,7 +8178,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             default:
                 taskFieldsEdited = false
             }
-            guard let card = new, let newAgent,
+            // The chip is the user's hand-off: it waits in the composer for an
+            // explicit send. An agent that took or edited its own task through
+            // the workspace API already holds it in the turn it is running, so
+            // staging it there would only invite a second send of the same task.
+            // A hand-off to ANOTHER agent still stages, unsent, for the user.
+            guard let card = new, let newAgent, newAgent != actingAgent,
                   oldAgent != newAgent || contentChanged || taskFieldsEdited,
                   let record = agentSupervisor.records[newAgent], record.projectId == projectID,
                   record.archivedAt == nil, record.capabilities.locallyManaged,
@@ -8881,7 +8896,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             disarmLeader()
             if let targetViewport {
                 recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
-                canvasView?.setViewport(targetViewport)
+                canvasView?.navigateViewport(to: targetViewport)
             }
             navSelectedZoneId = zoneId
             focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
@@ -9297,7 +9312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: CanvasViewport) {
         guard let canvasView else { return }
-        let current = canvasView.canvasState.viewport
+        let current = canvasView.navigationViewport
         guard Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
         focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: current, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
     }
@@ -9315,7 +9330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView, let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
         navSelectedZoneId = zoneId
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
         // Nav mode is still open and still owns input; see completeZoneJump.
         completeZoneJump(zoneId, landingInputOnCanvas: false)
@@ -9325,7 +9340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let viewport = canvasView?.fitAllToViewport() else { return }
         workspaceRuntime?.noteUserInteraction()
         navSelectedZoneId = nil
-        canvasView?.setViewport(viewport)
+        canvasView?.navigateViewport(to: viewport)
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
@@ -10217,7 +10232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let companionAuthService { return companionAuthService }
         let service = try CompanionAuthService(
             authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)),
-            instanceDisplayName: Host.current().localizedName ?? "Continuum"
+            instanceDisplayName: Host.current().localizedName ?? "Array"
         )
         companionAuthService = service
         return service
@@ -10263,18 +10278,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func presentPairingURL(_ url: URL, cameraURL: URL, listener: LocalPairingEndpointListener, expiresAt: Date) {
         let alert = NSAlert()
-        alert.messageText = "Continuum LAN Pairing"
+        alert.messageText = "Array LAN Pairing"
         alert.informativeText = """
-        Camera-compatible pairing link copied to the clipboard. Scan the QR code with iPhone Camera; it opens a local Mac page that opens Continuum.
+        Camera-compatible pairing link copied to the clipboard. Scan the QR code with iPhone Camera; it opens a local Mac page that opens Array.
 
-        If you are already in Continuum, Pair this phone > Scan Pairing QR also accepts this code.
+        If you are already in Array, Pair this phone > Scan Pairing QR also accepts this code.
 
         Status: Listening on \(listener.endpointURL.absoluteString)
         Expires: \(expiresAt.formatted(date: .abbreviated, time: .standard))
         Scope: Observer
 
         QR URL: \(cameraURL.absoluteString)
-        Continuum link: \(url.absoluteString)
+        Array link: \(url.absoluteString)
         """
         if let qrImage = makePairingQRCode(for: cameraURL) {
             let imageView = NSImageView(image: qrImage)
@@ -11377,6 +11392,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onWakeRerender = { [weak self] in
             self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
         }
+        sidebar.agentInbox.latestAssistantLineProvider = { [weak self] agentId in
+            self?.agentSupervisor.latestAssistantLine(for: AgentID(rawValue: agentId))
+        }
+    }
+
+    /// What a hold-⌥ jump badge on this tile says about its agent, read off the row
+    /// the sidebar is drawing so the two cannot disagree: the sidebar's mint `Done`
+    /// for a finished turn nobody has looked at, the approval amber while it waits
+    /// on you, nothing otherwise (and nothing for a row whose state is unconfirmed).
+    func leaderJumpBadgeAccent(forTile tileId: UUID) -> AccentToken? {
+        guard let agentId = agentSupervisor.agent(forTile: tileId),
+              let row = workspaceSidebarView?.agentInbox.row(forAgentId: agentId.rawValue),
+              !row.isUnconfirmed else { return nil }
+        if AgentInbox96CellView.isUnseen(row) { return .accentReview }
+        switch row.state {
+        case .approval, .input: return .accentApproval
+        case .working, .failed, .ready: return nil
+        }
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -11760,7 +11793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView,
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
         return true
@@ -12010,16 +12043,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// deliberate "I am done with this", and the Undo below gives it back.
     ///
     /// The tile is remembered — its WORLD frame and zone, as the layer held it
-    /// — so the settle's Undo can put it back exactly where it was.
+    /// — so the settle's Undo can put it back exactly where it was. So are the
+    /// zone's other members, before and after: closing a tile settles an
+    /// auto-layout zone so the members behind it close the gap
+    /// (`CanvasNSView.closeTile`), and the Undo opens that gap again.
     private func closeTileOfSettledAgent(_ agentId: AgentID) {
         guard let canvasView, let tileId = agentSupervisor.records[agentId]?.tileId,
               let zoneId = canvasView.zoneId(containing: tileId),
-              let tile = canvasView.tilesInWorldFrames(forZoneId: zoneId)?.first(where: { $0.id == tileId })
+              let members = canvasView.tilesInWorldFrames(forZoneId: zoneId),
+              let tile = members.first(where: { $0.id == tileId })
         else { return }
         let session = try? controller(owningTile: tileId)?.managedSessionStore.load(tileId: tileId)
         deleteTile(id: tileId, parksAgent: false)
         guard canvasView.tileView(for: tileId) == nil else { return }
-        settledAgentTiles[agentId] = SettledAgentTile(worldTile: tile, zoneId: zoneId, session: session ?? nil)
+        settledAgentTileSequence += 1
+        settledAgentTiles[agentId] = SettledAgentTile(
+            worldTile: tile, zoneId: zoneId, session: session ?? nil,
+            siblingsBefore: members.filter { $0.id != tileId },
+            siblingsAfter: canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? [],
+            sequence: settledAgentTileSequence)
     }
 
     /// A settled agent's tile, as it stood before Settle closed it.
@@ -12028,6 +12070,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let worldTile: Tile
         let zoneId: UUID
         let session: ManagedAgentSessionRecord?
+        /// The zone's other members (WORLD frames) before the close, and as the
+        /// close's gap-closing settle left them.
+        let siblingsBefore: [Tile]
+        let siblingsAfter: [Tile]
+        /// Close order: a bulk Undo reopens the gaps last-closed first, so each
+        /// one finds the zone exactly as its own close left it.
+        let sequence: Int
     }
 
     /// Put a settled agent's tile back where Settle took it from: same id, same
@@ -12061,14 +12110,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else {
             flushCanvasSave()
         }
+        // After the save, as a spawn's settle is (`TileSpawner.persistThenArrange`):
+        // a geometry commit refuses a tile no saved canvas holds.
+        reopenGapOfSettledAgent(memo, in: canvasView)
         return true
+    }
+
+    /// Put the members the close's settle slid into the gap back where they
+    /// were — only while every one of them still stands where that settle left
+    /// it. A member the person has moved since is theirs; nothing is undone over it.
+    private func reopenGapOfSettledAgent(_ memo: SettledAgentTile, in canvasView: CanvasNSView) {
+        guard let current = canvasView.tilesInWorldFrames(forZoneId: memo.zoneId) else { return }
+        let now = Dictionary(current.map { ($0.id, $0.frame) }, uniquingKeysWith: { first, _ in first })
+        func same(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5
+                && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
+        }
+        guard memo.siblingsAfter.allSatisfy({ after in now[after.id].map { same($0, after.frame) } ?? true })
+        else { return }
+        let moved = memo.siblingsBefore.filter { before in
+            now[before.id].map { !same($0, before.frame) } ?? false
+        }
+        guard !moved.isEmpty else { return }
+        let snapshot = CanvasGeometrySnapshot(
+            tiles: moved.map { CanvasTileGeometry(tileId: $0.id, frame: $0.frame, zoneId: memo.zoneId) },
+            zones: [])
+        canvasView.performGeometryEdit(.autoLayout, tileIds: Set(moved.map(\.id))) {
+            _ = canvasView.applyGeometrySnapshot(snapshot, notifyCommit: false)
+        }
     }
 
     /// The settle Undo's host half (P4.11's two seams, wired in production now):
     /// the four captured lifecycle facts go back verbatim, and an agent whose
     /// tile Settle closed gets that tile back.
     private func undoInboxLifecycle(_ restoring: [UUID: InboxLifecycleSnapshot]) {
-        for (rawID, facts) in restoring {
+        // Last-closed first: see `SettledAgentTile.sequence`.
+        let ordered = restoring.sorted {
+            (settledAgentTiles[AgentID(rawValue: $0.key)]?.sequence ?? 0)
+                > (settledAgentTiles[AgentID(rawValue: $1.key)]?.sequence ?? 0)
+        }
+        for (rawID, facts) in ordered {
             let agentId = AgentID(rawValue: rawID)
             agentSupervisor.restoreLifecycle(
                 agentID: agentId, settledOverride: facts.settledOverride, settledAt: facts.settledAt,
@@ -15482,6 +15563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var managedAgentStartRequests: Set<UUID> = []
     /// Tiles Settle closed, kept for the settle's Undo (launch polish, item R).
     private var settledAgentTiles: [AgentID: SettledAgentTile] = [:]
+    private var settledAgentTileSequence = 0
 
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
@@ -16336,7 +16418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return tileCount() > before
         case .fitCanvasToAll:
             guard let canvasView, let viewport = canvasView.fitAllToViewport() else { return false }
-            canvasView.setViewport(viewport)
+            canvasView.navigateViewport(to: viewport)
             return true
         case .tidyCanvas:
             canvasView?.tidyAutoLayout()
@@ -16515,7 +16597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         workspaceRuntime?.noteUserInteraction()
         if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
-            canvasView.setViewport(targetViewport)
+            canvasView.navigateViewport(to: targetViewport)
         }
         focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: historyReason)
         focusBroker.enterScope(.tile(tileId), reason: scopeReason)
@@ -16604,7 +16686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
         recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-        canvasView.setViewport(viewport)
+        canvasView.navigateViewport(to: viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
         completeZoneJump(zoneId)
@@ -16615,7 +16697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func restorePreviousView() -> Bool {
         guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return false }
         workspaceRuntime?.noteUserInteraction()
-        canvasView.setViewport(snapshot.viewport)
+        canvasView.navigateViewport(to: snapshot.viewport)
         navSelectedZoneId = snapshot.focusedZoneId
         if let tileId = snapshot.focusedTileId, canvasView.navigationTileSnapshot(for: tileId) != nil {
             focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
@@ -16646,7 +16728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // deleted.
         if let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
-            canvasView.setViewport(viewport)
+            canvasView.navigateViewport(to: viewport)
         }
         focusHistory.recordZoneFocus(zoneId, reason: .previousNavigation)
         completeZoneJump(zoneId)
@@ -17933,7 +18015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return false
         }
-        switch spawner.spawnBoard(title: "New Board") {
+        switch spawner.spawnBoard(title: newBoardTitle()) {
         case let .spawned(_, tileId):
             focusSpawnedTile(tileId)
             return true
@@ -17941,6 +18023,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnBoard failed: \(error)\n", stderr)
             return false
         }
+    }
+
+    /// A new board takes the name of the zone it lands in ("Storefront" reads as
+    /// "Board · Storefront"), so a project's board says whose it is. A zone still
+    /// carrying its automatic name ("Zone 3", "Group") gives "New Board".
+    private func newBoardTitle() -> String {
+        guard let zoneId = resolvedCreationScope()?.zoneId,
+              let title = canvasView?.zonePresentation(for: zoneId)?.title else { return "New Board" }
+        return Self.boardTitle(forZoneTitle: title)
+    }
+
+    static func boardTitle(forZoneTitle title: String) -> String {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let automatic = name.range(of: #"^(Zone|Group)( \d+)?$"#, options: .regularExpression) != nil
+        return name.isEmpty || automatic ? "New Board" : name
     }
 
     private func openFileFromPalette() {
@@ -18666,6 +18763,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView.onTileStopRunRequested = { [weak self] tileId in
             self?.stopHarnessRun(tileId: tileId)
+        }
+        canvasView.leaderJumpBadgeAccentProvider = { [weak self] tileId in
+            self?.leaderJumpBadgeAccent(forTile: tileId)
         }
         canvasView.onZoneCreated = { [weak self] placement in
             self?.persistCreatedGroupZone(placement)
@@ -25927,12 +26027,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try expect((p["indicatorRectInsideVisibleIntersection"] as? Bool) == true, "drawn indicator rect must be inside visible intersection and viewport")
         }
 
+        let badgeTint = try runLeaderJumpBadgeTintCheck()
+
         let manifest: [String: Any] = [
             "check": "leader-jump-visible-indicators",
             "path": "synthesized .flagsChanged -> production leaderJumpAssignments -> overlay placement seam",
             "viewportBounds": rectJSON(viewportBounds),
             "placements": placements,
             "offscreenTilesLabeled": assignments.filter { $0.tileId == offscreenId }.count,
+            "badgeTint": badgeTint,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -37818,7 +37921,94 @@ extension AppDelegate {
 
     fadeWindows.removeAll()
 
+    // M · THE CLOSE NUDGE (Dylan, 2026-10-05). A finished agent you read and then
+    // left asks "All set?" after five minutes: one click settles it, and a settle
+    // takes its tile off the canvas into History (`.settle`, the verb every settle
+    // entry point shares — `--settle-closes-tile-check` follows the tile). Before:
+    // the nudge waited ten minutes, vanished whenever any row was unread, and
+    // blinked off half of every minute.
+    let nudgeNow = LabFixtures.inboxNow
+    func seenDone(_ n: Int, _ title: String, minutesAgo: Double) -> AgentInboxRow {
+        let at = nudgeNow.addingTimeInterval(-minutesAgo * 60)
+        return AgentInboxRow(
+            id: UUID(uuidString: String(format: "000000AE-0000-0000-0000-%012d", n))!,
+            title: title, projectName: "Roast", state: .ready, lastActiveAt: at,
+            createdAt: at.addingTimeInterval(-600),
+            terminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t\(n)", outcome: .succeeded, endedAt: at),
+            terminalIsUnread: false)
+    }
+    let oldSeen = seenDone(1, "Dark mode", minutesAgo: 6)
+    let newerSeen = seenDone(2, "Hero copy", minutesAgo: 5.5)
+    let fresh = seenDone(3, "Cart total", minutesAgo: 4)
+    let unreadDone = AgentInboxRow(
+        id: UUID(uuidString: "000000AE-0000-0000-0000-000000000004")!, title: "Order export",
+        projectName: "Roast", state: .ready, attention: .unread,
+        lastActiveAt: nudgeNow.addingTimeInterval(-30), createdAt: nudgeNow.addingTimeInterval(-900),
+        terminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t4", outcome: .succeeded, endedAt: nudgeNow.addingTimeInterval(-30)),
+        terminalIsUnread: true)
+    let working = AgentInboxRow(
+        id: UUID(uuidString: "000000AE-0000-0000-0000-000000000005")!, title: "Subscriptions",
+        projectName: "Roast", state: .working, elapsed: 120, createdAt: nudgeNow.addingTimeInterval(-300))
+    var nudgeCalls: [(InboxRowAction, [UUID])] = []
+    let nudgeView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    nudgeView.clock = { nudgeNow }
+    nudgeView.onRowAction = { nudgeCalls.append(($0, $1)) }
+    nudgeView.wiredRowActions = AppDelegate.wiredInboxRowActions
+    nudgeView.reload(rows: [oldSeen, newerSeen, fresh, unreadDone, working])
+    let nudgeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+                               styleMask: [.borderless], backing: .buffered, defer: false)
+    nudgeWindow.contentView = nudgeView
+    nudgeView.layoutForQA()
+    try expect(nudgeView.isCloseNudgeShownForQA(agentId: oldSeen.id),
+               "a finished agent read 6 minutes ago must ask to be closed, beside an UNREAD Done row and a working one")
+    try expect(nudgeView.closeNudgeTitleForQA(agentId: oldSeen.id) == "All set?",
+               "the nudge says what it does: got '\(nudgeView.closeNudgeTitleForQA(agentId: oldSeen.id) ?? "")'")
+    for (row, why) in [(newerSeen, "only the OLDEST eligible row asks, one at a time"),
+                       (fresh, "4 minutes is under the 5-minute wait"),
+                       (unreadDone, "an unread row has not been read yet"),
+                       (working, "a working agent is not finished")] {
+        try expect(!nudgeView.isCloseNudgeShownForQA(agentId: row.id), "'\(row.title)' must not ask: \(why)")
+    }
+    try expect(nudgeView.clickCloseNudgeForQA(agentId: oldSeen.id), "the nudge must be clickable")
+    try expect(nudgeCalls.count == 1 && nudgeCalls[0].0 == .settle && nudgeCalls[0].1 == [oldSeen.id],
+               "clicking the nudge SETTLES the agent, which closes it to History (.settle on it alone) — got \(nudgeCalls.map { ($0.0.rawValue, $0.1.count) })")
+    // Closed: the next-oldest one asks, so the list empties one click at a time.
+    nudgeView.reload(rows: [newerSeen, fresh, unreadDone, working])
+    nudgeView.layoutForQA()
+    try expect(nudgeView.isCloseNudgeShownForQA(agentId: newerSeen.id),
+               "with the oldest closed, the next one read over five minutes ago asks")
+    // Never an agent that was made and never prompted (it has no finished turn), and
+    // never the agent that is open: one you just went to read is not one you left.
+    let neverRun = AgentInboxRow(
+        id: UUID(uuidString: "000000AE-0000-0000-0000-000000000007")!, title: "Fresh agent",
+        projectName: "Roast", state: .ready, lastActiveAt: nudgeNow.addingTimeInterval(-3_600),
+        createdAt: nudgeNow.addingTimeInterval(-3_600))
+    nudgeView.reload(rows: [neverRun])
+    nudgeView.layoutForQA()
+    try expect(!nudgeView.isCloseNudgeShownForQA(agentId: neverRun.id),
+               "an agent that never finished a turn has nothing to close: no nudge, even an hour after it was made")
+    nudgeView.reload(rows: [newerSeen, fresh])
+    nudgeView.openAgentId = newerSeen.id
+    nudgeView.layoutForQA()
+    try expect(!nudgeView.isCloseNudgeShownForQA(agentId: newerSeen.id),
+               "the agent open in its tile is being read: it must not ask to be closed")
+    nudgeView.openAgentId = nil
+    nudgeView.layoutForQA()
+    try expect(nudgeView.isCloseNudgeShownForQA(agentId: newerSeen.id),
+               "once another agent is open, the one left behind asks again")
+
+    // A person is needed elsewhere: the nudge steps aside.
+    let blocked = AgentInboxRow(
+        id: UUID(uuidString: "000000AE-0000-0000-0000-000000000006")!, title: "Needs approval",
+        projectName: "Roast", state: .approval, createdAt: nudgeNow.addingTimeInterval(-200))
+    nudgeView.reload(rows: [newerSeen, blocked])
+    nudgeView.layoutForQA()
+    try expect(!nudgeView.isCloseNudgeShownForQA(agentId: newerSeen.id),
+               "while an agent is blocked on the person, the close nudge stays down")
+    nudgeWindow.contentView = nil
+
     NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentInbox: " + (try runAgentInboxHoverGlanceCheck()))
     print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in its owning workspace while its record stays put — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle, Snooze and Mark Unread, a running one removing Archive and Delete, the two together leaving no bulk action, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a CUSTOM ROW CONTEXT MENU showing \(expectedQuietMenu.count) live capabilities through the tile's choice family, both right-click and Control-click taking the production event path, a background click offering nothing, a click outside a selection retargeting to that row and one inside preserving all selected targets, plural Open and blocked Settle absent rather than dead, Open live through P3.9's callback, Rename opening the targeted inline editor, stale actions refused after a push, keyboard focus announced to VoiceOver, and dismissal returning focus to the originating table; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live with Phase 6 lifecycle/read actions reaching the custom row menu and bulk bar, the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's managed TILE is removed while durable suppression keeps a stale restored copy from minting a replacement, a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is read from the shipped row list through `InboxSort.partition` after the builder derives lifecycle at read time, History \(afterOpening.history.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
     }
 }
@@ -38216,5 +38406,247 @@ static func checkRowStatusIsTurnState(
     let agreementReport = try checkInboxStateAgreesWithTilePresenter(fail: fail)
 
     return "row status is turn state: sampled \(samples.count) points of one turn (inbox rows \(beforeRow)/\(midRow)/\(afterRow)) through currentManagedAgentActivities() over the owner's on-disk record (\(samples.map { "\($0.phase) \($0.row)" }.joined(separator: ", "))), tile and row agree throughout, \(mapping.count) persisted cases mapped with stopped ≠ idle, approval still outranks working and settled; the listing refused before the sweep and answered after it; \(readGateReport); a stopped turn left the ring claiming working and the row read ready with no clock, \(Int(liveElapsed))s measured from the stamped start; \(agreementReport)"
+}
+}
+
+/// What an agent tile and its sidebar row say at a glance: the hold-⌥ jump badge's
+/// tint and the hover card's status and last line. A same-file extension because
+/// both witnesses drive the app's own wiring — `wireCanvasCallbacks`,
+/// `configureWorkspaceSidebar`, `refreshAgentSurfaces` — rather than a copy of it.
+///
+/// One fixture serves both. Three managed agents on a real `AgentSupervisor` with a
+/// transcript store (production injects one), driven into their states by events
+/// through the supervisor's own delivery path, never by hand-built rows:
+///  - `working`: a turn in flight that has written two lines;
+///  - `asking`: a turn holding an open command approval;
+///  - `done`: a completed turn nobody has looked at (the app was never active).
+/// A note tile stands for every tile that is not an agent.
+extension AppDelegate {
+struct AgentGlanceFixture {
+    let app: AppDelegate
+    let canvas: CanvasNSView
+    let sidebar: WorkspaceSidebarView
+    let window: NSWindow
+    let supervisor: AgentSupervisor
+    let working: (tile: UUID, agent: AgentID)
+    let asking: (tile: UUID, agent: AgentID)
+    let done: (tile: UUID, agent: AgentID)
+    let note: UUID
+    let root: URL
+}
+
+static let agentGlanceWorkingLine = "Tracing the flaky drag test in CanvasChecks"
+static let agentGlanceDoneLine = "All 12 zone checks pass now."
+
+@MainActor
+static func makeAgentGlanceFixture(label: String) throws -> AgentGlanceFixture {
+    struct SetupError: Error, CustomStringConvertible { let description: String }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-glance-\(label)-\(UUID().uuidString)", isDirectory: true)
+    let appSupport = root.appendingPathComponent("support", isDirectory: true)
+    let projectRoot = root.appendingPathComponent("project", isDirectory: true)
+    for dir in [appSupport, projectRoot] {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let projectId = UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000C1")!
+    var registry = Registry.empty()
+    registry.projects = [ProjectEntry(
+        id: projectId, name: "Glance", rootPath: projectRoot.path, workspaceId: nil,
+        lastOpenedAt: now, pinned: false, missing: false)]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: appSupport),
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        warn: { _ in },
+        transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
+    func agent(_ name: String, tile: UUID) -> (tile: UUID, agent: AgentID) {
+        (tile, supervisor.spawn(
+            role: nil, prompt: nil, cwd: projectRoot, harness: .pi, model: AgentCatalogQAFixture.pi[0],
+            thinking: AgentModelConfig.defaultThinking, projectId: projectId, projectRoot: projectRoot,
+            tileId: tile, displayName: name))
+    }
+    let working = agent("Drag fixer", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A1")!)
+    let asking = agent("Migrator", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A2")!)
+    let done = agent("Zone tidier", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A3")!)
+    let note = UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A4")!
+
+    func deliver(_ who: (tile: UUID, agent: AgentID), _ events: (String) -> [AgentRuntimeEvent]) {
+        for event in events(AgentSupervisor.threadId(for: who.agent)) { supervisor.qaDeliver(event, to: who.agent) }
+    }
+    deliver(working) { thread in [
+        .turnStarted(threadId: thread, turnId: "w1"),
+        .contentDelta(threadId: thread, turnId: "w1", streamKind: .assistant,
+                      delta: "Reading the build log.\n\n- \(agentGlanceWorkingLine)"),
+    ] }
+    deliver(asking) { thread in [
+        .turnStarted(threadId: thread, turnId: "q1"),
+        .requestOpened(threadId: thread, requestId: "q1-approve", kind: .commandExecutionApproval),
+    ] }
+    deliver(done) { thread in [
+        .turnStarted(threadId: thread, turnId: "d1"),
+        .contentDelta(threadId: thread, turnId: "d1", streamKind: .assistant,
+                      delta: "## Summary\n\nClosed the gap a removed tile left.\n\n\(agentGlanceDoneLine)\n\n```"),
+        .turnCompleted(threadId: thread, turnId: "d1", outcome: .completed, errorMessage: nil),
+    ] }
+
+    func tile(_ id: UUID, _ kind: TileKind, x: Double) -> Tile {
+        Tile(id: id, kind: kind, title: "glance", frame: TileFrame(x: x, y: 80, width: 260, height: 220),
+             zPosition: .fromLegacyRank(1), runtimeRef: nil,
+             metadata: kind == .note ? TileMetadata(noteId: id) : TileMetadata(launchProfileId: "managed-agent"))
+    }
+    let tiles = [tile(working.tile, .managedAgent, x: 40), tile(asking.tile, .managedAgent, x: 320),
+                 tile(done.tile, .managedAgent, x: 600), tile(note, .note, x: 880)]
+    let canvas = CanvasNSView(canvasState: CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+    canvas.frame = NSRect(x: 300, y: 0, width: 1200, height: 640)
+    for tile in tiles {
+        canvas.install(tileView: tile.kind == .managedAgent ? ManagedAgentTileNSView(tile: tile) : TileNSView(tile: tile),
+                       for: tile)
+    }
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = supervisor
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+    app.canvasView = canvas
+    canvas.focusBroker = app.focusBroker
+    app.wireCanvasCallbacks(canvas)
+    // Each agent tile wired the way boot wires it, so its agent counts as observed
+    // and its row states what the agent is doing rather than a last-known caveat.
+    for who in [working, asking, done] { app.wireManagedAgentTile(who.tile, agentID: who.agent) }
+
+    let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
+    app.workspaceSidebarView = sidebar
+    app.configureWorkspaceSidebar(sidebar)
+    sidebar.configureInboxScope(.all) { _ in }
+    // Parked off every display: the card needs a window's content view, never the screen.
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 640),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: 1500, height: 640))
+    container.addSubview(sidebar)
+    container.addSubview(canvas)
+    window.contentView = container
+    window.orderFrontOffscreenForChecks()
+    app.refreshAgentSurfaces(notify: false)
+    sidebar.layoutSubtreeIfNeeded()
+    sidebar.agentInbox.layoutForQA()
+    canvas.layoutSubtreeIfNeeded()
+    guard Set(sidebar.agentInbox.rowIdsForQA) == Set([working, asking, done].map(\.agent.rawValue)) else {
+        throw SetupError(description: "agent glance: the sidebar must list the three agents — got \(sidebar.agentInbox.titlesForQA)")
+    }
+    return AgentGlanceFixture(app: app, canvas: canvas, sidebar: sidebar, window: window, supervisor: supervisor,
+                              working: working, asking: asking, done: done, note: note, root: root)
+}
+
+/// The hold-⌥ badges tinted by what each agent needs, in the sidebar's own colours,
+/// read through the seam the overlay paints with. Opened through the real
+/// `.flagsChanged` path.
+@MainActor
+static func runLeaderJumpBadgeTintCheck() throws -> String {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError(description: "leader badge tint: " + message) }
+    }
+    let f = try makeAgentGlanceFixture(label: "leader")
+    defer { f.window.orderOut(nil); try? FileManager.default.removeItem(at: f.root) }
+    f.app.leaderDwell = 0
+    guard let option = NSEvent.keyEvent(
+        with: .flagsChanged, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 58) else {
+        throw CheckError(description: "leader badge tint: could not synthesize .flagsChanged")
+    }
+    f.app.handleFlagsChanged(option)
+    try expect(f.canvas.navModeOverlayQASnapshot().isInstalled, "holding ⌥ must open the jump HUD")
+    let labelled = Set(f.canvas.leaderJumpAssignments().map(\.tileId))
+    try expect(labelled == Set([f.working.tile, f.asking.tile, f.done.tile, f.note]),
+               "every tile must carry a letter — got \(labelled.count)")
+
+    let inbox = f.sidebar.agentInbox
+    let now = Date()
+    func sidebarColour(_ agent: AgentID) throws -> NSColor {
+        guard let row = inbox.row(forAgentId: agent.rawValue) else {
+            throw CheckError(description: "leader badge tint: no sidebar row for \(agent.rawValue)")
+        }
+        return AgentInbox96CellView.accentColour(row, now: now, in: f.canvas)
+    }
+    func badge(_ tile: UUID) -> AccentToken? { f.canvas.leaderJumpBadgeAccent(for: tile) }
+
+    let doneWord = inbox.row(forAgentId: f.done.agent.rawValue).flatMap { AgentInbox96CellView.stateWord($0, now: now) }
+    let doneRow = inbox.row(forAgentId: f.done.agent.rawValue)
+    try expect(doneWord == "Done", "the finished agent's row must read Done (unseen) — got \(doneWord ?? "nil"); "
+               + "row state \(doneRow.map { "\($0.state)" } ?? "nil"), unconfirmed \(doneRow?.isUnconfirmed ?? false), "
+               + "terminal \(String(describing: doneRow?.terminalEvent)), unread \(f.supervisor.records[f.done.agent]?.isUnread ?? false)")
+    try expect(badge(f.done.tile) == .accentReview,
+               "a finished, unseen agent's letter must be the sidebar's Done mint — got \(String(describing: badge(f.done.tile)))")
+    let doneRowColour = try sidebarColour(f.done.agent)
+    try expect(badge(f.done.tile)?.color.nsColor(in: f.canvas) == doneRowColour,
+               "the Done letter must be the very colour the sidebar paints that row")
+    try expect(badge(f.asking.tile) == .accentApproval,
+               "an agent waiting on an approval must have an amber letter — got \(String(describing: badge(f.asking.tile)))")
+    let askingRowColour = try sidebarColour(f.asking.agent)
+    try expect(badge(f.asking.tile)?.color.nsColor(in: f.canvas) == askingRowColour,
+               "the amber letter must be the very colour the sidebar paints that row")
+    try expect(badge(f.working.tile) == nil, "a working agent's letter keeps the accent — got \(String(describing: badge(f.working.tile)))")
+    try expect(badge(f.note) == nil, "a tile with no agent keeps the accent")
+
+    // Looking at the finished agent is what retires its Done — and its mint. A
+    // deliberate focus of its tile is how that look arrives.
+    f.supervisor.focusTile(f.done.tile)
+    f.app.refreshAgentSurfaces(notify: false)
+    try expect(badge(f.done.tile) == nil,
+               "once read, the finished agent's letter goes back to the accent — got \(String(describing: badge(f.done.tile)))")
+    return "leader badges: Done mint and approval amber matching the sidebar, accent otherwise, mint gone once read"
+}
+
+/// The hover card says what the agent is doing and the last thing it said, from the
+/// supervisor's transcript — and a line too long for the card ends in an ellipsis.
+@MainActor
+static func runAgentInboxHoverGlanceCheck() throws -> String {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError(description: "hover glance: " + message) }
+    }
+    let f = try makeAgentGlanceFixture(label: "hover")
+    defer { f.window.orderOut(nil); try? FileManager.default.removeItem(at: f.root) }
+    let inbox = f.sidebar.agentInbox
+    inbox.hoverCardEnabled = true
+    inbox.hoverCardScheduler = { _, work in work(); return {} }
+    func card(_ agent: AgentID) throws -> [String] {
+        _ = inbox.hoverRowForQA(id: nil)
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the row for \(agent.rawValue) must be hoverable")
+        try expect(inbox.isHoverCardVisibleForQA, "hovering a row must open its card")
+        return inbox.hoverCardLinesForQA
+    }
+
+    let working = try card(f.working.agent)
+    try expect(working.contains { $0.hasPrefix("Working · ") },
+               "a working agent's card must say Working and for how long — it said \(working)")
+    try expect(working.contains(agentGlanceWorkingLine),
+               "a working agent's card must carry its newest line, list marker dropped — it said \(working)")
+    let asking = try card(f.asking.agent)
+    try expect(asking.contains(AgentStatusVocabulary.label(for: .needsAttention)),
+               "an agent waiting on an approval must say so — it said \(asking)")
+    let done = try card(f.done.agent)
+    try expect(done.contains("Done"), "a finished agent's card must say Done — it said \(done)")
+    try expect(done.contains(agentGlanceDoneLine),
+               "a finished agent's card must carry its last line, not the closing fence — it said \(done)")
+
+    let long = String(repeating: "Following the drag through every zone layer to the persisted frame ", count: 4)
+    let thread = AgentSupervisor.threadId(for: f.working.agent)
+    f.supervisor.qaDeliver(.contentDelta(threadId: thread, turnId: "w1", streamKind: .assistant,
+                                         delta: "\n\n" + long), to: f.working.agent)
+    let streaming = try card(f.working.agent)
+    let expectedLong = long.trimmingCharacters(in: .whitespaces)
+    try expect(streaming.contains(expectedLong), "the card must follow the stream to its newest line — it said \(streaming)")
+    try expect(inbox.hoverCardTruncatedLinesForQA.contains(expectedLong),
+               "a line longer than the card must be cut with an ellipsis — truncated: \(inbox.hoverCardTruncatedLinesForQA)")
+    let width = inbox.hoverCardFrameForQA?.width ?? .infinity
+    try expect(width <= InboxHoverCardView.maximumWidth + 0.5,
+               "a long line must not widen the card past \(InboxHoverCardView.maximumWidth)pt — it is \(width)pt")
+    _ = inbox.hoverRowForQA(id: nil)
+    return "hover card: status (Working · elapsed / \(AgentStatusVocabulary.label(for: .needsAttention)) / Done) and the newest assistant line, truncated in-card"
 }
 }

@@ -590,5 +590,687 @@ enum ZoneArmingChecks {
               + "rect, click/focus/camera all re-armed, a group zone and empty canvas left the "
               + "arming alone, the choice persisted, and a zone reached after the mount got a "
               + "layer and its agent a record")
+
+        try runDrawnZoneSpawns()
+        try runAutoLayoutSpawnsNeverOverlap()
+        try runGrowthPushesNeighbours()
+        try runCloseTightensZone()
+    }
+
+    // MARK: - 8. A zone the user DRAWS is a zone they can create into
+
+    /// The marquee route: draw a zone on empty canvas, pick a project in the
+    /// Home picker, then ⌘K a Board and an Agent.
+    ///
+    /// **The defect.** `WorkspaceRuntime.commitCreatedZone` wrote the zone into
+    /// the document and set `lastActiveZoneId` directly. It never went through
+    /// `setActiveZone`, so the canvas kept the old armed zone and nothing acquired
+    /// the project's controller; and it never installed a `ZoneLayer`, so the
+    /// zone had nowhere for tiles to live. The first spawn opened the project
+    /// picker again (no spawner) or landed in the previously armed zone, and a
+    /// forced spawn fell to the retired flat scene. "Add Project to Canvas…"
+    /// (`_addProjectZone`) never had this bug — it builds and installs the layer.
+    ///
+    /// Two shapes, because they fail differently: a registered project with no
+    /// zone anywhere (no controller), and a SECOND zone for a project that is
+    /// already placed (controller live, but no layer for the new zone).
+    ///
+    /// Shared invariants fixture: `mountWorkspaceSceneAtBoot` and launch's own
+    /// `wireCanvasCallbacks`, so the provisional zone reaches the real
+    /// `presentProjectHomePicker` → `commitProvisionalZone` → `onZoneCreated`.
+    private static func runDrawnZoneSpawns() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        let fixture = try Fixture(label: "drawn-zone")
+        defer { fixture.dispose() }
+
+        // A registered project placed in no workspace: the picker offers it and
+        // nothing has acquired it.
+        let projectElm = UUID(uuidString: "00000000-0000-0000-0000-00000000B2E1")!
+        let elmRoot = fixture.root.appendingPathComponent("Elm", isDirectory: true)
+        try FileManager.default.createDirectory(at: elmRoot, withIntermediateDirectories: true)
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        try ProjectStore(projectRoot: elmRoot).saveProject(Project(
+            id: projectElm, name: "Elm", rootPath: elmRoot.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning)))
+        var registry = try fixture.registryStore.loadOrEmpty()
+        registry.projects.append(ProjectEntry(
+            id: projectElm, name: "Elm", rootPath: elmRoot.path, workspaceId: nil,
+            lastOpenedAt: now, pinned: false, missing: false))
+        try fixture.registryStore.save(registry)
+
+        // ⌘K "New Agent" needs a ready harness with a catalogued model. Volatile
+        // argument domain: read first by every `UserDefaults.standard` lookup,
+        // never persisted.
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        try fixture.mount()
+        let m = try fixture.requireMounted("drawn-zone")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+
+        // Any request for the creation-scope picker is the "picker opened again"
+        // half of the report. Counted, never presented.
+        var pickerRequests = 0
+        m.delegate.creationScopePickerPresenterForQA = { _ in pickerRequests += 1 }
+
+        /// Draw on empty canvas and confirm `project` through the picker's row.
+        func drawZone(_ label: String, screenRect: CGRect, project: UUID) throws -> UUID {
+            let zoneId = m.canvas.beginProvisionalZone(screenRect: screenRect)
+            try expect(m.delegate.qaConfirmProjectHomePicker(projectId: project, homeRelativePath: nil),
+                       "\(label): drawing a zone presented no Home picker offering the project")
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(m.runtime.document.zones.contains { $0.zoneId == zoneId && $0.projectId == project },
+                       "\(label): the confirmed zone must be in the document, bound to its project")
+            try expect(m.runtime.qaArmedZoneId == zoneId,
+                       "\(label): the document must arm the zone just drawn; got "
+                       + "\(String(describing: m.runtime.qaArmedZoneId))")
+            try expect(m.canvas.armedZoneId == zoneId,
+                       "\(label): the CANVAS must arm the zone just drawn — it is what the creation "
+                       + "scope and every placement read. `commitCreatedZone` wrote only "
+                       + "`document.lastActiveZoneId`, bypassing `setActiveZone`. Got "
+                       + "\(String(describing: m.canvas.armedZoneId))")
+            try expect(m.canvas.installedZoneLayerIds.contains(zoneId),
+                       "\(label): the zone must have a ZoneLayer, or a spawn into it falls to the "
+                       + "retired flat scene; installed: \(m.canvas.installedZoneLayerIds)")
+            try expect(m.runtime.controller(for: project)?.tileSpawner != nil,
+                       "\(label): the project's controller and spawner must be ready, or the first "
+                       + "spawn re-opens the project picker")
+            let scope = m.delegate.qaResolvedCreationScope
+            try expect(scope?.projectId == project && scope?.zoneId == zoneId,
+                       "\(label): creation must scope to the drawn zone and its project; got "
+                       + "\(String(describing: scope))")
+            return zoneId
+        }
+
+        /// One ⌘K action; returns the one tile it created, from either model.
+        func spawn(_ label: String, _ action: LaunchPaletteAction) throws -> UUID {
+            let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+            let picksBefore = pickerRequests
+            _ = m.delegate.qaPerformPaletteAction(action)
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(pickerRequests == picksBefore,
+                       "\(label): the spawn asked for a project again (\(pickerRequests - picksBefore) "
+                       + "picker request(s)) — the project was chosen when the zone was drawn")
+            let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+            guard created.count == 1, let tileId = created.first else {
+                throw Failure(message: "\(label): expected exactly one new installed tile; got \(created.count)")
+            }
+            return tileId
+        }
+
+        /// The tile's WORLD frame lies inside the zone as drawn.
+        func expectInside(_ label: String, _ tileId: UUID, zone zoneId: UUID) throws {
+            try expect(m.canvas.qaZoneMembership(of: tileId) == zoneId,
+                       "\(label): the tile must belong to the drawn zone; got "
+                       + "\(String(describing: m.canvas.qaZoneMembership(of: tileId)))")
+            guard let frame = m.canvas.allTilesInWorldFrames().first(where: { $0.id == tileId })?.frame,
+                  let zone = m.canvas.qaLiveZonePlacement(zoneId) else {
+                throw Failure(message: "\(label): could not read the tile's world frame or the zone")
+            }
+            let rect = CanvasEngine.zoneWorldFrame(zone)
+            try expect(frame.x >= rect.x - 0.001 && frame.y >= rect.y - 0.001
+                       && frame.x + frame.width <= rect.x + rect.width + 0.001
+                       && frame.y + frame.height <= rect.y + rect.height + 0.001,
+                       "\(label): world frame (\(frame.x), \(frame.y)) \(frame.width)x\(frame.height) "
+                       + "is not inside the drawn zone (\(rect.x), \(rect.y)) \(rect.width)x\(rect.height)")
+        }
+
+        // Case 1: a registered project with no zone anywhere. World
+        // (1600, 1010)+1200x700 — clear of every seeded zone (A2 ends at y 960,
+        // A3 at x 1500) under the seeded camera (300, -100).
+        let elmZone = try drawZone("unplaced project", screenRect: CGRect(x: 1300, y: 1110, width: 1200, height: 700),
+                                   project: projectElm)
+        // A board takes the zone's name once the user has named it.
+        m.canvas.qaRenameZone(elmZone, to: "Elm site")
+        let elmBoard = try spawn("unplaced project: board", .newBoard)
+        try expectInside("unplaced project: board", elmBoard, zone: elmZone)
+        let elmBoardTitle = m.canvas.allTilesInWorldFrames().first(where: { $0.id == elmBoard })?.title
+        try expect(elmBoardTitle == "Elm site",
+                   "unplaced project: a board made in the zone named \"Elm site\" must take that name; got "
+                   + "\(String(describing: elmBoardTitle))")
+        let elmAgent = try spawn("unplaced project: agent", .newManagedAgent)
+        try expectInside("unplaced project: agent", elmAgent, zone: elmZone)
+        let supervisor = m.delegate.qaAgentSupervisor
+        guard let agentId = supervisor.agent(forTile: elmAgent), let record = supervisor.records[agentId] else {
+            throw Failure(message: "unplaced project: the agent tile has no agent record")
+        }
+        try expect(record.projectId == projectElm,
+                   "unplaced project: the agent must belong to Elm; got \(String(describing: record.projectId))")
+
+        // Case 2: a SECOND zone for a project already placed (Birch owns A2).
+        // World (2800, 200)+1000x800, right of everything.
+        let birchZone = try drawZone("placed project", screenRect: CGRect(x: 2500, y: 300, width: 1000, height: 800),
+                                     project: Fixture.projectA2)
+        let birchBoard = try spawn("placed project: board", .newBoard)
+        try expectInside("placed project: board", birchBoard, zone: birchZone)
+        // Birch's second zone is unnamed, so it shows the project's name and the board takes it.
+        let birchBoardTitle = m.canvas.allTilesInWorldFrames().first(where: { $0.id == birchBoard })?.title
+        let birchZoneTitle = m.canvas.qaZoneDisplayName(birchZone) ?? ""
+        try expect(birchBoardTitle == AppDelegate.boardTitle(forZoneTitle: birchZoneTitle),
+                   "placed project: the board must be titled after the zone header \"\(birchZoneTitle)\"; got "
+                   + "\(String(describing: birchBoardTitle))")
+        try expect(AppDelegate.boardTitle(forZoneTitle: "Zone 3") == "New Board"
+                   && AppDelegate.boardTitle(forZoneTitle: "Group") == "New Board",
+                   "an automatically named zone must give \"New Board\"")
+
+        // Durable: each tile in its own project's canvas, stamped with the
+        // drawn zone, at the frame on screen; and the zones in the workspace file.
+        try m.runtime.flushMountedWorkspaceState()
+        fixture.drain()
+        func expectPersisted(_ label: String, _ tileId: UUID, root: URL, zone zoneId: UUID) throws {
+            let persisted = ((try? ProjectStore(projectRoot: root).tryLoadCanvas()) ?? nil)?.tiles ?? []
+            guard let tile = persisted.first(where: { $0.id == tileId }) else {
+                throw Failure(message: "\(label): the tile is not in its project's canvas.json "
+                              + "(\(persisted.count) tile(s) there)")
+            }
+            try expect(tile.zoneId == zoneId,
+                       "\(label): persisted with zone \(String(describing: tile.zoneId)), expected the drawn zone")
+            if let live = m.canvas.allTilesInWorldFrames().first(where: { $0.id == tileId })?.frame {
+                try expect(abs(live.x - tile.frame.x) + abs(live.y - tile.frame.y) < 0.001,
+                           "\(label): persisted frame (\(tile.frame.x), \(tile.frame.y)) is not the WORLD "
+                           + "frame on screen (\(live.x), \(live.y))")
+            }
+        }
+        try expectPersisted("unplaced project: board", elmBoard, root: elmRoot, zone: elmZone)
+        try expectPersisted("unplaced project: agent", elmAgent, root: elmRoot, zone: elmZone)
+        try expectPersisted("placed project: board", birchBoard,
+                            root: fixture.projectRoots[Fixture.projectA2]!, zone: birchZone)
+        for other in [Fixture.projectA1] {
+            let tiles = ((try? ProjectStore(projectRoot: fixture.projectRoots[other]!).tryLoadCanvas()) ?? nil)?.tiles ?? []
+            try expect(!tiles.contains { [elmBoard, elmAgent, birchBoard].contains($0.id) },
+                       "a drawn zone's tile leaked into another project's canvas")
+        }
+        let onDisk = try fixture.readWorkspaceFile(Fixture.workspaceA).document
+        try expect(onDisk?.zones.contains { $0.zoneId == elmZone && $0.projectId == projectElm } == true
+                   && onDisk?.zones.contains { $0.zoneId == birchZone && $0.projectId == Fixture.projectA2 } == true,
+                   "both drawn zones must be in workspace A's file, bound to their projects")
+
+        print("ZoneArmingChecks: a drawn zone for an unplaced project and a second drawn zone for a "
+              + "placed one each armed, got a layer and a spawner; ⌘K Board and Agent landed inside "
+              + "them with no second picker and persisted into their own project")
+    }
+
+    // MARK: - 9. Under auto layout, a spawn never lands on a sibling
+
+    /// The film capture `full-day-20261005T175103Z` (take 01-morning): with global
+    /// auto layout on, a drawn zone holding a Board and an Agent side by side took a
+    /// second Agent from ⌘K ON TOP of the board, and it stayed there.
+    ///
+    /// **The defect.** Automatic placement ranks "on screen" above "free", so with
+    /// the camera framing the zone tightly every free dock candidate was off screen
+    /// and the new tile was placed overlapping the board. Inside the zone, so the
+    /// zone did not grow. `arrangeAutoLayoutAfterSpawn` then settled with no mover:
+    /// the new tile, being top-most, seeded the cluster, and the board found no
+    /// gap-contact slot inside a zone too small for three tiles — `absorb` leaves
+    /// such a tile where it is, overlapping. Under a looser camera the placement
+    /// happened to choose a free slot below, which is why an earlier capture of the
+    /// same scene was fine.
+    ///
+    /// Drives the production ⌘K path (`qaPerformPaletteAction`) with auto layout ON
+    /// in the volatile argument domain, under several camera framings, and asserts
+    /// world geometry: no two members of the zone overlap and each lies inside the
+    /// (grown) zone, after every spawn.
+    private static func runAutoLayoutSpawnsNeverOverlap() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        /// The drawn zone, in screen points under the seeded camera (300, -100, 1):
+        /// world (1600, 1010) + 1750x810 — room for two tiles side by side, not three.
+        let drawnRect = CGRect(x: 1300, y: 1110, width: 1750, height: 810)
+        enum Framing: String, CaseIterable {
+            /// The film: the camera frames the whole zone, edge to edge.
+            case framesZone = "camera framing the zone"
+            /// The camera as it was when the zone was drawn (zone partly visible).
+            case asDrawn = "camera as drawn"
+            /// Zoomed far out: every dock candidate is on screen.
+            case zoomedOut = "camera zoomed out"
+            /// The capture verbatim: its 1619x1048 canvas, its zone, and its two
+            /// cameras — the one the Board and Agent were made under, then the
+            /// re-framed one the second Agent was made under.
+            case film = "the film's cameras"
+        }
+        let filmDrawCamera = CanvasViewport(x: 1480.1136363636365, y: -125.4545454545455, zoom: 0.88)
+        let filmSpawnCamera = CanvasViewport(x: 1674.4639376218324, y: -161.52241715399612, zoom: 0.8784246575342466)
+
+        for framing in Framing.allCases {
+            let fixture = try Fixture(label: "autolayout-spawn")
+            defer { fixture.dispose() }
+            let projectElm = UUID(uuidString: "00000000-0000-0000-0000-00000000B2E2")!
+            let elmRoot = fixture.root.appendingPathComponent("Elm", isDirectory: true)
+            try FileManager.default.createDirectory(at: elmRoot, withIntermediateDirectories: true)
+            let now = Date(timeIntervalSince1970: 1_900_000_000)
+            try ProjectStore(projectRoot: elmRoot).saveProject(Project(
+                id: projectElm, name: "Elm", rootPath: elmRoot.path, createdAt: now, updatedAt: now,
+                defaultLaunchProfileId: "shell", editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning)))
+            var registry = try fixture.registryStore.loadOrEmpty()
+            registry.projects.append(ProjectEntry(
+                id: projectElm, name: "Elm", rootPath: elmRoot.path, workspaceId: nil,
+                lastOpenedAt: now, pinned: false, missing: false))
+            try fixture.registryStore.save(registry)
+
+            try fixture.mount()
+            let m = try fixture.requireMounted("autolayout-spawn")
+            defer { m.delegate.qaAgentSupervisor.stopAll() }
+            m.delegate.creationScopePickerPresenterForQA = { _ in }
+            let label = framing.rawValue
+            try expect(m.canvas.isAutoLayoutEnabled, "\(label): auto layout must be ON for this witness")
+
+            var screenRect = drawnRect
+            if framing == .film {
+                m.canvas.frame = CGRect(x: 0, y: 0, width: 1619, height: 1048)
+                m.canvas.setViewport(filmDrawCamera)
+                // The capture's zone origin AS PERSISTED, float dust included: a real
+                // pointer drag lands world coordinates off the integer grid, and that
+                // dust is what makes an upward grow unrepresentable (see the fix).
+                let topLeft = CanvasEngine.worldToScreen(
+                    CGPoint(x: 1720, y: 30.00000000000003), viewport: filmDrawCamera)
+                let bottomRight = CanvasEngine.worldToScreen(CGPoint(x: 2880, y: 840), viewport: filmDrawCamera)
+                screenRect = CGRect(x: topLeft.x, y: topLeft.y,
+                                    width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y)
+            }
+            let zoneId = m.canvas.beginProvisionalZone(screenRect: screenRect)
+            try expect(m.delegate.qaConfirmProjectHomePicker(projectId: projectElm, homeRelativePath: nil),
+                       "\(label): drawing a zone presented no Home picker offering the project")
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(m.canvas.armedZoneId == zoneId, "\(label): the drawn zone must be armed")
+
+            func zoneRect() throws -> TileFrame {
+                guard let zone = m.canvas.qaLiveZonePlacement(zoneId) else {
+                    throw Failure(message: "\(label): the drawn zone vanished")
+                }
+                return CanvasEngine.zoneWorldFrame(zone)
+            }
+            func frameZone() throws {
+                let rect = try zoneRect()
+                let size = m.canvas.bounds.size
+                let zoom = min(Double(size.width) / rect.width, Double(size.height) / rect.height)
+                m.canvas.setViewport(CanvasViewport(
+                    x: rect.x + rect.width / 2 - Double(size.width) / zoom / 2,
+                    y: rect.y + rect.height / 2 - Double(size.height) / zoom / 2,
+                    zoom: zoom))
+                m.canvas.layoutSubtreeIfNeeded()
+            }
+            switch framing {
+            case .framesZone: try frameZone()
+            case .asDrawn, .film: break
+            case .zoomedOut:
+                let rect = try zoneRect()
+                m.canvas.setViewport(CanvasViewport(x: rect.x - 2600, y: rect.y - 1400, zoom: 0.4))
+                m.canvas.layoutSubtreeIfNeeded()
+            }
+
+            // Every OTHER zone, and how much the drawn zone overlaps it as drawn.
+            // Growth may never add to that: it pushes the neighbour away (§10), and a
+            // zone that grew across its neighbour stole the neighbour's clicks (capture
+            // `full-day-20261005T175740Z`: a click "in Roast API" armed Storefront
+            // and an agent landed in the wrong project).
+            func overlapArea(_ a: TileFrame, _ b: TileFrame) -> Double {
+                max(0, min(a.x + a.width, b.x + b.width) - max(a.x, b.x))
+                    * max(0, min(a.y + a.height, b.y + b.height) - max(a.y, b.y))
+            }
+            let drawn = try zoneRect()
+            var drawnOverlap: [UUID: Double] = [:]
+            for zone in m.runtime.document.zones where zone.zoneId != zoneId {
+                guard let other = m.canvas.qaLiveZonePlacement(zone.zoneId) else { continue }
+                drawnOverlap[zone.zoneId] = overlapArea(drawn, CanvasEngine.zoneWorldFrame(other))
+            }
+            try expect(!drawnOverlap.isEmpty, "\(label): the fixture must have neighbouring zones")
+
+            var spawned: [UUID] = []
+            for (step, action) in [("board", LaunchPaletteAction.newBoard),
+                                   ("agent", .newManagedAgent), ("second agent", .newManagedAgent)] {
+                if framing == .film, step == "second agent" {
+                    m.canvas.setViewport(filmSpawnCamera)
+                    m.canvas.layoutSubtreeIfNeeded()
+                }
+                let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+                _ = m.delegate.qaPerformPaletteAction(action)
+                m.canvas.layoutSubtreeIfNeeded()
+                let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+                guard created.count == 1, let tileId = created.first else {
+                    throw Failure(message: "\(label): ⌘K \(step) created \(created.count) tile(s), expected one")
+                }
+                spawned.append(tileId)
+                let rect = try zoneRect()
+                let members = m.canvas.allTilesInWorldFrames().filter {
+                    m.canvas.qaZoneMembership(of: $0.id) == zoneId
+                }
+                try expect(Set(spawned).isSubset(of: Set(members.map(\.id))),
+                           "\(label): after the \(step), every spawned tile must belong to the drawn zone")
+                func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+                for member in members {
+                    let f = member.frame
+                    try expect(f.x >= rect.x - 0.001 && f.y >= rect.y - 0.001
+                               && f.x + f.width <= rect.x + rect.width + 0.001
+                               && f.y + f.height <= rect.y + rect.height + 0.001,
+                               "\(label): after the \(step), \(member.kind) \(describe(f)) is not inside the "
+                               + "zone \(describe(rect))")
+                }
+                for (index, a) in members.enumerated() {
+                    for b in members.dropFirst(index + 1) {
+                        let overlap = a.frame.x < b.frame.x + b.frame.width - 0.001
+                            && b.frame.x < a.frame.x + a.frame.width - 0.001
+                            && a.frame.y < b.frame.y + b.frame.height - 0.001
+                            && b.frame.y < a.frame.y + a.frame.height - 0.001
+                        try expect(!overlap,
+                                   "\(label): after the \(step), \(a.kind) \(describe(a.frame)) overlaps "
+                                   + "\(b.kind) \(describe(b.frame)) in an auto-layout zone")
+                    }
+                }
+                for (id, before) in drawnOverlap {
+                    guard let other = m.canvas.qaLiveZonePlacement(id) else { continue }
+                    let otherRect = CanvasEngine.zoneWorldFrame(other)
+                    try expect(overlapArea(rect, otherRect) <= before + 0.001,
+                               "\(label): after the \(step), the zone \(describe(rect)) grew across the "
+                               + "neighbouring zone \(describe(otherRect))")
+                }
+                // The film re-framed the zone between spawns; so does this framing.
+                if framing == .framesZone { try frameZone() }
+            }
+        }
+
+        print("ZoneArmingChecks: under auto layout, ⌘K Board, Agent, Agent in a drawn zone never "
+              + "overlapped, stayed inside the zone, and never grew it across a neighbouring zone, "
+              + "under every camera framing")
+    }
+
+    // MARK: - 10. A zone that grows pushes the neighbour it runs into
+
+    /// Dylan, 2026-10-05: "push neighbour… new takes prio". A spawn into a full
+    /// auto-layout zone docks the tile past the zone's right or bottom edge and
+    /// the zone grows to hold it. When that growth runs into another zone, the
+    /// zone that grew keeps its place and the neighbour moves away, with its
+    /// tiles, as a dragged zone pushes. Before this, the growth either avoided
+    /// the neighbour or, boxed in on both sides as here, ran straight across it.
+    ///
+    /// Fixture: Roots (900x700, three tiles) has Birch 200 pt to its right and
+    /// Annex 100 pt below. A new Agent fits in neither gap.
+    private static func runGrowthPushesNeighbours() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        let fixture = try Fixture(label: "growth-push")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("growth-push")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+        try expect(m.canvas.isAutoLayoutEnabled, "growth push: auto layout must be ON for this witness")
+
+        let roots = Fixture.zoneA1
+        let neighbours = [Fixture.zoneA2, Fixture.zoneA3]
+        func rect(_ id: UUID) throws -> TileFrame {
+            guard let zone = m.canvas.qaLiveZonePlacement(id) else {
+                throw Failure(message: "growth push: zone \(id) vanished")
+            }
+            return CanvasEngine.zoneWorldFrame(zone)
+        }
+        func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+        func overlaps(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            a.x < b.x + b.width - 0.001 && b.x < a.x + a.width - 0.001
+                && a.y < b.y + b.height - 0.001 && b.y < a.y + a.height - 0.001
+        }
+        func members(_ id: UUID) -> [UUID: TileFrame] {
+            Dictionary(m.canvas.allTilesInWorldFrames()
+                .filter { m.canvas.qaZoneMembership(of: $0.id) == id }
+                .map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        let rootsBefore = try rect(roots)
+        var neighbourBefore: [UUID: (rect: TileFrame, members: [UUID: TileFrame])] = [:]
+        for id in neighbours { neighbourBefore[id] = (try rect(id), members(id)) }
+        for id in neighbours {
+            try expect(!overlaps(rootsBefore, neighbourBefore[id]!.rect),
+                       "growth push: the fixture's zones must start apart")
+        }
+
+        try expect(m.runtime.setActiveZone(roots, reason: .click), "growth push: Roots must arm")
+        let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newManagedAgent)
+        m.canvas.layoutSubtreeIfNeeded()
+        let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+        try expect(created.count == 1, "growth push: ⌘K Agent created \(created.count) tile(s), expected one")
+
+        let rootsAfter = try rect(roots)
+        try expect(rootsAfter.x == rootsBefore.x && rootsAfter.y == rootsBefore.y,
+                   "growth push: the zone that grew must keep its origin; \(describe(rootsBefore)) → \(describe(rootsAfter))")
+        try expect(rootsAfter.width > rootsBefore.width || rootsAfter.height > rootsBefore.height,
+                   "growth push: Roots \(describe(rootsBefore)) had no room for the Agent and must have grown")
+        try expect(members(roots).keys.contains(created.first!), "growth push: the Agent must belong to Roots")
+
+        var pushed = 0
+        for id in neighbours {
+            let after = try rect(id)
+            try expect(!overlaps(rootsAfter, after),
+                       "growth push: Roots grew to \(describe(rootsAfter)) across its neighbour \(describe(after))")
+            let (old, oldMembers) = neighbourBefore[id]!
+            let dx = after.x - old.x, dy = after.y - old.y
+            if dx != 0 || dy != 0 { pushed += 1 }
+            try expect(after.width == old.width && after.height == old.height,
+                       "growth push: a pushed neighbour moves, it never resizes; \(describe(old)) → \(describe(after))")
+            for (tile, frame) in members(id) {
+                guard let was = oldMembers[tile] else { continue }
+                try expect(abs(frame.x - was.x - dx) < 0.001 && abs(frame.y - was.y - dy) < 0.001,
+                           "growth push: a pushed zone's tile must move with it by (\(dx), \(dy)); "
+                           + "\(describe(was)) → \(describe(frame))")
+            }
+        }
+        try expect(pushed >= 1, "growth push: Roots grew into a neighbour, so one of them must have moved")
+
+        print("ZoneArmingChecks: a zone that grew to take a new Agent kept its origin and pushed the "
+              + "neighbour it ran into, tiles and all, so no two zones overlap")
+    }
+
+    // MARK: - 11. Closing a tile in an auto-layout zone closes the gap
+
+    /// Closing a member used to leave a hole: `CanvasNSView.removeTile` dropped the
+    /// view and ran no layout, so a row `A | Agent | B` became `A | _ | B` and stayed
+    /// that way. Every close the person makes commits through `AppDelegate.deleteTile`
+    /// — the title bar's ✕ (`onTileCloseRequested`), ⌘⌫, and closing an agent to
+    /// History from the sidebar (Archive, the close nudge) — so both legs below drive
+    /// one of those real entries, never `removeTile` or the solver.
+    ///
+    /// Roots is arranged at rest: `A | Agent | B` across the top, the file under A.
+    ///  - Leg 1 archives the Agent from the sidebar's row menu: B must move left into
+    ///    gap contact with A, on the same line.
+    ///  - Leg 2 closes A with its ✕: what is left must still be one gap-contact
+    ///    cluster.
+    /// After each: no member overlaps another, every member is inside the zone, the
+    /// zone and its neighbours are unchanged, and the project's canvas file on disk
+    /// holds the frames on screen.
+    private static func runCloseTightensZone() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        // Pinned, so whoever's preferences run this cannot move the arithmetic, and a
+        // close never stops on a confirmation alert.
+        arguments[TileGapResolver.userDefaultsKey] = 8.0
+        arguments[ZoneBoundsConfig.paddingKey] = 24.0
+        arguments[DeleteConfirmPolicy.userDefaultsKey] = DeleteConfirmPolicy.never.rawValue
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        let fixture = try Fixture(label: "close-tightens")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("close-tightens")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+        try expect(m.canvas.isAutoLayoutEnabled, "close tightens: auto layout must be ON for this witness")
+
+        let roots = Fixture.zoneA1
+        let gap = 8.0, padding = 24.0, header = Double(ZoneChromeNSView.headerHeight)
+        func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+        func zoneRect(_ id: UUID) throws -> TileFrame {
+            guard let zone = m.canvas.qaLiveZonePlacement(id) else {
+                throw Failure(message: "close tightens: zone \(id) vanished")
+            }
+            return CanvasEngine.zoneWorldFrame(zone)
+        }
+        func members() -> [UUID: TileFrame] {
+            Dictionary(m.canvas.allTilesInWorldFrames()
+                .filter { m.canvas.qaZoneMembership(of: $0.id) == roots }
+                .map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        try expect(m.runtime.setActiveZone(roots, reason: .click), "close tightens: Roots must arm")
+        let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newManagedAgent)
+        m.canvas.layoutSubtreeIfNeeded()
+        let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+        guard created.count == 1, let agentTile = created.first else {
+            throw Failure(message: "close tightens: ⌘K Agent created \(created.count) tile(s), expected one")
+        }
+        guard let agentId = m.delegate.qaAgentSupervisor.agent(forTile: agentTile) else {
+            throw Failure(message: "close tightens: the new Agent tile has no agent behind it")
+        }
+
+        // The arrangement, at rest: every member in gap contact, top-left at the
+        // zone's content corner.
+        let zone = try zoneRect(roots)
+        let cx = zone.x + padding, cy = zone.y + header + padding
+        let a = Fixture.noteA1a, b = Fixture.noteA1b, file = Fixture.fileA1
+        let arranged: [UUID: TileFrame] = [
+            a: TileFrame(x: cx, y: cy, width: 240, height: 160),
+            agentTile: TileFrame(x: cx + 248, y: cy, width: 320, height: 240),
+            b: TileFrame(x: cx + 248 + 328, y: cy, width: 240, height: 160),
+            file: TileFrame(x: cx, y: cy + 168, width: 240, height: 200)
+        ]
+        try expect(cx + 248 + 328 + 240 <= zone.x + zone.width - padding,
+                   "close tightens: Roots \(describe(zone)) is too narrow for the arranged row")
+        var applied = false
+        m.canvas.performGeometryEdit(.moveTile, includeAllTiles: true) {
+            applied = m.canvas.applyGeometrySnapshot(CanvasGeometrySnapshot(
+                tiles: arranged.map { CanvasTileGeometry(tileId: $0.key, frame: $0.value, zoneId: roots) },
+                zones: []), notifyCommit: false)
+        }
+        m.canvas.layoutSubtreeIfNeeded()
+        try expect(applied && members() == arranged,
+                   "close tightens: the arrangement did not land — \(members().mapValues(describe))")
+
+        let zonesBefore = try Dictionary(uniqueKeysWithValues: m.runtime.document.zones.map {
+            ($0.zoneId, try zoneRect($0.zoneId))
+        })
+        let projectStore = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
+
+        func expectSettled(_ leg: String, closed: UUID) throws {
+            m.canvas.layoutSubtreeIfNeeded()
+            let now = members()
+            try expect(now[closed] == nil && !m.canvas.allTilesInWorldFrames().contains { $0.id == closed },
+                       "\(leg): the closed tile is still on the canvas")
+            for (id, was) in zonesBefore {
+                let rect = try zoneRect(id)
+                try expect(rect == was, "\(leg): closing a tile changed zone \(id) \(describe(was)) → \(describe(rect))")
+            }
+            for (id, f) in now {
+                try expect(f.x >= zone.x + padding - 0.001 && f.y >= zone.y + header + padding - 0.001
+                           && f.x + f.width <= zone.x + zone.width - padding + 0.001
+                           && f.y + f.height <= zone.y + zone.height - padding + 0.001,
+                           "\(leg): \(id) \(describe(f)) is not inside Roots \(describe(zone))")
+            }
+            let frames = Array(now.values)
+            for (index, p) in frames.enumerated() {
+                for q in frames.dropFirst(index + 1) {
+                    let overlap = p.x < q.x + q.width - 0.001 && q.x < p.x + p.width - 0.001
+                        && p.y < q.y + q.height - 0.001 && q.y < p.y + p.height - 0.001
+                    try expect(!overlap, "\(leg): \(describe(p)) overlaps \(describe(q))")
+                }
+            }
+            // One gap-contact cluster: the hole the closed tile left has closed.
+            var reached: Set<UUID> = [now.keys.sorted { $0.uuidString < $1.uuidString }[0]]
+            var grew = true
+            while grew {
+                grew = false
+                for (id, f) in now where !reached.contains(id)
+                    && reached.contains(where: { CanvasAutoLayoutEngine.isGapAdjacent(f, now[$0]!, gap: gap) }) {
+                    reached.insert(id)
+                    grew = true
+                }
+            }
+            try expect(reached.count == now.count,
+                       "\(leg): the zone kept the hole the closed tile left — the members are not one "
+                       + "gap-contact cluster: \(now.mapValues(describe))")
+            guard let persisted = try projectStore.tryLoadCanvas() else {
+                throw Failure(message: "\(leg): project Alder has no canvas on disk")
+            }
+            try expect(!persisted.tiles.contains { $0.id == closed },
+                       "\(leg): the closed tile is still in the canvas file")
+            for (id, f) in now {
+                let onDisk = persisted.tiles.first { $0.id == id }?.frame
+                try expect(onDisk == f, "\(leg): \(id) is at \(describe(f)) on screen but "
+                           + "\(onDisk.map(describe) ?? "absent") on disk")
+            }
+        }
+
+        // Leg 1: Archive from the sidebar's row menu, the verb the close nudge uses.
+        try expect(m.delegate.performInboxRowAction(.archive, on: [agentId.rawValue]),
+                   "close tightens: Archive refused the idle Agent")
+        try expectSettled("archive", closed: agentTile)
+        let afterArchive = members()
+        try expect(afterArchive[b] == TileFrame(x: cx + 248, y: cy, width: 240, height: 160),
+                   "archive: B must close up to A at (\(cx + 248), \(cy)); it is at "
+                   + "\(afterArchive[b].map(describe) ?? "nowhere")")
+        try expect(afterArchive[a] == arranged[a] && afterArchive[file] == arranged[file],
+                   "archive: A and the file were already in place and must not move")
+
+        // Leg 2: the title bar's ✕.
+        guard let closeRequested = m.canvas.onTileCloseRequested else {
+            throw Failure(message: "close tightens: the canvas has no close handler wired")
+        }
+        closeRequested(a)
+        try expectSettled("✕", closed: a)
+
+        print("ZoneArmingChecks: closing a tile in an auto-layout zone (Archive from the sidebar, and "
+              + "the ✕) closed the gap it left, kept the zone and its neighbours where they were, and "
+              + "persisted the result")
     }
 }

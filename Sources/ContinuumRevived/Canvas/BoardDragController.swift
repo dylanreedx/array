@@ -241,14 +241,17 @@ extension KanbanTileNSView {
         canvas.showDragGhost(at: world, label: "Release to assign to " + (taskAgents?().first(where: { $0.tileID == agentTileId })?.name ?? "agent"), detail: title)
     }
 
-    /// The managed-agent tile under a point given in this tile's coordinates, or
-    /// nil when the pointer is still inside the board.
+    /// The managed-agent tile that is TOPMOST under a point given in this tile's
+    /// coordinates, or nil when the board itself is what the pointer is over.
+    /// Stacking decides, not the board's rectangle: an agent tile lying over the
+    /// board is where the user is dropping, and refusing every point inside the
+    /// board's bounds turned that drop into a lane move hidden behind the agent.
     private func agentTile(under point: CGPoint) -> UUID? {
-        guard bounds.contains(point) == false else { return nil }
         guard let canvas, let host = canvas.superview else { return nil }
         // hitTest takes coordinates in the receiver's parent, not its bounds.
         guard var hit = canvas.hitTest(convert(point, to: host)) else { return nil }
         while let parent = hit.superview {
+            if hit === self { return nil }
             if let agent = hit as? ManagedAgentTileNSView {
                 guard taskAgents?().contains(where: { $0.tileID == agent.tile.id }) ?? true else { return nil }
                 return agent.tile.id
@@ -286,7 +289,11 @@ extension KanbanTileNSView {
         let command = target.moveCommand(for: session.cardId)
         let cardId = session.cardId
         endDragSession(commit: true)
+        // The settle above already landed the card; the render this command
+        // produces must not animate it again from the stale source frame.
+        suppressesChangeAnimation = true
         onCommand?(command)
+        suppressesChangeAnimation = false
         setFocusState(.selected(cardId))
     }
 

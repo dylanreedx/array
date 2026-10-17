@@ -129,7 +129,7 @@ public struct CompanionFreshness: Equatable, Sendable {
             return CompanionFreshness(
                 state: .unpaired,
                 title: "Pair this phone",
-                subtitle: "Connect to your Continuum instance",
+                subtitle: "Connect to your Array instance",
                 allowsMutations: false,
                 actionBlocker: "Pair this phone",
                 showsCachedCanvas: false,

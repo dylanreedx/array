@@ -64,6 +64,7 @@ public struct AgentBlockKind: RawRepresentable, Codable, Equatable, Hashable, Se
     public static let imageGallery = Self(rawValue: "image-gallery")!
     public static let fileReferences = Self(rawValue: "file-references")!
     public static let agentReference = Self(rawValue: "agent-reference")!
+    public static let taskReference = Self(rawValue: "task-reference")!
     public static let error = Self(rawValue: "error")!
     public static let notice = Self(rawValue: "notice")!
     public static let unknown = Self(rawValue: "unknown")!
@@ -573,6 +574,19 @@ extension AgentCompactionPayload {
     }
 }
 
+/// A board task the user handed to the agent with this turn. The agent receives
+/// the whole task text; the transcript keeps only what the user recognises —
+/// the title and a one-line summary — and never the board/card identifiers.
+public struct AgentTaskReferencePayload: Codable, Equatable, Sendable {
+    public var title: String
+    public var summary: String?
+
+    public init(title: String, summary: String? = nil) {
+        self.title = title
+        self.summary = summary
+    }
+}
+
 /// A durable, portable reference to an agent that participated in this
 /// conversation. Runtime status and controls are deliberately resolved by the
 /// host from `agentID`; keeping them out of the document prevents every status
@@ -704,6 +718,7 @@ public enum AgentBlockPayload: Codable, Equatable, Sendable {
     case imageGallery(AgentImageGalleryPayload)
     case fileReferences(AgentFileReferencePayload)
     case agentReference(AgentReferencePayload)
+    case taskReference(AgentTaskReferencePayload)
     case error(AgentErrorPayload)
     case notice(AgentNoticePayload)
     case compaction(AgentCompactionPayload)

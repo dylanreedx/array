@@ -647,8 +647,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var undoToastTimer: Timer?
     /// One cadence for the whole list. Cells never own timers; the single oldest
     /// eligible visible row borrows this phase when it is materialized.
+    /// Re-reads the close nudge's five-minute threshold as time passes. It never
+    /// hides the nudge: an on/off blink made it visible half the time.
     private var settleNudgeTimer: Timer?
-    private var settleNudgePhaseVisible = true
     private static let settleNudgePeriod: TimeInterval = 30
     /// One clock for every materialized live duration and relative completion age.
     /// It ticks each second while work is running and only once a minute for a list
@@ -696,6 +697,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the ones that survived the current scope, which would make every scope but
     /// `.all` a one-way door.
     private var allRows: [AgentInboxRow] = []
+    /// One agent's row as last handed over, whatever the scope or search hides —
+    /// for a surface that has to say what the row says (the ⌥ jump badges).
+    func row(forAgentId id: UUID) -> AgentInboxRow? { allRows.first { $0.id == id } }
     /// The entries in the popup, parallel to the menu items' tags.
     private var scopeEntries: [InboxScope] = []
     /// Search is view-local filter state. It never participates in ordering or persistence.
@@ -2748,8 +2752,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     childCount: rollupsByParent[parentId]?.children ?? 0)
             }
             redesigned.setParentDisclosureTrailing(parentTrailing)
-            let nudgeTarget = settleNudgePhaseVisible ? settleNudgeTargetID(now: renderNow) : nil
-            redesigned.showSettleNudge(nudgeTarget == model.id) { [weak self] in
+            // The "All set?" nudge: a finished agent you read and left asks to be
+            // settled, which closes its tile into History (`.settle`, the same verb
+            // as the hover ✓, the row menu and the bulk bar, undo toast included).
+            redesigned.showSettleNudge(settleNudgeTargetID(now: renderNow) == model.id) { [weak self] in
                 guard let self else { return }
                 self.rowChoiceTargetIds = [agentId]
                 self.performRowAction(.settle)
@@ -2852,18 +2858,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return cell.clickBackgroundStopForQA()
     }
 
-    /// At most one nudge is ever offered, and only while the list has no unread or
-    /// action-blocked row. The oldest eligible completion wins, so a clock edge
-    /// cannot make six cards bloom together.
+    /// At most one nudge is ever offered, and only while no row is blocked on the
+    /// person (approval, input, failed). A freshly finished, unread row does NOT
+    /// hide it: with several agents running one almost always is, and the nudge
+    /// then never showed. The oldest eligible completion wins, so a clock edge
+    /// cannot make six cards bloom together; close it and the next one asks.
     private func settleNudgeTargetID(now: Date) -> UUID? {
-        let hasHigherPriorityWork = rows.contains { row in
-            row.terminalIsUnread || row.attention == .unread
-                || row.state == .approval || row.state == .input || row.state == .failed
+        let hasBlockedWork = rows.contains { row in
+            row.state == .approval || row.state == .input || row.state == .failed
         }
-        guard !hasHigherPriorityWork, isWired(.settle) else { return nil }
-        return rows.filter {
-            AgentInbox96CellView.isSettleCandidate($0, now: now)
-                && $0.canSettle(rollup: rollupsByParent[$0.id])
+        guard !hasBlockedWork, isWired(.settle) else { return nil }
+        // Never the agent you are on: one you just opened to read is not one you left.
+        return rows.filter { row in
+            row.id != openAgentId
+                && AgentInbox96CellView.isSettleCandidate(row, now: now)
+                && row.canSettle(rollup: rollupsByParent[row.id])
+                && InboxRowAction.settle.disabledReason(
+                    for: [row], isWired: true, rollups: rollupsByParent) == nil
         }.min {
             ($0.terminalEvent?.endedAt ?? $0.lastActiveAt ?? .distantFuture)
                 < ($1.terminalEvent?.endedAt ?? $1.lastActiveAt ?? .distantFuture)
@@ -3571,6 +3582,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// P3.15, for the checks: the shipped list's own answer, so "Snooze is still
     /// greyed" is asserted against the gate the menu uses rather than a copy of it.
     func isRowActionWiredForQA(_ action: InboxRowAction) -> Bool { isWired(action) }
+    /// The close nudge as the row draws it.
+    func isCloseNudgeShownForQA(agentId: UUID) -> Bool {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return false }
+        return cell.isSettleNudgeShownForQA
+    }
+    func closeNudgeTitleForQA(agentId: UUID) -> String? {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return nil }
+        return cell.settleNudgeTitleForQA
+    }
+    /// A click on the nudge's own button, through its target/action.
+    func clickCloseNudgeForQA(agentId: UUID) -> Bool {
+        guard let row = tableRow(forAgentId: agentId),
+              let cell = cellsByRow[row] as? AgentInbox96CellView else { return false }
+        return cell.clickSettleNudgeForQA()
+    }
     func isBulkActionWiredForQA(_ action: InboxBulkAction) -> Bool {
         onBulkAction != nil && wiredBulkActions.contains(action)
     }
@@ -4142,7 +4170,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let timer = Timer(timeInterval: Self.settleNudgePeriod, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.settleNudgePhaseVisible.toggle()
                 self.redraw(tableRows: Array(self.items.indices))
             }
         }
@@ -4314,6 +4341,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Injectable so a check can fire the dwell without sleeping — the shape
     /// `wakeRerenderScheduler` established.
     var hoverCardScheduler: WakeRerenderScheduler?
+    /// The newest line the agent wrote, from the host (the supervisor's transcript
+    /// projection). Asked only when a card opens, so hover reads no disk and runs
+    /// no process; nil, or no host, draws no line.
+    var latestAssistantLineProvider: ((UUID) -> String?)?
     private var hoverCard: InboxHoverCardView?
     private var hoverCardCancel: (() -> Void)?
     private var hoverCardClosedAt: Date?
@@ -4392,6 +4423,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// with "Unknown" would be worse than a shorter card.
     private func hoverCardLines(for row: AgentInboxRow) -> [InboxHoverCardLine] {
         var lines: [InboxHoverCardLine] = []
+        // What it is doing, then the last thing it said — the two questions a hover
+        // over an agent is usually asking, ahead of where it lives.
+        if let status = Self.hoverCardStatus(row, now: clock()) {
+            lines.append(.init(symbol: "circle.dashed", text: status))
+        }
+        if let said = latestAssistantLineProvider?(row.id), !said.isEmpty {
+            lines.append(.init(symbol: "text.bubble", text: said))
+        }
         if let project = row.projectName, !project.isEmpty {
             lines.append(.init(symbol: "folder", text: project))
         }
@@ -4426,6 +4465,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return lines
     }
 
+    /// The card's status line, in the row's own vocabulary (`stateWord`, and the
+    /// live elapsed beside `Working`), so the card and the row cannot disagree. A
+    /// finished turn you already saw drops its word on the ROW; the card still says
+    /// `Done`, with when. An unconfirmed row claims no state, and neither does this.
+    static func hoverCardStatus(_ row: AgentInboxRow, now: Date) -> String? {
+        guard !row.isUnconfirmed else { return nil }
+        let seenDone = AgentInbox96CellView.relativeCompletionText(row, now: now)
+        guard let word = AgentInbox96CellView.stateWord(row, now: now) ?? seenDone.map({ _ in "Done" })
+        else { return nil }
+        let age = AgentInbox96CellView.stateAge(row, now: now).flatMap(AgentInboxCellView.elapsedText)
+            ?? seenDone
+        return [word, age].compactMap { $0 }.joined(separator: " · ")
+    }
+
     /// The machine the agent is running on. One string for now, and honest:
     /// everything Array runs is local. It earns its place by being the line a
     /// remote environment will appear on rather than a line that has to be
@@ -4445,6 +4498,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
+    var hoverCardTruncatedLinesForQA: [String] { hoverCard?.qaTruncatedLinesForQA ?? [] }
     var hoverCardBrandMarksAreTemplatesForQA: Bool {
         hoverCard?.qaBrandMarksAreTemplatesForQA ?? false
     }

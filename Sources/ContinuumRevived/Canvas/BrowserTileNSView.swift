@@ -324,6 +324,27 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         onTabModelChange?(tabModel)
     }
 
+    /// What an address typed into the bar means, as browsers read it. A URL with a real scheme stays
+    /// as typed ("https://…", "file:///…", "about:blank", "data:…"). A bare host gets one: http for a
+    /// local host (localhost, an IP, `*.local`, or a dotless host with a port, the way a dev server is
+    /// typed: "localhost:3000"), https otherwise ("example.com/docs"). nil when it is not an address.
+    /// Without this, "localhost:3000" parsed as the scheme "localhost" and loaded nothing, and
+    /// "example.com" had no scheme at all and fell back to about:blank.
+    static func addressBarDestination(_ typed: String) -> String? {
+        let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if let scheme = URL(string: text)?.scheme?.lowercased(),
+           text.contains("://") || ["about", "data", "blob", "mailto"].contains(scheme) {
+            return text
+        }
+        guard !text.contains(where: \.isWhitespace), let url = URL(string: "http://" + text), let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        let ip = host.allSatisfy { $0.isNumber || $0 == "." } || host.contains(":")
+        let local = host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || ip
+            || (!host.contains(".") && url.port != nil)
+        guard local || host.contains(".") else { return nil }
+        return (local ? "http://" : "https://") + text
+    }
+
     private static func isLoadableBrowserURL(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
         return !(url.scheme ?? "").isEmpty
@@ -809,6 +830,28 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         try expect(runtime.isSemanticContentResponder(window.firstResponder), "Escape should leave real WKWebView content focused")
         try expect(window.firstResponder !== browserTile.hostView, "Escape must not focus plain BrowserHostView")
         try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Escape first responder must be WKWebView or descendant")
+
+        // Addresses typed the way people type them: a dev server, a bare domain, an IP.
+        let typed: [(String, String?)] = [
+            ("localhost:3000", "http://localhost:3000"),
+            ("localhost:5173/docs?x=1", "http://localhost:5173/docs?x=1"),
+            ("127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("printer.local", "http://printer.local"),
+            ("devbox:4000", "http://devbox:4000"),
+            ("example.com/docs", "https://example.com/docs"),
+            ("https://example.test/a", "https://example.test/a"),
+            ("about:blank", "about:blank"),
+            (dataPage, dataPage),
+            ("two words", nil),
+            ("justaword", nil),
+        ]
+        for (input, want) in typed {
+            let got = BrowserTileNSView.addressBarDestination(input)
+            try expect(got == want, "typed address \"\(input.prefix(40))\" must go to \(want ?? "nothing"), got \(got ?? "nothing")")
+        }
+        browserTile.urlField.stringValue = "localhost:3000"
+        try expect(browserTile.performURLFieldCommandForQA(#selector(NSResponder.insertNewline(_:))), "Return command should be handled")
+        try expect(runtime.url == "http://localhost:3000", "Return on \"localhost:3000\" must navigate to http://localhost:3000, got \(runtime.url)")
     }
 
     // MARK: - NSTextFieldDelegate
@@ -850,8 +893,9 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
                 // URL or across app restart. Malformed persisted/user-entered
                 // tab URLs degrade to about:blank instead of letting a failed
                 // load snapshot the previous tab's URL into this active tab.
-                let destination = Self.isLoadableBrowserURL(next) ? next : DefaultBrowserURL.fallback
-                if destination != next { lastInvalidTabURLFallbackForQA = next }
+                let resolved = Self.addressBarDestination(next)
+                let destination = resolved ?? DefaultBrowserURL.fallback
+                if resolved == nil { lastInvalidTabURLFallbackForQA = next }
                 tabModel.updateActiveTab(url: destination, title: "", faviconURL: nil, interactionState: nil)
                 onTabModelChange?(tabModel)
                 refresh()

@@ -49,7 +49,7 @@ enum WorkspaceAPIBoardChecks {
                   .permissionDenied, "Workspace Tools disabled")
         try expect(fixture.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: fixture.agentId, true), "Workspace Tools enables board operations")
         var committed: [BoardTransaction] = []
-        boardRuntime.onCommittedTransaction = { committed.append($0) }
+        boardRuntime.onCommittedTransaction = { transaction, _ in committed.append(transaction) }
 
         let list = try result(fixture.api.dispatch(
             agentId: fixture.agentId, requestId: "board-list", op: "board.query", payload: [:]), "closed-board query")
@@ -211,5 +211,110 @@ enum WorkspaceAPIBoardChecks {
         try expect(boardRuntime.advanceAssignedTaskAfterAcceptedSend(
             boardId: oneLaneID, cardId: singleCardID, agentId: fixture.agentId) == nil,
                    "accepted send leaves a one-column board unchanged")
+
+        try runComposerHandoff()
+    }
+
+    /// The film's RST-41 shot: an agent assigns a card to ITSELF through
+    /// `array_board_apply` and moves it to Doing. The composer task chip is the
+    /// user's hand-off affordance, so the caller's own composer must stay empty;
+    /// a hand-off to ANOTHER agent and the user's own Assign still stage it.
+    /// Driven through the production board provider (`configuredBoardRuntime`),
+    /// so the real post-commit sync decides, against real agent tiles.
+    private static func runComposerHandoff() throws {
+        let fixture = try WorkspaceAPIChecks.makeFixture()
+        defer { fixture.tearDown() }
+        let supervisor = fixture.delegate.qaAgentSupervisor
+        let support = fixture.tempRoot.appendingPathComponent("composer-handoff", isDirectory: true)
+        let attachments = AgentComposerAttachmentStore(applicationSupportDirectory: support)
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: support, attachmentStore: attachments)
+
+        func agentTile(_ title: String, x: Double) -> (AgentID, ManagedAgentTileNSView) {
+            let tileID = UUID()
+            let agentID = supervisor.spawn(
+                role: nil, prompt: nil, cwd: fixture.pbRoot, harness: .pi,
+                model: "openai-codex/gpt-5.6-sol", thinking: "high",
+                projectId: fixture.projectPb, projectRoot: fixture.pbRoot, tileId: tileID)
+            let tile = Tile(
+                id: tileID, kind: .managedAgent, title: title,
+                frame: TileFrame(x: x, y: 40, width: 480, height: 420),
+                zPosition: .fromLegacyRank(3), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed"))
+            let view = ManagedAgentTileNSView(tile: tile)
+            view.bindV2ComposerState(draftStore: drafts, promptHistory: AgentPromptHistory(), attachmentStore: attachments)
+            view.attach(agentID: agentID, supervisor: supervisor)
+            fixture.canvas.installProjectTile(tileView: view, for: tile, targetZoneId: fixture.zoneB)
+            return (agentID, view)
+        }
+        let (caller, callerTile) = agentTile("Dark mode", x: 40)
+        let (other, otherTile) = agentTile("Checkout", x: 560)
+        try expect(fixture.canvas.tileView(for: supervisor.records[caller]?.tileId ?? UUID()) === callerTile,
+                   "handoff: the calling agent's record resolves to its live tile")
+        func chip(_ view: ManagedAgentTileNSView) -> UUID? {
+            view.qaPageZoomComposerView?.draft.taskContext?.cardID
+        }
+        func pump(until predicate: () -> Bool, timeout: TimeInterval = 5) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !predicate(), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            return predicate()
+        }
+
+        guard let boardRuntime = fixture.api.boardRuntimeProvider(fixture.projectPb) else {
+            throw Failure(message: "handoff: the production board provider has no runtime for the agent's project")
+        }
+        let boardID = UUID()
+        guard let board = boardRuntime.createBoard(id: boardID, title: "Roadmap") else {
+            throw Failure(message: "handoff: could not create the board fixture")
+        }
+        let columns = board.orderedColumns
+        try expect(supervisor.setWorkspaceToolsEnabled(agentID: caller, true), "handoff: Workspace Tools enabled for the caller")
+
+        var keys = 0
+        func apply(_ fields: [String: Any], _ label: String) throws -> [String: AnyHashableJSON] {
+            keys += 1
+            var payload = fields
+            payload["boardId"] = boardID.uuidString
+            payload["expectedRevision"] = boardRuntime.board(id: boardID)?.revision ?? 0
+            payload["idempotencyKey"] = "handoff-\(keys)"
+            return try result(fixture.api.dispatch(
+                agentId: caller, requestId: "handoff-\(keys)", op: "board.apply", payload: payload), label)
+        }
+        func create(_ title: String) throws -> UUID {
+            let created = try apply(["op": "create", "columnId": columns[0].id.uuidString, "title": title], "create \(title)")
+            guard let cardID = id(created["cardId"]) else { throw Failure(message: "handoff: create \(title) returned no cardId") }
+            return cardID
+        }
+        let ownTask = try create("RST-41 Dark mode")
+        let delegated = try create("RST-42 Cart total")
+        let userTask = try create("RST-43 Receipt email")
+
+        _ = try apply(["op": "assign", "cardId": ownTask.uuidString, "assigneeAgentId": caller.rawValue.uuidString], "self-assign")
+        // Positive control in the same window: a hand-off to ANOTHER agent stages
+        // that agent's chip. Once it has landed, the self-assign's async prepare
+        // would have landed too.
+        _ = try apply(["op": "assign", "cardId": delegated.uuidString, "assigneeAgentId": other.rawValue.uuidString], "assign other")
+        try expect(pump(until: { chip(otherTile) == delegated }),
+                   "handoff: an agent assigning a task to ANOTHER agent stages it in that agent's composer, unsent")
+        _ = try apply(["op": "move", "cardId": ownTask.uuidString, "columnId": columns[1].id.uuidString], "move own to Doing")
+        _ = pump(until: { chip(callerTile) != nil }, timeout: 0.5)
+        try expect(boardRuntime.board(id: boardID)?.card(ownTask)?.assignee == caller
+                   && boardRuntime.board(id: boardID)?.card(ownTask)?.columnId == columns[1].id,
+                   "handoff: the self-assignment and move are durable on the board")
+        try expect(chip(callerTile) == nil,
+                   "handoff: an agent assigning a task to ITSELF through the workspace API stages no chip in its own composer (got \(String(describing: chip(callerTile))))")
+
+        // The user's own Assign (menu, drag onto the agent and the task editor all
+        // route through `onTaskAssign`) still stages the chip in that same composer.
+        let kanban = KanbanTileNSView(tile: Tile(
+            id: UUID(), kind: .kanban, title: "Roadmap",
+            frame: TileFrame(x: 0, y: 0, width: 600, height: 420),
+            zPosition: .fromLegacyRank(0), runtimeRef: nil,
+            metadata: { var metadata = TileMetadata(); metadata.boardId = boardID; return metadata }()), board: board)
+        boardRuntime.attach(kanban, to: boardID)
+        try expect(kanban.onTaskAssign?(userTask, caller) == nil, "handoff: the user's Assign applies")
+        try expect(pump(until: { chip(callerTile) == userTask }),
+                   "handoff: a user assignment still stages the task in the agent's composer")
+        supervisor.stop(caller)
+        supervisor.stop(other)
     }
 }

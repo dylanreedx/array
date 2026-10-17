@@ -851,7 +851,36 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
-    func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
+    /// Whether a settle of `zoneId` will actually run (the engine's own gate).
+    private func isAutoLayoutActive(inZone zoneId: UUID) -> Bool {
+        guard isAutoLayoutEnabled,
+              let zone = autoLayoutScene().zones.first(where: { $0.zoneId == zoneId }) else { return false }
+        return !zone.collapsed && zone.autoLayoutMode.resolves(globalEnabled: true)
+    }
+
+    /// `spawnedTileId` is the tile just installed. It settles LAST, as the anchor,
+    /// so the composition already in the zone stays put and the new tile docks
+    /// onto it — growing the zone right/down when no slot is free inside.
+    ///
+    /// Without that, the settle had no mover: a new tile placed above the others
+    /// seeded the cluster, and a sibling it covered found no slot inside a zone too
+    /// small for all of them and was left OVERLAPPING it (`absorb`'s fallback). The
+    /// zone was too small because growing it up/left to take the new tile can be
+    /// refused outright: `growZone` and `expandZoneToContainMembers` need an origin
+    /// that keeps every member's world frame bit-exact, and with the float dust a
+    /// real pointer drag leaves in those frames, an origin in a coarser binade has
+    /// none. Growing right/down keeps the origin, so it can never be refused.
+    /// `--zone-arming-check` §9.
+    ///
+    /// For the same reason, a spawn into an auto-layout zone never grows the zone
+    /// toward the tile's raw placement (`installProjectTile` skips `growZone`, and
+    /// the pre-settle expansion is skipped here): placement is camera-driven and
+    /// often lands left of or above the zone, and growing there ran a drawn zone
+    /// across its neighbour. When that right/down growth runs into another zone
+    /// (or a bare tile), the zone that grew takes priority and pushes it away, as
+    /// a dragged zone does (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`,
+    /// `--zone-arming-check` §10).
+    func arrangeAutoLayoutAfterSpawn(zoneId: UUID?, spawnedTileId: UUID? = nil) {
         guard isAutoLayoutEnabled else { return }
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(
@@ -860,9 +889,24 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneIds: Set(baseline.zones.map(\.zoneId))
         )
         autoLayoutGestureBaseline = baseline
-        if let zoneId { expandZoneToContainMembers(zoneId) }
+        if let zoneId, spawnedTileId == nil || !isAutoLayoutActive(inZone: zoneId) {
+            expandZoneToContainMembers(zoneId)
+        }
         for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
-            applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
+            let anchor = spawnedTileId.flatMap { tile in
+                autoLayoutScene().tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
+            }
+            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil),
+                            baseline: autoLayoutScene())
+            if anchor != nil, let before = liveZones.first(where: { $0.zoneId == id }) {
+                expandZoneToContainMembers(id)
+                let push = CanvasAutoLayoutEngine.pushPeers(
+                    ofGrownZone: id, from: before, scene: autoLayoutScene(),
+                    gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults))
+                if !push.tileFrames.isEmpty || !push.zonePlacements.isEmpty {
+                    applyLayoutTransaction(push)
+                }
+            }
         }
         _ = finishAutoLayoutGesture()
         _ = commitGeometryEdit()
@@ -3189,6 +3233,25 @@ final class CanvasNSView: NSView, TokenThemed {
         delegate?.canvasDidChange(self)
     }
 
+    /// A tile the person CLOSED — ✕, ⌘⌫, or closing its agent to History, all of
+    /// which commit through `AppDelegate.deleteTile`. `removeTile` alone left a
+    /// hole where the tile was; here an auto-layout zone the tile leaves settles,
+    /// so the members behind it close up, exactly as the zone a tile is dragged
+    /// OUT of does (`reevaluateZoneMembership`). Settle moves members only: the
+    /// zone keeps its size and neighbouring zones stay put. Committed as a
+    /// geometry edit, so it persists like any other layout change.
+    /// `--zone-arming-check` §11.
+    func closeTile(id: UUID) {
+        let zoneId = autoLayoutScene().tiles.first { $0.id == id }?.zoneId
+        removeTile(id: id)
+        guard let zoneId, isAutoLayoutActive(inZone: zoneId) else { return }
+        let baseline = autoLayoutScene()
+        let began = beginGeometryEdit(
+            .autoLayout, tileIds: Set(baseline.tiles.map(\.id)), zoneIds: [zoneId])
+        applyAutoLayout(.settle(zoneId: zoneId, anchor: nil, pin: false), baseline: baseline)
+        if began { _ = commitGeometryEdit() }
+    }
+
     func markActive(tileId: UUID) {
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)
@@ -3747,7 +3810,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // CX-01: only the USER's camera (trackpad/pinch through the driver, or a
         // pointer pan) counts as an interaction; a navigation snap, a restore, an
         // API reveal or a check is programmatic and must not defer itself.
-        if cameraDriver.isApplying || pointerPanActive { onUserCameraChange?() }
+        // A navigation flight's steps are the driver's, but programmatic: the jump
+        // that started it already noted the user's interaction once.
+        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
         // Any writer other than the driver — a navigation snap, a pointer-pan
         // drag, a restore, a self-check — owns the camera now: gesture state
         // still in flight (a glide, accumulated scroll) must not keep steering
@@ -4864,11 +4929,11 @@ final class CanvasNSView: NSView, TokenThemed {
     @discardableResult
     func qaDoubleClickZoneHeaderOrBackground(at screenPoint: CGPoint) -> CanvasViewport? {
         if let zoneId = zoneHeaderZoneId(at: screenPoint), let viewport = fitZoneToViewport(zoneId: zoneId) {
-            setViewport(viewport)
+            navigateViewport(to: viewport)
             return viewport
         }
         if tileId(at: screenPoint) == nil, let viewport = fitAllToViewport() {
-            setViewport(viewport)
+            navigateViewport(to: viewport)
             return viewport
         }
         return nil
@@ -5438,6 +5503,20 @@ final class CanvasNSView: NSView, TokenThemed {
         leaderJumpAssignments().first { $0.label == label }?.tileId
     }
 
+    /// The app's answer to "what is this tile's agent asking for", in the sidebar's
+    /// own words (`AppDelegate.leaderJumpBadgeAccent(forTile:)`). nil means nothing.
+    var leaderJumpBadgeAccentProvider: ((UUID) -> AccentToken?)?
+
+    /// The tint of a hold-⌥ jump badge, so the letters say where to look: mint for
+    /// an agent that finished and nobody has looked at (the sidebar's `Done`),
+    /// amber for one that needs you (the attention ring's colour, which a tile with
+    /// a ring but no managed agent also gets). nil keeps the system accent.
+    /// `--leader-zone-jump-check`.
+    func leaderJumpBadgeAccent(for tileId: UUID) -> AccentToken? {
+        if let accent = leaderJumpBadgeAccentProvider?(tileId) { return accent }
+        return attentionTileIds.contains(tileId) ? .accentApproval : nil
+    }
+
     /// Returns the key→zone mapping for the current zone-jump leader state,
     /// pairing each zone in `navZoneRenderModels` order with its assigned key
     /// (configured `navKey` or auto-ordinal from `leaderZoneOrdinalAlphabet`).
@@ -5484,7 +5563,35 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `--agent-inbox-check`.
     func centerOnTile(_ tileId: UUID) {
         guard let viewport = framedViewportForTileJump(tileId) else { return }
-        setViewport(viewport)
+        navigateViewport(to: viewport)
+    }
+
+    /// The camera navigation should reason from: where an in-flight jump is
+    /// going, else where the camera is. A jump made mid-flight records THIS as
+    /// the view to go back to, not a point the camera was only passing through.
+    var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
+
+    /// QA: force navigation to fly (true) or cut (false) whatever the window's
+    /// visibility. Nil in production.
+    var navigationFlightOverrideForQA: Bool?
+
+    /// The camera for a jump the user asked for: a leader letter or zone key, a
+    /// sidebar row, ⌘K Jump to, fit-all, previous view, a double-click fit. It
+    /// FLIES there (`CameraFlight`, stepped by the camera driver) rather than
+    /// cutting, so you can see where you went. Cuts when Reduce Motion is on, and
+    /// when the window is not on screen (a self-check's off-screen window): there
+    /// nothing is watching, and those callers read the viewport back immediately.
+    /// `--canvas-zoom-momentum-check` (`runNavigationFlight`).
+    func navigateViewport(to target: CanvasViewport) {
+        let flies = navigationFlightOverrideForQA
+            ?? (window?.occlusionState.contains(.visible) == true
+                && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        guard flies, let flight = CameraFlight(
+            from: canvasState.viewport, to: target, viewportSize: bounds.size) else {
+            setViewport(target)
+            return
+        }
+        cameraDriver.fly(flight)
     }
 
     func setLeaderOverlayVisible(_ visible: Bool) {
@@ -7064,10 +7171,15 @@ final class CanvasNSView: NSView, TokenThemed {
         tileZoneMembership[tile.id] = zoneId
         reorderTileSubviewsByZIndex()
         delegate?.canvasSidebarModelDidChange(self)
-        // T7: unconditional. `arrangeAutoLayoutAfterSpawn` also expands the zone, but
-        // only when auto-layout is enabled — with it off, a spawned tile sat outside
-        // its zone until someone dragged it.
-        growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
+        // T7: unconditional for a zone auto-layout does not own — with it off, a
+        // spawned tile sat outside its zone until someone dragged it.
+        //
+        // Into an auto-layout zone the caller's post-save settle docks the tile
+        // onto the zone's members and grows the zone right/down only, clear of its
+        // neighbours (`arrangeAutoLayoutAfterSpawn`, `TileSpawner.persistThenArrange`).
+        if !isAutoLayoutActive(inZone: zoneId) {
+            growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
+        }
         return .zoneLayer(zoneId)
     }
 
@@ -13532,7 +13644,8 @@ private final class NavModeOverlayNSView: NSView {
             let badge = JumpIndicatorPlacementEngine.indicatorRect(for: assignment.placement, normalBadgeSize: badgeSize)
             let badgeRadius = CornerRole.badge.cgRadius()
             let badgePath = NSBezierPath(roundedRect: badge, xRadius: min(badgeRadius, badge.width / 2), yRadius: min(badgeRadius, badge.height / 2))
-            NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
+            let tint = canvas.leaderJumpBadgeAccent(for: assignment.tileId)?.color.nsColor(in: self)
+            (tint ?? NSColor.controlAccentColor).withAlphaComponent(0.95).setFill()
             badgePath.fill()
             let text = assignment.label.uppercased()
             let attributes: [NSAttributedString.Key: Any] = [

@@ -61,7 +61,8 @@ enum SettleClosesTileChecks {
     private static func check(_ entry: EntryPoint) throws -> String {
         // Off the world origin, so a tile put back in zone-local space instead
         // of world space lands somewhere visibly different.
-        let world = try SidebarTruthChecks.makeWorld(zoneOriginA: ZonePoint(x: 260, y: 140))
+        let world = try SidebarTruthChecks.makeWorld(
+            zoneOriginA: ZonePoint(x: 260, y: 140), idleAgentsFinishedATurn: true)
         defer { SidebarTruthChecks.tearDown(world) }
         try expect(!DeleteConfirmPolicy.current.requiresConfirmation(for: .managedAgent),
                    "setup: this machine's delete-confirm policy would put a modal in front of the close")
@@ -92,6 +93,12 @@ enum SettleClosesTileChecks {
             before[target.tile] = tile
             beforeLifecycle[target.agent] = world.supervisor.records[target.agent]?.settledOverride
         }
+
+        // Every tile of the project as it stood: closing a tile settles an
+        // auto-layout zone shut over the gap (529c3300), and the Undo must open
+        // it again — every member back at its world frame, not just the tile.
+        let zoneBefore = Dictionary(uniqueKeysWithValues: world.canvas
+            .tilesInWorldFrames(forProjectId: world.projectA).map { ($0.id, $0.frame) })
 
         // SETTLE, through the entry point under test.
         let first = targets[0].agent.rawValue
@@ -132,6 +139,11 @@ enum SettleClosesTileChecks {
                        "\(target.agent.rawValue): the record still names the closed tile")
         }
 
+        let closedIds = Set(targets.map(\.tile))
+        let slidIntoGap = world.canvas.tilesInWorldFrames(forProjectId: world.projectA)
+            .filter { !closedIds.contains($0.id) && zoneBefore[$0.id] != nil && zoneBefore[$0.id] != $0.frame }
+            .count
+
         // ONE History shelf: the settled row is drawn in History, and the toast
         // names that place.
         inbox.expandHistoryShelfForQA()
@@ -171,6 +183,12 @@ enum SettleClosesTileChecks {
                        "\(target.agent.rawValue): the restored tile is not back in the canvas file at its world frame — \(String(describing: persisted?.frame))")
         }
 
+        for tile in world.canvas.tilesInWorldFrames(forProjectId: world.projectA) {
+            guard let was = zoneBefore[tile.id] else { continue }
+            try expect(tile.frame == was,
+                       "Undo left \(tile.id) at \(tile.frame); before the settle it was at \(was) — the gap the close shut was not opened again")
+        }
+
         // RE-OPEN: settle again, then open the row — it gets a tile again.
         let agent = targets[0].agent
         try expect(inbox.openRowMenuForQA(clickedRowId: agent.rawValue) && inbox.pickRowMenuItemForQA(.settle),
@@ -185,6 +203,6 @@ enum SettleClosesTileChecks {
         }
         try expect(world.canvas.tileView(for: reopenedTile) is ManagedAgentTileNSView,
                    "opening the settled row bound a tile no canvas holds")
-        return "\(entry.rawValue): closed \(targets.count) tile(s), undo '\(toast)' restored them at \(targets.compactMap { before[$0.tile]?.frame }), reopen gave a tile"
+        return "\(entry.rawValue): closed \(targets.count) tile(s), undo '\(toast)' restored them at \(targets.compactMap { before[$0.tile]?.frame }), \(slidIntoGap) member(s) slid into the gap and back, reopen gave a tile"
     }
 }

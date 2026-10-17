@@ -388,7 +388,7 @@ final class TileSpawner {
             if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
             // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
@@ -1139,7 +1139,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
         } catch {
             // Leave nothing behind: no web view process, no drawn tile nothing
             // persisted, no browser-state row for a tile that does not exist.
@@ -1231,7 +1231,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
         } catch {
             fputs("TileSpawner target=_blank persistence failed: \(error)\n", stderr)
             canvasView.removeTile(id: tile.id)
@@ -1399,7 +1399,7 @@ final class TileSpawner {
         nextState.inspectorStates.append(inspectorState)
         do {
             try projectStore.saveBrowserState(nextState)
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(inspectorTileId, after: target, in: canvasView)
             _ = revealTile(inspectorTileId)
         } catch {
             return .failure(error)
@@ -1775,7 +1775,7 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tileId, after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             withdrawFailedSpawn(tileId, target: target, in: canvasView)
@@ -2278,7 +2278,7 @@ final class TileSpawner {
         }
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2328,7 +2328,7 @@ final class TileSpawner {
         runtime.bindTile(tileId, to: boardId)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2380,7 +2380,7 @@ final class TileSpawner {
         view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2695,7 +2695,7 @@ final class TileSpawner {
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
 
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2737,13 +2737,19 @@ final class TileSpawner {
     /// refuses (and rolls back) any moved tile it finds in no saved canvas, so
     /// arranging first refused every spawn that moved anything: "That layout
     /// change couldn't be saved, so it was undone". `--spawn-arrange-commit-check`.
+    ///
+    /// `tileId` is the tile just spawned: the settle docks it LAST onto the
+    /// zone's members, so the composition already there stays put and the new
+    /// tile lands off its siblings, growing the zone right/down only
+    /// (`arrangeAutoLayoutAfterSpawn`, `--zone-arming-check` §9/§10).
     private func persistThenArrange(
+        _ tileId: UUID,
         after target: CanvasNSView.ProjectTileTarget,
         in canvasView: CanvasNSView
     ) throws {
         try persistProjectCanvas(after: target, in: canvasView)
         if case let .zoneLayer(zoneId) = target {
-            canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
+            canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tileId)
         }
     }
 
@@ -2820,7 +2826,7 @@ final class TileSpawner {
         let view = RunArtifactsTileNSView(tile: tile)
         let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -4587,7 +4593,7 @@ final class TileSpawner {
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
         // untouched by the centre policy: to the right of the anchor, top-aligned.
-        // File default size is 320x480. Under auto layout, post-spawn settle
+        // File default size is 640x560. Under auto layout, post-spawn settle
         // magnetizes zone members to the CONFIGURED gap (8), so the legacy
         // `anchoredFileGap` (24) is compacted: x = 680 + 640 + 8.
         let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
@@ -4600,7 +4606,7 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, anchoredFileId),
-                        TileFrame(x: 1328, y: 300, width: 320, height: 480),
+                        TileFrame(x: 1328, y: 300, width: 640, height: 560),
                         "an explicitly anchored file stays gap-adjacent to its anchor")
 
         // A file opened with no anchor and no point is an automatic spawn: it takes the
@@ -4608,7 +4614,7 @@ final class TileSpawner {
         // right side is now blocked by the anchored file, so the fully visible left
         // candidate wins on visibility over below/above (which are half off screen) and
         // over the outward right ring. Anchor 680..1320 x 300..700 -> left candidate
-        // x = 680-8-320, y = 500-240.
+        // x = 680-8-640, y = 500-280.
         let autoFilePath = layerFixture.root.appendingPathComponent("automatic.txt")
         try Data("automatic".utf8).write(to: autoFilePath)
         let autoFileId: UUID
@@ -4619,7 +4625,7 @@ final class TileSpawner {
         case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
         try expectFrame(try placedFrame(layerFixture, autoFileId),
-                        TileFrame(x: 352, y: 260, width: 320, height: 480),
+                        TileFrame(x: 32, y: 220, width: 640, height: 560),
                         "an anchorless file open docks beside the tile under the viewport centre")
 
         let manifest: [String: Any] = [
@@ -6528,7 +6534,7 @@ final class TileSpawner {
             targetZoneId: targetZoneId
         )
         do {
-            try persistThenArrange(after: target, in: canvasView)
+            try persistThenArrange(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -7008,6 +7014,7 @@ final class TileSpawner {
             "check": "file-tree-hardening",
             "debounceFlush": try FileTreeTileNSView.runDebounceFlushSelfCheck(),
             "truncatedOutline": try FileTreeTileNSView.runTruncatedOutlineSelfCheck(),
+            "zoomedLegacyScrollers": try FileTreeTileNSView.runZoomedLegacyScrollerSelfCheck(),
             "sidecarValidation": scenarios
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")

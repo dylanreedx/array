@@ -103,7 +103,13 @@ enum SidebarTruthChecks {
 
     /// `zoneOriginA` moves workspace A's zone (and its tiles with it) off the
     /// world origin, so a witness can tell a WORLD frame from a ZONE-LOCAL one.
-    static func makeWorld(zoneOriginA: ZonePoint = ZonePoint(x: 0, y: 0)) throws -> World {
+    /// `idleAgentsFinishedATurn`: the two idle agents carry a finished, read turn,
+    /// which the "All set?" nudge requires — an agent that was made and never
+    /// prompted has nothing to be done with, so it is never asked about (0235a44e).
+    static func makeWorld(
+        zoneOriginA: ZonePoint = ZonePoint(x: 0, y: 0),
+        idleAgentsFinishedATurn: Bool = false
+    ) throws -> World {
         let fm = FileManager.default
         let now = Date()
         let root = fm.temporaryDirectory
@@ -205,14 +211,23 @@ enum SidebarTruthChecks {
                 createdAt: now.addingTimeInterval(-age), lastActivityAt: now.addingTimeInterval(-age),
                 tileId: tile)
         }
+        func idle(_ id: AgentID, _ name: String, tile: UUID, age: TimeInterval) -> AgentRecord {
+            var value = record(id, name, project: projectA, root: rootA, tile: tile, age: age)
+            if idleAgentsFinishedATurn {
+                value.latestTerminalEvent = AgentTerminalEvent(
+                    sequence: 1, turnID: "t1", outcome: .succeeded, endedAt: now.addingTimeInterval(-age))
+                value.acknowledgedTerminalSequence = 1
+            }
+            return value
+        }
         for value in [
-            record(idleAgent, "idle agent", project: projectA, root: rootA, tile: idleTile, age: 600),
+            idle(idleAgent, "idle agent", tile: idleTile, age: 600),
             record(busyAgent, "busy agent", project: projectA, root: rootA, tile: busyTile, age: 500),
             record(parentAgent, "parent agent", project: projectA, root: rootA, tile: parentTile, age: 400),
             record(childOne, "child one", project: projectA, root: rootA, tile: nil, parent: parentAgent, age: 300),
             record(childTwo, "child two", project: projectA, root: rootA, tile: nil, parent: parentAgent, age: 290),
             record(lostAgent, "lost agent", project: projectA, root: rootA, tile: lostTile, age: 200),
-            record(secondIdleAgent, "second idle agent", project: projectA, root: rootA, tile: secondIdleTile, age: 150),
+            idle(secondIdleAgent, "second idle agent", tile: secondIdleTile, age: 150),
             record(backgroundStopAgent, "background stop agent", project: projectA, root: rootA, tile: backgroundStopTile, age: 140),
             record(otherAgent, "other agent", project: projectB, root: rootB, tile: otherTile, age: 100),
         ] {

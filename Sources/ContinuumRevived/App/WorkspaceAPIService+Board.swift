@@ -233,7 +233,9 @@ extension WorkspaceAPIService {
         guard !nowStale || canRebase else {
             return .error(WorkspaceAPIError(code: .revisionConflict, message: "The board changed before this operation could be applied. Re-query before writing."))
         }
-        let outcome = boardRuntime.apply(command, to: request.boardId)
+        // A delete leaves no card to read the title from afterwards.
+        let titleBeforeChange = current.card(cardId)?.title
+        let outcome = boardRuntime.apply(command, to: request.boardId, actingAgent: agentId)
         let resultOutcome: BoardApplyResult.Outcome
         switch outcome {
         case .applied: resultOutcome = (stale || nowStale) ? .rebased : .applied
@@ -249,10 +251,14 @@ extension WorkspaceAPIService {
         guard let updated = boardRuntime.board(id: request.boardId) else {
             return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The board committed but its result could not be read."))
         }
+        let updatedCard = updated.card(cardId)
         let result = BoardApplyResult(
             operationId: requestId, op: request.op, boardId: request.boardId, cardId: cardId,
             outcome: resultOutcome, undoRegistered: true, revision: updated.revision,
-            card: updated.card(cardId).map { boardQueryCard($0, checkout: handle) })
+            card: updatedCard.map { boardQueryCard($0, checkout: handle) },
+            cardTitle: updatedCard?.title ?? titleBeforeChange,
+            columnName: updatedCard.flatMap { card in updated.orderedColumns.first { $0.id == card.columnId }?.name },
+            assigneeName: updatedCard?.assignee.flatMap { supervisor.records[$0]?.humanDisplayName })
         cacheBoardApply(agentId: agentId, key: request.idempotencyKey, hash: payloadHash, result: result)
         remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .boardApply, outcome: "committed"))
         if isCancelled() { return .cancelled(result: Self.jsonObject(result)) }

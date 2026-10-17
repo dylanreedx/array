@@ -17,6 +17,7 @@ enum BoardTaskWorkflowChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("board-task-check-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try await checkModal(root: root)
+        try BoardTaskDropChecks.run()
         let images = AgentComposerAttachmentStore(applicationSupportDirectory: root)
         let drafts = AgentComposerDraftStore(applicationSupportDirectory: root, attachmentStore: images)
         let tasks = BoardAttachmentStore(projectRoot: root)

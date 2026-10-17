@@ -1160,6 +1160,19 @@ public enum AgentToolDetailPresenter {
             ?? shortLine(capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName))))
         var lines: [String] = []
         if let actionLine { lines.append(actionLine) }
+        // An MCP row's title names the server and the tool; the line under it is
+        // the argument saying what it was FOR (the JQL, the query, the issue).
+        // `server` is in the title already; a board change's `op` is its verb.
+        var argumentKeysSaid: Set<String> = []
+        if mcpToolName(detail) != nil {
+            argumentKeysSaid.insert("server")
+            if let primary = mcpPrimaryArgument(detail) {
+                lines.append(shortLine(primary.value))
+                argumentKeysSaid.insert(primary.key)
+            }
+        } else if ArrayWorkspaceTool(toolName: safeToolName(detail.toolName)) == .boardApply {
+            argumentKeysSaid.insert("op")
+        }
         let kind = AgentToolKind.resolve(toolName: safeToolName(detail.toolName))
         let fileLabel = kind.fileLineLabel
         let affectedFileNames = observableAffectedFileNames(detail)
@@ -1183,7 +1196,8 @@ public enum AgentToolDetailPresenter {
             if let diff = change.diffPreview, !diff.isEmpty { lines.append(diff) }
         }
         for argument in detail.arguments.prefix(4)
-        where !argument.sensitiveKeyFiltered && !argument.value.redacted {
+        where !argument.sensitiveKeyFiltered && !argument.value.redacted
+            && !argumentKeysSaid.contains(argument.key) {
             let value = shortLine(argument.value.text)
             guard !value.isEmpty, !value.contains("[REDACTED]"),
                   !isPathBearingObservableValue(value) else { continue }
@@ -1316,6 +1330,15 @@ public enum AgentToolDetailPresenter {
     /// contained "create" would have joined it. A kind with nothing to say now
     /// falls through to the provider's own summary, and then to the tool name.
     private static func pureSummary(for detail: AgentToolDetailRecord) -> String? {
+        // Array's own workspace tools: a fixed sentence per tool, named by the
+        // `relativePath` basename the provider whitelists forward as `file`.
+        if let tool = ArrayWorkspaceTool(toolName: safeToolName(detail.toolName)) {
+            if tool == .boardApply { return boardChangeLine(detail) }
+            return tool.actionLine(fileBasename: safeBasenameArgument(detail, keys: ["file", "relativepath"]))
+        }
+        // Someone else's MCP server: "Atlassian · Search Jira issues using JQL".
+        // codex reports the server beside a bare tool name, as `server`.
+        if let mcp = mcpToolName(detail) { return mcp.title }
         switch AgentToolKind.resolve(toolName: safeToolName(detail.toolName)) {
         case .shell:
             // A shell row with a command is titled by `shellInvocation` (see
@@ -1427,6 +1450,53 @@ public enum AgentToolDetailPresenter {
             exitCode: detail.exitCode,
             duration: detail.measuredDuration,
             status: status)
+    }
+
+    private static func mcpToolName(_ detail: AgentToolDetailRecord) -> MCPToolName? {
+        let name = safeToolName(detail.toolName)
+        guard ArrayWorkspaceTool(toolName: name) == nil else { return nil }
+        return MCPToolName(toolName: name, server: safeArgument(detail, keys: ["server"]))
+    }
+
+    /// The one argument an MCP row shows under its title, in order of how much
+    /// it says. A path never shows (the disclosure rule); a web URL may.
+    private static let mcpPrimaryArgumentKeys = ["jql", "cql", "query", "q", "search", "issuekey", "issueidorkey", "url"]
+
+    private static func mcpPrimaryArgument(_ detail: AgentToolDetailRecord) -> (key: String, value: String)? {
+        for key in mcpPrimaryArgumentKeys {
+            guard let argument = detail.arguments.first(where: {
+                $0.key.lowercased().filter { $0.isLetter || $0.isNumber } == key
+            }), let value = safeArgument(detail, keys: [key]) else { continue }
+            let isWebURL = value.hasPrefix("https://") || value.hasPrefix("http://")
+            guard isWebURL || !isPathBearingObservableValue(value) else { continue }
+            return (argument.key, value)
+        }
+        return nil
+    }
+
+    /// `array_board_apply`'s sentence from the op and the names the host's reply
+    /// carries. The reply is read only when it arrived whole: a clipped or
+    /// redacted reply is not half-parsed into a name.
+    private static func boardChangeLine(_ detail: AgentToolDetailRecord) -> String {
+        var result: [String: Any]?
+        if let output = detail.output, !output.truncatedByBytes, !output.truncatedByLines, !output.redacted,
+           let object = (try? JSONSerialization.jsonObject(with: Data(output.text.utf8))) as? [String: Any],
+           object["status"] as? String == "ok" {
+            result = object["result"] as? [String: Any]
+        }
+        func name(_ value: Any?) -> String? {
+            guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty, !text.contains("[REDACTED]") else { return nil }
+            return text
+        }
+        let op = name(result?["op"]) ?? safeArgument(detail, keys: ["op"])
+        let card = result?["card"] as? [String: Any]
+        let inputTitle = (op == "create" || op == "edit") ? safeArgument(detail, keys: ["title"]) : nil
+        return ArrayWorkspaceTool.boardChangeLine(
+            op: op,
+            cardTitle: name(result?["cardTitle"]) ?? name(card?["title"]) ?? inputTitle,
+            columnName: name(result?["columnName"]),
+            assigneeName: name(result?["assigneeName"]))
     }
 
     private static func capitalizedPhrase(_ raw: String) -> String {

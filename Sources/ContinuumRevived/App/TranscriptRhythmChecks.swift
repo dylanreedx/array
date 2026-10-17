@@ -72,12 +72,14 @@ enum TranscriptRhythmChecks {
         try checkAToolRowIsExactlyAsTallAsItsContent()
         try checkASettledRowKeepsItsDuration()
         try checkAToolRowsIdentitySurvivesDisclosure()
+        try checkASentBoardTaskRendersAsATaskCard()
         print(
             "TranscriptRhythmChecks: heading ladder, candidate body leading, hanging indents, thematic break, "
             + "turn separation, error/notice divergence, table structure, surface fills, "
             + "the replayed real claude turn, tool-run clustering, one line per fact, "
             + "a glyph vocabulary that distinguishes row kinds, rows measured at the height they draw, "
-            + "durations that survive a failure, and an accessibility identity that survives disclosure"
+            + "durations that survive a failure, an accessibility identity that survives disclosure, "
+            + "and a sent board task drawn as a task card with no ids"
         )
     }
 
@@ -2696,3 +2698,98 @@ extension TranscriptRhythmChecks {
     }
 
 }
+
+// MARK: - A board task sent to an agent
+
+extension TranscriptRhythmChecks {
+    /// The composer sends a board task as `BoardTaskContext.promptText`, which
+    /// carries the board/card UUIDs and the observed revision for the AGENT.
+    /// The user's bubble used to print every byte of it. Rendered through the
+    /// production list view and registry: the turn must show a task card with
+    /// the title and the description's first line, the user's own words as the
+    /// ruled prose, and no identifier anywhere in the drawn text.
+    static func checkASentBoardTaskRendersAsATaskCard() throws {
+        let boardID = UUID()
+        let card = BoardCard(
+            id: UUID(), columnId: UUID(), position: FracIndex(value: 0.5),
+            title: "RST-42 Cart total is off by a cent",
+            body: "The cart rounds each line before summing.\n\nRepro: three items at 0.335.",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let context = BoardTaskContext(boardID: boardID, card: card, revision: 9, imageAttachmentIDs: [])
+        let instructions = "Keep the fix small and add a test."
+        var projection = AgentTranscriptProjection(threadId: "rhythm-board-task")
+        try projection.appendUserPrompt(
+            id: AgentNodeID(rawValue: "submission:rhythm-board-task")!,
+            prompt: AgentPrompt(context.promptText(additionalInstructions: instructions))
+        )
+        let document = projection.document
+
+        for theme: TokenTheme in [.light, .dark] {
+            let transcript = AgentTranscriptListView(renderContext: AgentRenderContext(
+                actions: .disabled, tokens: .transcript, appearance: theme
+            ))
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 720))
+            host.addSubview(transcript)
+            transcript.frame = host.bounds
+            // The tile's seam for a local send (`synchronizeV2Transcript`): a
+            // structural change forwards the model's entries under an empty
+            // patch, and `final` presents it without the streaming gate.
+            try transcript.enqueue(
+                document: AgentDocument(version: 1, entries: document.entries),
+                patch: try AgentDocumentPatch.empty(fromVersion: 0),
+                final: true
+            )
+            transcript.flushPendingVisualUpdate()
+            if let error = transcript.qaRenderingErrorDescription {
+                throw fail("board task/\(theme.rawValue): the transcript failed to render: \(error)")
+            }
+            transcript.layoutSubtreeIfNeeded()
+            transcript.collectionView.layout()
+            transcript.collectionView.layoutSubtreeIfNeeded()
+            func descendants(in view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let views = descendants(in: transcript)
+
+            let drawn = views.compactMap { view -> String? in
+                if let field = view as? NSTextField, !field.isHidden { return field.stringValue }
+                if let text = view as? NSTextView { return text.string }
+                return nil
+            }.joined(separator: "\n")
+            for leak in ["boardId", "cardId", "observedRevision", "Array task reference", "# Task:",
+                         boardID.uuidString.lowercased(), card.id.uuidString.lowercased()] {
+                guard !drawn.contains(leak) else {
+                    throw fail("board task/\(theme.rawValue): the sent turn still draws '\(leak)': \(drawn)")
+                }
+            }
+            guard let task = views.compactMap({ $0 as? AgentTaskReferenceRowView }).first else {
+                throw fail("board task/\(theme.rawValue): no task card rendered for the sent board task")
+            }
+            guard task.titleLabel.stringValue == card.title,
+                  !task.summaryLabel.isHidden,
+                  task.summaryLabel.stringValue == "The cart rounds each line before summing." else {
+                throw fail("board task/\(theme.rawValue): the task card shows title '\(task.titleLabel.stringValue)' "
+                    + "and summary '\(task.summaryLabel.stringValue)' (hidden: \(task.summaryLabel.isHidden))")
+            }
+            task.layoutSubtreeIfNeeded()
+            let titleFrame = task.titleLabel.convert(task.titleLabel.bounds, to: task)
+            let summaryFrame = task.summaryLabel.convert(task.summaryLabel.bounds, to: task)
+            guard task.frame.height > 0, titleFrame.width > 40, summaryFrame.width > 40,
+                  task.bounds.contains(titleFrame), task.bounds.contains(summaryFrame),
+                  summaryFrame.minY >= titleFrame.maxY - 0.5 else {
+                throw fail("board task/\(theme.rawValue): the task card is not laid out as title over summary "
+                    + "inside its row: row \(task.frame), title \(titleFrame), summary \(summaryFrame)")
+            }
+            let users = views.compactMap { $0 as? UserPromptView }
+            let prose = users.flatMap { $0.proseView.textFields.map(\.string) }.joined(separator: "\n")
+            guard users.count == 1, prose == instructions else {
+                throw fail("board task/\(theme.rawValue): the user's own words must be the turn's ruled prose; "
+                    + "got \(users.count) prompt view(s) drawing '\(prose)'")
+            }
+            guard !drawn.contains("Repro: three items") else {
+                throw fail("board task/\(theme.rawValue): the task body was printed in the user's turn")
+            }
+        }
+    }
+}
+
