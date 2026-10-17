@@ -10984,6 +10984,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onWakeRerender = { [weak self] in
             self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
         }
+        sidebar.agentInbox.latestAssistantLineProvider = { [weak self] agentId in
+            self?.agentSupervisor.latestAssistantLine(for: AgentID(rawValue: agentId))
+        }
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -36936,6 +36939,7 @@ extension AppDelegate {
     nudgeWindow.contentView = nil
 
     NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentInbox: " + (try runAgentInboxHoverGlanceCheck()))
     print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in its owning workspace while its record stays put — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle, Snooze and Mark Unread, a running one removing Archive and Delete, the two together leaving no bulk action, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a CUSTOM ROW CONTEXT MENU showing \(expectedQuietMenu.count) live capabilities through the tile's choice family, both right-click and Control-click taking the production event path, a background click offering nothing, a click outside a selection retargeting to that row and one inside preserving all selected targets, plural Open and blocked Settle absent rather than dead, Open live through P3.9's callback, Rename opening the targeted inline editor, stale actions refused after a push, keyboard focus announced to VoiceOver, and dismissal returning focus to the originating table; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live with Phase 6 lifecycle/read actions reaching the custom row menu and bulk bar, the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's managed TILE is removed while durable suppression keeps a stale restored copy from minting a replacement, a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is read from the shipped row list through `InboxSort.partition` after the builder derives lifecycle at read time, tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
     }
 }
@@ -37333,5 +37337,187 @@ static func checkRowStatusIsTurnState(
     let agreementReport = try checkInboxStateAgreesWithTilePresenter(fail: fail)
 
     return "row status is turn state: sampled \(samples.count) points of one turn (inbox rows \(beforeRow)/\(midRow)/\(afterRow)) through currentManagedAgentActivities() over the owner's on-disk record (\(samples.map { "\($0.phase) \($0.row)" }.joined(separator: ", "))), tile and row agree throughout, \(mapping.count) persisted cases mapped with stopped ≠ idle, approval still outranks working and settled; the listing refused before the sweep and answered after it; \(readGateReport); a stopped turn left the ring claiming working and the row read ready with no clock, \(Int(liveElapsed))s measured from the stamped start; \(agreementReport)"
+}
+}
+
+/// What an agent tile and its sidebar row say at a glance: the hold-⌥ jump badge's
+/// tint and the hover card's status and last line. A same-file extension because
+/// both witnesses drive the app's own wiring — `wireCanvasCallbacks`,
+/// `configureWorkspaceSidebar`, `refreshAgentSurfaces` — rather than a copy of it.
+///
+/// One fixture serves both. Three managed agents on a real `AgentSupervisor` with a
+/// transcript store (production injects one), driven into their states by events
+/// through the supervisor's own delivery path, never by hand-built rows:
+///  - `working`: a turn in flight that has written two lines;
+///  - `asking`: a turn holding an open command approval;
+///  - `done`: a completed turn nobody has looked at (the app was never active).
+/// A note tile stands for every tile that is not an agent.
+extension AppDelegate {
+struct AgentGlanceFixture {
+    let app: AppDelegate
+    let canvas: CanvasNSView
+    let sidebar: WorkspaceSidebarView
+    let window: NSWindow
+    let supervisor: AgentSupervisor
+    let working: (tile: UUID, agent: AgentID)
+    let asking: (tile: UUID, agent: AgentID)
+    let done: (tile: UUID, agent: AgentID)
+    let note: UUID
+    let root: URL
+}
+
+static let agentGlanceWorkingLine = "Tracing the flaky drag test in CanvasChecks"
+static let agentGlanceDoneLine = "All 12 zone checks pass now."
+
+@MainActor
+static func makeAgentGlanceFixture(label: String) throws -> AgentGlanceFixture {
+    struct SetupError: Error, CustomStringConvertible { let description: String }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-glance-\(label)-\(UUID().uuidString)", isDirectory: true)
+    let appSupport = root.appendingPathComponent("support", isDirectory: true)
+    let projectRoot = root.appendingPathComponent("project", isDirectory: true)
+    for dir in [appSupport, projectRoot] {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let projectId = UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000C1")!
+    var registry = Registry.empty()
+    registry.projects = [ProjectEntry(
+        id: projectId, name: "Glance", rootPath: projectRoot.path, workspaceId: nil,
+        lastOpenedAt: now, pinned: false, missing: false)]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: appSupport),
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        warn: { _ in },
+        transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
+    func agent(_ name: String, tile: UUID) -> (tile: UUID, agent: AgentID) {
+        (tile, supervisor.spawn(
+            role: nil, prompt: nil, cwd: projectRoot, harness: .pi, model: AgentCatalogQAFixture.pi[0],
+            thinking: AgentModelConfig.defaultThinking, projectId: projectId, projectRoot: projectRoot,
+            tileId: tile, displayName: name))
+    }
+    let working = agent("Drag fixer", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A1")!)
+    let asking = agent("Migrator", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A2")!)
+    let done = agent("Zone tidier", tile: UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A3")!)
+    let note = UUID(uuidString: "6A1A0000-0000-4000-8000-0000000000A4")!
+
+    func deliver(_ who: (tile: UUID, agent: AgentID), _ events: (String) -> [AgentRuntimeEvent]) {
+        for event in events(AgentSupervisor.threadId(for: who.agent)) { supervisor.qaDeliver(event, to: who.agent) }
+    }
+    deliver(working) { thread in [
+        .turnStarted(threadId: thread, turnId: "w1"),
+        .contentDelta(threadId: thread, turnId: "w1", streamKind: .assistant,
+                      delta: "Reading the build log.\n\n- \(agentGlanceWorkingLine)"),
+    ] }
+    deliver(asking) { thread in [
+        .turnStarted(threadId: thread, turnId: "q1"),
+        .requestOpened(threadId: thread, requestId: "q1-approve", kind: .commandExecutionApproval),
+    ] }
+    deliver(done) { thread in [
+        .turnStarted(threadId: thread, turnId: "d1"),
+        .contentDelta(threadId: thread, turnId: "d1", streamKind: .assistant,
+                      delta: "## Summary\n\nClosed the gap a removed tile left.\n\n\(agentGlanceDoneLine)\n\n```"),
+        .turnCompleted(threadId: thread, turnId: "d1", outcome: .completed, errorMessage: nil),
+    ] }
+
+    func tile(_ id: UUID, _ kind: TileKind, x: Double) -> Tile {
+        Tile(id: id, kind: kind, title: "glance", frame: TileFrame(x: x, y: 80, width: 260, height: 220),
+             zPosition: .fromLegacyRank(1), runtimeRef: nil,
+             metadata: kind == .note ? TileMetadata(noteId: id) : TileMetadata(launchProfileId: "managed-agent"))
+    }
+    let tiles = [tile(working.tile, .managedAgent, x: 40), tile(asking.tile, .managedAgent, x: 320),
+                 tile(done.tile, .managedAgent, x: 600), tile(note, .note, x: 880)]
+    let canvas = CanvasNSView(canvasState: CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+    canvas.frame = NSRect(x: 300, y: 0, width: 1200, height: 640)
+    for tile in tiles {
+        canvas.install(tileView: tile.kind == .managedAgent ? ManagedAgentTileNSView(tile: tile) : TileNSView(tile: tile),
+                       for: tile)
+    }
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = supervisor
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+    app.canvasView = canvas
+    canvas.focusBroker = app.focusBroker
+    app.wireCanvasCallbacks(canvas)
+    // Each agent tile wired the way boot wires it, so its agent counts as observed
+    // and its row states what the agent is doing rather than a last-known caveat.
+    for who in [working, asking, done] { app.wireManagedAgentTile(who.tile, agentID: who.agent) }
+
+    let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
+    app.workspaceSidebarView = sidebar
+    app.configureWorkspaceSidebar(sidebar)
+    sidebar.configureInboxScope(.all) { _ in }
+    // Parked off every display: the card needs a window's content view, never the screen.
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 640),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: 1500, height: 640))
+    container.addSubview(sidebar)
+    container.addSubview(canvas)
+    window.contentView = container
+    window.orderFrontOffscreenForChecks()
+    app.refreshAgentSurfaces(notify: false)
+    sidebar.layoutSubtreeIfNeeded()
+    sidebar.agentInbox.layoutForQA()
+    canvas.layoutSubtreeIfNeeded()
+    guard Set(sidebar.agentInbox.rowIdsForQA) == Set([working, asking, done].map(\.agent.rawValue)) else {
+        throw SetupError(description: "agent glance: the sidebar must list the three agents — got \(sidebar.agentInbox.titlesForQA)")
+    }
+    return AgentGlanceFixture(app: app, canvas: canvas, sidebar: sidebar, window: window, supervisor: supervisor,
+                              working: working, asking: asking, done: done, note: note, root: root)
+}
+
+/// The hover card says what the agent is doing and the last thing it said, from the
+/// supervisor's transcript — and a line too long for the card ends in an ellipsis.
+@MainActor
+static func runAgentInboxHoverGlanceCheck() throws -> String {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError(description: "hover glance: " + message) }
+    }
+    let f = try makeAgentGlanceFixture(label: "hover")
+    defer { f.window.orderOut(nil); try? FileManager.default.removeItem(at: f.root) }
+    let inbox = f.sidebar.agentInbox
+    inbox.hoverCardEnabled = true
+    inbox.hoverCardScheduler = { _, work in work(); return {} }
+    func card(_ agent: AgentID) throws -> [String] {
+        _ = inbox.hoverRowForQA(id: nil)
+        try expect(inbox.hoverRowForQA(id: agent.rawValue), "the row for \(agent.rawValue) must be hoverable")
+        try expect(inbox.isHoverCardVisibleForQA, "hovering a row must open its card")
+        return inbox.hoverCardLinesForQA
+    }
+
+    let working = try card(f.working.agent)
+    try expect(working.contains { $0.hasPrefix("Working · ") },
+               "a working agent's card must say Working and for how long — it said \(working)")
+    try expect(working.contains(agentGlanceWorkingLine),
+               "a working agent's card must carry its newest line, list marker dropped — it said \(working)")
+    let asking = try card(f.asking.agent)
+    try expect(asking.contains(AgentStatusVocabulary.label(for: .needsAttention)),
+               "an agent waiting on an approval must say so — it said \(asking)")
+    let done = try card(f.done.agent)
+    try expect(done.contains("Done"), "a finished agent's card must say Done — it said \(done)")
+    try expect(done.contains(agentGlanceDoneLine),
+               "a finished agent's card must carry its last line, not the closing fence — it said \(done)")
+
+    let long = String(repeating: "Following the drag through every zone layer to the persisted frame ", count: 4)
+    let thread = AgentSupervisor.threadId(for: f.working.agent)
+    f.supervisor.qaDeliver(.contentDelta(threadId: thread, turnId: "w1", streamKind: .assistant,
+                                         delta: "\n\n" + long), to: f.working.agent)
+    let streaming = try card(f.working.agent)
+    let expectedLong = long.trimmingCharacters(in: .whitespaces)
+    try expect(streaming.contains(expectedLong), "the card must follow the stream to its newest line — it said \(streaming)")
+    try expect(inbox.hoverCardTruncatedLinesForQA.contains(expectedLong),
+               "a line longer than the card must be cut with an ellipsis — truncated: \(inbox.hoverCardTruncatedLinesForQA)")
+    let width = inbox.hoverCardFrameForQA?.width ?? .infinity
+    try expect(width <= InboxHoverCardView.maximumWidth + 0.5,
+               "a long line must not widen the card past \(InboxHoverCardView.maximumWidth)pt — it is \(width)pt")
+    _ = inbox.hoverRowForQA(id: nil)
+    return "hover card: status (Working · elapsed / \(AgentStatusVocabulary.label(for: .needsAttention)) / Done) and the newest assistant line, truncated in-card"
 }
 }

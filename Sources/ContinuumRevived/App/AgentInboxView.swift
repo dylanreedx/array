@@ -4331,6 +4331,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Injectable so a check can fire the dwell without sleeping — the shape
     /// `wakeRerenderScheduler` established.
     var hoverCardScheduler: WakeRerenderScheduler?
+    /// The newest line the agent wrote, from the host (the supervisor's transcript
+    /// projection). Asked only when a card opens, so hover reads no disk and runs
+    /// no process; nil, or no host, draws no line.
+    var latestAssistantLineProvider: ((UUID) -> String?)?
     private var hoverCard: InboxHoverCardView?
     private var hoverCardCancel: (() -> Void)?
     private var hoverCardClosedAt: Date?
@@ -4409,6 +4413,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// with "Unknown" would be worse than a shorter card.
     private func hoverCardLines(for row: AgentInboxRow) -> [InboxHoverCardLine] {
         var lines: [InboxHoverCardLine] = []
+        // What it is doing, then the last thing it said — the two questions a hover
+        // over an agent is usually asking, ahead of where it lives.
+        if let status = Self.hoverCardStatus(row, now: clock()) {
+            lines.append(.init(symbol: "circle.dashed", text: status))
+        }
+        if let said = latestAssistantLineProvider?(row.id), !said.isEmpty {
+            lines.append(.init(symbol: "text.bubble", text: said))
+        }
         if let project = row.projectName, !project.isEmpty {
             lines.append(.init(symbol: "folder", text: project))
         }
@@ -4443,6 +4455,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return lines
     }
 
+    /// The card's status line, in the row's own vocabulary (`stateWord`, and the
+    /// live elapsed beside `Working`), so the card and the row cannot disagree. A
+    /// finished turn you already saw drops its word on the ROW; the card still says
+    /// `Done`, with when. An unconfirmed row claims no state, and neither does this.
+    static func hoverCardStatus(_ row: AgentInboxRow, now: Date) -> String? {
+        guard !row.isUnconfirmed else { return nil }
+        let seenDone = AgentInbox96CellView.relativeCompletionText(row, now: now)
+        guard let word = AgentInbox96CellView.stateWord(row, now: now) ?? seenDone.map({ _ in "Done" })
+        else { return nil }
+        let age = AgentInbox96CellView.stateAge(row, now: now).flatMap(AgentInboxCellView.elapsedText)
+            ?? seenDone
+        return [word, age].compactMap { $0 }.joined(separator: " · ")
+    }
+
     /// The machine the agent is running on. One string for now, and honest:
     /// everything Array runs is local. It earns its place by being the line a
     /// remote environment will appear on rather than a line that has to be
@@ -4462,6 +4488,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var isHoverCardVisibleForQA: Bool { hoverCard?.superview != nil }
     var hoverCardFrameForQA: NSRect? { hoverCard?.superview == nil ? nil : hoverCard?.frame }
     var hoverCardLinesForQA: [String] { hoverCard?.qaLinesForQA ?? [] }
+    var hoverCardTruncatedLinesForQA: [String] { hoverCard?.qaTruncatedLinesForQA ?? [] }
     var hoverCardBrandMarksAreTemplatesForQA: Bool {
         hoverCard?.qaBrandMarksAreTemplatesForQA ?? false
     }
