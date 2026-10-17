@@ -160,7 +160,7 @@ enum AgentCLIUpdateSettingsChecks {
         delegate.agentSupervisor = supervisor
         delegate.cliUpdateCenter = center
 
-        let settings = SettingsModel(defaults: defaults, navKeymap: .default, isCompanionEnabled: false)
+        let settings = SettingsModel(defaults: defaults, navKeymap: .default)
         settings.cliUpdates = center
         let fixture = SettingsFixtureWindow(model: settings, size: NSSize(width: 1_100, height: 1_200))
         teardown.append { fixture.tearDown() }
