@@ -340,7 +340,7 @@ final class TileSpawner {
 
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: creationScope?.zoneId, arrangeAfterSpawn: false)
 
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
@@ -361,7 +361,7 @@ final class TileSpawner {
             if target == .unplaced { throw SpawnError.canvasUnavailable }
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
             terminalSpawnedHandler?(descriptor)
         } catch {
             // A fresh spawn: take back what it made. (Restart, below, keeps its tile.)
@@ -1100,7 +1100,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
 
         do {
             try upsertBrowserTile(
@@ -1112,7 +1112,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
         } catch {
             // Leave nothing behind: no web view process, no drawn tile nothing
             // persisted, no browser-state row for a tile that does not exist.
@@ -1192,7 +1192,7 @@ final class TileSpawner {
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: profile.dataStoreIdentifier, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         configureBrowserInspectorMenu(view, tileId: tile.id)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
 
         do {
             try upsertBrowserTile(
@@ -1204,7 +1204,7 @@ final class TileSpawner {
                 profileId: profile.id,
                 in: browserState
             )
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
         } catch {
             fputs("TileSpawner target=_blank persistence failed: \(error)\n", stderr)
             canvasView.removeTile(id: tile.id)
@@ -1366,14 +1366,14 @@ final class TileSpawner {
             networkLiteEventProvider: browserInspectorNetworkLiteEventProvider(for: browserTileId)
         )
         configureBrowserInspectorView(view, inspectorTileId: inspectorTileId, browserTileId: browserTileId)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
 
         var nextState = browserState
         nextState.inspectorStates.append(inspectorState)
         do {
             try projectStore.saveBrowserState(nextState)
             _ = revealTile(inspectorTileId)
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(inspectorTileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -1748,11 +1748,7 @@ final class TileSpawner {
                 resumeCursor: nil,
                 runtimePayload: nil
             ))
-            try persistProjectCanvas(after: target, in: canvasView)
-            // The layout transaction must see the new tile in the saved canvas.
-            if case let .zoneLayer(zoneId) = target {
-                canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId)
-            }
+            try persistSpawnedTile(tileId, after: target, in: canvasView)
         } catch {
             try? managedSessionStore.delete(tileId: tileId)
             withdrawFailedSpawn(tileId, target: target, in: canvasView)
@@ -2223,9 +2219,9 @@ final class TileSpawner {
         view.onSaveAsMarkdownRequested = { [weak self] url in
             self?.handleNoteConversion(self?.convertNoteToDocument(noteId: noteId, tileId: tileId, destination: url))
         }
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2273,9 +2269,9 @@ final class TileSpawner {
         let view = KanbanTileNSView(tile: tile, board: board)
         runtime.attach(view, to: boardId)
         runtime.bindTile(tileId, to: boardId)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2325,9 +2321,9 @@ final class TileSpawner {
             repositoryURL: URL(fileURLWithPath: project.rootPath, isDirectory: true),
             sendCommentsToAgent: { sendCommentsToAgent(tileId) })
         view.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tileId, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2639,10 +2635,10 @@ final class TileSpawner {
         )
         let view = FileTileNSView(tile: tile)
         fileEditorConfigurator?(view)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
 
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -2715,6 +2711,23 @@ final class TileSpawner {
         }
     }
 
+    /// Persists a freshly SPAWNED tile, then settles its auto-layout zone around
+    /// it. The order matters: a layout commit refuses a tile that no saved canvas
+    /// holds yet (`LayoutCommitError.tilesWithoutStore`) and rolls the settle
+    /// back, so settling inside `installProjectTile`, before this save, left every
+    /// spawn but the managed agent's (which already ran in this order) wherever its
+    /// raw placement put it — on top of a sibling, or outside its zone.
+    private func persistSpawnedTile(
+        _ tileId: UUID,
+        after target: CanvasNSView.ProjectTileTarget,
+        in canvasView: CanvasNSView
+    ) throws {
+        try persistProjectCanvas(after: target, in: canvasView)
+        if case let .zoneLayer(zoneId) = target {
+            canvasView.arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tileId)
+        }
+    }
+
     /// Installs a file tile view for an existing `Tile` during canvas restore.
     func installFileTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = FileTileNSView(tile: tile)
@@ -2749,9 +2762,9 @@ final class TileSpawner {
             metadata: TileMetadata(filePath: trimmedPath)
         )
         let view = RunArtifactsTileNSView(tile: tile)
-        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+        let target = canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -6452,7 +6465,7 @@ final class TileSpawner {
             targetZoneId: targetZoneId
         )
         do {
-            try persistProjectCanvas(after: target, in: canvasView)
+            try persistSpawnedTile(tile.id, after: target, in: canvasView)
         } catch {
             return .failure(error)
         }
@@ -6533,7 +6546,7 @@ final class TileSpawner {
         }
         let target = replacingExistingView
             ? canvasView.materializeProjectTile(tileView: view, for: tile)
-            : canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId)
+            : canvasView.installProjectTile(tileView: view, for: tile, targetZoneId: targetZoneId, arrangeAfterSpawn: false)
         return (viewModel, target)
     }
 

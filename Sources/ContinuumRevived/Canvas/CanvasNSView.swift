@@ -826,7 +826,36 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
-    func arrangeAutoLayoutAfterSpawn(zoneId: UUID?) {
+    /// Whether a settle of `zoneId` will actually run (the engine's own gate).
+    private func isAutoLayoutActive(inZone zoneId: UUID) -> Bool {
+        guard isAutoLayoutEnabled,
+              let zone = autoLayoutScene().zones.first(where: { $0.zoneId == zoneId }) else { return false }
+        return !zone.collapsed && zone.autoLayoutMode.resolves(globalEnabled: true)
+    }
+
+    /// `spawnedTileId` is the tile just installed. It settles LAST, as the anchor,
+    /// so the composition already in the zone stays put and the new tile docks
+    /// onto it — growing the zone right/down when no slot is free inside.
+    ///
+    /// Without that, the settle had no mover: a new tile placed above the others
+    /// seeded the cluster, and a sibling it covered found no slot inside a zone too
+    /// small for all of them and was left OVERLAPPING it (`absorb`'s fallback). The
+    /// zone was too small because growing it up/left to take the new tile can be
+    /// refused outright: `growZone` and `expandZoneToContainMembers` need an origin
+    /// that keeps every member's world frame bit-exact, and with the float dust a
+    /// real pointer drag leaves in those frames, an origin in a coarser binade has
+    /// none. Growing right/down keeps the origin, so it can never be refused.
+    /// `--zone-arming-check` §9.
+    ///
+    /// For the same reason, a spawn into an auto-layout zone never grows the zone
+    /// toward the tile's raw placement (`installProjectTile` skips `growZone`, and
+    /// the pre-settle expansion is skipped here): placement is camera-driven and
+    /// often lands left of or above the zone, and growing there ran a drawn zone
+    /// across its neighbour. When that right/down growth runs into another zone
+    /// (or a bare tile), the zone that grew takes priority and pushes it away, as
+    /// a dragged zone does (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`,
+    /// `--zone-arming-check` §10).
+    func arrangeAutoLayoutAfterSpawn(zoneId: UUID?, spawnedTileId: UUID? = nil) {
         guard isAutoLayoutEnabled else { return }
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(
@@ -835,9 +864,24 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneIds: Set(baseline.zones.map(\.zoneId))
         )
         autoLayoutGestureBaseline = baseline
-        if let zoneId { expandZoneToContainMembers(zoneId) }
+        if let zoneId, spawnedTileId == nil || !isAutoLayoutActive(inZone: zoneId) {
+            expandZoneToContainMembers(zoneId)
+        }
         for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
-            applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
+            let anchor = spawnedTileId.flatMap { tile in
+                autoLayoutScene().tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
+            }
+            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil),
+                            baseline: autoLayoutScene())
+            if anchor != nil, let before = liveZones.first(where: { $0.zoneId == id }) {
+                expandZoneToContainMembers(id)
+                let push = CanvasAutoLayoutEngine.pushPeers(
+                    ofGrownZone: id, from: before, scene: autoLayoutScene(),
+                    gap: TileGapResolver.resolvedGap(defaults: autoLayoutDefaults))
+                if !push.tileFrames.isEmpty || !push.zonePlacements.isEmpty {
+                    applyLayoutTransaction(push)
+                }
+            }
         }
         _ = finishAutoLayoutGesture()
         _ = commitGeometryEdit()
@@ -7016,8 +7060,14 @@ final class CanvasNSView: NSView, TokenThemed {
         // T7: unconditional, and BEFORE the auto-layout pass. `arrangeAutoLayoutAfterSpawn`
         // already expands the zone, but only when auto-layout is enabled — with it off,
         // a spawned tile sat outside its zone until someone dragged it.
-        growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
-        if arrangeAfterSpawn { arrangeAutoLayoutAfterSpawn(zoneId: zoneId) }
+        //
+        // Except into an auto-layout zone: there the settle docks the tile onto
+        // the zone's members and grows the zone right/down only, clear of its
+        // neighbours (see `arrangeAutoLayoutAfterSpawn`).
+        if !isAutoLayoutActive(inZone: zoneId) {
+            growZone(zoneId, toInclude: CanvasEngine.worldFrame(tile: installed, in: layer.placement))
+        }
+        if arrangeAfterSpawn { arrangeAutoLayoutAfterSpawn(zoneId: zoneId, spawnedTileId: tile.id) }
         return .zoneLayer(zoneId)
     }
 

@@ -592,6 +592,8 @@ enum ZoneArmingChecks {
               + "layer and its agent a record")
 
         try runDrawnZoneSpawns()
+        try runAutoLayoutSpawnsNeverOverlap()
+        try runGrowthPushesNeighbours()
     }
 
     // MARK: - 8. A zone the user DRAWS is a zone they can create into
@@ -799,5 +801,303 @@ enum ZoneArmingChecks {
         print("ZoneArmingChecks: a drawn zone for an unplaced project and a second drawn zone for a "
               + "placed one each armed, got a layer and a spawner; ⌘K Board and Agent landed inside "
               + "them with no second picker and persisted into their own project")
+    }
+
+    // MARK: - 9. Under auto layout, a spawn never lands on a sibling
+
+    /// The film capture `full-day-20261005T175103Z` (take 01-morning): with global
+    /// auto layout on, a drawn zone holding a Board and an Agent side by side took a
+    /// second Agent from ⌘K ON TOP of the board, and it stayed there.
+    ///
+    /// **The defect.** Automatic placement ranks "on screen" above "free", so with
+    /// the camera framing the zone tightly every free dock candidate was off screen
+    /// and the new tile was placed overlapping the board. Inside the zone, so the
+    /// zone did not grow. `arrangeAutoLayoutAfterSpawn` then settled with no mover:
+    /// the new tile, being top-most, seeded the cluster, and the board found no
+    /// gap-contact slot inside a zone too small for three tiles — `absorb` leaves
+    /// such a tile where it is, overlapping. Under a looser camera the placement
+    /// happened to choose a free slot below, which is why an earlier capture of the
+    /// same scene was fine.
+    ///
+    /// Drives the production ⌘K path (`qaPerformPaletteAction`) with auto layout ON
+    /// in the volatile argument domain, under several camera framings, and asserts
+    /// world geometry: no two members of the zone overlap and each lies inside the
+    /// (grown) zone, after every spawn.
+    private static func runAutoLayoutSpawnsNeverOverlap() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        /// The drawn zone, in screen points under the seeded camera (300, -100, 1):
+        /// world (1600, 1010) + 1750x810 — room for two tiles side by side, not three.
+        let drawnRect = CGRect(x: 1300, y: 1110, width: 1750, height: 810)
+        enum Framing: String, CaseIterable {
+            /// The film: the camera frames the whole zone, edge to edge.
+            case framesZone = "camera framing the zone"
+            /// The camera as it was when the zone was drawn (zone partly visible).
+            case asDrawn = "camera as drawn"
+            /// Zoomed far out: every dock candidate is on screen.
+            case zoomedOut = "camera zoomed out"
+            /// The capture verbatim: its 1619x1048 canvas, its zone, and its two
+            /// cameras — the one the Board and Agent were made under, then the
+            /// re-framed one the second Agent was made under.
+            case film = "the film's cameras"
+        }
+        let filmDrawCamera = CanvasViewport(x: 1480.1136363636365, y: -125.4545454545455, zoom: 0.88)
+        let filmSpawnCamera = CanvasViewport(x: 1674.4639376218324, y: -161.52241715399612, zoom: 0.8784246575342466)
+
+        for framing in Framing.allCases {
+            let fixture = try Fixture(label: "autolayout-spawn")
+            defer { fixture.dispose() }
+            let projectElm = UUID(uuidString: "00000000-0000-0000-0000-00000000B2E2")!
+            let elmRoot = fixture.root.appendingPathComponent("Elm", isDirectory: true)
+            try FileManager.default.createDirectory(at: elmRoot, withIntermediateDirectories: true)
+            let now = Date(timeIntervalSince1970: 1_900_000_000)
+            try ProjectStore(projectRoot: elmRoot).saveProject(Project(
+                id: projectElm, name: "Elm", rootPath: elmRoot.path, createdAt: now, updatedAt: now,
+                defaultLaunchProfileId: "shell", editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning)))
+            var registry = try fixture.registryStore.loadOrEmpty()
+            registry.projects.append(ProjectEntry(
+                id: projectElm, name: "Elm", rootPath: elmRoot.path, workspaceId: nil,
+                lastOpenedAt: now, pinned: false, missing: false))
+            try fixture.registryStore.save(registry)
+
+            try fixture.mount()
+            let m = try fixture.requireMounted("autolayout-spawn")
+            defer { m.delegate.qaAgentSupervisor.stopAll() }
+            m.delegate.creationScopePickerPresenterForQA = { _ in }
+            let label = framing.rawValue
+            try expect(m.canvas.isAutoLayoutEnabled, "\(label): auto layout must be ON for this witness")
+
+            var screenRect = drawnRect
+            if framing == .film {
+                m.canvas.frame = CGRect(x: 0, y: 0, width: 1619, height: 1048)
+                m.canvas.setViewport(filmDrawCamera)
+                // The capture's zone origin AS PERSISTED, float dust included: a real
+                // pointer drag lands world coordinates off the integer grid, and that
+                // dust is what makes an upward grow unrepresentable (see the fix).
+                let topLeft = CanvasEngine.worldToScreen(
+                    CGPoint(x: 1720, y: 30.00000000000003), viewport: filmDrawCamera)
+                let bottomRight = CanvasEngine.worldToScreen(CGPoint(x: 2880, y: 840), viewport: filmDrawCamera)
+                screenRect = CGRect(x: topLeft.x, y: topLeft.y,
+                                    width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y)
+            }
+            let zoneId = m.canvas.beginProvisionalZone(screenRect: screenRect)
+            try expect(m.delegate.qaConfirmProjectHomePicker(projectId: projectElm, homeRelativePath: nil),
+                       "\(label): drawing a zone presented no Home picker offering the project")
+            m.canvas.layoutSubtreeIfNeeded()
+            try expect(m.canvas.armedZoneId == zoneId, "\(label): the drawn zone must be armed")
+
+            func zoneRect() throws -> TileFrame {
+                guard let zone = m.canvas.qaLiveZonePlacement(zoneId) else {
+                    throw Failure(message: "\(label): the drawn zone vanished")
+                }
+                return CanvasEngine.zoneWorldFrame(zone)
+            }
+            func frameZone() throws {
+                let rect = try zoneRect()
+                let size = m.canvas.bounds.size
+                let zoom = min(Double(size.width) / rect.width, Double(size.height) / rect.height)
+                m.canvas.setViewport(CanvasViewport(
+                    x: rect.x + rect.width / 2 - Double(size.width) / zoom / 2,
+                    y: rect.y + rect.height / 2 - Double(size.height) / zoom / 2,
+                    zoom: zoom))
+                m.canvas.layoutSubtreeIfNeeded()
+            }
+            switch framing {
+            case .framesZone: try frameZone()
+            case .asDrawn, .film: break
+            case .zoomedOut:
+                let rect = try zoneRect()
+                m.canvas.setViewport(CanvasViewport(x: rect.x - 2600, y: rect.y - 1400, zoom: 0.4))
+                m.canvas.layoutSubtreeIfNeeded()
+            }
+
+            // Every OTHER zone, and how much the drawn zone overlaps it as drawn.
+            // Growth may never add to that: it pushes the neighbour away (§10), and a
+            // zone that grew across its neighbour stole the neighbour's clicks (capture
+            // `full-day-20261005T175740Z`: a click "in Roast API" armed Storefront
+            // and an agent landed in the wrong project).
+            func overlapArea(_ a: TileFrame, _ b: TileFrame) -> Double {
+                max(0, min(a.x + a.width, b.x + b.width) - max(a.x, b.x))
+                    * max(0, min(a.y + a.height, b.y + b.height) - max(a.y, b.y))
+            }
+            let drawn = try zoneRect()
+            var drawnOverlap: [UUID: Double] = [:]
+            for zone in m.runtime.document.zones where zone.zoneId != zoneId {
+                guard let other = m.canvas.qaLiveZonePlacement(zone.zoneId) else { continue }
+                drawnOverlap[zone.zoneId] = overlapArea(drawn, CanvasEngine.zoneWorldFrame(other))
+            }
+            try expect(!drawnOverlap.isEmpty, "\(label): the fixture must have neighbouring zones")
+
+            var spawned: [UUID] = []
+            for (step, action) in [("board", LaunchPaletteAction.newBoard),
+                                   ("agent", .newManagedAgent), ("second agent", .newManagedAgent)] {
+                if framing == .film, step == "second agent" {
+                    m.canvas.setViewport(filmSpawnCamera)
+                    m.canvas.layoutSubtreeIfNeeded()
+                }
+                let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+                _ = m.delegate.qaPerformPaletteAction(action)
+                m.canvas.layoutSubtreeIfNeeded()
+                let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+                guard created.count == 1, let tileId = created.first else {
+                    throw Failure(message: "\(label): ⌘K \(step) created \(created.count) tile(s), expected one")
+                }
+                spawned.append(tileId)
+                let rect = try zoneRect()
+                let members = m.canvas.allTilesInWorldFrames().filter {
+                    m.canvas.qaZoneMembership(of: $0.id) == zoneId
+                }
+                try expect(Set(spawned).isSubset(of: Set(members.map(\.id))),
+                           "\(label): after the \(step), every spawned tile must belong to the drawn zone")
+                func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+                for member in members {
+                    let f = member.frame
+                    try expect(f.x >= rect.x - 0.001 && f.y >= rect.y - 0.001
+                               && f.x + f.width <= rect.x + rect.width + 0.001
+                               && f.y + f.height <= rect.y + rect.height + 0.001,
+                               "\(label): after the \(step), \(member.kind) \(describe(f)) is not inside the "
+                               + "zone \(describe(rect))")
+                }
+                for (index, a) in members.enumerated() {
+                    for b in members.dropFirst(index + 1) {
+                        let overlap = a.frame.x < b.frame.x + b.frame.width - 0.001
+                            && b.frame.x < a.frame.x + a.frame.width - 0.001
+                            && a.frame.y < b.frame.y + b.frame.height - 0.001
+                            && b.frame.y < a.frame.y + a.frame.height - 0.001
+                        try expect(!overlap,
+                                   "\(label): after the \(step), \(a.kind) \(describe(a.frame)) overlaps "
+                                   + "\(b.kind) \(describe(b.frame)) in an auto-layout zone")
+                    }
+                }
+                for (id, before) in drawnOverlap {
+                    guard let other = m.canvas.qaLiveZonePlacement(id) else { continue }
+                    let otherRect = CanvasEngine.zoneWorldFrame(other)
+                    try expect(overlapArea(rect, otherRect) <= before + 0.001,
+                               "\(label): after the \(step), the zone \(describe(rect)) grew across the "
+                               + "neighbouring zone \(describe(otherRect))")
+                }
+                // The film re-framed the zone between spawns; so does this framing.
+                if framing == .framesZone { try frameZone() }
+            }
+        }
+
+        print("ZoneArmingChecks: under auto layout, ⌘K Board, Agent, Agent in a drawn zone never "
+              + "overlapped, stayed inside the zone, and never grew it across a neighbouring zone, "
+              + "under every camera framing")
+    }
+
+    // MARK: - 10. A zone that grows pushes the neighbour it runs into
+
+    /// Dylan, 2026-10-05: "push neighbour… new takes prio". A spawn into a full
+    /// auto-layout zone docks the tile past the zone's right or bottom edge and
+    /// the zone grows to hold it. When that growth runs into another zone, the
+    /// zone that grew keeps its place and the neighbour moves away, with its
+    /// tiles, as a dragged zone pushes. Before this, the growth either avoided
+    /// the neighbour or, boxed in on both sides as here, ran straight across it.
+    ///
+    /// Fixture: Roots (900x700, three tiles) has Birch 200 pt to its right and
+    /// Annex 100 pt below. A new Agent fits in neither gap.
+    private static func runGrowthPushesNeighbours() throws {
+        typealias Fixture = WorkspaceInvariantsFixture
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
+        let savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        arguments[AgentHarnessConfig.key] = AgentHarness.pi.rawValue
+        arguments[AgentModelConfig.modelKey] = AgentCatalogQAFixture.pi[0]
+        arguments[AgentModelConfig.thinkingKey] = AgentModelConfig.defaultThinking
+        arguments[CanvasAutoLayoutConfig.enabledKey] = true
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer {
+            UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+            AgentModelCatalog.shared.resetForQA()
+        }
+
+        let fixture = try Fixture(label: "growth-push")
+        defer { fixture.dispose() }
+        try fixture.mount()
+        let m = try fixture.requireMounted("growth-push")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+        try expect(m.canvas.isAutoLayoutEnabled, "growth push: auto layout must be ON for this witness")
+
+        let roots = Fixture.zoneA1
+        let neighbours = [Fixture.zoneA2, Fixture.zoneA3]
+        func rect(_ id: UUID) throws -> TileFrame {
+            guard let zone = m.canvas.qaLiveZonePlacement(id) else {
+                throw Failure(message: "growth push: zone \(id) vanished")
+            }
+            return CanvasEngine.zoneWorldFrame(zone)
+        }
+        func describe(_ f: TileFrame) -> String { "(\(f.x), \(f.y)) \(f.width)x\(f.height)" }
+        func overlaps(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            a.x < b.x + b.width - 0.001 && b.x < a.x + a.width - 0.001
+                && a.y < b.y + b.height - 0.001 && b.y < a.y + a.height - 0.001
+        }
+        func members(_ id: UUID) -> [UUID: TileFrame] {
+            Dictionary(m.canvas.allTilesInWorldFrames()
+                .filter { m.canvas.qaZoneMembership(of: $0.id) == id }
+                .map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        }
+
+        let rootsBefore = try rect(roots)
+        var neighbourBefore: [UUID: (rect: TileFrame, members: [UUID: TileFrame])] = [:]
+        for id in neighbours { neighbourBefore[id] = (try rect(id), members(id)) }
+        for id in neighbours {
+            try expect(!overlaps(rootsBefore, neighbourBefore[id]!.rect),
+                       "growth push: the fixture's zones must start apart")
+        }
+
+        try expect(m.runtime.setActiveZone(roots, reason: .click), "growth push: Roots must arm")
+        let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
+        _ = m.delegate.qaPerformPaletteAction(.newManagedAgent)
+        m.canvas.layoutSubtreeIfNeeded()
+        let created = Set(m.canvas.allTilesInWorldFrames().map(\.id)).subtracting(before)
+        try expect(created.count == 1, "growth push: ⌘K Agent created \(created.count) tile(s), expected one")
+
+        let rootsAfter = try rect(roots)
+        try expect(rootsAfter.x == rootsBefore.x && rootsAfter.y == rootsBefore.y,
+                   "growth push: the zone that grew must keep its origin; \(describe(rootsBefore)) → \(describe(rootsAfter))")
+        try expect(rootsAfter.width > rootsBefore.width || rootsAfter.height > rootsBefore.height,
+                   "growth push: Roots \(describe(rootsBefore)) had no room for the Agent and must have grown")
+        try expect(members(roots).keys.contains(created.first!), "growth push: the Agent must belong to Roots")
+
+        var pushed = 0
+        for id in neighbours {
+            let after = try rect(id)
+            try expect(!overlaps(rootsAfter, after),
+                       "growth push: Roots grew to \(describe(rootsAfter)) across its neighbour \(describe(after))")
+            let (old, oldMembers) = neighbourBefore[id]!
+            let dx = after.x - old.x, dy = after.y - old.y
+            if dx != 0 || dy != 0 { pushed += 1 }
+            try expect(after.width == old.width && after.height == old.height,
+                       "growth push: a pushed neighbour moves, it never resizes; \(describe(old)) → \(describe(after))")
+            for (tile, frame) in members(id) {
+                guard let was = oldMembers[tile] else { continue }
+                try expect(abs(frame.x - was.x - dx) < 0.001 && abs(frame.y - was.y - dy) < 0.001,
+                           "growth push: a pushed zone's tile must move with it by (\(dx), \(dy)); "
+                           + "\(describe(was)) → \(describe(frame))")
+            }
+        }
+        try expect(pushed >= 1, "growth push: Roots grew into a neighbour, so one of them must have moved")
+
+        print("ZoneArmingChecks: a zone that grew to take a new Agent kept its origin and pushed the "
+              + "neighbour it ran into, tiles and all, so no two zones overlap")
     }
 }
