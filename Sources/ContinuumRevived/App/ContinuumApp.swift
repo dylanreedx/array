@@ -2423,6 +2423,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--top-bar-icons-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runTopBarIconsSelfCheck()
+                print("ContinuumRevivedTopBarIconsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-top-bar-check") {
             do {
                 _ = NSApplication.shared
@@ -11302,6 +11314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
         topBar.onOpenCommandCenter = { [weak self] in self?.openProfilePalette() }
         topBar.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
+        topBar.updateSidebarShortcut(resolvedShortcutDisplay(commandID: "view.toggleWorkspaceSidebar"))
         topBar.onSwitchWorkspace = { [weak self] workspaceId in
             self?.switchWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
@@ -11327,6 +11340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func refreshRegisteredShortcutSurfaces() {
         workspaceTopBarView?.updateCommandCenterShortcut(resolvedShortcutDisplay(commandID: "app.commandCenter"))
+        workspaceTopBarView?.updateSidebarShortcut(resolvedShortcutDisplay(commandID: "view.toggleWorkspaceSidebar"))
         canvasShortcutRailView?.reloadBindings(navKeymap: navKeymap)
         refreshGettingStartedTasks()
         ContinuumApp.refreshRegisteredCommandMenuItems()
@@ -12523,7 +12537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         expect(topChromeHeight < legacyTopChromeHeight,
                "top chrome must shrink; got \(topChromeHeight) against \(legacyTopChromeHeight)")
 
-        // 4. The workspace identity clears the traffic lights instead of hiding under them.
+        // 4. The bar's leading cluster — the sidebar icon, then the workspace title
+        //    menu — clears the traffic lights instead of hiding under them.
         guard let closeButton = window.standardWindowButton(.closeButton),
               let zoomButton = window.standardWindowButton(.zoomButton) else {
             throw CheckError.failed("the merged titlebar must keep the standard window buttons")
@@ -12534,7 +12549,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let identityLeft = topBar.convert(topBar.identityFrameForQA, to: nil).minX
         let trafficLightGap = identityLeft - buttonsRight
         expect(trafficLightGap >= 12,
-               "the workspace name must start clear of the traffic lights by at least 12pt; identity at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
+               "the sidebar icon must start clear of the traffic lights by at least 12pt; cluster at \(identityLeft), buttons end at \(buttonsRight), gap \(trafficLightGap)")
+        let sidebarIcon = topBar.sidebarToggleForQA.convert(topBar.sidebarToggleForQA.bounds, to: nil)
+        let titleMenu = topBar.titleButtonForQA.convert(topBar.titleButtonForQA.bounds, to: nil)
+        expect(abs(sidebarIcon.minX - identityLeft) < 0.5 && titleMenu.minX >= sidebarIcon.maxX
+               && titleMenu.minX - sidebarIcon.maxX <= 12,
+               "the cluster must lead with the sidebar icon and follow it with the title menu; icon \(sidebarIcon), title \(titleMenu), cluster at \(identityLeft)")
+        let barMidY = topBar.convert(topBar.bounds, to: nil).midY
+        expect(abs(sidebarIcon.midY - barMidY) < 1 && abs(titleMenu.midY - barMidY) < 1,
+               "the icon and title must sit on the bar's centre line \(barMidY); icon midY \(sidebarIcon.midY), title midY \(titleMenu.midY)")
         let buttonsMidY = closeButton.convert(closeButton.bounds, to: nil).midY
         let barInWindow = topBar.convert(topBar.bounds, to: nil)
         expect(buttonsMidY > barInWindow.minY && buttonsMidY < barInWindow.maxY,
@@ -12577,11 +12600,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         expect(abs(insetFullScreen) < 0.5,
                "entering full screen must drop the traffic-light inset to 0, got \(insetFullScreen)")
         expect(abs(identityFullScreen - WorkspaceTopBarView.identityLeading) < 0.5,
-               "in full screen the workspace name must sit at the bar's own \(WorkspaceTopBarView.identityLeading)pt margin, got \(identityFullScreen)")
+               "in full screen the sidebar icon must sit at the bar's own \(WorkspaceTopBarView.identityLeading)pt margin, got \(identityFullScreen)")
         expect(abs(insetRestored - workspaceTrafficLightInset) < 0.5,
                "leaving full screen must restore the \(workspaceTrafficLightInset)pt inset, got \(insetRestored)")
         expect(abs(identityRestored - identityWindowed) < 0.5,
-               "leaving full screen must put the workspace name back at \(identityWindowed), got \(identityRestored)")
+               "leaving full screen must put the sidebar icon back at \(identityWindowed), got \(identityRestored)")
 
         // A notification for some other window must not touch this bar.
         let stranger = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
@@ -12628,6 +12651,316 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "identityLeftWindowed": Double(identityWindowed),
             "identityLeftFullScreen": Double(identityFullScreen),
             "identityLeftRestored": Double(identityRestored),
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// `--top-bar-icons-check`: the window's top bar is two icons and one title
+    /// menu, not a row of bezelled text buttons. Every assertion runs and every
+    /// failure is reported, so a RED run names the whole regression.
+    static func runTopBarIconsSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        var failures: [String] = []
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+            if !condition() { failures.append(message) }
+        }
+        func descendants(_ view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        func menuTitles(_ menu: NSMenu) -> [String] {
+            menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_500_000)
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-top-bar-icons-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let forest = UUID(uuidString: "00000000-0000-0000-0000-00000000F601")!
+        let grove = UUID(uuidString: "00000000-0000-0000-0000-00000000F602")!
+        let forestEntry = WorkspaceEntry(id: forest, name: "Forest", projectIds: [], createdAt: now, updatedAt: now)
+        let groveEntry = WorkspaceEntry(id: grove, name: "Grove", projectIds: [], createdAt: now, updatedAt: now)
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = forest
+        registry.workspaces = [forestEntry, groveEntry]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        let emptyDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), zones: [], zoneZOrder: [], lastActiveZoneId: nil)
+        for id in [forest, grove] {
+            try WorkspaceStore(workspaceId: id, applicationSupportDirectory: appSupport).save(emptyDocument)
+        }
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let runtime = WorkspaceRuntime(
+            workspaceId: forest,
+            document: emptyDocument,
+            registry: ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+                throw CheckError.failed("the top bar icons check should not acquire project controllers")
+            }),
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        runtime.adoptCanvas(CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)))
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 900, height: workspaceTopBarHeight))
+        app.qaAttachWorkspaceTopBar(topBar)
+        topBar.layoutSubtreeIfNeeded()
+        // The production wiring toggles a persisted setting and opens a panel;
+        // count the deliveries instead.
+        var sidebarToggles = 0
+        var commandCenterOpens = 0
+        topBar.onToggleSidebar = { sidebarToggles += 1 }
+        topBar.onOpenCommandCenter = { commandCenterOpens += 1 }
+
+        // 1. No bezelled text controls anywhere in the bar.
+        let visible = descendants(topBar).filter { !$0.isHiddenOrHasHiddenAncestor }
+        let popups = visible.compactMap { $0 as? NSPopUpButton }
+        let bezelled = visible.compactMap { $0 as? NSButton }.filter { $0.isBordered }
+        expect(popups.isEmpty, "the bar still carries \(popups.count) pop-up button(s)")
+        expect(bezelled.isEmpty,
+               "the bar still draws bezelled buttons: \(bezelled.map { "'\($0.title)'" }.joined(separator: ", "))")
+        // A button's own title cell may be hosted in a label view; that text is the button's.
+        let labels = visible.compactMap { $0 as? NSTextField }
+            .filter { label in !label.stringValue.isEmpty && !descendants(topBar).contains { $0 is NSButton && label.isDescendant(of: $0) } }
+        expect(labels.isEmpty,
+               "a saved bar shows no text besides its title menu, found: \(labels.map { "'\($0.stringValue)'" }.joined(separator: ", "))")
+
+        // 2. The two icons: the right class, symbol, tooltip, label and behaviour.
+        let sidebarDisplay = app.resolvedShortcutDisplay(commandID: "view.toggleWorkspaceSidebar")
+        let commandCenterDisplay = app.resolvedShortcutDisplay(commandID: "app.commandCenter")
+        let icons: [(name: String, control: NSView, symbol: String, label: String, tip: String)] = [
+            ("sidebar toggle", topBar.sidebarToggleForQA, "sidebar.left", "Show/Hide Sidebar",
+             ["Show/Hide Sidebar", sidebarDisplay].compactMap { $0 }.joined(separator: " ")),
+            ("Command Center", topBar.commandCenterButtonForQA, "magnifyingglass", "Command Center",
+             ["Command Center", commandCenterDisplay].compactMap { $0 }.joined(separator: " ")),
+        ]
+        for icon in icons {
+            guard let button = icon.control as? ChromeIconButton else {
+                failures.append("the \(icon.name) is a \(type(of: icon.control)), not a ChromeIconButton")
+                continue
+            }
+            expect(button.symbolName == icon.symbol && button.image != nil && button.titleText == nil,
+                   "the \(icon.name) draws '\(button.symbolName)' (image \(button.image != nil), title \(String(describing: button.titleText))), expected the '\(icon.symbol)' symbol alone")
+            expect(button.toolTip == icon.tip, "the \(icon.name) tooltip is '\(button.toolTip ?? "")', expected '\(icon.tip)'")
+            expect(button.accessibilityLabel() == icon.label && button.accessibilityRole() == .button,
+                   "the \(icon.name) reads to VoiceOver as '\(button.accessibilityLabel() ?? "")' (\(String(describing: button.accessibilityRole())))")
+            expect(button.focusRingType != .none && button.focusRingMaskBounds == button.bounds,
+                   "the \(icon.name) has no focus ring around its fill (type \(button.focusRingType.rawValue), mask \(button.focusRingMaskBounds), bounds \(button.bounds))")
+            expect(abs(button.frame.width - ChromeIconButton.side) < 0.5 && abs(button.frame.height - ChromeIconButton.side) < 0.5,
+                   "the \(icon.name) is \(button.frame.size), expected a \(ChromeIconButton.side)pt square")
+        }
+        topBar.sidebarToggleForQA.performClick(nil)
+        topBar.commandCenterButtonForQA.performClick(nil)
+        expect(sidebarToggles == 1 && commandCenterOpens == 1,
+               "clicking the icons delivered \(sidebarToggles) sidebar toggle(s) and \(commandCenterOpens) Command Center open(s)")
+        let bar = topBar.convert(topBar.bounds, to: nil)
+        let sidebarFrame = topBar.sidebarToggleForQA.convert(topBar.sidebarToggleForQA.bounds, to: nil)
+        let searchFrame = topBar.commandCenterButtonForQA.convert(topBar.commandCenterButtonForQA.bounds, to: nil)
+        let titleFrame = topBar.titleButtonForQA.convert(topBar.titleButtonForQA.bounds, to: nil)
+        expect(sidebarFrame.maxX <= titleFrame.minX && titleFrame.maxX < searchFrame.minX,
+               "the order must be sidebar, title, …, search; got sidebar \(sidebarFrame), title \(titleFrame), search \(searchFrame)")
+        expect(abs(bar.maxX - searchFrame.maxX - WorkspaceTopBarView.identityLeading) < 0.5,
+               "the search icon must sit at the bar's trailing \(WorkspaceTopBarView.identityLeading)pt margin, sits \(bar.maxX - searchFrame.maxX)pt in")
+
+        // 3. The title menu: every workspace, a check on the current one, the verbs.
+        let menu = topBar.titleMenuForQA
+        menu.update()
+        let titleButton: ChromeIconButton? = topBar.titleButtonForQA
+        expect(titleButton?.titleText == "Forest" && titleButton?.symbolName == "chevron.down",
+               "the title menu reads '\(titleButton?.titleText ?? "none")' with '\(titleButton?.symbolName ?? "none")', expected 'Forest' and a chevron")
+        expect(titleButton?.toolTip == "0 projects · 0 zones · empty workspace",
+               "the title's tooltip must carry the counts, got '\(titleButton?.toolTip ?? "")'")
+        expect(titleButton?.pullDownMenu === menu, "the title button does not open the title menu")
+        expect(menuTitles(menu) == ["Forest", "Grove", "—", "New Workspace…", "Rename Workspace…", "Delete Workspace…"],
+               "the title menu lists \(menuTitles(menu))")
+        expect(menu.items.filter { $0.state == .on }.map(\.title) == ["Forest"],
+               "the check must sit on the current workspace alone, got \(menu.items.filter { $0.state == .on }.map(\.title))")
+        expect(menu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled),
+               "with two workspaces every item is live, disabled: \(menu.items.filter { !$0.isSeparatorItem && !$0.isEnabled }.map(\.title))")
+
+        // 4. Picking a workspace switches it, through the item AppKit would fire.
+        if let index = menu.items.firstIndex(where: { $0.title == "Grove" }) {
+            menu.performActionForItem(at: index)
+        }
+        topBar.layoutSubtreeIfNeeded()
+        let switched = topBar.titleMenuForQA
+        expect(runtime.workspaceId == grove, "picking Grove from the title menu did not switch the workspace")
+        expect(topBar.titleButtonForQA.titleText == "Grove"
+               && switched.items.filter { $0.state == .on }.map(\.title) == ["Grove"],
+               "after the switch the title reads '\(topBar.titleButtonForQA.titleText ?? "")' with the check on \(switched.items.filter { $0.state == .on }.map(\.title))")
+
+        // 5. A refused Delete is disabled and says why, in the scope menu's words.
+        topBar.reload(WorkspaceTopBarModel(
+            currentWorkspaceId: grove, currentWorkspaceName: "Grove", projectCount: 0, zoneCount: 0,
+            saveState: .saved, workspaces: [groveEntry], managementMessage: nil))
+        let only = topBar.titleMenuForQA
+        only.update()
+        let onlyDelete = only.items.last
+        expect(onlyDelete?.isEnabled == false
+               && onlyDelete?.title == "Delete Workspace… — this is your only workspace — create another first"
+               && (onlyDelete?.toolTip ?? "").contains("only workspace"),
+               "the last workspace's Delete reads '\(onlyDelete?.title ?? "")' enabled=\(String(describing: onlyDelete?.isEnabled)) tooltip='\(onlyDelete?.toolTip ?? "")'")
+        let unloaded = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 900, height: workspaceTopBarHeight))
+        let unloadedMenu = unloaded.titleMenuForQA
+        unloadedMenu.update()
+        let unloadedDelete = unloadedMenu.items.last
+        expect(unloadedDelete?.isEnabled == false && (unloadedDelete?.title ?? "").hasPrefix("Delete Workspace… — ")
+               && (unloadedDelete?.title ?? "").contains("loading"),
+               "an unloaded bar's Delete reads '\(unloadedDelete?.title ?? "")' enabled=\(String(describing: unloadedDelete?.isEnabled))")
+
+        // 6. Save state: nothing when saved, a dot while unsaved or saving, words on failure.
+        var saveReadings: [String: String] = [:]
+        for state in [WorkspaceDocumentSaveState.saved, .unsavedChanges, .saving, .saveFailed] {
+            topBar.reload(WorkspaceTopBarModel(
+                currentWorkspaceId: grove, currentWorkspaceName: "Grove", projectCount: 0, zoneCount: 0,
+                saveState: state, workspaces: [forestEntry, groveEntry], managementMessage: nil))
+            topBar.layoutSubtreeIfNeeded()
+            let dot = topBar.saveDotForQA
+            let dotShown = dot.map { !$0.isHiddenOrHasHiddenAncestor } ?? false
+            let failedShown = topBar.saveFailedVisibleForQA
+            saveReadings[state.rawValue] = "dot=\(dotShown) failed=\(failedShown) text='\(topBar.saveStateTextForQA)'"
+            switch state {
+            case .saved:
+                expect(!dotShown && !failedShown && topBar.saveStateTextForQA.isEmpty,
+                       "a saved workspace must show nothing: \(saveReadings[state.rawValue]!)")
+            case .unsavedChanges, .saving:
+                expect(dotShown && !failedShown && dot?.toolTip == state.displayTitle,
+                       "\(state.rawValue) must show only the dot, tooltip '\(state.displayTitle)': \(saveReadings[state.rawValue]!) tooltip='\(dot?.toolTip ?? "")'")
+                if let dot, dotShown {
+                    let dotFrame = dot.convert(dot.bounds, to: nil)
+                    let title = topBar.titleButtonForQA.convert(topBar.titleButtonForQA.bounds, to: nil)
+                    expect(dotFrame.minX >= title.maxX && dotFrame.minX - title.maxX <= 12
+                           && abs(dotFrame.midY - title.midY) < 1,
+                           "the dot must sit just after the title: dot \(dotFrame), title \(title)")
+                }
+            case .saveFailed:
+                expect(!dotShown && failedShown && topBar.saveStateTextForQA == "Save failed",
+                       "a failed save must say 'Save failed' and nothing else: \(saveReadings[state.rawValue]!)")
+            }
+        }
+
+        // 7. Borders stay hairlines; radii come from CornerRole in every style.
+        let layers = ([topBar] + descendants(topBar)).compactMap(\.layer).flatMap { layer -> [CALayer] in
+            func all(_ layer: CALayer) -> [CALayer] { [layer] + (layer.sublayers ?? []).flatMap(all) }
+            return all(layer)
+        }
+        let thick = layers.filter { $0.borderWidth > CGFloat(LineWidth.hairline) }
+        expect(thick.isEmpty, "\(thick.count) layer(s) in the bar draw a border wider than the \(LineWidth.hairline)pt hairline: \(thick.map(\.borderWidth))")
+        var cornerReadings: [String: String] = [:]
+        defer {
+            CornerStyle.current = .standard
+            CornerStyleController.refresh(topBar)
+        }
+        for style in CornerStyle.allCases {
+            CornerStyle.current = style
+            CornerStyleController.refresh(topBar)
+            topBar.layoutSubtreeIfNeeded()
+            var reading: [String] = []
+            for (name, control) in [("sidebar", topBar.sidebarToggleForQA), ("search", topBar.commandCenterButtonForQA)] {
+                let radius = control.layer?.cornerRadius ?? -1
+                let want: CGFloat = style == .sharp ? 0 : min(control.bounds.width, control.bounds.height) / 2
+                reading.append("\(name)=\(radius)")
+                expect(abs(radius - want) < 0.01, "\(style.title): the \(name) icon's corner is \(radius), CornerRole.pill wants \(want)")
+            }
+            let titleRadius = topBar.titleButtonForQA.layer?.cornerRadius ?? -1
+            reading.append("title=\(titleRadius)")
+            expect(abs(titleRadius - CornerRole.control.cgRadius()) < 0.01,
+                   "\(style.title): the title menu's corner is \(titleRadius), CornerRole.control wants \(CornerRole.control.cgRadius())")
+            cornerReadings[style.rawValue] = reading.joined(separator: " ")
+        }
+
+        // 8. In the real window: the controls take their own clicks, the empty bar drags.
+        let chromeApp = AppDelegate()
+        chromeApp.registryStore = registryStore
+        try chromeApp.reconciledManagedSessionSource.reconcile(
+            registry: try registryStore.loadOrEmpty(), reason: .continuumRestarted, now: now)
+        let window = chromeApp.makeWorkspaceWindow(
+            canvasView: CanvasNSView(canvasState: CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)),
+            title: "Grove — Array")
+        chromeApp.window = window
+        defer {
+            window.orderOut(nil)
+            window.delegate = nil
+            chromeApp.window = nil
+        }
+        var dragReadings: [String: String] = [:]
+        var captures: [String: Data] = [:]
+        if let content = window.contentView, let mounted = chromeApp.workspaceTopBarView {
+            mounted.reload(WorkspaceTopBarModel(
+                currentWorkspaceId: grove, currentWorkspaceName: "Grove", projectCount: 0, zoneCount: 0,
+                saveState: .saved, workspaces: [forestEntry, groveEntry], managementMessage: nil))
+            content.layoutSubtreeIfNeeded()
+            for (name, control) in [("sidebar", mounted.sidebarToggleForQA), ("title", mounted.titleButtonForQA),
+                                    ("search", mounted.commandCenterButtonForQA)] {
+                let center = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: content)
+                let hit = content.hitTest(center)
+                dragReadings[name] = "\(hit.map { "\(type(of: $0))" } ?? "nil") moves=\(String(describing: hit?.mouseDownCanMoveWindow))"
+                expect(hit === control && hit?.mouseDownCanMoveWindow == false,
+                       "a press on the \(name) control must stay with it, not drag the window: \(dragReadings[name]!)")
+            }
+            let leading = mounted.titleButtonForQA.convert(mounted.titleButtonForQA.bounds, to: mounted).maxX
+            let trailing = mounted.commandCenterButtonForQA.convert(mounted.commandCenterButtonForQA.bounds, to: mounted).minX
+            let empty = mounted.convert(NSPoint(x: (leading + 40 + trailing) / 2, y: mounted.bounds.midY), to: content)
+            let emptyHit = content.hitTest(empty)
+            dragReadings["empty"] = "\(emptyHit.map { "\(type(of: $0))" } ?? "nil") moves=\(String(describing: emptyHit?.mouseDownCanMoveWindow))"
+            expect(emptyHit.map { $0 === mounted || $0.isDescendant(of: mounted) } == true
+                   && emptyHit?.mouseDownCanMoveWindow == true,
+                   "a press on the bar's empty surface must drag the window: \(dragReadings["empty"]!)")
+            // For the eye, not the gate: the bar as the Lab renders it, unsaved,
+            // with the sidebar icon hovered.
+            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(id: "top-bar-icons.\(name)", size: NSSize(width: 720, height: 32), appearance: appearance)
+                ) {
+                    let view = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 720, height: 32))
+                    view.reload(WorkspaceTopBarModel(
+                        currentWorkspaceId: grove, currentWorkspaceName: "Grove", projectCount: 0, zoneCount: 0,
+                        saveState: .unsavedChanges, workspaces: [forestEntry, groveEntry], managementMessage: nil))
+                    view.sidebarToggleForQA.isHovered = true
+                    return view
+                }
+                captures["top-bar-\(name).png"] = probe.hostRep.representation(using: .png, properties: [:])
+            }
+        } else {
+            failures.append("the workspace window did not mount a top bar")
+        }
+
+        guard failures.isEmpty else {
+            throw CheckError.failed("top bar icons: \(failures.count) assertion(s) failed:\n  - " + failures.joined(separator: "\n  - "))
+        }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("top-bar-icons", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        for (name, data) in captures { try data.write(to: directory.appendingPathComponent(name)) }
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "top-bar-icons",
+            "titleMenu": menuTitles(menu),
+            "saveStates": saveReadings,
+            "corners": cornerReadings,
+            "drag": dragReadings,
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
@@ -13648,7 +13981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let countsRendered = topBar.countsTextForQA == "2 projects · 2 zones"
             && topBar.switchWorkspaceNamesForQA == ["Alpha Workspace", "Beta Workspace"]
         try expect(currentWorkspaceNameRendered, "top bar should render the current workspace name")
-        try expect(countsRendered, "top bar should render project/zone counts and switch menu workspace names")
+        try expect(countsRendered, "top bar should carry project/zone counts on the title's tooltip and list the workspaces in the title menu")
 
         let switchDelivered = topBar.selectWorkspaceForQA(workspaceB)
         topBar.layoutSubtreeIfNeeded()
@@ -13678,7 +14011,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(saveController.state == .unsavedChanges, "workspace save controller should expose unsaved state after scheduling")
         try saveController.flushPendingSave()
         app.reloadWorkspaceTopBar()
-        let savedStateRendered = topBar.saveStateTextForQA == WorkspaceDocumentSaveState.saved.displayTitle
+        // A saved workspace says nothing: the dot (and its "Unsaved changes"
+        // tooltip) goes, and no "Saved" text replaces it.
+        let savedStateRendered = topBar.saveStateTextForQA.isEmpty
+            && topBar.saveDotForQA?.isHidden == true && !topBar.saveFailedVisibleForQA
         let saveStateRendered = unsavedStateRendered && savedStateRendered && saveController.state == .saved
         try expect(saveStateRendered, "top bar should render workspace save state before and after a real save")
 
@@ -13691,7 +14027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "workspace-top-bar",
-            "path": "WorkspaceTopBarView -> AppDelegate switch/rename/save-state reload paths",
+            "path": "WorkspaceTopBarView title menu -> AppDelegate switch/rename/save-state reload paths",
             "currentWorkspaceNameRendered": currentWorkspaceNameRendered,
             "countsRendered": countsRendered,
             "switchUpdatedName": switchUpdatedName,
@@ -13992,7 +14328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "workspace-management-polish",
-            "path": "AgentInboxView scope menu / WorkspaceTopBarView buttons -> AppDelegate create/rename/delete validation and confirmation -> RegistryStore/WorkspaceStore/WorkspaceRuntime",
+            "path": "AgentInboxView scope menu / WorkspaceTopBarView title menu -> AppDelegate create/rename/delete validation and confirmation -> RegistryStore/WorkspaceStore/WorkspaceRuntime",
             "workspaceManagementTitles": managementTitles,
             "workspaceManagementSeparated": sidebar.isWorkspaceManagementSeparatedForQA,
             "scopedRenameTargetedScope": scopedRenameTargetedScope,
@@ -14094,8 +14430,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         unloadedTopBar.onDeleteWorkspace = { _ in unloadedDeliveries += 1 }
         let unloadedDeleteIsDead = !unloadedTopBar.deleteEnabledForQA
             && unloadedTopBar.deleteToolTipForQA.contains("loading")
+            && unloadedTopBar.deleteMenuTitleForQA.contains("loading")
         try expect(unloadedDeleteIsDead,
-                   "an unloaded top bar must not draw a live Delete — enabled=\(unloadedTopBar.deleteEnabledForQA) tooltip='\(unloadedTopBar.deleteToolTipForQA)'")
+                   "an unloaded top bar must not draw a live Delete — enabled=\(unloadedTopBar.deleteEnabledForQA) title='\(unloadedTopBar.deleteMenuTitleForQA)' tooltip='\(unloadedTopBar.deleteToolTipForQA)'")
         // The real @objc action, not a re-derivation of its guard.
         unloadedTopBar.invokeDeleteActionForQA()
         unloadedTopBar.layoutSubtreeIfNeeded()
@@ -14206,10 +14543,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             && lastTopBar.managementMessageForQA.contains("Cannot delete the last workspace")
             && !lastTopBar.deleteEnabledForQA
             && lastTopBar.deleteToolTipForQA.contains("only workspace")
+            && lastTopBar.deleteMenuTitleForQA.contains("only workspace")
             && !lastSidebar.deleteEnabledForQA
             && lastSidebar.deleteMenuTitleForQA.contains("only workspace")
+        // Both controls are menus now — the title menu and the sidebar's scope
+        // menu — and each greyed Delete carries the reason in its own title.
         try expect(lastWorkspaceExplained,
-                   "the last-workspace refusal must be explained on both controls — tooltip='\(lastTopBar.deleteToolTipForQA)' menu='\(lastSidebar.deleteMenuTitleForQA)' message='\(lastTopBar.managementMessageForQA)'")
+                   "the last-workspace refusal must be explained on both controls — title menu='\(lastTopBar.deleteMenuTitleForQA)' tooltip='\(lastTopBar.deleteToolTipForQA)' scope menu='\(lastSidebar.deleteMenuTitleForQA)' message='\(lastTopBar.managementMessageForQA)'")
         _ = lastSupport
 
         // ---------------------------------------------------------------- (4b)
@@ -14257,7 +14597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "workspace-delete-failure",
-            "path": "WorkspaceTopBarView delete button / AgentInboxView scope menu -> AppDelegate.deleteWorkspaceAndRelaunch -> RegistryStore/WorkspaceStore/WorkspaceRuntime.switchWorkspace",
+            "path": "WorkspaceTopBarView title menu Delete / AgentInboxView scope menu -> AppDelegate.deleteWorkspaceAndRelaunch -> RegistryStore/WorkspaceStore/WorkspaceRuntime.switchWorkspace",
             "unloadedDeleteIsDead": unloadedDeleteIsDead,
             "unloadedClickExplains": unloadedClickExplains,
             "corruptTopBarStillLoaded": corruptTopBarStillLoaded,

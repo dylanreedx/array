@@ -37,18 +37,31 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         ])
     }
 
-    private let nameLabel: NSTextField
-    private let countsLabel: NSTextField
-    private let saveStateLabel: NSTextField
+    /// The bar is two icons and one title menu:
+    ///
+    ///     ● ● ●  [sidebar]  Forest ⌄  •                      [search]
+    ///
+    /// It used to be a row of bezelled text buttons — "Add or jump… ⌘K", "☰", a
+    /// Switch popup, "+", "Rename", "Delete" — and a counts label, none of which
+    /// had been revisited since they were first added. The verbs now live in the
+    /// title menu (and in the sidebar's scope menu and ⌘K, as before); the counts
+    /// are the title's tooltip. The title sits leading, after the sidebar icon,
+    /// rather than centred: macOS's own unified titlebars lead with it, and a
+    /// centred title would have to dodge the traffic lights and the search icon as
+    /// the window narrows.
+    private let sidebarButton = ChromeIconButton(symbolName: "sidebar.left", accessibilityLabel: "Show/Hide Sidebar")
+    private let titleButton = ChromeIconButton(
+        symbolName: "chevron.down", accessibilityLabel: "Workspace", title: "Workspace")
+    private let titleMenu = NSMenu()
+    /// Unsaved or saving: a dot beside the title, with the state as its tooltip.
+    private let saveDot = NSImageView()
+    /// Words only when they matter: "Save failed", or "Switching…" mid-switch.
+    private let statusLabel: NSTextField
     private let managementMessageLabel: NSTextField
-    private let switchWorkspaceButton: NSPopUpButton
-    private let createButton: NSButton
-    private let renameButton: NSButton
-    private let deleteButton: NSButton
-    private let toggleSidebarButton: NSButton
-    private let commandCenterButton: NSButton
+    private let commandCenterButton = ChromeIconButton(symbolName: "magnifyingglass", accessibilityLabel: "Command Center")
 
     private var currentWorkspaceId: UUID?
+    private var workspaces: [WorkspaceEntry] = []
     private var identityLeadingConstraint: NSLayoutConstraint?
     private var identityStack: NSStackView?
 
@@ -65,9 +78,10 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         }
     }
 
-    /// The bar's own margin, before any traffic-light clearance.
+    /// The bar's own margin, before any traffic-light clearance. The trailing
+    /// search icon keeps the same margin.
     static let identityLeading: CGFloat = 10
-    /// The save state the label is currently showing, so `applyTokens()` can
+    /// The save state the bar is currently showing, so `applyTokens()` can
     /// re-resolve its token on an appearance flip without waiting for a `reload`.
     private var currentSaveState: WorkspaceDocumentSaveState = .saved
 
@@ -79,109 +93,62 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     var onOpenCommandCenter: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
-        nameLabel = NSTextField(labelWithString: "Workspace")
-        nameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        countsLabel = NSTextField(labelWithString: "0 projects · 0 zones")
-        countsLabel.font = .systemFont(ofSize: 12, weight: .regular)
-        countsLabel.lineBreakMode = .byTruncatingTail
-
-        saveStateLabel = NSTextField(labelWithString: WorkspaceDocumentSaveState.saved.displayTitle)
-        saveStateLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        saveStateLabel.lineBreakMode = .byTruncatingTail
+        statusLabel = NSTextField(labelWithString: "")
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.isHidden = true
 
         managementMessageLabel = NSTextField(labelWithString: "")
         managementMessageLabel.font = .systemFont(ofSize: 12, weight: .medium)
         managementMessageLabel.lineBreakMode = .byTruncatingTail
         managementMessageLabel.isHidden = true
 
-        switchWorkspaceButton = NSPopUpButton(frame: .zero, pullsDown: false)
-        switchWorkspaceButton.toolTip = "Switch workspace"
-        switchWorkspaceButton.bezelStyle = .rounded
-        switchWorkspaceButton.controlSize = .small
-        switchWorkspaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        createButton = NSButton(title: "+", target: nil, action: nil)
-        createButton.bezelStyle = .rounded
-        createButton.controlSize = .small
-        createButton.toolTip = "Create workspace"
-
-        renameButton = NSButton(title: "Rename", target: nil, action: nil)
-        renameButton.bezelStyle = .rounded
-        renameButton.controlSize = .small
-        renameButton.toolTip = "Rename workspace"
-        renameButton.isEnabled = false
-
-        deleteButton = NSButton(title: "Delete", target: nil, action: nil)
-        deleteButton.bezelStyle = .rounded
-        deleteButton.controlSize = .small
-        deleteButton.toolTip = Self.deleteUnloadedToolTip
-        // 0721: enablement must come from a model that really loaded. `NSButton`
-        // defaults `isEnabled` to true, so before the first `reload(_:)` — and after
-        // any reload that failed to build a model — Delete used to LOOK live over a
-        // nil `currentWorkspaceId`, and the click fell straight out of the guard in
-        // `deleteWorkspaceClicked`. "The button does nothing" was exactly this.
-        deleteButton.isEnabled = false
-
-        toggleSidebarButton = NSButton(title: "☰", target: nil, action: nil)
-        toggleSidebarButton.bezelStyle = .rounded
-        toggleSidebarButton.controlSize = .small
-        toggleSidebarButton.toolTip = "Toggle workspace sidebar"
-
-        commandCenterButton = NSButton(title: "Add or jump…  ⌘K", target: nil, action: nil)
-        commandCenterButton.bezelStyle = .rounded
-        commandCenterButton.controlSize = .small
-        commandCenterButton.toolTip = "Open Command Center"
-
         super.init(frame: frameRect)
 
         wantsLayer = true
-        applyTokens()
         setAccessibilityIdentifier("ContinuumWorkspaceTopBarRoot")
 
-        nameLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarName")
-        countsLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCounts")
-        saveStateLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarSaveState")
-        managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarManagementMessage")
-        switchWorkspaceButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarSwitch")
-        createButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCreate")
-        renameButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarRename")
-        deleteButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarDelete")
-        toggleSidebarButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarToggleSidebar")
-        commandCenterButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCommandCenter")
+        sidebarButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarToggleSidebar")
+        sidebarButton.toolTip = "Show/Hide Sidebar"
+        sidebarButton.target = self
+        sidebarButton.action = #selector(toggleSidebarClicked(_:))
 
-        switchWorkspaceButton.target = self
-        switchWorkspaceButton.action = #selector(switchWorkspaceSelected(_:))
-        createButton.target = self
-        createButton.action = #selector(createWorkspaceClicked(_:))
-        renameButton.target = self
-        renameButton.action = #selector(renameWorkspaceClicked(_:))
-        deleteButton.target = self
-        deleteButton.action = #selector(deleteWorkspaceClicked(_:))
-        toggleSidebarButton.target = self
-        toggleSidebarButton.action = #selector(toggleSidebarClicked(_:))
+        // The menu is the control; the button only opens it, on press, the way a
+        // pull-down does. `autoenablesItems` off: enablement is the model's, and a
+        // refused Delete has to stay greyed whatever AppKit's validation thinks.
+        titleMenu.autoenablesItems = false
+        titleButton.pullDownMenu = titleMenu
+        titleButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarTitle")
+        titleButton.setAccessibilityRole(.menuButton)
+        titleButton.target = self
+        titleButton.action = #selector(titleClicked(_:))
+        titleButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        saveDot.image = CanvasSymbolImage.image(named: "circle.fill", pointSize: 6, weight: .regular)
+        saveDot.imageScaling = .scaleNone
+        saveDot.isHidden = true
+        saveDot.setAccessibilityIdentifier("ContinuumWorkspaceTopBarSaveState")
+
+        statusLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarStatus")
+        managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarManagementMessage")
+
+        commandCenterButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCommandCenter")
+        commandCenterButton.toolTip = "Command Center"
         commandCenterButton.target = self
         commandCenterButton.action = #selector(openCommandCenterClicked(_:))
 
-        let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel])
+        let identityStack = NSStackView(views: [sidebarButton, titleButton, saveDot, statusLabel])
         self.identityStack = identityStack
         identityStack.orientation = .horizontal
-        identityStack.alignment = .firstBaseline
-        identityStack.spacing = 8
+        identityStack.alignment = .centerY
+        identityStack.spacing = 6
+        identityStack.setCustomSpacing(2, after: titleButton)
         identityStack.translatesAutoresizingMaskIntoConstraints = false
         identityStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let actionsStack = NSStackView(views: [commandCenterButton, toggleSidebarButton, switchWorkspaceButton, createButton, renameButton, deleteButton])
-        actionsStack.orientation = .horizontal
-        actionsStack.alignment = .centerY
-        actionsStack.spacing = 6
-        actionsStack.translatesAutoresizingMaskIntoConstraints = false
-        actionsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
-
+        commandCenterButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(identityStack)
-        addSubview(actionsStack)
+        addSubview(commandCenterButton)
 
         let identityLeadingConstraint = identityStack.leadingAnchor.constraint(
             equalTo: leadingAnchor, constant: Self.identityLeading + trafficLightInset)
@@ -194,12 +161,20 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
 
             identityLeadingConstraint,
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: actionsStack.leadingAnchor, constant: -10),
+            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: commandCenterButton.leadingAnchor, constant: -10),
 
-            actionsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            actionsStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            switchWorkspaceButton.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
+            sidebarButton.widthAnchor.constraint(equalToConstant: ChromeIconButton.side),
+            sidebarButton.heightAnchor.constraint(equalToConstant: ChromeIconButton.side),
+            titleButton.heightAnchor.constraint(equalToConstant: ChromeIconButton.side),
+            titleButton.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+
+            commandCenterButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.identityLeading),
+            commandCenterButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            commandCenterButton.widthAnchor.constraint(equalToConstant: ChromeIconButton.side),
+            commandCenterButton.heightAnchor.constraint(equalToConstant: ChromeIconButton.side),
         ])
+        rebuildTitleMenu()
+        applyTokens()
     }
 
     required init?(coder: NSCoder) {
@@ -211,15 +186,13 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// the same system colour. See `WorkspaceSidebarView.applyTokens()` for why the
     /// alpha went with the literal.
     ///
-    /// `saveStateLabel` is deliberately NOT reset here: its colour is state-carrying
-    /// and `reload(_:)` owns it. `applyTokens()` re-derives it from the last model
-    /// instead, so a flip cannot revert a "save failed" label to neutral.
+    /// The save dot and the status words are state-carrying; `renderStatus()`
+    /// re-derives them from the last model, so a flip cannot revert a "save
+    /// failed" to neutral.
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
-        nameLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
-        countsLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         managementMessageLabel.textColor = AccentToken.accentApproval.color.nsColor(in: self)
-        saveStateLabel.textColor = Self.color(for: currentSaveState).nsColor(in: self)
+        renderStatus()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -229,32 +202,61 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
 
     func reload(_ model: WorkspaceTopBarModel) {
         currentWorkspaceId = model.currentWorkspaceId
-        nameLabel.stringValue = model.currentWorkspaceName
-        countsLabel.stringValue = Self.countsText(projectCount: model.projectCount, zoneCount: model.zoneCount)
-        saveStateLabel.stringValue = model.saveState.displayTitle
+        workspaces = model.workspaces
+        titleButton.titleText = model.currentWorkspaceName
+        titleButton.setAccessibilityLabel("Workspace: \(model.currentWorkspaceName)")
+        titleButton.toolTip = Self.countsText(projectCount: model.projectCount, zoneCount: model.zoneCount)
         currentSaveState = model.saveState
-        saveStateLabel.textColor = Self.color(for: model.saveState).nsColor(in: self)
+        renderStatus()
         setManagementMessage(model.managementMessage)
-
-        switchWorkspaceButton.removeAllItems()
-        for workspace in model.workspaces {
-            switchWorkspaceButton.addItem(withTitle: workspace.name)
-            switchWorkspaceButton.lastItem?.representedObject = workspace.id.uuidString
-        }
-        if let selectedIndex = model.workspaces.firstIndex(where: { $0.id == model.currentWorkspaceId }) {
-            switchWorkspaceButton.selectItem(at: selectedIndex)
-        }
-        switchWorkspaceButton.isEnabled = !model.workspaces.isEmpty
-        createButton.isEnabled = true
-        renameButton.isEnabled = currentWorkspaceId != nil
-        deleteButton.isEnabled = model.workspaces.count > 1 && currentWorkspaceId != nil
-        // 0721: a greyed Delete with the generic tooltip reads as "I can't delete a
-        // workspace". The refusal is intended; being unable to find out why is not.
-        deleteButton.toolTip = Self.deleteToolTip(
-            workspaceCount: model.workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
+        rebuildTitleMenu()
     }
 
-    /// The four readings of the Delete button, as the tooltip states them.
+    /// Every workspace with a check on the current one, then the three verbs.
+    /// Built by hand, never `addItem(withTitle:)`, which would collapse two
+    /// workspaces that share a name (`AgentInboxView.updateScopeMenu` precedent).
+    private func rebuildTitleMenu() {
+        titleMenu.removeAllItems()
+        let switchingTo = switchingWorkspaceId
+        for workspace in workspaces {
+            let item = NSMenuItem(title: workspace.name, action: #selector(workspaceItemPicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = workspace.id.uuidString
+            item.state = workspace.id == (switchingTo ?? currentWorkspaceId) ? .on : .off
+            item.isEnabled = switchingTo == nil
+            titleMenu.addItem(item)
+        }
+        if !workspaces.isEmpty { titleMenu.addItem(.separator()) }
+
+        let create = NSMenuItem(title: AgentInboxView.WorkspaceManagementAction.create.title,
+                                action: #selector(createWorkspaceClicked(_:)), keyEquivalent: "")
+        create.target = self
+        titleMenu.addItem(create)
+
+        let rename = NSMenuItem(title: AgentInboxView.WorkspaceManagementAction.rename.title,
+                                action: #selector(renameWorkspaceClicked(_:)), keyEquivalent: "")
+        rename.target = self
+        rename.isEnabled = currentWorkspaceId != nil
+        titleMenu.addItem(rename)
+
+        // 0721: a greyed Delete with no explanation reads as "I can't delete a
+        // workspace". The refusal is intended; being unable to find out why is
+        // not. The reason rides on the item itself, in the scope menu's form.
+        let deleteTitle = AgentInboxView.WorkspaceManagementAction.delete.title
+        let delete = NSMenuItem(title: deleteTitle, action: #selector(deleteWorkspaceClicked(_:)), keyEquivalent: "")
+        delete.target = self
+        let reason = Self.deleteDisabledReason(
+            workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
+        // 0721: enablement must come from a model that really loaded — before the
+        // first `reload(_:)` Delete is greyed and says why.
+        delete.isEnabled = reason == nil
+        if let reason { delete.title = "\(deleteTitle) — \(reason)" }
+        delete.toolTip = Self.deleteToolTip(
+            workspaceCount: workspaces.count, hasCurrentWorkspace: currentWorkspaceId != nil)
+        titleMenu.addItem(delete)
+    }
+
+    /// The four readings of Delete, as its tooltip states them.
     static let deleteUnloadedToolTip =
         "Delete workspace — unavailable until this workspace finishes loading"
     static let lastWorkspaceToolTip =
@@ -263,6 +265,42 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     static func deleteToolTip(workspaceCount: Int, hasCurrentWorkspace: Bool) -> String {
         guard hasCurrentWorkspace else { return deleteUnloadedToolTip }
         return workspaceCount > 1 ? "Delete workspace" : lastWorkspaceToolTip
+    }
+
+    /// Why Delete is greyed, worded as the sidebar's scope menu words it.
+    static func deleteDisabledReason(workspaceCount: Int, hasCurrentWorkspace: Bool) -> String? {
+        guard hasCurrentWorkspace else { return "this workspace is still loading" }
+        return workspaceCount > 1 ? nil : "this is your only workspace — create another first"
+    }
+
+    /// The dot, the words, and their colours, from the save state and any switch
+    /// in flight. Nothing at all when saved.
+    private func renderStatus() {
+        if switchingWorkspaceId != nil {
+            saveDot.isHidden = true
+            statusLabel.stringValue = "Switching…"
+            statusLabel.textColor = AccentToken.accentWorking.color.nsColor(in: self)
+            statusLabel.isHidden = false
+            return
+        }
+        switch currentSaveState {
+        case .saved:
+            saveDot.isHidden = true
+            statusLabel.isHidden = true
+            statusLabel.stringValue = ""
+        case .saving, .unsavedChanges:
+            saveDot.isHidden = false
+            saveDot.contentTintColor = Self.color(for: currentSaveState).nsColor(in: self)
+            saveDot.toolTip = currentSaveState.displayTitle
+            saveDot.setAccessibilityLabel(currentSaveState.displayTitle)
+            statusLabel.isHidden = true
+            statusLabel.stringValue = ""
+        case .saveFailed:
+            saveDot.isHidden = true
+            statusLabel.stringValue = currentSaveState.displayTitle
+            statusLabel.textColor = Self.color(for: currentSaveState).nsColor(in: self)
+            statusLabel.isHidden = false
+        }
     }
 
     func setManagementMessage(_ message: String?, kind: WorkspaceNotificationView.Kind) {
@@ -294,13 +332,15 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     }
 
     func updateCommandCenterShortcut(_ display: String?) {
-        commandCenterButton.title = display.map { "Add or jump…  \($0)" } ?? "Add or jump…"
-        commandCenterButton.toolTip = display.map { "Open Command Center (\($0))" }
-            ?? "Open Command Center"
+        commandCenterButton.toolTip = display.map { "Command Center \($0)" } ?? "Command Center"
+    }
+
+    func updateSidebarShortcut(_ display: String?) {
+        sidebarButton.toolTip = display.map { "Show/Hide Sidebar \($0)" } ?? "Show/Hide Sidebar"
     }
 
     /// A drag anywhere on the bar's own surface moves the window, the way the
-    /// titlebar it replaced did. Controls and labels keep their own hit areas.
+    /// titlebar it replaced did. Controls keep their own hit areas.
     override var mouseDownCanMoveWindow: Bool { true }
 
     /// The workspace the bar is switching to, while a switch is in flight.
@@ -311,13 +351,9 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// the next display cycle would only ever show the result.
     func beginSwitching(to workspaceId: UUID, name: String) {
         switchingWorkspaceId = workspaceId
-        nameLabel.stringValue = name
-        if let item = switchWorkspaceButton.itemArray.first(where: { ($0.representedObject as? String) == workspaceId.uuidString }) {
-            switchWorkspaceButton.select(item)
-        }
-        switchWorkspaceButton.isEnabled = false
-        saveStateLabel.stringValue = "Switching…"
-        saveStateLabel.textColor = AccentToken.accentWorking.color.nsColor(in: self)
+        titleButton.titleText = name
+        renderStatus()
+        rebuildTitleMenu()
         displayIfNeeded()
     }
 
@@ -325,67 +361,85 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     /// success, the workspace still mounted on failure.
     func endSwitching() {
         switchingWorkspaceId = nil
-        switchWorkspaceButton.isEnabled = switchWorkspaceButton.numberOfItems > 0
+        renderStatus()
+        rebuildTitleMenu()
     }
 
-    var switchProgressVisibleForQA: Bool { switchingWorkspaceId != nil && saveStateLabel.stringValue == "Switching…" }
+    var switchProgressVisibleForQA: Bool {
+        switchingWorkspaceId != nil && !statusLabel.isHidden && statusLabel.stringValue == "Switching…"
+    }
+    /// The workspace the title menu checks.
     var selectedWorkspaceIdForQA: UUID? {
-        (switchWorkspaceButton.selectedItem?.representedObject as? String).flatMap(UUID.init(uuidString:))
+        (titleMenu.items.first { $0.state == .on }?.representedObject as? String).flatMap(UUID.init(uuidString:))
     }
 
     var managementMessageIsVisibleForQA: Bool { !managementMessageLabel.isHidden && managementMessageLabel.superview != nil }
 
-    var workspaceNameForQA: String { nameLabel.stringValue }
+    var sidebarToggleForQA: ChromeIconButton { sidebarButton }
+    var commandCenterButtonForQA: ChromeIconButton { commandCenterButton }
+    var titleButtonForQA: ChromeIconButton { titleButton }
+    var titleMenuForQA: NSMenu { titleMenu }
+    var saveDotForQA: NSView? { saveDot }
+    var saveFailedVisibleForQA: Bool { !statusLabel.isHidden && statusLabel.stringValue == WorkspaceDocumentSaveState.saveFailed.displayTitle }
+
+    var workspaceNameForQA: String { titleButton.titleText ?? "" }
     var identityLeadingForQA: CGFloat { identityLeadingConstraint?.constant ?? 0 }
+    /// The leading cluster — sidebar icon, title menu, save state — in bar space.
     var identityFrameForQA: NSRect { identityStack?.frame ?? .zero }
-    var countsTextForQA: String { countsLabel.stringValue }
-    var saveStateTextForQA: String { saveStateLabel.stringValue }
+    /// The counts, as the title's tooltip carries them.
+    var countsTextForQA: String { titleButton.toolTip ?? "" }
+    /// What the bar says about saving: nothing when saved, the dot's tooltip while
+    /// unsaved or saving, the words on failure.
+    var saveStateTextForQA: String {
+        if !statusLabel.isHidden { return statusLabel.stringValue }
+        if !saveDot.isHidden { return saveDot.toolTip ?? "" }
+        return ""
+    }
     var managementMessageForQA: String { managementMessageLabel.stringValue }
-    var deleteEnabledForQA: Bool { deleteButton.isEnabled }
-    var deleteToolTipForQA: String { deleteButton.toolTip ?? "" }
+
+    private func titleMenuItem(_ action: AgentInboxView.WorkspaceManagementAction) -> NSMenuItem? {
+        titleMenu.items.first { $0.title.hasPrefix(action.title) }
+    }
+
+    var deleteEnabledForQA: Bool { titleMenuItem(.delete)?.isEnabled ?? false }
+    var deleteToolTipForQA: String { titleMenuItem(.delete)?.toolTip ?? "" }
+    var deleteMenuTitleForQA: String { titleMenuItem(.delete)?.title ?? "" }
 
     /// Drive the real `@objc` action regardless of enablement, so a witness can
     /// assert the handler itself explains a refusal instead of returning silently.
     func invokeDeleteActionForQA() {
-        deleteWorkspaceClicked(deleteButton)
+        deleteWorkspaceClicked(titleMenuItem(.delete) ?? NSMenuItem())
     }
-    var switchWorkspaceNamesForQA: [String] { switchWorkspaceButton.itemArray.map(\.title) }
+    var switchWorkspaceNamesForQA: [String] {
+        titleMenu.items.filter { $0.representedObject is String }.map(\.title)
+    }
+
+    /// Fire a title-menu item the way AppKit does when it is picked, refusing a
+    /// greyed one as the menu would.
+    private func pickTitleMenuItem(_ item: NSMenuItem?) -> Bool {
+        guard let item, item.isEnabled, let index = titleMenu.items.firstIndex(of: item) else { return false }
+        titleMenu.performActionForItem(at: index)
+        return true
+    }
 
     @discardableResult
     func selectWorkspaceForQA(_ workspaceId: UUID) -> Bool {
-        guard let item = switchWorkspaceButton.itemArray.first(where: { ($0.representedObject as? String) == workspaceId.uuidString }) else {
-            return false
-        }
-        switchWorkspaceButton.select(item)
-        switchWorkspaceSelected(switchWorkspaceButton)
-        return true
+        pickTitleMenuItem(titleMenu.items.first { ($0.representedObject as? String) == workspaceId.uuidString })
     }
 
     @discardableResult
-    func clickCreateForQA() -> Bool {
-        guard createButton.isEnabled else { return false }
-        createButton.performClick(nil)
-        return true
-    }
+    func clickCreateForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.create)) }
 
     @discardableResult
-    func clickRenameForQA() -> Bool {
-        guard renameButton.isEnabled else { return false }
-        renameButton.performClick(nil)
-        return true
-    }
+    func clickRenameForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.rename)) }
 
     @discardableResult
-    func clickDeleteForQA() -> Bool {
-        guard deleteButton.isEnabled else { return false }
-        deleteButton.performClick(nil)
-        return true
-    }
+    func clickDeleteForQA() -> Bool { pickTitleMenuItem(titleMenuItem(.delete)) }
 
     @discardableResult
     func clickToggleSidebarForQA() -> Bool {
-        guard toggleSidebarButton.isEnabled else { return false }
-        toggleSidebarButton.performClick(nil)
+        guard sidebarButton.isEnabled else { return false }
+        sidebarButton.performClick(nil)
         return true
     }
 
@@ -395,24 +449,29 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return true
     }
 
+    /// Keyboard and VoiceOver presses reach here; the mouse opens the menu on
+    /// press inside the button itself.
+    @objc private func titleClicked(_ sender: NSButton) {
+        titleButton.popUpPullDownMenu()
+    }
 
-    @objc private func switchWorkspaceSelected(_ sender: NSPopUpButton) {
-        guard let idString = sender.selectedItem?.representedObject as? String,
+    @objc private func workspaceItemPicked(_ sender: NSMenuItem) {
+        guard let idString = sender.representedObject as? String,
               let workspaceId = UUID(uuidString: idString),
               workspaceId != currentWorkspaceId else { return }
         onSwitchWorkspace?(workspaceId)
     }
 
-    @objc private func createWorkspaceClicked(_ sender: NSButton) {
+    @objc private func createWorkspaceClicked(_ sender: NSMenuItem) {
         onCreateWorkspace?()
     }
 
-    @objc private func renameWorkspaceClicked(_ sender: NSButton) {
+    @objc private func renameWorkspaceClicked(_ sender: NSMenuItem) {
         guard let currentWorkspaceId else { return }
         onRenameWorkspace?(currentWorkspaceId)
     }
 
-    @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
+    @objc private func deleteWorkspaceClicked(_ sender: NSMenuItem) {
         // 0721: say so. Reaching here with no loaded workspace used to return in
         // silence, which is indistinguishable from a broken button.
         guard let currentWorkspaceId else {
@@ -438,7 +497,7 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return zoneCount == 0 ? "\(base) · empty workspace" : base
     }
 
-    /// P1.11: four tokens for four states. `secondaryLabelColor` and
+    /// P1.11: four tokens for four states (`.saved` is no longer drawn). `secondaryLabelColor` and
     /// `systemOrange` were both P0.4 failures on a light panel (3.95:1 and 2.31:1);
     /// the accents here are the same ones `StatusChipPresenter` uses for the
     /// equivalent agent states, so "saving" reads like "working" everywhere.
