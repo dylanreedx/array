@@ -119,7 +119,7 @@ final class ComposerDictationPillView: NSView, TokenThemed, AgentPageZoomScalabl
         let glyph = CGFloat(pageZoom.scaled(10))
         stopGlyph.frame = NSRect(
             x: bounds.width - side + (side - glyph) / 2, y: (side - glyph) / 2, width: glyph, height: glyph)
-        stopGlyph.layer?.cornerRadius = CornerStyle.current == .sharp ? 0 : CGFloat(pageZoom.scaled(2.5))
+        stopGlyph.layer?.applyCorner(base: 2.5, zoom: pageZoom)
         let timeWidth = ceil(timeLabel.fittingSize.width)
         let timeHeight = ceil(timeLabel.fittingSize.height)
         let timeX = bounds.width - side - timeWidth
