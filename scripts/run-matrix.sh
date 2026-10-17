@@ -447,6 +447,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 # the bare CoreChecks run is KNOWN-RED.
 run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -499,6 +501,7 @@ run_app_check .build/debug/Array --settings-panel-check
 # Launch polish: settings as an in-window modal, and its search.
 run_app_check .build/debug/Array --settings-modal-check
 run_app_check .build/debug/Array --settings-search-check
+run_app_check .build/debug/Array --cli-update-settings-check
 run_app_check .build/debug/Array --agent-awareness-check
 run_app_check .build/debug/Array --completion-awareness-check
 run_app_check .build/debug/Array --throbber-timeline-check
