@@ -111,6 +111,7 @@ check --leader-jump-check
 check --leader-snap-check
 check --leader-zone-jump-check
 check --live-model-catalog-check
+check --local-pairing-endpoint-check
 check --location-action-surface-check
 check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
@@ -536,6 +537,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
@@ -571,7 +573,7 @@ bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 22
 count ContinuumRevivedAgentUIChecks 20
-count ContinuumRevivedCoreChecks 164
+count ContinuumRevivedCoreChecks 165
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
