@@ -48,6 +48,9 @@ public struct CodexEventTranslator {
     /// the captured thread id — never the raw args. Fires on the translator's
     /// owner queue before the matching normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+    /// Where `TranscriptShellCommandConfig` is read, per command, so flipping
+    /// the setting applies to the next command a running agent issues.
+    public var settingsDefaults: UserDefaults = .standard
 
     public init(
         workingDirectory: URL? = nil,
@@ -135,7 +138,7 @@ public struct CodexEventTranslator {
             // the host-local side channel only, with the start instant, so the
             // row can say what ran (launch polish, item J).
             if let onRuntimeObservation {
-                let command = AgentShellObservation.commandField(item["command"])
+                let command = AgentShellObservation.commandField(item["command"], defaults: settingsDefaults)
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
                     phase: .started, toolName: "Shell",
                     fields: command.map { [$0] } ?? [],

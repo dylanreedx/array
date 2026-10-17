@@ -1366,9 +1366,21 @@ public enum AgentToolDetailPresenter {
     public static func collapsed(_ detail: AgentToolDetailRecord) -> AgentToolDetailCollapsedPresentation {
         // A shell row is titled by what ran: claude's description when it gave
         // one (the renderer sets the command beside it), else the command.
-        if let shell = shellInvocation(detail), !shell.command.isEmpty {
+        if let shell = shellInvocation(detail) {
+            if !shell.command.isEmpty {
+                return AgentToolDetailCollapsedPresentation(
+                    actionLine: shell.description.map(capitalizedPhrase) ?? shell.headline,
+                    durationText: shell.durationText)
+            }
+            // The command was withheld ("Show shell commands in transcripts" off,
+            // or an old record): the row names the description or the tool, but
+            // keeps the shell's own duration — the provider's measurement, and
+            // none when there is nothing real to show.
             return AgentToolDetailCollapsedPresentation(
-                actionLine: shell.description.map(capitalizedPhrase) ?? shell.headline,
+                actionLine: shortLine(
+                    pureSummary(for: detail)
+                        ?? capitalizedPhrase(AgentToolKind.humanizedToolName(safeToolName(detail.toolName)))
+                ),
                 durationText: shell.durationText)
         }
         return AgentToolDetailCollapsedPresentation(

@@ -73,6 +73,9 @@ public struct ClaudeEventTranslator {
     /// args. Fires on the translator's owner queue before the matching
     /// normalized event is returned.
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
+    /// Where `TranscriptShellCommandConfig` is read, per command, so flipping
+    /// the setting applies to the next command a running agent issues.
+    public var settingsDefaults: UserDefaults = .standard
 
     /// C7 — an observed claude subagent, announced by an `Agent` (formerly
     /// `Task`) tool call. Exactly pi's `onSpawnRequest` seam and for exactly the
@@ -399,7 +402,8 @@ public struct ClaudeEventTranslator {
                     phase: .started,
                     toolName: name,
                     fields: Self.toolDetailFields(
-                        toolName: name, input: block["input"] as? [String: Any] ?? [:]),
+                        toolName: name, input: block["input"] as? [String: Any] ?? [:],
+                        settingsDefaults: settingsDefaults),
                     fileChanges: Self.fileDetails(toolName: name, input: block["input"] as? [String: Any] ?? [:]),
                     parentItemID: object["parent_tool_use_id"] as? String,
                     observedAt: now()
@@ -758,7 +762,8 @@ public struct ClaudeEventTranslator {
     /// stay on the activity channel, only the basename rides here.
     private static func toolDetailFields(
         toolName: String,
-        input: [String: Any]
+        input: [String: Any],
+        settingsDefaults: UserDefaults
     ) -> [(key: String, value: String)] {
         func string(_ key: String) -> String? {
             guard let value = input[key] as? String else { return nil }
@@ -785,7 +790,7 @@ public struct ClaudeEventTranslator {
         // Launch polish, item J — a SHELL's command, host-local only. It is
         // the one body that crosses, because it is what the row is about.
         if AgentShellObservation.isShellTool(toolName),
-           let command = AgentShellObservation.commandField(input["command"]) {
+           let command = AgentShellObservation.commandField(input["command"], defaults: settingsDefaults) {
             fields.append(command)
         }
         // A ROLE ID, and role ids are publishable — `RoleRegistry` reads them out

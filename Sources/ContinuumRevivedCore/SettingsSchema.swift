@@ -168,6 +168,12 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: AgentStatusElement.contextMeter.settingKey, label: "Show the context meter", default: AgentStatusElement.contextMeter.defaultVisible),
                             keywords: ["context meter", "status", "tokens"]),
             ]),
+            SettingsGroup(id: "agents.transcript", title: "Transcript", rows: [
+                SettingsRow(.toggle(key: TranscriptShellCommandConfig.key, label: "Show shell commands in transcripts",
+                                    default: TranscriptShellCommandConfig.defaultEnabled),
+                            help: "Keeps the commands agents run on this Mac so transcript rows can show them. Never synced.",
+                            keywords: ["privacy", "shell", "command", "bash", "history", "transcript"]),
+            ]),
             SettingsGroup(id: "agents.status", title: "Status row",
                           footer: "Applies to every agent tile. Account usage is per provider account, shared by every agent signed into it.",
                           rows: statusRow),

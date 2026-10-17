@@ -527,6 +527,12 @@ enum SettingsSearchChecks {
         try type("iphone")
         try expect(results().contains { $0.id == "pane.companion" },
                    "'iphone' must find the iPhone pane — got \(results().map(\.id))")
+        // Settings › Agents › Transcript (decisions pass): found by its privacy words.
+        for word in ["privacy", "bash", "shell command"] {
+            try type(word)
+            try expect(results().contains { $0.field?.key == TranscriptShellCommandConfig.key && $0.paneID == "agents" },
+                       "'\(word)' must find Show shell commands in transcripts under Agents — got \(results().map(\.label))")
+        }
         try type("on")
         try expect(!results().isEmpty, "'on' must find something")
         for entry in results() {
