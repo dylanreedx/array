@@ -1,0 +1,717 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "v2-day-check",
+ "window": {
+  "width": 1600,
+  "height": 900
+ },
+ "sidebar": true,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "fps": 60,
+ "video": "none",
+ "png": "none",
+ "catalog": [
+  {
+   "harness": "claude",
+   "model": "anthropic/claude-opus-5",
+   "displayName": "Opus 5",
+   "contextWindow": 200000
+  },
+  {
+   "harness": "codex",
+   "model": "openai-codex/gpt-5.5-codex",
+   "displayName": "GPT-5.5 Codex"
+  }
+ ],
+ "workspace": "Roast",
+ "projects": [
+  {
+   "key": "api",
+   "name": "roast-api",
+   "files": "../full-day/projects/roast-api",
+   "git": {}
+  },
+  {
+   "key": "web",
+   "name": "roast-web",
+   "files": "../full-day/projects/roast-web",
+   "git": {},
+   "placed": false
+  },
+  {
+   "key": "admin",
+   "name": "roast-admin"
+  },
+  {
+   "key": "ios",
+   "name": "roast-ios"
+  },
+  {
+   "key": "infra",
+   "name": "roast-infra"
+  }
+ ],
+ "zones": [
+  {
+   "key": "apiZone",
+   "project": "api",
+   "name": "Roast API",
+   "rect": [
+    0,
+    0,
+    1400,
+    900
+   ],
+   "color": "teal"
+  },
+  {
+   "key": "adminZone",
+   "project": "admin",
+   "name": "Barista Admin",
+   "rect": [
+    1600,
+    0,
+    1200,
+    900
+   ],
+   "color": "purple"
+  },
+  {
+   "key": "iosZone",
+   "project": "ios",
+   "name": "Roast iOS",
+   "rect": [
+    0,
+    1100,
+    1200,
+    800
+   ],
+   "color": "blue"
+  },
+  {
+   "key": "infraZone",
+   "project": "infra",
+   "name": "Infra",
+   "rect": [
+    1400,
+    1100,
+    1200,
+    800
+   ],
+   "color": "mint"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "cart",
+   "kind": "agent",
+   "zone": "apiZone",
+   "frame": [
+    60,
+    60,
+    600,
+    760
+   ],
+   "name": "Cart total"
+  },
+  {
+   "key": "dark",
+   "kind": "agent",
+   "zone": "apiZone",
+   "frame": [
+    720,
+    60,
+    600,
+    760
+   ],
+   "name": "Dark mode"
+  },
+  {
+   "key": "queue",
+   "kind": "note",
+   "zone": "adminZone",
+   "frame": [
+    60,
+    60,
+    500,
+    360
+   ],
+   "body": "Barista queue filters"
+  },
+  {
+   "key": "ios1",
+   "kind": "agent",
+   "harness": "codex",
+   "zone": "iosZone",
+   "frame": [
+    60,
+    60,
+    520,
+    660
+   ],
+   "name": "Widgets"
+  },
+  {
+   "key": "deploy",
+   "kind": "agent",
+   "zone": "infraZone",
+   "frame": [
+    60,
+    60,
+    520,
+    660
+   ],
+   "name": "Staging deploy"
+  }
+ ],
+ "takes": [
+  {
+   "name": "01-morning",
+   "frames": 479,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 40
+     }
+    },
+    {
+     "at": 0,
+     "agent": "cart",
+     "prompt": "Fix the cart total."
+    },
+    {
+     "at": 0,
+     "agent": "cart",
+     "turn": "start",
+     "ago": 900
+    },
+    {
+     "at": 0,
+     "agent": "dark",
+     "prompt": "Dark mode for the shop."
+    },
+    {
+     "at": 0,
+     "agent": "dark",
+     "turn": "start",
+     "ago": 900
+    },
+    {
+     "at": 0,
+     "agent": "deploy",
+     "prompt": "Ship the staging deploy."
+    },
+    {
+     "at": 0,
+     "agent": "deploy",
+     "turn": "start",
+     "ago": 900
+    },
+    {
+     "at": 0,
+     "agent": "ios1",
+     "turn": "start",
+     "ago": 600
+    },
+    {
+     "at": 4,
+     "agent": "cart",
+     "say": "Rounded once, on the total.",
+     "dur": 12
+    },
+    {
+     "at": 18,
+     "agent": "cart",
+     "turn": "done"
+    },
+    {
+     "at": 20,
+     "agent": "dark",
+     "say": "Every token has a dark value.",
+     "dur": 12
+    },
+    {
+     "at": 34,
+     "agent": "dark",
+     "turn": "done"
+    },
+    {
+     "at": 36,
+     "agent": "deploy",
+     "say": "Staging is green.",
+     "dur": 10
+    },
+    {
+     "at": 48,
+     "agent": "deploy",
+     "turn": "done"
+    },
+    {
+     "at": 68,
+     "pointer": {
+      "to": {
+       "sidebar": "cart"
+      },
+      "hover": true,
+      "dwell": 30
+     },
+     "dur": 24
+    },
+    {
+     "at": 126,
+     "pointer": {
+      "to": {
+       "sidebar": "dark"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 150,
+     "click": {
+      "deliver": true
+     },
+     "dur": 60
+    },
+    {
+     "at": 218,
+     "pointer": {
+      "to": {
+       "sidebar": "cart"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 242,
+     "click": {
+      "deliver": true
+     },
+     "dur": 60
+    },
+    {
+     "at": 310,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "composer"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 334,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 345,
+     "type": "Also cover the 3-for-2 promo.",
+     "dur": 40
+    },
+    {
+     "at": 393,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "send"
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 413,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 426,
+     "agent": "cart",
+     "turn": "start"
+    },
+    {
+     "at": 432,
+     "agent": "cart",
+     "say": "The promo is covered, with a test.",
+     "dur": 14
+    },
+    {
+     "at": 448,
+     "agent": "cart",
+     "turn": "done"
+    }
+   ],
+   "clock": "8:45"
+  },
+  {
+   "name": "02-settings",
+   "frames": 286,
+   "actions": [
+    {
+     "at": 4,
+     "key": ",",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 20,
+     "pointer": {
+      "to": {
+       "settings": "section.Agents"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 46,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 65,
+     "pointer": {
+      "to": {
+       "window": [
+        900,
+        520
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 83,
+     "scroll": {
+      "by": [
+       0,
+       -480
+      ]
+     },
+     "dur": 24
+    },
+    {
+     "at": 113,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitPushSucceeded.enabled"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 137,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 150,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitPushSucceeded.preview"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 172,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 189,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitMergeSucceeded.enabled"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 213,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 226,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitMergeSucceeded.preview"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 248,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 265,
+     "key": ",",
+     "mods": [
+      "cmd"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "03-lunch",
+   "frames": 64,
+   "actions": [
+    {
+     "at": 6,
+     "pointer": {
+      "to": {
+       "sidebar": "dark",
+       "at": "nudge"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 34,
+     "click": {
+      "deliver": true
+     }
+    }
+   ],
+   "clock": "13:00"
+  },
+  {
+   "name": "04-zones",
+   "frames": 710,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "rect": [
+       2900,
+       -40,
+       1500,
+       1000
+      ]
+     }
+    },
+    {
+     "at": 0,
+     "pointer": {
+      "to": {
+       "world": [
+        3000,
+        60
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 20,
+     "gesture": {
+      "to": {
+       "world": [
+        4200,
+        860
+       ]
+      }
+     },
+     "dur": 36
+    },
+    {
+     "at": 66,
+     "pointer": {
+      "to": {
+       "choice": "roast-web"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 92,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 109,
+     "adopt": {
+      "as": "webZone",
+      "kind": "zone"
+     }
+    },
+    {
+     "at": 115,
+     "pointer": {
+      "to": {
+       "window": [
+        1200,
+        820
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 135,
+     "camera": {
+      "all": true,
+      "padding": 60
+     },
+     "dur": 240
+    },
+    {
+     "at": 379,
+     "hold": "option",
+     "dur": 100
+    },
+    {
+     "at": 399,
+     "jump": "queue",
+     "dur": 60
+    },
+    {
+     "at": 489,
+     "hold": "option",
+     "dur": 100
+    },
+    {
+     "at": 509,
+     "jumpZone": "iosZone",
+     "dur": 60
+    },
+    {
+     "at": 599,
+     "hold": "option",
+     "dur": 100
+    },
+    {
+     "at": 619,
+     "jumpZone": "webZone",
+     "dur": 60
+    }
+   ],
+   "clock": "13:30"
+  },
+  {
+   "name": "05-evening",
+   "frames": 320,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 40
+     }
+    },
+    {
+     "at": 4,
+     "pointer": {
+      "to": {
+       "sidebar": "cart"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 28,
+     "click": {
+      "deliver": true
+     },
+     "dur": 40
+    },
+    {
+     "at": 76,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 89,
+     "pointer": {
+      "to": {
+       "sidebar": "deploy"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 113,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 130,
+     "pointer": {
+      "to": {
+       "bulk": "menu"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 154,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 179,
+     "pointer": {
+      "to": {
+       "bulk": "archive"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 201,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 230,
+     "pointer": {
+      "to": {
+       "sidebar": "history"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 254,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 279,
+     "pointer": {
+      "to": {
+       "sidebar": "cart"
+      }
+     },
+     "dur": 20
+    }
+   ],
+   "clock": "18:00"
+  }
+ ]
+}

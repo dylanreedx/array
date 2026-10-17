@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Array — every agent, in plain sight</title>
+<style>
+  :root { --bg: #0b0d12; --panel: #141821; --line: #232938; --text: #eef1f7; --muted: #8b93a7;
+          --blue: #5b8cff; --mint: #3ddc97; --amber: #f5b14c; --pink: #ff6fae; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  nav { display: flex; align-items: center; gap: 28px; padding: 18px 40px; border-bottom: 1px solid var(--line); }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+  .mark { width: 22px; height: 22px; border-radius: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 3px;
+          background: linear-gradient(135deg, #5b8cff, #a66bff); }
+  .mark i { background: rgba(255,255,255,.85); border-radius: 2px; }
+  nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+  nav .spacer { flex: 1; }
+  nav .btn { color: var(--text); background: #1d2330; border: 1px solid var(--line); padding: 7px 14px; border-radius: 8px; }
+  .hero { padding: 64px 40px 40px; text-align: center;
+          background: radial-gradient(900px 380px at 50% -40px, rgba(91,140,255,.28), transparent 70%); }
+  .pill { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: #c8d3ff; padding: 5px 12px;
+          border: 1px solid rgba(91,140,255,.4); border-radius: 999px; background: rgba(91,140,255,.12); }
+  .pill b { width: 7px; height: 7px; border-radius: 50%; background: var(--mint); }
+  h1 { font-size: 54px; line-height: 1.04; letter-spacing: -0.035em; margin: 22px auto 16px; max-width: 760px; font-weight: 750; }
+  h1 em { font-style: normal; background: linear-gradient(90deg, #8fb0ff, #c99bff); -webkit-background-clip: text; color: transparent; }
+  .sub { color: var(--muted); font-size: 18px; max-width: 560px; margin: 0 auto 28px; }
+  .ctas { display: flex; gap: 12px; justify-content: center; }
+  .cta { padding: 12px 20px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 15px; }
+  .cta.primary { background: var(--text); color: #0b0d12; }
+  .cta.ghost { color: var(--text); border: 1px solid var(--line); background: #141821; }
+  .canvas { margin: 44px auto 0; max-width: 900px; height: 300px; border: 1px solid var(--line); border-radius: 16px; position: relative;
+            background: #0f1218; background-image: radial-gradient(#1f2533 1px, transparent 1px); background-size: 22px 22px; overflow: hidden; }
+  .zone { position: absolute; border-radius: 12px; border: 1px solid; }
+  .zone span { position: absolute; top: 8px; left: 12px; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+  .tile { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .tile::before { content: ""; position: absolute; left: 10px; right: 30%; top: 10px; height: 6px; border-radius: 3px; background: #2a3142; }
+  .tile.agent::after { content: ""; position: absolute; left: 10px; right: 18%; top: 26px; bottom: 12px; border-radius: 4px;
+                       background: repeating-linear-gradient(#232a39 0 6px, transparent 6px 14px); }
+  .dot { position: absolute; top: 8px; right: 10px; width: 8px; height: 8px; border-radius: 50%; }
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; max-width: 900px; margin: 40px auto 60px; padding: 0 40px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+  .card h3 { font-size: 15px; margin-bottom: 6px; }
+  .card p { color: var(--muted); font-size: 14px; }
+  .card .icon { width: 30px; height: 30px; border-radius: 8px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+  <nav>
+    <div class="logo"><div class="mark"><i></i><i></i><i></i><i></i></div>Array</div>
+    <a href="#">Product</a><a href="#">Docs</a><a href="#">Changelog</a>
+    <div class="spacer"></div>
+    <a href="#">Sign in</a><a class="btn" href="#">Download</a>
+  </nav>
+  <section class="hero">
+    <div class="pill"><b></b>0.7.25 — boards that hand work to agents</div>
+    <h1>Every agent,<br><em>in plain sight.</em></h1>
+    <p class="sub">One canvas for your coding agents, terminals, browsers and dev servers. Parallel work stays visible instead of hiding in tabs.</p>
+    <div class="ctas"><a class="cta primary" href="#">Download for macOS</a><a class="cta ghost" href="#">Watch the tour</a></div>
+    <div class="canvas">
+      <div class="zone" style="left:24px;top:24px;width:420px;height:250px;border-color:rgba(91,140,255,.5);background:rgba(91,140,255,.06)"><span style="color:#8fb0ff">Canvas fixes</span></div>
+      <div class="tile" style="left:40px;top:56px;width:170px;height:110px"></div>
+      <div class="tile agent" style="left:224px;top:56px;width:204px;height:200px"><div class="dot" style="background:var(--blue)"></div></div>
+      <div class="tile" style="left:40px;top:180px;width:170px;height:76px"></div>
+      <div class="zone" style="left:464px;top:24px;width:412px;height:118px;border-color:rgba(61,220,151,.45);background:rgba(61,220,151,.05)"><span style="color:#7fe8b9">Landing page</span></div>
+      <div class="tile agent" style="left:480px;top:52px;width:180px;height:78px"><div class="dot" style="background:var(--mint)"></div></div>
+      <div class="tile" style="left:672px;top:52px;width:190px;height:78px"></div>
+      <div class="zone" style="left:464px;top:156px;width:412px;height:118px;border-color:rgba(245,177,76,.5);background:rgba(245,177,76,.05)"><span style="color:#f5c57a">Release 0.7.25</span></div>
+      <div class="tile agent" style="left:480px;top:184px;width:180px;height:78px;border-color:rgba(245,177,76,.8)"><div class="dot" style="background:var(--amber)"></div></div>
+      <div class="tile" style="left:672px;top:184px;width:190px;height:78px"></div>
+    </div>
+  </section>
+  <section class="features">
+    <div class="card"><div class="icon" style="background:linear-gradient(135deg,#5b8cff,#7f9dff)"></div><h3>Agents on the canvas</h3><p>Claude Code, Codex and Pi run as tiles you can watch, steer and approve.</p></div>
+    <div class="card"><div class="icon" style="background:linear-gradient(135deg,#3ddc97,#2bb67c)"></div><h3>Boards that assign work</h3><p>Drag a task onto an agent. It moves to Doing when the agent starts.</p></div>
+    <div class="card"><div class="icon" style="background:linear-gradient(135deg,#f5b14c,#ff8a4c)"></div><h3>Approvals you can see</h3><p>An agent that needs you lights up, wherever it is on the canvas.</p></div>
+  </section>
+</body>
+</html>

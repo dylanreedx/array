@@ -1,0 +1,877 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "v2-smoke-day",
+ "window": {
+  "width": 1920,
+  "height": 1080
+ },
+ "sidebar": true,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "autoLayout": true,
+ "fps": 60,
+ "video": "h264",
+ "png": 10,
+ "site": {
+  "project": "web",
+  "path": "public"
+ },
+ "catalog": [
+  {
+   "harness": "claude",
+   "model": "anthropic/claude-opus-5",
+   "displayName": "Opus 5",
+   "contextWindow": 200000
+  },
+  {
+   "harness": "codex",
+   "model": "openai-codex/gpt-5.5-codex",
+   "displayName": "GPT-5.5 Codex"
+  }
+ ],
+ "workspace": "Roast",
+ "projects": [
+  {
+   "key": "api",
+   "name": "roast-api",
+   "files": "../full-day/projects/roast-api",
+   "git": {}
+  },
+  {
+   "key": "web",
+   "name": "roast-web",
+   "files": "../full-day/projects/roast-web",
+   "git": {},
+   "placed": false
+  }
+ ],
+ "zones": [
+  {
+   "key": "apiZone",
+   "project": "api",
+   "name": "Roast API",
+   "rect": [
+    0,
+    0,
+    1500,
+    1000
+   ],
+   "color": "teal"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "orders",
+   "kind": "agent",
+   "harness": "codex",
+   "zone": "apiZone",
+   "frame": [
+    40,
+    60,
+    480,
+    620
+   ],
+   "name": "Cart rounding"
+  }
+ ],
+ "takes": [
+  {
+   "name": "01-zone",
+   "clock": "8:45",
+   "frames": 400,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "rect": [
+       1500,
+       -100,
+       1900,
+       1200
+      ]
+     }
+    },
+    {
+     "at": 4,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "world": [
+        1700,
+        120
+       ]
+      }
+     },
+     "mark": "marquee"
+    },
+    {
+     "at": 40,
+     "dur": 50,
+     "gesture": {
+      "to": {
+       "world": [
+        2900,
+        900
+       ]
+      }
+     }
+    },
+    {
+     "at": 100,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "choice": "roast-web"
+      }
+     },
+     "mark": "picker"
+    },
+    {
+     "at": 134,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 142,
+     "adopt": {
+      "as": "webZone",
+      "kind": "zone"
+     }
+    },
+    {
+     "at": 144,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "header"
+      }
+     }
+    },
+    {
+     "at": 172,
+     "click": {
+      "deliver": true,
+      "count": 2
+     },
+     "mark": "rename"
+    },
+    {
+     "at": 184,
+     "dur": 30,
+     "type": "Storefront"
+    },
+    {
+     "at": 218,
+     "key": "Return"
+    },
+    {
+     "at": 226,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "overflow"
+      }
+     }
+    },
+    {
+     "at": 254,
+     "click": {
+      "deliver": true
+     },
+     "mark": "menu"
+    },
+    {
+     "at": 276,
+     "menu": {
+      "choose": [
+       "Color",
+       "Orange"
+      ]
+     }
+    },
+    {
+     "at": 290,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "right"
+      }
+     }
+    },
+    {
+     "at": 318,
+     "dur": 50,
+     "gesture": {
+      "to": {
+       "by": [
+        150,
+        0
+       ]
+      }
+     },
+     "mark": "resize"
+    }
+   ]
+  },
+  {
+   "name": "02-palette",
+   "frames": 320,
+   "actions": [
+    {
+     "at": 0,
+     "dur": 90,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 94,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "zone": "apiZone",
+       "at": [
+        0.75,
+        0.85
+       ]
+      }
+     }
+    },
+    {
+     "at": 120,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 134,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "palette"
+    },
+    {
+     "at": 150,
+     "dur": 20,
+     "type": "board"
+    },
+    {
+     "at": 178,
+     "key": "Return"
+    },
+    {
+     "at": 190,
+     "adopt": {
+      "as": "board",
+      "kind": "kanban"
+     }
+    },
+    {
+     "at": 200,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 216,
+     "dur": 20,
+     "type": "agent"
+    },
+    {
+     "at": 244,
+     "key": "Return"
+    },
+    {
+     "at": 266,
+     "key": "Return",
+     "mark": "agent"
+    },
+    {
+     "at": 280,
+     "adopt": {
+      "as": "planner",
+      "kind": "agent",
+      "name": "Planner",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 284,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "header"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "03-plan",
+   "clock": "9:00",
+   "frames": 540,
+   "actions": [
+    {
+     "at": 0,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "composer"
+      }
+     }
+    },
+    {
+     "at": 26,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 34,
+     "dur": 26,
+     "type": "What's on my plate today?",
+     "mark": "typed"
+    },
+    {
+     "at": 66,
+     "key": "Return",
+     "mark": "sent"
+    },
+    {
+     "at": 74,
+     "agent": "planner",
+     "turn": "start"
+    },
+    {
+     "at": 78,
+     "dur": 30,
+     "agent": "planner",
+     "think": "Check Jira for this sprint, then put the tickets on the board."
+    },
+    {
+     "at": 114,
+     "agent": "planner",
+     "tool": {
+      "id": "jira1",
+      "name": "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql",
+      "input": {
+       "jql": "project = RST AND sprint in openSprints()"
+      },
+      "output": "RST-41 Dark mode for the shop\nRST-43 Coffee subscriptions"
+     }
+    },
+    {
+     "at": 150,
+     "agent": "planner",
+     "toolDone": "jira1"
+    },
+    {
+     "at": 160,
+     "agent": "planner",
+     "tool": {
+      "id": "card1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "bind": "darkmode",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-41 Dark mode for the shop",
+       "body": "Follow the system setting. Tokens live in public/theme.css."
+      }
+     }
+    },
+    {
+     "at": 180,
+     "agent": "planner",
+     "toolDone": "card1"
+    },
+    {
+     "at": 190,
+     "agent": "planner",
+     "tool": {
+      "id": "card2",
+      "name": "mcp__array_workspace__array_board_apply",
+      "bind": "subs",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-43",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-43 Coffee subscriptions",
+       "body": "Weekly or monthly beans, pause any time."
+      }
+     }
+    },
+    {
+     "at": 210,
+     "agent": "planner",
+     "toolDone": "card2"
+    },
+    {
+     "at": 220,
+     "agent": "planner",
+     "tool": {
+      "id": "assign1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "assign",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41-me",
+       "cardId": "{card:darkmode}",
+       "assigneeAgentId": "{agent:planner}"
+      }
+     }
+    },
+    {
+     "at": 236,
+     "agent": "planner",
+     "toolDone": "assign1"
+    },
+    {
+     "at": 242,
+     "dur": 50,
+     "agent": "planner",
+     "say": "Two tickets on the board. I took RST-41 myself."
+    },
+    {
+     "at": 296,
+     "agent": "planner",
+     "turn": "done"
+    },
+    {
+     "at": 306,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "card": "subs"
+      }
+     }
+    },
+    {
+     "at": 340,
+     "click": {
+      "deliver": true
+     },
+     "mark": "details"
+    },
+    {
+     "at": 450,
+     "dur": 20,
+     "pointer": {
+      "to": {
+       "window": [
+        420,
+        80
+       ]
+      }
+     }
+    },
+    {
+     "at": 474,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 490,
+     "dur": 40,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "body"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "04-helpers",
+   "clock": "10:30",
+   "frames": 420,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "planner",
+     "prompt": "Take RST-43. Bring helpers."
+    },
+    {
+     "at": 4,
+     "agent": "planner",
+     "turn": "start"
+    },
+    {
+     "at": 10,
+     "agent": "planner",
+     "tool": {
+      "id": "toolu_sub1",
+      "name": "Agent",
+      "input": {
+       "description": "Subscriptions API",
+       "prompt": "Build the subscription endpoints in src/subscriptions.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 30,
+     "agent": "planner",
+     "child": "toolu_sub1",
+     "say": "Reading the cart types first."
+    },
+    {
+     "at": 50,
+     "agent": "planner",
+     "child": "toolu_sub1",
+     "tool": {
+      "id": "toolu_c1",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/types.ts"
+      },
+      "output": "export type Cart = { lines: Line[] }"
+     }
+    },
+    {
+     "at": 70,
+     "agent": "planner",
+     "child": "toolu_sub1",
+     "toolDone": "toolu_c1"
+    },
+    {
+     "at": 90,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "chip": "toolu_sub1"
+      }
+     },
+     "mark": "chip"
+    },
+    {
+     "at": 124,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 150,
+     "adopt": {
+      "as": "helper",
+      "child": "toolu_sub1",
+      "of": "planner"
+     }
+    },
+    {
+     "at": 152,
+     "dur": 40,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 196,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "tile": "helper",
+       "at": "header"
+      }
+     }
+    },
+    {
+     "at": 230,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 246,
+     "dur": 50,
+     "gesture": {
+      "to": {
+       "by": [
+        -160,
+        120
+       ]
+      }
+     },
+     "mark": "dragHelper"
+    },
+    {
+     "at": 320,
+     "agent": "planner",
+     "toolDone": "toolu_sub1"
+    },
+    {
+     "at": 340,
+     "dur": 40,
+     "agent": "planner",
+     "say": "The helper finished the subscription API."
+    },
+    {
+     "at": 390,
+     "agent": "planner",
+     "turn": "done"
+    }
+   ]
+  },
+  {
+   "name": "05-site",
+   "clock": "11:15",
+   "frames": 670,
+   "actions": [
+    {
+     "at": 0,
+     "dur": 24,
+     "pointer": {
+      "to": {
+       "zone": "apiZone",
+       "at": [
+        0.75,
+        0.9
+       ]
+      }
+     }
+    },
+    {
+     "at": 28,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 40,
+     "key": "3",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "browser"
+    },
+    {
+     "at": 60,
+     "adopt": {
+      "as": "site",
+      "kind": "browser"
+     }
+    },
+    {
+     "at": 64,
+     "browser": {
+      "tile": "site",
+      "url": "http://localhost:3000/"
+     }
+    },
+    {
+     "at": 80,
+     "dur": 60,
+     "camera": {
+      "tiles": [
+       "site"
+      ],
+      "padding": 60
+     }
+    },
+    {
+     "at": 150,
+     "write": {
+      "project": "web",
+      "path": "public/theme.css",
+      "from": "../full-day/edits/theme.css"
+     }
+    },
+    {
+     "at": 160,
+     "browser": {
+      "tile": "site",
+      "reload": true
+     },
+     "mark": "reload"
+    },
+    {
+     "at": 200,
+     "dur": 60,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 264,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "card": "subs"
+      }
+     }
+    },
+    {
+     "at": 298,
+     "dur": 50,
+     "drag": {
+      "card": "subs",
+      "toAgent": "orders"
+     },
+     "mark": "dropCard"
+    },
+    {
+     "at": 360,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "tile": "orders",
+       "at": "send"
+      }
+     }
+    },
+    {
+     "at": 394,
+     "click": {
+      "deliver": true
+     },
+     "mark": "sendCard"
+    },
+    {
+     "at": 418,
+     "agent": "orders",
+     "turn": "start"
+    },
+    {
+     "at": 422,
+     "dur": 40,
+     "agent": "orders",
+     "say": "Rounding happens per line; it should happen once on the total."
+    },
+    {
+     "at": 470,
+     "agent": "orders",
+     "tool": {
+      "id": "cx1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/orders/routes.ts"
+     }
+    },
+    {
+     "at": 490,
+     "agent": "orders",
+     "toolDone": "cx1"
+    },
+    {
+     "at": 500,
+     "agent": "orders",
+     "tool": {
+      "id": "cx2",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test",
+      "output": "12 passing"
+     }
+    },
+    {
+     "at": 540,
+     "agent": "orders",
+     "toolDone": "cx2"
+    },
+    {
+     "at": 550,
+     "dur": 40,
+     "agent": "orders",
+     "say": "Tests pass."
+    },
+    {
+     "at": 600,
+     "agent": "orders",
+     "turn": "done"
+    }
+   ]
+  },
+  {
+   "name": "06-push",
+   "clock": "15:00",
+   "frames": 440,
+   "actions": [
+    {
+     "at": 0,
+     "dur": 60,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 64,
+     "agent": "planner",
+     "prompt": "Ship it."
+    },
+    {
+     "at": 68,
+     "agent": "planner",
+     "turn": "start"
+    },
+    {
+     "at": 72,
+     "agent": "planner",
+     "tool": {
+      "id": "push1",
+      "name": "Bash",
+      "input": {
+       "command": "git push origin main",
+       "description": "Push to origin"
+      },
+      "output": "To origin\n   1a2b3c4..5d6e7f8  main -> main"
+     }
+    },
+    {
+     "at": 100,
+     "agent": "planner",
+     "toolDone": "push1",
+     "mark": "pushed"
+    },
+    {
+     "at": 110,
+     "dur": 30,
+     "agent": "planner",
+     "say": "Pushed."
+    },
+    {
+     "at": 400,
+     "agent": "planner",
+     "turn": "done"
+    },
+    {
+     "at": 160,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "window": [
+        1000,
+        980
+       ]
+      }
+     }
+    },
+    {
+     "at": 200,
+     "dur": 90,
+     "hold": "option",
+     "mark": "leader"
+    }
+   ]
+  }
+ ]
+}

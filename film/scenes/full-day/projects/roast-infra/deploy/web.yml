@@ -1,0 +1,10 @@
+# Storefront deploy: build on main, ship to the edge.
+name: deploy-web
+on: { push: { branches: [main] } }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
+      - run: npx vercel deploy --prod

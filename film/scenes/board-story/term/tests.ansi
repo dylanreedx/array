@@ -1,0 +1,24 @@
+swift test --filter PlacementTests
+[1mBuilding for debugging...[0m
+[1/6] Compiling Array CanvasNSView.swift
+[4/6] Compiling Array TilePlacement.swift
+[6/6] Linking ArrayPackageTests
+Build complete! [2m(3.84s)[0m
+[1m◇ Suite PlacementTests started.[0m
+[32m✔[0m Test spawnIntoArmedZone() passed [2mafter 0.001s[0m
+[32m✔[0m Test spawnIntoUnarmedZone() passed [2mafter 0.002s[0m
+[32m✔[0m Test frameAndInstallShareZone() passed [2mafter 0.003s[0m
+[32m✔[0m Test gapScanSkipsOccupied() passed [2mafter 0.004s[0m
+[32m✔[0m Test zoneOriginAppliedOnce() passed [2mafter 0.005s[0m
+[32m✔[0m Test terminalSnapsToCells() passed [2mafter 0.006s[0m
+[32m✔[0m Test browserKeepsDefaultSize() passed [2mafter 0.007s[0m
+[32m✔[0m Test agentFramedInScopeZone() passed [2mafter 0.001s[0m
+[32m✔[0m Test noteSpawnsBesideAnchor() passed [2mafter 0.002s[0m
+[32m✔[0m Test worldFrameRoundTrip() passed [2mafter 0.003s[0m
+[32m✔[0m Test persistedFramesAreWorld() passed [2mafter 0.004s[0m
+[32m✔[0m Test membershipStaysInProject() passed [2mafter 0.005s[0m
+[32m✔[0m Test cameraUntouchedBySpawn() passed [2mafter 0.006s[0m
+[32m✔[0m Test undoRestoresPlacement() passed [2mafter 0.007s[0m
+[32m✔[0m [1mSuite PlacementTests passed after 0.041s[0m
+[32m✔[0m [1m14 tests passed, 0 failed[0m
+[1;32m➜[0m  [1;36marray[0m [1;34mgit:([31mfix/tile-jump[34m)[0m 

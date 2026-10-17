@@ -1,0 +1,804 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "v2-smoke",
+ "site": "../power-tour/site",
+ "window": {
+  "width": 1920,
+  "height": 1080
+ },
+ "sidebar": true,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "fps": 60,
+ "video": "prores",
+ "png": 30,
+ "closeUpMinZoom": 0.85,
+ "catalog": {
+  "model": "anthropic/claude-opus-5",
+  "displayName": "Opus 5",
+  "contextWindow": 200000
+ },
+ "workspace": "Launch week",
+ "projects": [
+  {
+   "key": "array",
+   "name": "array",
+   "files": "../board-story/projects/array",
+   "git": {
+    "modify": {
+     "Sources/Array/Canvas/CanvasNSView.swift": "../board-story/edits/CanvasNSView.swift"
+    }
+   }
+  },
+  {
+   "key": "web",
+   "name": "array-website",
+   "files": "../board-story/projects/array-website",
+   "git": {}
+  },
+  {
+   "key": "ios",
+   "name": "array-ios",
+   "files": "../board-story/projects/array-ios",
+   "git": {}
+  }
+ ],
+ "zones": [
+  {
+   "key": "canvas",
+   "project": "array",
+   "name": "Canvas fixes",
+   "rect": [
+    0,
+    0,
+    2460,
+    1520
+   ],
+   "color": "blue"
+  },
+  {
+   "key": "transcript",
+   "project": "array",
+   "name": "Agent transcript",
+   "rect": [
+    2620,
+    0,
+    1560,
+    960
+   ],
+   "color": "purple"
+  },
+  {
+   "key": "release",
+   "project": "array",
+   "name": "Release 0.7.25",
+   "rect": [
+    4340,
+    0,
+    1440,
+    960
+   ],
+   "color": "yellow"
+  },
+  {
+   "key": "landing",
+   "project": "web",
+   "name": "Landing page",
+   "rect": [
+    0,
+    1680,
+    2240,
+    960
+   ],
+   "color": "orange"
+  },
+  {
+   "key": "docs",
+   "project": "web",
+   "name": "Docs",
+   "rect": [
+    2400,
+    1680,
+    1520,
+    960
+   ],
+   "color": "teal"
+  },
+  {
+   "key": "companion",
+   "project": "ios",
+   "name": "Companion",
+   "rect": [
+    4080,
+    1680,
+    2040,
+    960
+   ],
+   "color": "mint"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "board",
+   "kind": "kanban",
+   "zone": "canvas",
+   "frame": [
+    40,
+    80,
+    820,
+    540
+   ],
+   "title": "Canvas sprint",
+   "board": {
+    "title": "Canvas sprint",
+    "columns": [
+     "To Do",
+     "Doing",
+     "Done"
+    ],
+    "cards": [
+     {
+      "key": "jump",
+      "column": "To Do",
+      "title": "Fix tile jump",
+      "body": "A tile spawned into an unarmed zone lands offset by the difference of the two zone origins. Frame and install must use one target zone."
+     },
+     {
+      "key": "snap",
+      "column": "To Do",
+      "title": "Snap zones to the grid"
+     },
+     {
+      "key": "pinch",
+      "column": "To Do",
+      "title": "Pinch-zoom overshoot at 400%"
+     },
+     {
+      "key": "hover",
+      "column": "Doing",
+      "title": "Hover lag past 80 tiles"
+     },
+     {
+      "key": "ants",
+      "column": "Done",
+      "title": "Marching ants on approval"
+     },
+     {
+      "key": "camera",
+      "column": "Done",
+      "title": "Camera still during zone resize"
+     }
+    ]
+   }
+  },
+  {
+   "key": "fix",
+   "kind": "agent",
+   "zone": "canvas",
+   "frame": [
+    900,
+    80,
+    660,
+    700
+   ],
+   "name": "Fix tile jump",
+   "workspaceTools": true
+  },
+  {
+   "key": "tree",
+   "kind": "fileTree",
+   "zone": "canvas",
+   "frame": [
+    40,
+    860,
+    360,
+    580
+   ],
+   "path": ".",
+   "expanded": [
+    "Sources",
+    "Sources/Array",
+    "Sources/Array/Canvas"
+   ]
+  },
+  {
+   "key": "editor",
+   "kind": "file",
+   "zone": "canvas",
+   "frame": [
+    440,
+    860,
+    760,
+    580
+   ],
+   "path": "Sources/Array/Canvas/CanvasNSView.swift"
+  },
+  {
+   "key": "term",
+   "kind": "terminal",
+   "zone": "canvas",
+   "frame": [
+    1600,
+    80,
+    820,
+    440
+   ]
+  },
+  {
+   "key": "site",
+   "kind": "browser",
+   "zone": "canvas",
+   "frame": [
+    1240,
+    860,
+    1180,
+    620
+   ],
+   "url": "http://localhost:3000/"
+  },
+  {
+   "key": "stream",
+   "kind": "agent",
+   "zone": "transcript",
+   "frame": [
+    40,
+    80,
+    700,
+    760
+   ],
+   "name": "Stream tool rows"
+  },
+  {
+   "key": "polish",
+   "kind": "note",
+   "zone": "transcript",
+   "frame": [
+    780,
+    80,
+    740,
+    360
+   ],
+   "title": "Transcript polish",
+   "body": "# Transcript polish\n\n- [x] Fade new rows in (0.18 s)\n- [ ] Settle tool rows (0.16 s)\n- [ ] Keep the tail pinned while streaming\n"
+  },
+  {
+   "key": "tview",
+   "kind": "file",
+   "zone": "transcript",
+   "frame": [
+    780,
+    480,
+    740,
+    400
+   ],
+   "path": "Sources/Array/Agents/TranscriptView.swift"
+  },
+  {
+   "key": "rel",
+   "kind": "agent",
+   "zone": "release",
+   "frame": [
+    40,
+    80,
+    660,
+    760
+   ],
+   "name": "Cut release 0.7.25"
+  },
+  {
+   "key": "runbook",
+   "kind": "file",
+   "zone": "release",
+   "frame": [
+    740,
+    80,
+    660,
+    520
+   ],
+   "path": "docs/RELEASE.md"
+  },
+  {
+   "key": "hero",
+   "kind": "agent",
+   "zone": "landing",
+   "frame": [
+    40,
+    80,
+    660,
+    760
+   ],
+   "name": "Hero copy pass"
+  },
+  {
+   "key": "pricing",
+   "kind": "agent",
+   "zone": "landing",
+   "frame": [
+    740,
+    80,
+    660,
+    760
+   ],
+   "name": "Pricing table"
+  },
+  {
+   "key": "heroSrc",
+   "kind": "file",
+   "zone": "landing",
+   "frame": [
+    1440,
+    80,
+    760,
+    560
+   ],
+   "path": "src/pages/index.astro"
+  },
+  {
+   "key": "docs",
+   "kind": "agent",
+   "zone": "docs",
+   "frame": [
+    40,
+    80,
+    660,
+    760
+   ],
+   "name": "Docs: workspace API"
+  },
+  {
+   "key": "apiDoc",
+   "kind": "file",
+   "zone": "docs",
+   "frame": [
+    740,
+    80,
+    740,
+    760
+   ],
+   "path": "src/pages/docs/workspace-api.md"
+  },
+  {
+   "key": "widget",
+   "kind": "agent",
+   "zone": "companion",
+   "frame": [
+    40,
+    80,
+    660,
+    760
+   ],
+   "name": "Live Activity widget"
+  },
+  {
+   "key": "push",
+   "kind": "agent",
+   "zone": "companion",
+   "frame": [
+    740,
+    80,
+    660,
+    760
+   ],
+   "name": "Push permissions"
+  },
+  {
+   "key": "iosTree",
+   "kind": "fileTree",
+   "zone": "companion",
+   "frame": [
+    1440,
+    80,
+    560,
+    760
+   ],
+   "path": ".",
+   "expanded": [
+    "Companion",
+    "Companion/Views"
+   ]
+  }
+ ],
+ "takes": [
+  {
+   "name": "00-setup",
+   "frames": 30,
+   "capture": false,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "all": true,
+      "padding": 60
+     }
+    },
+    {
+     "at": 0,
+     "terminal": "term",
+     "file": "../board-story/term/initial.ansi"
+    },
+    {
+     "at": 0,
+     "agent": "stream",
+     "prompt": "Make tool rows settle instead of swapping when a tool finishes."
+    },
+    {
+     "at": 0,
+     "agent": "stream",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "stream",
+     "say": "Tool rows replace their view when the status changes. I'll animate the existing row's opacity instead and leave the model value untouched."
+    },
+    {
+     "at": 0,
+     "agent": "stream",
+     "tool": {
+      "id": "s1",
+      "kind": "commandExecution",
+      "title": "Read",
+      "path": "Sources/Array/Agents/TranscriptView.swift"
+     }
+    },
+    {
+     "at": 1,
+     "agent": "stream",
+     "toolDone": "s1"
+    },
+    {
+     "at": 2,
+     "agent": "stream",
+     "tool": {
+      "id": "s2",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "Sources/Array/Agents/TranscriptView.swift",
+      "action": "edit",
+      "added": 14,
+      "removed": 6
+     }
+    },
+    {
+     "at": 0,
+     "agent": "rel",
+     "prompt": "Prepare release 0.7.25: bump the build, notarize both DMGs, regenerate the appcast and tag."
+    },
+    {
+     "at": 0,
+     "agent": "rel",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "rel",
+     "tool": {
+      "id": "r0",
+      "kind": "commandExecution",
+      "title": "Bash",
+      "command": "Build, sign and notarize Array 0.7.25",
+      "output": "Notarized Array-0.7.25.dmg (build 76)"
+     }
+    },
+    {
+     "at": 1,
+     "agent": "rel",
+     "toolDone": "r0"
+    },
+    {
+     "at": 2,
+     "agent": "rel",
+     "say": "Build 76 is signed and both DMGs are notarized. Next: regenerate the appcast, then tag v0.7.25."
+    },
+    {
+     "at": 0,
+     "agent": "hero",
+     "prompt": "Tighten the hero copy. Keep it under twelve words."
+    },
+    {
+     "at": 0,
+     "agent": "hero",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "hero",
+     "say": "Trying \"Every agent, in plain sight.\" Seven words, and it says what the canvas is for."
+    },
+    {
+     "at": 1,
+     "agent": "hero",
+     "tool": {
+      "id": "h1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/components/Hero.astro",
+      "action": "edit",
+      "added": 3,
+      "removed": 3
+     }
+    },
+    {
+     "at": 0,
+     "agent": "pricing",
+     "prompt": "Add an Alpha tier card to the pricing section."
+    },
+    {
+     "at": 0,
+     "agent": "pricing",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "pricing",
+     "say": "One Alpha card for now. The paid tiers can follow once pricing is settled."
+    },
+    {
+     "at": 1,
+     "agent": "pricing",
+     "tool": {
+      "id": "p1",
+      "kind": "commandExecution",
+      "title": "Read",
+      "path": "src/components/Pricing.astro"
+     }
+    },
+    {
+     "at": 0,
+     "agent": "docs",
+     "prompt": "Write the workspace API page for the docs site."
+    },
+    {
+     "at": 0,
+     "agent": "docs",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "docs",
+     "tool": {
+      "id": "d1",
+      "kind": "fileChange",
+      "title": "Write",
+      "path": "src/pages/docs/workspace-api.md",
+      "action": "write",
+      "added": 22
+     }
+    },
+    {
+     "at": 1,
+     "agent": "docs",
+     "toolDone": "d1"
+    },
+    {
+     "at": 2,
+     "agent": "docs",
+     "say": "The page covers the four operations and the grant model: an agent starts with its own checkout, and anything wider is a prompt you answer in Array."
+    },
+    {
+     "at": 3,
+     "agent": "docs",
+     "turn": "done"
+    },
+    {
+     "at": 0,
+     "agent": "widget",
+     "prompt": "Show working and needs-you counts in the Live Activity."
+    },
+    {
+     "at": 0,
+     "agent": "widget",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "widget",
+     "say": "Adding `working` and `needsYou` to the activity's content state, then wiring them to the inbox counts."
+    },
+    {
+     "at": 1,
+     "agent": "widget",
+     "tool": {
+      "id": "w1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "Widget/LiveActivity.swift",
+      "action": "edit",
+      "added": 8,
+      "removed": 1
+     }
+    },
+    {
+     "at": 0,
+     "agent": "push",
+     "prompt": "Ask for push permission after the first agent finishes, not at launch."
+    },
+    {
+     "at": 0,
+     "agent": "push",
+     "turn": "start"
+    },
+    {
+     "at": 0,
+     "agent": "push",
+     "tool": {
+      "id": "q1",
+      "kind": "commandExecution",
+      "title": "Read",
+      "path": "Companion/App/PushPermission.swift"
+     }
+    },
+    {
+     "at": 1,
+     "agent": "push",
+     "toolDone": "q1"
+    },
+    {
+     "at": 2,
+     "agent": "push",
+     "say": "The prompt now waits for the first finished agent. Should it also wait a full day for people who never start one?"
+    },
+    {
+     "at": 3,
+     "agent": "push",
+     "turn": "done"
+    }
+   ]
+  },
+  {
+   "name": "01-smoke",
+   "frames": 670,
+   "actions": [
+    {
+     "at": 8,
+     "dur": 28,
+     "pointer": {
+      "to": {
+       "zone": "canvas",
+       "at": "center"
+      },
+      "spring": "soft"
+     },
+     "mark": "enter"
+    },
+    {
+     "at": 40,
+     "dur": 150,
+     "zoom": {
+      "to": {
+       "tiles": [
+        "board",
+        "fix"
+       ],
+       "padding": 40
+      }
+     },
+     "mark": "zoomIn"
+    },
+    {
+     "at": 200,
+     "dur": 100,
+     "pan": {
+      "to": {
+       "tiles": [
+        "site"
+       ],
+       "padding": 40
+      },
+      "style": "scroll"
+     },
+     "mark": "panSite"
+    },
+    {
+     "at": 330,
+     "dur": 30,
+     "pointer": {
+      "to": {
+       "sidebar": "stream"
+      }
+     },
+     "mark": "toSidebar"
+    },
+    {
+     "at": 366,
+     "click": {
+      "deliver": false
+     },
+     "mark": "click"
+    },
+    {
+     "at": 371,
+     "dur": 90,
+     "reveal": "stream",
+     "mark": "reveal"
+    },
+    {
+     "at": 490,
+     "dur": 150,
+     "zoom": {
+      "to": {
+       "all": true,
+       "padding": 60
+      }
+     },
+     "mark": "zoomOut"
+    },
+    {
+     "at": 669,
+     "mark": "end"
+    }
+   ]
+  },
+  {
+   "name": "99-open-beside",
+   "frames": 150,
+   "capture": false,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "fix",
+     "turn": "start"
+    },
+    {
+     "at": 2,
+     "agent": "fix",
+     "tool": {
+      "id": "toolu_film_query_1",
+      "name": "mcp__array_workspace__array_canvas_query",
+      "input": {}
+     }
+    },
+    {
+     "at": 6,
+     "agent": "fix",
+     "toolDone": "toolu_film_query_1"
+    },
+    {
+     "at": 8,
+     "dur": 60,
+     "agent": "fix",
+     "open": {
+      "path": "Sources/Array/Canvas/TilePlacement.swift",
+      "as": "placement",
+      "toolId": "toolu_film_open_1"
+     }
+    },
+    {
+     "at": 72,
+     "dur": 40,
+     "camera": {
+      "tiles": [
+       "fix",
+       "placement"
+      ],
+      "padding": 40
+     }
+    },
+    {
+     "at": 114,
+     "dur": 20,
+     "pointer": {
+      "to": {
+       "tile": "placement"
+      }
+     }
+    },
+    {
+     "at": 140,
+     "agent": "fix",
+     "turn": "done"
+    }
+   ]
+  }
+ ],
+ "expect": {
+  "cards": {
+   "jump": "To Do"
+  },
+  "agentStatus": {
+   "docs": "completed",
+   "push": "completed",
+   "stream": "working"
+  }
+ }
+}

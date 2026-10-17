@@ -1,0 +1,17 @@
+/* Roast design tokens. */
+:root {
+  --bg: #f7f0e6;
+  --panel: #fffaf3;
+  --ink: #2b1d14;
+  --muted: #7a6656;
+  --line: #e6d8c6;
+  --accent: #d9622b;
+  --accent-soft: #fbe2d2;
+  --on-accent: #ffffff;
+  /* RST-45: softer cards. */
+  --radius: 24px;
+  /* RST-45: a serif for headings. */
+  --font-heading: ui-serif, "New York", Georgia, serif;
+  --heading-weight: 700;
+  --heading-tracking: -0.02em;
+}

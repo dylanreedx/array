@@ -1,0 +1,1319 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "which-tab-plate",
+ "window": {
+  "width": 1920,
+  "height": 1080
+ },
+ "sidebar": false,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "fps": 60,
+ "streamHz": 30,
+ "settleToolDetails": true,
+ "video": "prores",
+ "png": "all",
+ "closeUpMinZoom": 0.85,
+ "site": {
+  "project": "web",
+  "path": "public"
+ },
+ "catalog": [
+  {
+   "harness": "claude",
+   "model": "anthropic/claude-opus-5-5",
+   "displayName": "Opus 5.5"
+  },
+  {
+   "harness": "codex",
+   "model": "openai-codex/gpt-6.1-sol",
+   "displayName": "GPT-6.1-Sol"
+  },
+  {
+   "harness": "pi",
+   "model": "openai-codex/gpt-5.6-sol",
+   "displayName": "GPT-5.6 Sol",
+   "contextWindow": 272000
+  }
+ ],
+ "workspace": "Roast",
+ "projects": [
+  {
+   "key": "web",
+   "name": "roast-web",
+   "files": "../full-day/projects/roast-web",
+   "git": {}
+  },
+  {
+   "key": "api",
+   "name": "roast-api",
+   "files": "../full-day/projects/roast-api",
+   "git": {}
+  }
+ ],
+ "zones": [
+  {
+   "key": "web",
+   "project": "web",
+   "name": "Storefront",
+   "rect": [
+    0,
+    0,
+    3240,
+    720
+   ],
+   "color": "orange"
+  },
+  {
+   "key": "api",
+   "project": "api",
+   "name": "Roast API",
+   "rect": [
+    0,
+    820,
+    3240,
+    720
+   ],
+   "color": "teal"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "picker",
+   "kind": "agent",
+   "zone": "web",
+   "frame": [
+    40,
+    80,
+    680,
+    600
+   ],
+   "name": "Plan picker",
+   "harness": "codex"
+  },
+  {
+   "key": "dark",
+   "kind": "agent",
+   "zone": "web",
+   "frame": [
+    760,
+    80,
+    680,
+    600
+   ],
+   "name": "Dark mode",
+   "harness": "pi"
+  },
+  {
+   "key": "cart",
+   "kind": "agent",
+   "zone": "web",
+   "frame": [
+    1480,
+    80,
+    680,
+    600
+   ],
+   "name": "Cart total",
+   "harness": "claude"
+  },
+  {
+   "key": "subs",
+   "kind": "agent",
+   "zone": "api",
+   "frame": [
+    40,
+    80,
+    680,
+    600
+   ],
+   "name": "Subscriptions",
+   "harness": "claude"
+  },
+  {
+   "key": "emails",
+   "kind": "agent",
+   "zone": "api",
+   "frame": [
+    760,
+    80,
+    680,
+    600
+   ],
+   "name": "Renewal emails",
+   "harness": "pi"
+  },
+  {
+   "key": "export",
+   "kind": "agent",
+   "zone": "api",
+   "frame": [
+    1480,
+    80,
+    680,
+    600
+   ],
+   "name": "Order export",
+   "harness": "codex"
+  },
+  {
+   "key": "site",
+   "kind": "browser",
+   "zone": "web",
+   "frame": [
+    2200,
+    80,
+    1000,
+    600
+   ],
+   "url": "http://localhost:3000/",
+   "title": "Roast — coffee, roasted this morning"
+  },
+  {
+   "key": "board",
+   "kind": "kanban",
+   "zone": "api",
+   "frame": [
+    2200,
+    80,
+    1000,
+    600
+   ],
+   "title": "Roast sprint",
+   "board": {
+    "title": "Roast sprint",
+    "columns": [
+     "To Do",
+     "Doing",
+     "Done"
+    ],
+    "cards": [
+     {
+      "key": "rst50",
+      "column": "To Do",
+      "title": "RST-50 Rate limits for the public API",
+      "body": "Per key, 60 requests a minute."
+     },
+     {
+      "key": "rst51",
+      "column": "To Do",
+      "title": "RST-51 Retry failed webhooks",
+      "body": "Back off, give up after a day."
+     },
+     {
+      "key": "rst43",
+      "column": "Doing",
+      "title": "RST-43 Coffee subscriptions",
+      "body": "Weekly or monthly beans, pause any time."
+     },
+     {
+      "key": "rst49",
+      "column": "Doing",
+      "title": "RST-49 Renewal emails",
+      "body": "Two days before each renewal."
+     },
+     {
+      "key": "rst48",
+      "column": "Doing",
+      "title": "RST-48 Order export",
+      "body": "A CSV of last month’s orders."
+     },
+     {
+      "key": "rst40",
+      "column": "Done",
+      "title": "RST-40 Page the orders API",
+      "body": "Cursor paging, 50 per page."
+     },
+     {
+      "key": "rst39",
+      "column": "Done",
+      "title": "RST-39 Order confirmation email",
+      "body": "“Your coffee is on its way.”"
+     }
+    ]
+   }
+  }
+ ],
+ "takes": [
+  {
+   "name": "00-setup",
+   "frames": 492,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "all": true,
+      "padding": 60
+     }
+    },
+    {
+     "at": 0,
+     "agent": "picker",
+     "prompt": "Add a weekly or monthly plan picker to the product page."
+    },
+    {
+     "at": 0,
+     "agent": "picker",
+     "turn": "start",
+     "ago": 1975.2
+    },
+    {
+     "at": 0,
+     "agent": "dark",
+     "prompt": "Give the shop a dark mode that follows the system setting."
+    },
+    {
+     "at": 0,
+     "agent": "dark",
+     "turn": "start",
+     "ago": 2455.2
+    },
+    {
+     "at": 0,
+     "agent": "cart",
+     "prompt": "The cart total is off by a cent: two Autumn blends with 10% off show $32.39, not $32.40."
+    },
+    {
+     "at": 0,
+     "agent": "cart",
+     "turn": "start",
+     "ago": 1255.2
+    },
+    {
+     "at": 0,
+     "agent": "subs",
+     "prompt": "Add a subscriptions API: create, pause and resume a plan."
+    },
+    {
+     "at": 0,
+     "agent": "subs",
+     "turn": "start",
+     "ago": 2695.2
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "prompt": "Email customers two days before their subscription renews."
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "turn": "start",
+     "ago": 1495.2
+    },
+    {
+     "at": 0,
+     "agent": "export",
+     "prompt": "Export last month’s orders as a CSV for the accountant."
+    },
+    {
+     "at": 0,
+     "agent": "export",
+     "turn": "start",
+     "ago": 1735.2
+    },
+    {
+     "at": 2,
+     "agent": "cart",
+     "think": "The discount is applied per line and each line is rounded, so the cents drift."
+    },
+    {
+     "at": 3,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h1",
+      "name": "Grep",
+      "input": {
+       "pattern": "round\\(",
+       "path": "src/cart"
+      },
+      "output": "src/cart/total.ts:14:  return lines.map((l) => round(l.price * l.qty * (1 - discount)))"
+     }
+    },
+    {
+     "at": 4,
+     "agent": "cart",
+     "toolDone": "cart-h1"
+    },
+    {
+     "at": 5,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h2",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal(lines: Line[], discount = 0)"
+     }
+    },
+    {
+     "at": 6,
+     "agent": "cart",
+     "toolDone": "cart-h2"
+    },
+    {
+     "at": 7,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h3",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/types.ts"
+      },
+      "output": "export interface Line { sku: string; price: number; qty: number }"
+     }
+    },
+    {
+     "at": 8,
+     "agent": "cart",
+     "toolDone": "cart-h3"
+    },
+    {
+     "at": 9,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h4",
+      "name": "Read",
+      "input": {
+       "file_path": "tests/cart.test.ts"
+      },
+      "output": "describe('cartTotal', () => {"
+     }
+    },
+    {
+     "at": 10,
+     "agent": "cart",
+     "toolDone": "cart-h4"
+    },
+    {
+     "at": 11,
+     "agent": "cart",
+     "say": "Each line is rounded before the discount, so a cent goes missing. I’ll round once, on the total."
+    },
+    {
+     "at": 12,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h6",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/cart/total.ts",
+       "old_string": "export function cartTotal(lines: Line[], discount = 0) {\n  return sum(lines.map((l) => round(l.price * l.qty * (1 - discount))))\n}",
+       "new_string": "export function cartTotal(lines: Line[], discount = 0) {\n  const subtotal = sum(lines.map((l) => l.price * l.qty))\n  const total = subtotal * (1 - discount)\n  return round(total)\n}"
+      }
+     }
+    },
+    {
+     "at": 13,
+     "agent": "cart",
+     "toolDone": "cart-h6"
+    },
+    {
+     "at": 14,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h7",
+      "name": "Edit",
+      "input": {
+       "file_path": "tests/cart.test.ts",
+       "old_string": "})",
+       "new_string": "  it('rounds once, on the total', () => {\n    const autumn = { sku: 'autumn', price: 18, qty: 2 }\n    expect(cartTotal([autumn], 0.1)).toBe(32.4)\n  })\n})"
+      }
+     }
+    },
+    {
+     "at": 15,
+     "agent": "cart",
+     "toolDone": "cart-h7"
+    },
+    {
+     "at": 16,
+     "agent": "cart",
+     "say": "The cart summary adds the lines up again on its own, so it drifts the same way. Pointing it at cartTotal."
+    },
+    {
+     "at": 17,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h9",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/cart/summary.ts",
+       "old_string": "  const total = lines.reduce((s, l) => s + round(l.price * l.qty), 0)",
+       "new_string": "  const total = cartTotal(lines, discount)"
+      }
+     }
+    },
+    {
+     "at": 18,
+     "agent": "cart",
+     "toolDone": "cart-h9"
+    },
+    {
+     "at": 19,
+     "agent": "cart",
+     "tool": {
+      "id": "cart-h10",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/cart/format.ts",
+       "old_string": "export const money = (n: number) => `$${round(n).toFixed(2)}`",
+       "new_string": "export const money = (n: number) => `$${n.toFixed(2)}`"
+      }
+     }
+    },
+    {
+     "at": 20,
+     "agent": "cart",
+     "toolDone": "cart-h10"
+    },
+    {
+     "at": 21,
+     "agent": "subs",
+     "think": "Three routes and a status column. Pausing must not lose the next renewal date."
+    },
+    {
+     "at": 22,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h1",
+      "name": "Read",
+      "input": {
+       "file_path": "src/orders/routes.ts"
+      },
+      "output": "router.post(\"/orders\""
+     }
+    },
+    {
+     "at": 23,
+     "agent": "subs",
+     "toolDone": "subs-h1"
+    },
+    {
+     "at": 24,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h2",
+      "name": "Read",
+      "input": {
+       "file_path": "src/server.ts"
+      },
+      "output": "app.use(\"/orders\", orders)"
+     }
+    },
+    {
+     "at": 25,
+     "agent": "subs",
+     "toolDone": "subs-h2"
+    },
+    {
+     "at": 26,
+     "agent": "subs",
+     "say": "I’ll follow the orders routes: POST /subscriptions, then pause and resume."
+    },
+    {
+     "at": 27,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h4",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/model.ts",
+       "content": "export type Status = 'active' | 'paused'\n\nexport interface Subscription {\n  id: string\n  plan: 'weekly' | 'monthly'\n  status: Status\n  nextRenewal: string\n}"
+      }
+     }
+    },
+    {
+     "at": 28,
+     "agent": "subs",
+     "toolDone": "subs-h4"
+    },
+    {
+     "at": 29,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h5",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/server.ts",
+       "old_string": "app.use(\"/orders\", orders)",
+       "new_string": "app.use(\"/orders\", orders)\napp.use(\"/subscriptions\", subscriptions)"
+      }
+     }
+    },
+    {
+     "at": 30,
+     "agent": "subs",
+     "toolDone": "subs-h5"
+    },
+    {
+     "at": 31,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h6",
+      "name": "Bash",
+      "input": {
+       "command": "npx tsc --noEmit",
+       "description": "Type-check"
+      },
+      "output": "src/server.ts(4,30): Cannot find module ./subscriptions/routes"
+     }
+    },
+    {
+     "at": 32,
+     "agent": "subs",
+     "toolDone": "subs-h6"
+    },
+    {
+     "at": 33,
+     "agent": "subs",
+     "say": "Expected: the routes file doesn’t exist yet. Writing it now."
+    },
+    {
+     "at": 34,
+     "agent": "subs",
+     "tool": {
+      "id": "subs-h8",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/routes.ts",
+       "content": "export const subscriptions = router()\n\nsubscriptions.post(\"/\", create)\nsubscriptions.post(\"/:id/pause\", pause)\nsubscriptions.post(\"/:id/resume\", resume)"
+      }
+     }
+    },
+    {
+     "at": 35,
+     "agent": "subs",
+     "toolDone": "subs-h8"
+    },
+    {
+     "at": 36,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h0",
+      "kind": "commandExecution",
+      "title": "rg -n \"price\" public/index.html",
+      "command": "rg -n \"price\" public/index.html",
+      "output": "public/index.html:42:  <p class=\"price\">$18</p>"
+     }
+    },
+    {
+     "at": 37,
+     "agent": "picker",
+     "toolDone": "picker-h0"
+    },
+    {
+     "at": 38,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h1",
+      "kind": "commandExecution",
+      "title": "sed -n 30,60p public/index.html",
+      "command": "sed -n 30,60p public/index.html",
+      "output": "<article class=\"product\">\n  <h3>Autumn blend</h3>\n  <p class=\"price\">$18</p>"
+     }
+    },
+    {
+     "at": 39,
+     "agent": "picker",
+     "toolDone": "picker-h1"
+    },
+    {
+     "at": 40,
+     "agent": "picker",
+     "say": "The product card has room under the price. A two-option toggle fits there: Weekly, Monthly."
+    },
+    {
+     "at": 41,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h3",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/index.html",
+      "action": "update"
+     }
+    },
+    {
+     "at": 42,
+     "agent": "picker",
+     "toolDone": "picker-h3"
+    },
+    {
+     "at": 43,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h4",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "update"
+     }
+    },
+    {
+     "at": 44,
+     "agent": "picker",
+     "toolDone": "picker-h4"
+    },
+    {
+     "at": 45,
+     "agent": "picker",
+     "say": "The toggle renders. Next: the monthly price, which is four weekly bags with 10% off."
+    },
+    {
+     "at": 46,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h6",
+      "kind": "commandExecution",
+      "title": "npm test -- picker",
+      "command": "npm test -- picker",
+      "output": "✓ tests/picker.test.ts (3 tests)"
+     }
+    },
+    {
+     "at": 47,
+     "agent": "picker",
+     "toolDone": "picker-h6"
+    },
+    {
+     "at": 48,
+     "agent": "picker",
+     "tool": {
+      "id": "picker-h7",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/plan.js",
+      "action": "update"
+     }
+    },
+    {
+     "at": 49,
+     "agent": "picker",
+     "toolDone": "picker-h7"
+    },
+    {
+     "at": 50,
+     "agent": "export",
+     "tool": {
+      "id": "export-h0",
+      "kind": "commandExecution",
+      "title": "rg -n \"cursor\" src/orders",
+      "command": "rg -n \"cursor\" src/orders",
+      "output": "src/orders/routes.ts:12:  const { cursor } = req.query"
+     }
+    },
+    {
+     "at": 51,
+     "agent": "export",
+     "toolDone": "export-h0"
+    },
+    {
+     "at": 52,
+     "agent": "export",
+     "say": "Orders are already paged by month. I’ll stream them to CSV so a big month never sits in memory."
+    },
+    {
+     "at": 53,
+     "agent": "export",
+     "tool": {
+      "id": "export-h2",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/orders/csv.ts",
+      "action": "update"
+     }
+    },
+    {
+     "at": 54,
+     "agent": "export",
+     "toolDone": "export-h2"
+    },
+    {
+     "at": 55,
+     "agent": "export",
+     "tool": {
+      "id": "export-h3",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/orders/routes.ts",
+      "action": "update"
+     }
+    },
+    {
+     "at": 56,
+     "agent": "export",
+     "toolDone": "export-h3"
+    },
+    {
+     "at": 57,
+     "agent": "export",
+     "say": "A customer called “Smith, Jo” would split the row, so every field with a comma is quoted. Running the tests."
+    },
+    {
+     "at": 58,
+     "agent": "export",
+     "tool": {
+      "id": "export-h5",
+      "kind": "commandExecution",
+      "title": "npm test -- orders",
+      "command": "npm test -- orders",
+      "output": "FAIL tests/orders.test.ts > ordersCsv > quotes names with commas\n  Expected: \"1042,2026-09-14,\\\"Smith, Jo\\\",36.00\"\n  Received: \"1042,2026-09-14,Smith, Jo,36.00\"\n\nTests  1 failed | 8 passed (9)"
+     }
+    },
+    {
+     "at": 59,
+     "agent": "export",
+     "toolDone": "export-h5",
+     "status": "failed"
+    },
+    {
+     "at": 60,
+     "agent": "export",
+     "turn": "failed"
+    },
+    {
+     "at": 61,
+     "agent": "dark",
+     "tool": {
+      "id": "dark-h0",
+      "name": "read",
+      "input": {
+       "path": "public/theme.css"
+      },
+      "output": ":root {\n  --paper: #f7f2ea;\n  --ink: #2b2118;"
+     }
+    },
+    {
+     "at": 62,
+     "agent": "dark",
+     "toolDone": "dark-h0"
+    },
+    {
+     "at": 63,
+     "agent": "dark",
+     "say": "The colours are tokens in public/theme.css, so dark mode is one block of overrides."
+    },
+    {
+     "at": 64,
+     "agent": "dark",
+     "tool": {
+      "id": "dark-h2",
+      "name": "grep",
+      "input": {
+       "pattern": "#[0-9a-fA-F]{6}",
+       "path": "public"
+      },
+      "output": "public/index.html:12:  <a class=\"cart\" style=\"color:#2b2118\">"
+     }
+    },
+    {
+     "at": 65,
+     "agent": "dark",
+     "toolDone": "dark-h2"
+    },
+    {
+     "at": 66,
+     "agent": "dark",
+     "think": "One hard-coded colour outside the tokens. Move it to a token first, or it stays brown on dark."
+    },
+    {
+     "at": 67,
+     "agent": "dark",
+     "tool": {
+      "id": "dark-h4",
+      "name": "edit",
+      "input": {
+       "path": "public/index.html",
+       "edits": [
+        {
+         "oldText": "<a class=\"cart\" style=\"color:#2b2118\">",
+         "newText": "<a class=\"cart\">"
+        }
+       ]
+      },
+      "output": "Applied 1 edit."
+     }
+    },
+    {
+     "at": 68,
+     "agent": "dark",
+     "toolDone": "dark-h4"
+    },
+    {
+     "at": 69,
+     "agent": "dark",
+     "tool": {
+      "id": "dark-h5",
+      "name": "edit",
+      "input": {
+       "path": "public/theme.css",
+       "edits": [
+        {
+         "oldText": "}",
+         "newText": "}\n\n@media (prefers-color-scheme: dark) {\n  :root {\n    --paper: #17130f;\n    --ink: #f2ece4;\n    --muted: #a59a8d;\n    --line: #2e2721;\n  }\n}"
+        }
+       ]
+      },
+      "output": "Applied 1 edit."
+     }
+    },
+    {
+     "at": 70,
+     "agent": "dark",
+     "toolDone": "dark-h5"
+    },
+    {
+     "at": 71,
+     "agent": "dark",
+     "tool": {
+      "id": "dark-h6",
+      "name": "bash",
+      "input": {
+       "command": "npx stylelint public/theme.css"
+      },
+      "output": "No problems found."
+     }
+    },
+    {
+     "at": 72,
+     "agent": "dark",
+     "toolDone": "dark-h6"
+    },
+    {
+     "at": 73,
+     "agent": "dark",
+     "say": "Dark mode is in. It follows the system setting, every colour is a token with a dark value, and the cart badge reads on both."
+    },
+    {
+     "at": 74,
+     "agent": "dark",
+     "turn": "done"
+    },
+    {
+     "at": 75,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h0",
+      "name": "read",
+      "input": {
+       "path": "src/emails/order.ts"
+      },
+      "output": "export function orderEmail(order: Order) {"
+     }
+    },
+    {
+     "at": 76,
+     "agent": "emails",
+     "toolDone": "emails-h0"
+    },
+    {
+     "at": 77,
+     "agent": "emails",
+     "say": "The order email is a good template. The reminder needs the plan, the date and a skip link."
+    },
+    {
+     "at": 78,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h2",
+      "name": "grep",
+      "input": {
+       "pattern": "sendEmail",
+       "path": "src"
+      },
+      "output": "src/emails/order.ts:3:import { sendEmail } from \"../http\""
+     }
+    },
+    {
+     "at": 79,
+     "agent": "emails",
+     "toolDone": "emails-h2"
+    },
+    {
+     "at": 80,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h3",
+      "name": "write",
+      "input": {
+       "path": "src/emails/renewal.ts",
+       "content": "export function renewalEmail(sub: Subscription) {\n  return {\n    subject: `Your ${sub.plan} coffee ships ${weekday(sub.nextRenewal)}`,\n    skip: skipLink(sub),\n  }\n}"
+      },
+      "output": "Wrote src/emails/renewal.ts"
+     }
+    },
+    {
+     "at": 81,
+     "agent": "emails",
+     "toolDone": "emails-h3"
+    },
+    {
+     "at": 82,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h4",
+      "name": "bash",
+      "input": {
+       "command": "npm test -- emails"
+      },
+      "output": "✓ tests/emails.test.ts (11 tests)"
+     }
+    },
+    {
+     "at": 83,
+     "agent": "emails",
+     "toolDone": "emails-h4"
+    },
+    {
+     "at": 84,
+     "agent": "emails",
+     "think": "Two days before renewal is clear, but not what time. A 9 a.m. send lands at 3 a.m. for half the customers."
+    },
+    {
+     "at": 85,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h6",
+      "name": "edit",
+      "input": {
+       "path": "src/emails/order.ts",
+       "edits": [
+        {
+         "oldText": "export function orderEmail(order: Order) {\n  const footer = `Roast · ${order.shop}`",
+         "newText": "export function orderEmail(order: Order) {\n  const footer = shopFooter(order.shop)"
+        }
+       ]
+      },
+      "output": "Applied 1 edit."
+     }
+    },
+    {
+     "at": 86,
+     "agent": "emails",
+     "toolDone": "emails-h6"
+    },
+    {
+     "at": 87,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h7",
+      "name": "write",
+      "input": {
+       "path": "src/emails/footer.ts",
+       "content": "export const shopFooter = (shop: string) =>\n  `Roast · ${shop} · Manage your plan at roast.coffee/account`"
+      },
+      "output": "Wrote src/emails/footer.ts"
+     }
+    },
+    {
+     "at": 88,
+     "agent": "emails",
+     "toolDone": "emails-h7"
+    },
+    {
+     "at": 89,
+     "agent": "emails",
+     "tool": {
+      "id": "emails-h8",
+      "name": "bash",
+      "input": {
+       "command": "npm test -- emails"
+      },
+      "output": "✓ tests/emails.test.ts (13 tests)"
+     }
+    },
+    {
+     "at": 90,
+     "agent": "emails",
+     "toolDone": "emails-h8"
+    },
+    {
+     "at": 91,
+     "agent": "emails",
+     "say": "The reminder is written and tested. One question before I schedule it: should it go out at 9 a.m. in the customer’s time zone, or at the shop’s 9 a.m.?"
+    },
+    {
+     "at": 92,
+     "agent": "emails",
+     "turn": "done"
+    },
+    {
+     "at": 204,
+     "camera": {
+      "tiles": [
+       "cart"
+      ],
+      "padding": 24
+     }
+    },
+    {
+     "at": 252,
+     "camera": {
+      "all": true,
+      "padding": 70
+     },
+     "dur": 180,
+     "ease": "inOut"
+    }
+   ],
+   "clock": "10:40",
+   "capture": false
+  },
+  {
+   "name": "01-pullback",
+   "frames": 600,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "all": true,
+      "padding": 70
+     },
+     "mark": "plate"
+    },
+    {
+     "at": 0,
+     "mark": "tight"
+    },
+    {
+     "at": 0,
+     "agent": "cart",
+     "tool": {
+      "id": "c4",
+      "name": "Bash",
+      "input": {
+       "command": "npm test -- cart",
+       "description": "Run the cart tests"
+      },
+      "output": "✓ tests/cart.test.ts (14 tests)\n\n Test Files  1 passed (1)\n      Tests  14 passed (14)"
+     }
+    },
+    {
+     "at": 48,
+     "mark": "pullStart"
+    },
+    {
+     "at": 228,
+     "mark": "wide"
+    },
+    {
+     "at": 229,
+     "mark": "hold"
+    },
+    {
+     "at": 112,
+     "agent": "cart",
+     "toolDone": "c4"
+    },
+    {
+     "at": 136,
+     "agent": "cart",
+     "say": "Fixed: the discount applies first and the total is rounded once. $32.40 now, and a test pins it.",
+     "dur": 70
+    },
+    {
+     "at": 262,
+     "agent": "cart",
+     "turn": "done",
+     "mark": "bell"
+    },
+    {
+     "at": 248,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "header"
+      }
+     },
+     "dur": 14
+    },
+    {
+     "at": 264,
+     "click": {
+      "deliver": true
+     },
+     "mark": "focus"
+    },
+    {
+     "at": 6,
+     "agent": "subs",
+     "say": "Routes are in. Now the part that matters: pause keeps the plan and moves next_renewal forward, and resume never charges twice.",
+     "dur": 50
+    },
+    {
+     "at": 64,
+     "agent": "subs",
+     "tool": {
+      "id": "s2",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/routes.ts",
+       "old_string": "subscriptions.post(\"/:id/resume\", resume)",
+       "new_string": "subscriptions.post(\"/:id/resume\", async (req, res) => {\n  const sub = await resume(req.params.id)\n  res.json(sub)\n})"
+      }
+     }
+    },
+    {
+     "at": 104,
+     "agent": "subs",
+     "toolDone": "s2"
+    },
+    {
+     "at": 114,
+     "agent": "subs",
+     "tool": {
+      "id": "s3",
+      "name": "Bash",
+      "input": {
+       "command": "npm test -- subscriptions",
+       "description": "Run the subscription tests"
+      },
+      "output": "✓ tests/subscriptions.test.ts (7 tests)"
+     }
+    },
+    {
+     "at": 244,
+     "agent": "subs",
+     "toolDone": "s3"
+    },
+    {
+     "at": 256,
+     "agent": "subs",
+     "think": "Seven pass. Still missing: a paused plan must not renew, and resuming the day before renewal must not double-ship.",
+     "dur": 46
+    },
+    {
+     "at": 312,
+     "agent": "subs",
+     "say": "Adding two tests for the edges: a paused plan never renews, and a resume on renewal day ships once.",
+     "dur": 40
+    },
+    {
+     "at": 362,
+     "agent": "subs",
+     "tool": {
+      "id": "s4",
+      "name": "Write",
+      "input": {
+       "file_path": "tests/subscriptions.pause.test.ts",
+       "content": "it('never renews a paused plan', async () => {\n  const sub = await pause(await create(weekly))\n  expect(await renewDue(sub.nextRenewal)).not.toContain(sub.id)\n})"
+      }
+     }
+    },
+    {
+     "at": 402,
+     "agent": "subs",
+     "toolDone": "s4"
+    },
+    {
+     "at": 412,
+     "agent": "subs",
+     "tool": {
+      "id": "s5",
+      "name": "Bash",
+      "input": {
+       "command": "npm test -- subscriptions",
+       "description": "Run the subscription tests"
+      },
+      "output": "✓ tests/subscriptions.test.ts (7 tests)\n✓ tests/subscriptions.pause.test.ts (2 tests)"
+     }
+    },
+    {
+     "at": 0,
+     "agent": "picker",
+     "say": "Wiring the toggle: each option carries its price, so switching plans updates the line without a round trip.",
+     "dur": 43
+    },
+    {
+     "at": 53,
+     "agent": "picker",
+     "tool": {
+      "id": "p2",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/plan.js",
+      "action": "update"
+     }
+    },
+    {
+     "at": 89,
+     "agent": "picker",
+     "toolDone": "p2"
+    },
+    {
+     "at": 99,
+     "agent": "picker",
+     "tool": {
+      "id": "p3",
+      "kind": "commandExecution",
+      "title": "npm test -- picker",
+      "command": "npm test -- picker",
+      "output": "✓ tests/picker.test.ts (5 tests)"
+     }
+    },
+    {
+     "at": 219,
+     "agent": "picker",
+     "toolDone": "p3"
+    },
+    {
+     "at": 231,
+     "agent": "picker",
+     "say": "Five tests pass, including the keyboard: arrow keys move between Weekly and Monthly and the price follows. Checking the focus ring in dark mode next.",
+     "dur": 60
+    },
+    {
+     "at": 301,
+     "agent": "picker",
+     "tool": {
+      "id": "p4",
+      "kind": "commandExecution",
+      "title": "rg -n \"focus-visible\" public/theme.css",
+      "command": "rg -n \"focus-visible\" public/theme.css",
+      "output": "public/theme.css:88:.plan input:focus-visible {"
+     }
+    },
+    {
+     "at": 361,
+     "agent": "picker",
+     "toolDone": "p4"
+    },
+    {
+     "at": 371,
+     "agent": "picker",
+     "tool": {
+      "id": "p5",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "update"
+     }
+    },
+    {
+     "at": 411,
+     "agent": "picker",
+     "toolDone": "p5"
+    },
+    {
+     "at": 421,
+     "agent": "picker",
+     "say": "The focus ring uses the accent token now, so it shows in both themes. Running the whole suite.",
+     "dur": 38
+    },
+    {
+     "at": 469,
+     "agent": "picker",
+     "tool": {
+      "id": "p6",
+      "kind": "commandExecution",
+      "title": "npm test",
+      "command": "npm test",
+      "output": "Test Files  9 passed (9)\n     Tests  61 passed (61)"
+     }
+    }
+   ]
+  }
+ ]
+}

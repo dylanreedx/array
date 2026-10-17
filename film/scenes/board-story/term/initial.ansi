@@ -1,0 +1,6 @@
+[1;32m➜[0m  [1;36marray[0m [1;34mgit:([31mfix/tile-jump[34m)[0m git log --oneline -4
+[33m9c1e4b2[0m [33m([1;36mHEAD -> [1;32mfix/tile-jump[33m)[0m fix(canvas): keep the camera still while a zone resizes
+[33m41d07aa[0m feat(board): drag a task onto an agent to assign it
+[33m7f3b9e0[0m fix(transcript): settle tool rows instead of swapping them
+[33mc28a615[0m chore(release): publish Array 0.7.24 build 75
+[1;32m➜[0m  [1;36marray[0m [1;34mgit:([31mfix/tile-jump[34m)[0m 

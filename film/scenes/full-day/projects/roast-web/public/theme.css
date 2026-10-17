@@ -1,0 +1,15 @@
+/* Roast design tokens. */
+:root {
+  --bg: #f7f0e6;
+  --panel: #fffaf3;
+  --ink: #2b1d14;
+  --muted: #7a6656;
+  --line: #e6d8c6;
+  --accent: #d9622b;
+  --accent-soft: #fbe2d2;
+  --on-accent: #ffffff;
+  --radius: 4px;
+  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+  --heading-weight: 800;
+  --heading-tracking: -0.04em;
+}

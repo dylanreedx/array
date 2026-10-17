@@ -1,0 +1,169 @@
+{
+  "schema": "array.film.scene.v1",
+  "id": "board-story",
+  "window": { "width": 1440, "height": 810 },
+  "fps": 60,
+  "video": "prores",
+  "png": 3,
+  "closeUpMinZoom": 0.85,
+  "catalog": { "model": "anthropic/claude-opus-5", "displayName": "Opus 5", "contextWindow": 200000 },
+  "workspace": "Launch week",
+  "projects": [
+    { "key": "array", "name": "array", "files": "projects/array",
+      "git": { "modify": { "Sources/Array/Canvas/CanvasNSView.swift": "edits/CanvasNSView.swift" } } },
+    { "key": "web", "name": "array-website", "files": "projects/array-website", "git": {} },
+    { "key": "ios", "name": "array-ios", "files": "projects/array-ios", "git": {} }
+  ],
+  "zones": [
+    { "key": "canvas", "project": "array", "name": "Canvas fixes", "rect": [0, 0, 2460, 1520], "color": "blue" },
+    { "key": "transcript", "project": "array", "name": "Agent transcript", "rect": [2620, 0, 1560, 960], "color": "purple" },
+    { "key": "release", "project": "array", "name": "Release 0.7.25", "rect": [4340, 0, 1440, 960], "color": "yellow" },
+    { "key": "landing", "project": "web", "name": "Landing page", "rect": [0, 1680, 2240, 960], "color": "orange" },
+    { "key": "docs", "project": "web", "name": "Docs", "rect": [2400, 1680, 1520, 960], "color": "teal" },
+    { "key": "companion", "project": "ios", "name": "Companion", "rect": [4080, 1680, 2040, 960], "color": "mint" }
+  ],
+  "tiles": [
+    { "key": "board", "kind": "kanban", "zone": "canvas", "frame": [40, 80, 820, 540], "title": "Canvas sprint",
+      "board": { "title": "Canvas sprint", "columns": ["To Do", "Doing", "Done"], "cards": [
+        { "key": "jump", "column": "To Do", "title": "Fix tile jump",
+          "body": "A tile spawned into an unarmed zone lands offset by the difference of the two zone origins. Frame and install must use one target zone." },
+        { "key": "snap", "column": "To Do", "title": "Snap zones to the grid" },
+        { "key": "pinch", "column": "To Do", "title": "Pinch-zoom overshoot at 400%" },
+        { "key": "hover", "column": "Doing", "title": "Hover lag past 80 tiles" },
+        { "key": "ants", "column": "Done", "title": "Marching ants on approval" },
+        { "key": "camera", "column": "Done", "title": "Camera still during zone resize" }
+      ] } },
+    { "key": "fix", "kind": "agent", "zone": "canvas", "frame": [900, 80, 660, 700], "name": "Fix tile jump" },
+    { "key": "tree", "kind": "fileTree", "zone": "canvas", "frame": [40, 860, 360, 580], "path": ".",
+      "expanded": ["Sources", "Sources/Array", "Sources/Array/Canvas"] },
+    { "key": "editor", "kind": "file", "zone": "canvas", "frame": [440, 860, 760, 580], "path": "Sources/Array/Canvas/CanvasNSView.swift" },
+    { "key": "term", "kind": "terminal", "zone": "canvas", "frame": [1600, 80, 820, 440] },
+    { "key": "site", "kind": "browser", "zone": "canvas", "frame": [1240, 860, 1180, 620], "url": "http://localhost:3000/" },
+
+    { "key": "stream", "kind": "agent", "zone": "transcript", "frame": [40, 80, 700, 760], "name": "Stream tool rows" },
+    { "key": "polish", "kind": "note", "zone": "transcript", "frame": [780, 80, 740, 360], "title": "Transcript polish",
+      "body": "# Transcript polish\n\n- [x] Fade new rows in (0.18 s)\n- [ ] Settle tool rows (0.16 s)\n- [ ] Keep the tail pinned while streaming\n" },
+    { "key": "tview", "kind": "file", "zone": "transcript", "frame": [780, 480, 740, 400], "path": "Sources/Array/Agents/TranscriptView.swift" },
+
+    { "key": "rel", "kind": "agent", "zone": "release", "frame": [40, 80, 660, 760], "name": "Cut release 0.7.25" },
+    { "key": "runbook", "kind": "file", "zone": "release", "frame": [740, 80, 660, 520], "path": "docs/RELEASE.md" },
+
+    { "key": "hero", "kind": "agent", "zone": "landing", "frame": [40, 80, 660, 760], "name": "Hero copy pass" },
+    { "key": "pricing", "kind": "agent", "zone": "landing", "frame": [740, 80, 660, 760], "name": "Pricing table" },
+    { "key": "heroSrc", "kind": "file", "zone": "landing", "frame": [1440, 80, 760, 560], "path": "src/pages/index.astro" },
+
+    { "key": "docs", "kind": "agent", "zone": "docs", "frame": [40, 80, 660, 760], "name": "Docs: workspace API" },
+    { "key": "apiDoc", "kind": "file", "zone": "docs", "frame": [740, 80, 740, 760], "path": "src/pages/docs/workspace-api.md" },
+
+    { "key": "widget", "kind": "agent", "zone": "companion", "frame": [40, 80, 660, 760], "name": "Live Activity widget" },
+    { "key": "push", "kind": "agent", "zone": "companion", "frame": [740, 80, 660, 760], "name": "Push permissions" },
+    { "key": "iosTree", "kind": "fileTree", "zone": "companion", "frame": [1440, 80, 560, 760], "path": ".",
+      "expanded": ["Companion", "Companion/Views"] }
+  ],
+  "takes": [
+    { "name": "00-setup", "frames": 30, "capture": false, "actions": [
+      { "at": 0, "camera": { "all": true, "padding": 60 } },
+      { "at": 0, "terminal": "term", "file": "term/initial.ansi" },
+
+      { "at": 0, "agent": "stream", "prompt": "Make tool rows settle instead of swapping when a tool finishes." },
+      { "at": 0, "agent": "stream", "turn": "start" },
+      { "at": 0, "agent": "stream", "say": "Tool rows replace their view when the status changes. I'll animate the existing row's opacity instead and leave the model value untouched." },
+      { "at": 0, "agent": "stream", "tool": { "id": "s1", "kind": "commandExecution", "title": "Read", "path": "Sources/Array/Agents/TranscriptView.swift" } },
+      { "at": 1, "agent": "stream", "toolDone": "s1" },
+      { "at": 2, "agent": "stream", "tool": { "id": "s2", "kind": "fileChange", "title": "Edit", "path": "Sources/Array/Agents/TranscriptView.swift", "action": "edit", "added": 14, "removed": 6 } },
+
+      { "at": 0, "agent": "rel", "prompt": "Prepare release 0.7.25: bump the build, notarize both DMGs, regenerate the appcast and tag." },
+      { "at": 0, "agent": "rel", "turn": "start" },
+      { "at": 0, "agent": "rel", "tool": { "id": "r0", "kind": "commandExecution", "title": "Bash", "command": "Build, sign and notarize Array 0.7.25", "output": "Notarized Array-0.7.25.dmg (build 76)" } },
+      { "at": 1, "agent": "rel", "toolDone": "r0" },
+      { "at": 2, "agent": "rel", "say": "Build 76 is signed and both DMGs are notarized. Next: regenerate the appcast, then tag v0.7.25." },
+
+      { "at": 0, "agent": "hero", "prompt": "Tighten the hero copy. Keep it under twelve words." },
+      { "at": 0, "agent": "hero", "turn": "start" },
+      { "at": 0, "agent": "hero", "say": "Trying \"Every agent, in plain sight.\" Seven words, and it says what the canvas is for." },
+      { "at": 1, "agent": "hero", "tool": { "id": "h1", "kind": "fileChange", "title": "Edit", "path": "src/components/Hero.astro", "action": "edit", "added": 3, "removed": 3 } },
+
+      { "at": 0, "agent": "pricing", "prompt": "Add an Alpha tier card to the pricing section." },
+      { "at": 0, "agent": "pricing", "turn": "start" },
+      { "at": 0, "agent": "pricing", "say": "One Alpha card for now. The paid tiers can follow once pricing is settled." },
+      { "at": 1, "agent": "pricing", "tool": { "id": "p1", "kind": "commandExecution", "title": "Read", "path": "src/components/Pricing.astro" } },
+
+      { "at": 0, "agent": "docs", "prompt": "Write the workspace API page for the docs site." },
+      { "at": 0, "agent": "docs", "turn": "start" },
+      { "at": 0, "agent": "docs", "tool": { "id": "d1", "kind": "fileChange", "title": "Write", "path": "src/pages/docs/workspace-api.md", "action": "write", "added": 22 } },
+      { "at": 1, "agent": "docs", "toolDone": "d1" },
+      { "at": 2, "agent": "docs", "say": "The page covers the four operations and the grant model: an agent starts with its own checkout, and anything wider is a prompt you answer in Array." },
+      { "at": 3, "agent": "docs", "turn": "done" },
+
+      { "at": 0, "agent": "widget", "prompt": "Show working and needs-you counts in the Live Activity." },
+      { "at": 0, "agent": "widget", "turn": "start" },
+      { "at": 0, "agent": "widget", "say": "Adding `working` and `needsYou` to the activity's content state, then wiring them to the inbox counts." },
+      { "at": 1, "agent": "widget", "tool": { "id": "w1", "kind": "fileChange", "title": "Edit", "path": "Widget/LiveActivity.swift", "action": "edit", "added": 8, "removed": 1 } },
+
+      { "at": 0, "agent": "push", "prompt": "Ask for push permission after the first agent finishes, not at launch." },
+      { "at": 0, "agent": "push", "turn": "start" },
+      { "at": 0, "agent": "push", "say": "I need to boot the simulator to check when the prompt appears." },
+      { "at": 1, "agent": "push", "tool": { "id": "q1", "kind": "commandExecution", "title": "Bash", "command": "Boot the iPhone 17 simulator" } },
+      { "at": 2, "agent": "push", "request": "q1-approve", "requestKind": "commandExecutionApproval" }
+    ] },
+
+    { "name": "01-wide-glide", "frames": 300, "actions": [
+      { "at": 0, "dur": 90, "mark": "holdWide" },
+      { "at": 90, "dur": 180, "camera": { "tiles": ["board", "fix"], "padding": 40 }, "mark": "glideStart" }
+    ] },
+
+    { "name": "02-assign", "frames": 380, "actions": [
+      { "at": 24, "dur": 66, "drag": { "card": "jump", "toAgent": "fix" }, "mark": "dragStart" },
+      { "at": 120, "agent": "fix", "prompt": "Fix tile jump: a tile spawned into an unarmed zone lands offset by the difference of the two zone origins.", "mark": "send" },
+      { "at": 126, "agent": "fix", "turn": "start" },
+      { "at": 128, "board": { "advance": "jump", "agent": "fix" }, "mark": "toDoing" },
+      { "at": 150, "dur": 80, "agent": "fix", "say": "I'll find where a spawned tile is framed and where it is installed." },
+      { "at": 250, "agent": "fix", "tool": { "id": "f1", "kind": "commandExecution", "title": "Grep", "pattern": "installProjectTile" } },
+      { "at": 276, "agent": "fix", "toolDone": "f1" },
+      { "at": 292, "agent": "fix", "tool": { "id": "f2", "kind": "commandExecution", "title": "Read", "path": "Sources/Array/Canvas/CanvasNSView.swift" } },
+      { "at": 320, "agent": "fix", "toolDone": "f2" }
+    ] },
+
+    { "name": "03-edit", "frames": 420, "actions": [
+      { "at": 140, "dur": 120, "camera": { "tiles": ["tree", "editor"], "padding": 40 }, "mark": "panToCode" },
+      { "at": 10, "dur": 130, "agent": "fix", "say": "Found it. `installProjectTile` frames the tile against the armed zone but installs it into the scope's zone, so it lands offset by the difference of their origins. One target zone for both." },
+      { "at": 170, "agent": "fix", "tool": { "id": "f3", "kind": "fileChange", "title": "Edit", "path": "Sources/Array/Canvas/CanvasNSView.swift", "action": "edit", "added": 9, "removed": 4 }, "mark": "edit" },
+      { "at": 214, "agent": "fix", "toolDone": "f3" }
+    ] },
+
+    { "name": "04-tests", "frames": 430, "actions": [
+      { "at": 0, "dur": 130, "camera": { "tiles": ["fix", "term"], "padding": 40 }, "mark": "panToTests" },
+      { "at": 110, "agent": "fix", "tool": { "id": "f4", "kind": "commandExecution", "title": "Bash", "command": "Run the placement tests", "output": "Executed 14 tests, with 0 failures" } },
+      { "at": 120, "dur": 170, "terminal": "term", "file": "term/tests.ansi", "mark": "testsRun" },
+      { "at": 300, "agent": "fix", "toolDone": "f4" },
+      { "at": 316, "dur": 90, "agent": "fix", "say": "All 14 placement tests pass, including a new one for a spawn into an unarmed zone." }
+    ] },
+
+    { "name": "05-browser", "frames": 240, "actions": [
+      { "at": 0, "dur": 130, "camera": { "tiles": ["site"], "padding": 40 }, "mark": "panToSite" }
+    ] },
+
+    { "name": "06-approval", "frames": 500, "actions": [
+      { "at": 0, "dur": 180, "camera": { "tiles": ["rel", "runbook"], "padding": 40 }, "mark": "pullBack" },
+      { "at": 200, "agent": "rel", "tool": { "id": "r1", "kind": "commandExecution", "title": "Bash", "command": "Tag v0.7.25 and push", "output": "* [new tag] v0.7.25 -> v0.7.25" } },
+      { "at": 210, "agent": "rel", "request": "r1-approve", "requestKind": "commandExecutionApproval", "mark": "needsYou" },
+      { "at": 370, "agent": "rel", "resolve": "r1-approve", "decision": "approve", "mark": "approved" },
+      { "at": 380, "agent": "rel", "toolDone": "r1" },
+      { "at": 392, "dur": 70, "agent": "rel", "say": "Tagged v0.7.25 and pushed. The appcast now offers build 76." },
+      { "at": 476, "agent": "rel", "turn": "done" }
+    ] },
+
+    { "name": "07-done", "frames": 440, "actions": [
+      { "at": 0, "dur": 150, "camera": { "tiles": ["board", "fix"], "padding": 40 }, "mark": "backToBoard" },
+      { "at": 150, "dur": 60, "agent": "fix", "say": "Fixed: frame and install now share one target zone." },
+      { "at": 214, "agent": "fix", "turn": "done", "mark": "agentDone" },
+      { "at": 226, "dur": 60, "drag": { "card": "jump", "toColumn": "Done" }, "mark": "toDone" },
+      { "at": 300, "dur": 139, "camera": { "all": true, "padding": 60 }, "mark": "pullBackWide" }
+    ] }
+  ],
+  "expect": {
+    "cards": { "jump": "Done" },
+    "assignees": { "jump": "fix" },
+    "agentStatus": { "fix": "completed", "rel": "completed", "docs": "completed", "push": "needsAttention", "stream": "working" }
+  }
+}

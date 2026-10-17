@@ -1,0 +1,9 @@
+{
+  "name": "roast-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "test": "vitest run"
+  }
+}

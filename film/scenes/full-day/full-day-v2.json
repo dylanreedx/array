@@ -1,0 +1,3905 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "full-day-v2",
+ "window": {
+  "width": 1920,
+  "height": 1080
+ },
+ "sidebar": true,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "autoLayout": true,
+ "fps": 60,
+ "video": "prores",
+ "png": 30,
+ "closeUpMinZoom": 0.85,
+ "site": {
+  "project": "web",
+  "path": "public"
+ },
+ "catalog": [
+  {
+   "harness": "claude",
+   "model": "anthropic/claude-opus-5",
+   "displayName": "Opus 5",
+   "contextWindow": 200000
+  },
+  {
+   "harness": "codex",
+   "model": "openai-codex/gpt-5.5-codex",
+   "displayName": "GPT-5.5 Codex"
+  }
+ ],
+ "workspace": "Roast",
+ "projects": [
+  {
+   "key": "api",
+   "name": "roast-api",
+   "files": "projects/roast-api",
+   "git": {}
+  },
+  {
+   "key": "web",
+   "name": "roast-web",
+   "files": "projects/roast-web",
+   "git": {},
+   "placed": false
+  },
+  {
+   "key": "admin",
+   "name": "roast-admin",
+   "files": "projects/roast-admin",
+   "git": {}
+  },
+  {
+   "key": "ios",
+   "name": "roast-ios",
+   "files": "projects/roast-ios",
+   "git": {}
+  },
+  {
+   "key": "infra",
+   "name": "roast-infra",
+   "files": "projects/roast-infra",
+   "git": {}
+  }
+ ],
+ "zones": [
+  {
+   "key": "apiZone",
+   "project": "api",
+   "name": "Roast API",
+   "rect": [
+    0,
+    0,
+    1500,
+    1000
+   ],
+   "color": "teal"
+  },
+  {
+   "key": "iosZone",
+   "project": "ios",
+   "name": "Roast iOS",
+   "rect": [
+    -2600,
+    0,
+    2200,
+    1000
+   ],
+   "color": "blue"
+  },
+  {
+   "key": "adminZone",
+   "project": "admin",
+   "name": "Barista Admin",
+   "rect": [
+    0,
+    3400,
+    2200,
+    1000
+   ],
+   "color": "purple"
+  },
+  {
+   "key": "infraZone",
+   "project": "infra",
+   "name": "Infra",
+   "rect": [
+    -2600,
+    3400,
+    2200,
+    1000
+   ],
+   "color": "mint"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "emails",
+   "kind": "agent",
+   "zone": "apiZone",
+   "frame": [
+    80,
+    80,
+    640,
+    740
+   ],
+   "name": "Order emails"
+  }
+ ],
+ "takes": [
+  {
+   "name": "00-setup",
+   "frames": 33,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "emails"
+      ],
+      "padding": 160
+     }
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "prompt": "Send an email when an order is placed."
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "turn": "start",
+     "ago": 1500
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "say": "Orders now send \"Your coffee is on its way\". The template and a test are in."
+    },
+    {
+     "at": 2,
+     "agent": "emails",
+     "turn": "done"
+    }
+   ],
+   "clock": "8:30",
+   "capture": false
+  },
+  {
+   "name": "01-morning",
+   "frames": 3204,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "emails"
+      ],
+      "padding": 170
+     }
+    },
+    {
+     "at": 160,
+     "pointer": {
+      "to": {
+       "tile": "emails",
+       "at": "close"
+      },
+      "spring": "soft"
+     },
+     "dur": 40
+    },
+    {
+     "at": 208,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closed"
+    },
+    {
+     "at": 222,
+     "mark": "filedLine"
+    },
+    {
+     "at": 322,
+     "camera": {
+      "rect": [
+       1580,
+       -80,
+       1640,
+       1100
+      ]
+     },
+     "dur": 150,
+     "mark": "toEmpty"
+    },
+    {
+     "at": 476,
+     "pointer": {
+      "to": {
+       "world": [
+        1720,
+        30
+       ]
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 504,
+     "gesture": {
+      "to": {
+       "world": [
+        2880,
+        840
+       ]
+      }
+     },
+     "dur": 48,
+     "mark": "marquee"
+    },
+    {
+     "at": 560,
+     "pointer": {
+      "to": {
+       "choice": "roast-web"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 592,
+     "click": {
+      "deliver": true
+     },
+     "mark": "picked"
+    },
+    {
+     "at": 602,
+     "adopt": {
+      "as": "webZone",
+      "kind": "zone"
+     }
+    },
+    {
+     "at": 606,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "header"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 632,
+     "click": {
+      "deliver": true,
+      "count": 2
+     },
+     "mark": "rename"
+    },
+    {
+     "at": 642,
+     "type": "Storefront",
+     "dur": 30
+    },
+    {
+     "at": 680,
+     "key": "Return"
+    },
+    {
+     "at": 690,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "overflow"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 714,
+     "click": {
+      "deliver": true
+     },
+     "mark": "menu"
+    },
+    {
+     "at": 758,
+     "menu": {
+      "choose": [
+       "Color",
+       "Orange"
+      ]
+     },
+     "mark": "colour"
+    },
+    {
+     "at": 770,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "right"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 796,
+     "gesture": {
+      "to": {
+       "by": [
+        260,
+        0
+       ]
+      }
+     },
+     "dur": 40,
+     "mark": "resize"
+    },
+    {
+     "at": 844,
+     "mark": "zoneLine"
+    },
+    {
+     "at": 934,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": [
+        0.35,
+        0.55
+       ]
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 958,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 968,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "palette"
+    },
+    {
+     "at": 984,
+     "type": "board",
+     "dur": 15
+    },
+    {
+     "at": 1007,
+     "key": "Return"
+    },
+    {
+     "at": 1019,
+     "adopt": {
+      "as": "board",
+      "kind": "kanban"
+     }
+    },
+    {
+     "at": 1029,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 1029,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1043,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 1061,
+     "key": "Return"
+    },
+    {
+     "at": 1075,
+     "key": "Return"
+    },
+    {
+     "at": 1087,
+     "adopt": {
+      "as": "planner",
+      "kind": "agent",
+      "name": "Planner",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 1097,
+     "mark": "growLine"
+    },
+    {
+     "at": 1127,
+     "camera": {
+      "zone": "webZone",
+      "padding": 40
+     },
+     "dur": 100
+    },
+    {
+     "at": 1237,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1263,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1269,
+     "type": "What's on my plate today?",
+     "dur": 50
+    },
+    {
+     "at": 1327,
+     "key": "Return",
+     "mark": "ask"
+    },
+    {
+     "at": 1331,
+     "agent": "planner",
+     "turn": "start"
+    },
+    {
+     "at": 1337,
+     "agent": "planner",
+     "think": "Check this sprint in Jira, then put today’s tickets on the board.",
+     "dur": 24
+    },
+    {
+     "at": 1365,
+     "agent": "planner",
+     "tool": {
+      "id": "jira1",
+      "name": "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql",
+      "input": {
+       "cloudId": "roast.atlassian.net",
+       "jql": "assignee = currentUser() AND sprint in openSprints() ORDER BY rank"
+      },
+      "output": "RST-42 Cart total is off by a cent\nRST-41 Dark mode for the shop\nRST-45 Softer product cards\nRST-46 Autumn blend hero copy\nRST-43 Coffee subscriptions\nRST-48 Order export as CSV\nRST-49 Barista queue filters\nRST-50 Apple Pay in the iOS app\nRST-51 Preview deploys for the storefront\nRST-44 Autumn blend landing page"
+     }
+    },
+    {
+     "at": 1389,
+     "agent": "planner",
+     "toolDone": "jira1"
+    },
+    {
+     "at": 1395,
+     "agent": "planner",
+     "tool": {
+      "id": "card0",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "cartbug",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-42 Cart total is off by a cent",
+       "body": "A 10% discount on two Autumn blends shows $32.39. It should be $32.40."
+      },
+      "bind": "cartbug"
+     }
+    },
+    {
+     "at": 1402,
+     "agent": "planner",
+     "toolDone": "card0"
+    },
+    {
+     "at": 1407,
+     "agent": "planner",
+     "tool": {
+      "id": "card1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "darkmode",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-41 Dark mode for the shop",
+       "body": "Follow the system setting. The design tokens live in public/theme.css."
+      },
+      "bind": "darkmode"
+     }
+    },
+    {
+     "at": 1414,
+     "agent": "planner",
+     "toolDone": "card1"
+    },
+    {
+     "at": 1419,
+     "agent": "planner",
+     "tool": {
+      "id": "card2",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "cards",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-45 Softer product cards",
+       "body": "The shop looks sharp and dated. Rounder cards and buttons; try a warmer heading face."
+      },
+      "bind": "cards"
+     }
+    },
+    {
+     "at": 1426,
+     "agent": "planner",
+     "toolDone": "card2"
+    },
+    {
+     "at": 1431,
+     "agent": "planner",
+     "tool": {
+      "id": "card3",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "hero",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-46 Autumn blend hero copy",
+       "body": "Shorter headline for the autumn launch."
+      },
+      "bind": "hero"
+     }
+    },
+    {
+     "at": 1438,
+     "agent": "planner",
+     "toolDone": "card3"
+    },
+    {
+     "at": 1443,
+     "agent": "planner",
+     "tool": {
+      "id": "card4",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "subs",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-43 Coffee subscriptions",
+       "body": "Weekly or monthly beans, pause any time. Plan picker, checkout and renewal emails."
+      },
+      "bind": "subs"
+     }
+    },
+    {
+     "at": 1450,
+     "agent": "planner",
+     "toolDone": "card4"
+    },
+    {
+     "at": 1455,
+     "agent": "planner",
+     "tool": {
+      "id": "card5",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "export",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-48 Order export as CSV",
+       "body": "Finance wants last month’s orders as a CSV from the API."
+      },
+      "bind": "export"
+     }
+    },
+    {
+     "at": 1462,
+     "agent": "planner",
+     "toolDone": "card5"
+    },
+    {
+     "at": 1467,
+     "agent": "planner",
+     "tool": {
+      "id": "card6",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "filters",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-49 Barista queue filters",
+       "body": "Filter the order queue by pickup or delivery."
+      },
+      "bind": "filters"
+     }
+    },
+    {
+     "at": 1474,
+     "agent": "planner",
+     "toolDone": "card6"
+    },
+    {
+     "at": 1479,
+     "agent": "planner",
+     "tool": {
+      "id": "card7",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "applepay",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-50 Apple Pay in the iOS app",
+       "body": "Checkout with Apple Pay on iPhone."
+      },
+      "bind": "applepay"
+     }
+    },
+    {
+     "at": 1486,
+     "agent": "planner",
+     "toolDone": "card7"
+    },
+    {
+     "at": 1491,
+     "agent": "planner",
+     "tool": {
+      "id": "card8",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "deploy",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-51 Preview deploys for the storefront",
+       "body": "A preview URL on every pull request."
+      },
+      "bind": "deploy"
+     }
+    },
+    {
+     "at": 1498,
+     "agent": "planner",
+     "toolDone": "card8"
+    },
+    {
+     "at": 1503,
+     "agent": "planner",
+     "tool": {
+      "id": "card9",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "autumn",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-44 Autumn blend landing page",
+       "body": "A page for the autumn launch. Copy from marketing next week."
+      },
+      "bind": "autumn"
+     }
+    },
+    {
+     "at": 1510,
+     "agent": "planner",
+     "toolDone": "card9"
+    },
+    {
+     "at": 1515,
+     "agent": "planner",
+     "say": "Ten tickets today across four projects. RST-43 is the big one; give it its own agent.",
+     "dur": 40,
+     "mark": "planned"
+    },
+    {
+     "at": 1559,
+     "agent": "planner",
+     "turn": "done"
+    },
+    {
+     "at": 1563,
+     "mark": "planLine"
+    },
+    {
+     "at": 1623,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "body"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1649,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1679,
+     "pointer": {
+      "to": {
+       "tile": "board",
+       "at": "bottomRight"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 1709,
+     "gesture": {
+      "to": {
+       "by": [
+        -180,
+        260
+       ]
+      }
+     },
+     "dur": 60,
+     "mark": "roomy"
+    },
+    {
+     "at": 1779,
+     "mark": "roomLine"
+    },
+    {
+     "at": 1859,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 1859,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1873,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 1891,
+     "key": "Return"
+    },
+    {
+     "at": 1905,
+     "key": "Return"
+    },
+    {
+     "at": 1915,
+     "adopt": {
+      "as": "cart",
+      "kind": "agent",
+      "name": "Cart total",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 1925,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 90
+    },
+    {
+     "at": 2019,
+     "pointer": {
+      "to": {
+       "card": "cartbug"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 2043,
+     "drag": {
+      "card": "cartbug",
+      "toAgent": "cart"
+     },
+     "dur": 46
+    },
+    {
+     "at": 2095,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "send"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 2117,
+     "click": {
+      "deliver": true
+     },
+     "mark": "send0"
+    },
+    {
+     "at": 2123,
+     "agent": "cart",
+     "turn": "start"
+    },
+    {
+     "at": 2127,
+     "agent": "cart",
+     "say": "Each line is rounded before the discount, so a cent goes missing. I’ll round once, on the total.",
+     "dur": 30
+    },
+    {
+     "at": 2177,
+     "mark": "oneLine"
+    },
+    {
+     "at": 2217,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 2217,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 2231,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 2249,
+     "key": "Return"
+    },
+    {
+     "at": 2263,
+     "key": "Return"
+    },
+    {
+     "at": 2273,
+     "adopt": {
+      "as": "dark",
+      "kind": "agent",
+      "name": "Dark mode",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 2283,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 60
+    },
+    {
+     "at": 2343,
+     "pointer": {
+      "to": {
+       "card": "darkmode"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 2367,
+     "drag": {
+      "card": "darkmode",
+      "toAgent": "dark"
+     },
+     "dur": 40
+    },
+    {
+     "at": 2413,
+     "pointer": {
+      "to": {
+       "tile": "dark",
+       "at": "send"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 2435,
+     "click": {
+      "deliver": true
+     },
+     "mark": "send1"
+    },
+    {
+     "at": 2441,
+     "agent": "dark",
+     "turn": "start"
+    },
+    {
+     "at": 2445,
+     "agent": "dark",
+     "say": "The colours are tokens in theme.css. Adding dark values behind prefers-color-scheme.",
+     "dur": 30
+    },
+    {
+     "at": 2471,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 2471,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 2485,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 2503,
+     "key": "Return"
+    },
+    {
+     "at": 2517,
+     "key": "Return"
+    },
+    {
+     "at": 2527,
+     "adopt": {
+      "as": "cardsAgent",
+      "kind": "agent",
+      "name": "Softer cards",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 2537,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 60
+    },
+    {
+     "at": 2597,
+     "pointer": {
+      "to": {
+       "card": "cards"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 2621,
+     "drag": {
+      "card": "cards",
+      "toAgent": "cardsAgent"
+     },
+     "dur": 34
+    },
+    {
+     "at": 2661,
+     "pointer": {
+      "to": {
+       "tile": "cardsAgent",
+       "at": "send"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 2683,
+     "click": {
+      "deliver": true
+     },
+     "mark": "send2"
+    },
+    {
+     "at": 2689,
+     "agent": "cardsAgent",
+     "turn": "start"
+    },
+    {
+     "at": 2693,
+     "agent": "cardsAgent",
+     "say": "Starting with the radius token; every card and button reads it.",
+     "dur": 30
+    },
+    {
+     "at": 2711,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 2711,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 2725,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 2743,
+     "key": "Return"
+    },
+    {
+     "at": 2757,
+     "key": "Return"
+    },
+    {
+     "at": 2767,
+     "adopt": {
+      "as": "hero",
+      "kind": "agent",
+      "name": "Hero copy",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 2777,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 60
+    },
+    {
+     "at": 2837,
+     "pointer": {
+      "to": {
+       "card": "hero"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 2861,
+     "drag": {
+      "card": "hero",
+      "toAgent": "hero"
+     },
+     "dur": 30
+    },
+    {
+     "at": 2897,
+     "pointer": {
+      "to": {
+       "tile": "hero",
+       "at": "send"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 2919,
+     "click": {
+      "deliver": true
+     },
+     "mark": "send3"
+    },
+    {
+     "at": 2925,
+     "agent": "hero",
+     "turn": "start"
+    },
+    {
+     "at": 2929,
+     "agent": "hero",
+     "say": "Three shorter headlines, then the best one in place.",
+     "dur": 30
+    },
+    {
+     "at": 2943,
+     "mark": "fanLine"
+    }
+   ],
+   "clock": "8:45"
+  },
+  {
+   "name": "01b-midmorning",
+   "frames": 21,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "cardsAgent",
+     "tool": {
+      "id": "cd1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "edit",
+      "added": 2,
+      "removed": 1
+     }
+    },
+    {
+     "at": 2,
+     "write": {
+      "project": "web",
+      "path": "public/theme.css",
+      "from": "edits/design-1.css"
+     }
+    },
+    {
+     "at": 4,
+     "agent": "cardsAgent",
+     "toolDone": "cd1"
+    },
+    {
+     "at": 6,
+     "agent": "cardsAgent",
+     "say": "Cards and buttons now share a 10px radius from one token, --radius. Have a look.",
+     "dur": 4
+    },
+    {
+     "at": 10,
+     "agent": "cardsAgent",
+     "turn": "done"
+    }
+   ],
+   "clock": "10:20",
+   "capture": false
+  },
+  {
+   "name": "02-late",
+   "frames": 2177,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 180,
+     "pointer": {
+      "to": {
+       "sidebar": "cardsAgent"
+      },
+      "hover": true,
+      "dwell": 90
+     },
+     "dur": 24
+    },
+    {
+     "at": 298,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70,
+     "mark": "reveal"
+    },
+    {
+     "at": 376,
+     "mark": "lookLine"
+    },
+    {
+     "at": 436,
+     "key": "3",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "browserKey"
+    },
+    {
+     "at": 456,
+     "adopt": {
+      "as": "site",
+      "kind": "browser"
+     }
+    },
+    {
+     "at": 462,
+     "pointer": {
+      "to": {
+       "tile": "site",
+       "at": "address"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 486,
+     "key": "l",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 496,
+     "type": "localhost:3000",
+     "dur": 42
+    },
+    {
+     "at": 546,
+     "key": "Return"
+    },
+    {
+     "at": 570,
+     "camera": {
+      "tiles": [
+       "cardsAgent",
+       "site"
+      ],
+      "padding": 50
+     },
+     "dur": 90
+    },
+    {
+     "at": 664,
+     "pointer": {
+      "to": {
+       "tile": "site",
+       "at": "bottomRight"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 692,
+     "gesture": {
+      "to": {
+       "by": [
+        220,
+        160
+       ]
+      }
+     },
+     "dur": 60,
+     "mark": "bigger"
+    },
+    {
+     "at": 762,
+     "camera": {
+      "tiles": [
+       "cardsAgent",
+       "site"
+      ],
+      "padding": 50
+     },
+     "dur": 80
+    },
+    {
+     "at": 846,
+     "mark": "reviewLine"
+    },
+    {
+     "at": 906,
+     "pointer": {
+      "to": {
+       "tile": "cardsAgent",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 932,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 938,
+     "type": "Rounder corners, and try a serif for the headings.",
+     "dur": 100
+    },
+    {
+     "at": 1046,
+     "key": "Return",
+     "mark": "ask1"
+    },
+    {
+     "at": 1052,
+     "agent": "cardsAgent",
+     "turn": "start"
+    },
+    {
+     "at": 1058,
+     "agent": "cardsAgent",
+     "think": "Raise --radius and swap --font-heading to the system serif.",
+     "dur": 20
+    },
+    {
+     "at": 1082,
+     "agent": "cardsAgent",
+     "open": {
+      "path": "public/theme.css",
+      "as": "editor",
+      "toolId": "open1"
+     },
+     "dur": 90,
+     "mark": "open"
+    },
+    {
+     "at": 1178,
+     "camera": {
+      "tiles": [
+       "cardsAgent",
+       "editor",
+       "site"
+      ],
+      "padding": 40
+     },
+     "dur": 90
+    },
+    {
+     "at": 1272,
+     "agent": "cardsAgent",
+     "tool": {
+      "id": "ed2",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "edit",
+      "added": 5,
+      "removed": 4
+     }
+    },
+    {
+     "at": 1280,
+     "write": {
+      "project": "web",
+      "path": "public/theme.css",
+      "from": "edits/design-2.css"
+     },
+     "mark": "edit2"
+    },
+    {
+     "at": 1294,
+     "agent": "cardsAgent",
+     "toolDone": "ed2"
+    },
+    {
+     "at": 1298,
+     "browser": {
+      "tile": "site",
+      "reload": true
+     },
+     "mark": "live1"
+    },
+    {
+     "at": 1322,
+     "agent": "cardsAgent",
+     "say": "24px corners and New York for headings.",
+     "dur": 24
+    },
+    {
+     "at": 1352,
+     "agent": "cardsAgent",
+     "turn": "done"
+    },
+    {
+     "at": 1356,
+     "mark": "liveLine"
+    },
+    {
+     "at": 1426,
+     "pointer": {
+      "to": {
+       "tile": "cardsAgent",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1452,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1458,
+     "type": "A little less. 14px.",
+     "dur": 40
+    },
+    {
+     "at": 1506,
+     "key": "Return",
+     "mark": "ask2"
+    },
+    {
+     "at": 1512,
+     "agent": "cardsAgent",
+     "turn": "start"
+    },
+    {
+     "at": 1518,
+     "agent": "cardsAgent",
+     "tool": {
+      "id": "ed3",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "edit",
+      "added": 1,
+      "removed": 1
+     }
+    },
+    {
+     "at": 1526,
+     "write": {
+      "project": "web",
+      "path": "public/theme.css",
+      "from": "edits/design-3.css"
+     },
+     "mark": "edit3"
+    },
+    {
+     "at": 1540,
+     "agent": "cardsAgent",
+     "toolDone": "ed3"
+    },
+    {
+     "at": 1544,
+     "browser": {
+      "tile": "site",
+      "reload": true
+     },
+     "mark": "live2"
+    },
+    {
+     "at": 1568,
+     "agent": "cardsAgent",
+     "say": "14px everywhere.",
+     "dur": 14
+    },
+    {
+     "at": 1588,
+     "agent": "cardsAgent",
+     "turn": "done"
+    },
+    {
+     "at": 1592,
+     "mark": "againLine"
+    },
+    {
+     "at": 1642,
+     "pointer": {
+      "to": {
+       "tile": "cardsAgent",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1668,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1674,
+     "type": "Ship it.",
+     "dur": 16
+    },
+    {
+     "at": 1698,
+     "key": "Return",
+     "mark": "ship"
+    },
+    {
+     "at": 1704,
+     "agent": "cardsAgent",
+     "turn": "start"
+    },
+    {
+     "at": 1710,
+     "agent": "cardsAgent",
+     "tool": {
+      "id": "cm1",
+      "name": "Bash",
+      "input": {
+       "command": "git commit -am \"Softer cards and serif headings (RST-45)\"",
+       "description": "Commit"
+      },
+      "output": "[rst-45 4c1e2a9] Softer cards and serif headings (RST-45)"
+     }
+    },
+    {
+     "at": 1730,
+     "agent": "cardsAgent",
+     "toolDone": "cm1"
+    },
+    {
+     "at": 1736,
+     "agent": "cardsAgent",
+     "tool": {
+      "id": "cdone",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-45-done",
+       "cardId": "{card:cards}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 1746,
+     "agent": "cardsAgent",
+     "toolDone": "cdone"
+    },
+    {
+     "at": 1752,
+     "agent": "cardsAgent",
+     "say": "Committed, and RST-45 is in Done.",
+     "dur": 16
+    },
+    {
+     "at": 1772,
+     "agent": "cardsAgent",
+     "turn": "done",
+     "mark": "shipped"
+    },
+    {
+     "at": 1802,
+     "pointer": {
+      "to": {
+       "tile": "editor",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1828,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1840,
+     "pointer": {
+      "to": {
+       "tile": "cardsAgent",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1866,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closeCards"
+    },
+    {
+     "at": 1886,
+     "mark": "closeLine"
+    }
+   ],
+   "clock": "10:30"
+  },
+  {
+   "name": "03-lunch",
+   "frames": 33,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "hero",
+     "tool": {
+      "id": "h1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/index.html",
+      "action": "edit",
+      "added": 1,
+      "removed": 1
+     }
+    },
+    {
+     "at": 2,
+     "agent": "hero",
+     "toolDone": "h1"
+    },
+    {
+     "at": 4,
+     "agent": "hero",
+     "tool": {
+      "id": "hdone",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-46-done",
+       "cardId": "{card:hero}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 6,
+     "agent": "hero",
+     "toolDone": "hdone"
+    },
+    {
+     "at": 8,
+     "agent": "hero",
+     "say": "New headline: \"Roasted this morning. At your door tomorrow.\" RST-46 is in Done.",
+     "dur": 4
+    },
+    {
+     "at": 12,
+     "agent": "hero",
+     "turn": "done"
+    },
+    {
+     "at": 16,
+     "agent": "cart",
+     "tool": {
+      "id": "cx1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/cart/total.ts",
+      "action": "edit",
+      "added": 3,
+      "removed": 2
+     }
+    },
+    {
+     "at": 18,
+     "agent": "cart",
+     "toolDone": "cx1"
+    },
+    {
+     "at": 20,
+     "agent": "dark",
+     "tool": {
+      "id": "dk1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "edit",
+      "added": 15,
+      "removed": 0
+     }
+    },
+    {
+     "at": 22,
+     "agent": "dark",
+     "toolDone": "dk1"
+    }
+   ],
+   "clock": "12:50",
+   "capture": false
+  },
+  {
+   "name": "04-afternoon",
+   "frames": 3853,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 40
+     }
+    },
+    {
+     "at": 170,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 210,
+     "jumpZone": "webZone",
+     "dur": 110,
+     "mark": "toWeb"
+    },
+    {
+     "at": 324,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 346,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 354,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 354,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 368,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 386,
+     "key": "Return"
+    },
+    {
+     "at": 400,
+     "key": "Return"
+    },
+    {
+     "at": 412,
+     "adopt": {
+      "as": "subs",
+      "kind": "agent",
+      "name": "Subscriptions",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 422,
+     "camera": {
+      "tiles": [
+       "board",
+       "subs"
+      ],
+      "padding": 60
+     },
+     "dur": 140
+    },
+    {
+     "at": 566,
+     "pointer": {
+      "to": {
+       "card": "subs"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 590,
+     "drag": {
+      "card": "subs",
+      "toAgent": "subs"
+     },
+     "dur": 44
+    },
+    {
+     "at": 640,
+     "pointer": {
+      "to": {
+       "tile": "subs",
+       "at": "send"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 662,
+     "click": {
+      "deliver": true
+     },
+     "mark": "sendSubs"
+    },
+    {
+     "at": 668,
+     "agent": "subs",
+     "turn": "start"
+    },
+    {
+     "at": 674,
+     "agent": "subs",
+     "think": "Three separable parts: the plan picker, checkout, renewal emails.",
+     "dur": 20
+    },
+    {
+     "at": 698,
+     "agent": "subs",
+     "say": "This is three jobs. I’ll give each one to a helper and review what comes back.",
+     "dur": 36
+    },
+    {
+     "at": 738,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_picker",
+      "name": "Agent",
+      "input": {
+       "description": "Plan picker",
+       "prompt": "Build the weekly/monthly plan picker on the product page.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 752,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_checkout",
+      "name": "Agent",
+      "input": {
+       "description": "Subscription checkout",
+       "prompt": "Add subscriptions to checkout and the cart total.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 766,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_emails",
+      "name": "Agent",
+      "input": {
+       "description": "Renewal emails",
+       "prompt": "Send a reminder email two days before each renewal.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 780,
+     "mark": "helpersLine"
+    },
+    {
+     "at": 800,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "say": "Starting on the plan picker."
+    },
+    {
+     "at": 808,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "say": "Starting on the subscription checkout."
+    },
+    {
+     "at": 816,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "say": "Starting on the renewal emails."
+    },
+    {
+     "at": 854,
+     "agent": "cart",
+     "tool": {
+      "id": "cx2",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test",
+      "output": "14 passing"
+     }
+    },
+    {
+     "at": 858,
+     "agent": "cart",
+     "toolDone": "cx2"
+    },
+    {
+     "at": 860,
+     "agent": "cart",
+     "say": "Fixed: the discount applies first and the total is rounded once. $32.40 now, and a test pins it.",
+     "dur": 8
+    },
+    {
+     "at": 864,
+     "agent": "cart",
+     "turn": "done",
+     "mark": "cartDone"
+    },
+    {
+     "at": 904,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 120
+    },
+    {
+     "at": 1028,
+     "mark": "doneLine"
+    },
+    {
+     "at": 1058,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1104,
+     "jump": "cart",
+     "dur": 100,
+     "mark": "toCart"
+    },
+    {
+     "at": 1208,
+     "mark": "readLine"
+    },
+    {
+     "at": 1268,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1294,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1300,
+     "type": "Also cover the 3-for-2 promo.",
+     "dur": 58
+    },
+    {
+     "at": 1366,
+     "key": "Return",
+     "mark": "ask3"
+    },
+    {
+     "at": 1372,
+     "agent": "cart",
+     "turn": "start"
+    },
+    {
+     "at": 1378,
+     "agent": "cart",
+     "say": "Adding a 3-for-2 case to the tests and checking the rounding holds.",
+     "dur": 24
+    },
+    {
+     "at": 1388,
+     "mark": "followLine"
+    },
+    {
+     "at": 1418,
+     "agent": "dark",
+     "say": "Dark mode follows the system setting; every token has a dark value. RST-41 is in Done.",
+     "dur": 8
+    },
+    {
+     "at": 1420,
+     "agent": "dark",
+     "tool": {
+      "id": "ddone",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41-done",
+       "cardId": "{card:darkmode}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 1422,
+     "agent": "dark",
+     "toolDone": "ddone"
+    },
+    {
+     "at": 1424,
+     "agent": "dark",
+     "turn": "done",
+     "mark": "darkDone"
+    },
+    {
+     "at": 1464,
+     "pointer": {
+      "to": {
+       "sidebar": "dark"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 1494,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70,
+     "mark": "toDark"
+    },
+    {
+     "at": 1622,
+     "pointer": {
+      "to": {
+       "tile": "dark",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1648,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closeDark"
+    },
+    {
+     "at": 1672,
+     "mark": "oneShotLine"
+    },
+    {
+     "at": 1702,
+     "pointer": {
+      "to": {
+       "sidebar": "hero"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 1732,
+     "click": {
+      "deliver": true
+     },
+     "dur": 110,
+     "mark": "toHero"
+    },
+    {
+     "at": 1890,
+     "pointer": {
+      "to": {
+       "tile": "hero",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1916,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closeHero"
+    },
+    {
+     "at": 1940,
+     "pointer": {
+      "to": {
+       "sidebar": "planner",
+       "at": "nudge"
+      }
+     },
+     "dur": 28
+    },
+    {
+     "at": 1978,
+     "mark": "nudgeLine"
+    },
+    {
+     "at": 2018,
+     "click": {
+      "deliver": true
+     },
+     "mark": "nudgeClose"
+    },
+    {
+     "at": 2048,
+     "agent": "cart",
+     "tool": {
+      "id": "cx3",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test",
+      "output": "15 passing"
+     }
+    },
+    {
+     "at": 2052,
+     "agent": "cart",
+     "toolDone": "cx3"
+    },
+    {
+     "at": 2054,
+     "agent": "cart",
+     "say": "3-for-2 is covered, 15 passing.",
+     "dur": 8
+    },
+    {
+     "at": 2058,
+     "agent": "cart",
+     "turn": "done",
+     "mark": "cartDone2"
+    },
+    {
+     "at": 2088,
+     "pointer": {
+      "to": {
+       "sidebar": "cart"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 2118,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70
+    },
+    {
+     "at": 2226,
+     "pointer": {
+      "to": {
+       "tile": "cart",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 2252,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closeCart"
+    },
+    {
+     "at": 2276,
+     "mark": "cookingLine"
+    },
+    {
+     "at": 2316,
+     "camera": {
+      "tiles": [
+       "subs"
+      ],
+      "padding": 120
+     },
+     "dur": 130
+    },
+    {
+     "at": 2450,
+     "pointer": {
+      "to": {
+       "chip": "toolu_picker"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 2480,
+     "click": {
+      "deliver": true
+     },
+     "mark": "openHelper"
+    },
+    {
+     "at": 2504,
+     "adopt": {
+      "as": "picker",
+      "child": "toolu_picker",
+      "of": "subs"
+     }
+    },
+    {
+     "at": 2510,
+     "camera": {
+      "tiles": [
+       "subs",
+       "picker"
+      ],
+      "padding": 70
+     },
+     "dur": 80
+    },
+    {
+     "at": 2594,
+     "pointer": {
+      "to": {
+       "tile": "picker",
+       "at": "header"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 2620,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 2632,
+     "gesture": {
+      "to": {
+       "by": [
+        180,
+        140
+       ]
+      }
+     },
+     "dur": 56,
+     "mark": "dragHelper"
+    },
+    {
+     "at": 2694,
+     "mark": "moveLine"
+    },
+    {
+     "at": 2784,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 2824,
+     "jumpZone": "apiZone",
+     "dur": 110,
+     "mark": "toApi"
+    },
+    {
+     "at": 2938,
+     "pointer": {
+      "to": {
+       "zone": "apiZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 2960,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 2968,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 2968,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 2982,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 3000,
+     "key": "Return"
+    },
+    {
+     "at": 3014,
+     "key": "Return"
+    },
+    {
+     "at": 3024,
+     "adopt": {
+      "as": "export",
+      "kind": "agent",
+      "name": "Order export",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 3034,
+     "pointer": {
+      "to": {
+       "tile": "export",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 3060,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 3066,
+     "type": "RST-48: last month’s orders as a CSV endpoint.",
+     "dur": 92
+    },
+    {
+     "at": 3166,
+     "key": "Return",
+     "mark": "sendExport"
+    },
+    {
+     "at": 3172,
+     "agent": "export",
+     "turn": "start"
+    },
+    {
+     "at": 3202,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 3242,
+     "jumpZone": "adminZone",
+     "dur": 110,
+     "mark": "toAdmin"
+    },
+    {
+     "at": 3356,
+     "pointer": {
+      "to": {
+       "zone": "adminZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 3378,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 3386,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 3386,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 3400,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 3418,
+     "key": "Return"
+    },
+    {
+     "at": 3432,
+     "key": "Return"
+    },
+    {
+     "at": 3442,
+     "adopt": {
+      "as": "filters",
+      "kind": "agent",
+      "name": "Queue filters"
+     }
+    },
+    {
+     "at": 3452,
+     "pointer": {
+      "to": {
+       "tile": "filters",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 3478,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 3484,
+     "type": "RST-49: filter the queue by pickup or delivery.",
+     "dur": 94
+    },
+    {
+     "at": 3586,
+     "key": "Return",
+     "mark": "sendFilters"
+    },
+    {
+     "at": 3592,
+     "agent": "filters",
+     "turn": "start"
+    },
+    {
+     "at": 3602,
+     "mark": "moreLine"
+    }
+   ],
+   "clock": "13:00"
+  },
+  {
+   "name": "05-busy",
+   "frames": 2309,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "adminZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 20,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "r0",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 28,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "r0"
+    },
+    {
+     "at": 32,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "r1",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 40,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "r1"
+    },
+    {
+     "at": 44,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "r2",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 52,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "r2"
+    },
+    {
+     "at": 56,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 96,
+     "jumpZone": "iosZone",
+     "dur": 110
+    },
+    {
+     "at": 210,
+     "pointer": {
+      "to": {
+       "zone": "iosZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 230,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 236,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 236,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 250,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 268,
+     "key": "Return"
+    },
+    {
+     "at": 282,
+     "key": "Return"
+    },
+    {
+     "at": 290,
+     "adopt": {
+      "as": "applepay",
+      "kind": "agent",
+      "name": "Apple Pay",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 300,
+     "pointer": {
+      "to": {
+       "tile": "applepay",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 326,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 332,
+     "type": "RST-50: Apple Pay at checkout.",
+     "dur": 60
+    },
+    {
+     "at": 400,
+     "key": "Return"
+    },
+    {
+     "at": 406,
+     "agent": "applepay",
+     "turn": "start"
+    },
+    {
+     "at": 416,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 456,
+     "jumpZone": "infraZone",
+     "dur": 110
+    },
+    {
+     "at": 570,
+     "pointer": {
+      "to": {
+       "zone": "infraZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 590,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 596,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 596,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 610,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 628,
+     "key": "Return"
+    },
+    {
+     "at": 642,
+     "key": "Return"
+    },
+    {
+     "at": 650,
+     "adopt": {
+      "as": "deploy",
+      "kind": "agent",
+      "name": "Preview deploys"
+     }
+    },
+    {
+     "at": 660,
+     "pointer": {
+      "to": {
+       "tile": "deploy",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 686,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 692,
+     "type": "RST-51: a preview URL on every pull request.",
+     "dur": 88
+    },
+    {
+     "at": 788,
+     "key": "Return"
+    },
+    {
+     "at": 794,
+     "agent": "deploy",
+     "turn": "start"
+    },
+    {
+     "at": 804,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "w0",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 814,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "w0"
+    },
+    {
+     "at": 818,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "w1",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 828,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "w1"
+    },
+    {
+     "at": 832,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "w2",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 842,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "w2"
+    },
+    {
+     "at": 846,
+     "agent": "filters",
+     "say": "Pickup and delivery filters are in, with tests.",
+     "dur": 6
+    },
+    {
+     "at": 848,
+     "agent": "filters",
+     "turn": "done"
+    },
+    {
+     "at": 868,
+     "pointer": {
+      "to": {
+       "sidebar": "filters"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 898,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70
+    },
+    {
+     "at": 1000,
+     "pointer": {
+      "to": {
+       "tile": "filters",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1026,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1040,
+     "pointer": {
+      "to": {
+       "zone": "adminZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 1060,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1066,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 1066,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1080,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 1098,
+     "key": "Return"
+    },
+    {
+     "at": 1112,
+     "key": "Return"
+    },
+    {
+     "at": 1120,
+     "adopt": {
+      "as": "ready",
+      "kind": "agent",
+      "name": "Order ready"
+     }
+    },
+    {
+     "at": 1130,
+     "pointer": {
+      "to": {
+       "tile": "ready",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1156,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1162,
+     "type": "Tell the customer when their order is ready.",
+     "dur": 88
+    },
+    {
+     "at": 1258,
+     "key": "Return"
+    },
+    {
+     "at": 1264,
+     "agent": "ready",
+     "turn": "start"
+    },
+    {
+     "at": 1274,
+     "agent": "ready",
+     "tool": {
+      "id": "ready0",
+      "name": "Read",
+      "input": {
+       "file_path": "src/ready.ts"
+      },
+      "output": "export"
+     }
+    },
+    {
+     "at": 1284,
+     "agent": "ready",
+     "toolDone": "ready0"
+    },
+    {
+     "at": 1290,
+     "agent": "export",
+     "say": "GET /orders/export.csv?month=2026-09, streamed.",
+     "dur": 6
+    },
+    {
+     "at": 1292,
+     "agent": "export",
+     "turn": "done"
+    },
+    {
+     "at": 1312,
+     "pointer": {
+      "to": {
+       "sidebar": "export"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 1342,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70
+    },
+    {
+     "at": 1440,
+     "pointer": {
+      "to": {
+       "tile": "export",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1466,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1472,
+     "type": "Add the refund column too.",
+     "dur": 52
+    },
+    {
+     "at": 1532,
+     "key": "Return"
+    },
+    {
+     "at": 1538,
+     "agent": "export",
+     "turn": "start"
+    },
+    {
+     "at": 1558,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "e00",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1568,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "e00"
+    },
+    {
+     "at": 1572,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "e01",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1582,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "e01"
+    },
+    {
+     "at": 1586,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "e02",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1596,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "e02"
+    },
+    {
+     "at": 1600,
+     "agent": "applepay",
+     "tool": {
+      "id": "ap0",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "Roast/Checkout/ApplePay.swift",
+      "action": "edit",
+      "added": 30
+     }
+    },
+    {
+     "at": 1610,
+     "agent": "applepay",
+     "toolDone": "ap0"
+    },
+    {
+     "at": 1614,
+     "agent": "deploy",
+     "tool": {
+      "id": "dp0",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "deploy/preview.yml",
+      "action": "write",
+      "added": 22
+     }
+    },
+    {
+     "at": 1624,
+     "agent": "deploy",
+     "toolDone": "dp0"
+    },
+    {
+     "at": 1628,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "e10",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1638,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "e10"
+    },
+    {
+     "at": 1642,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "e11",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1652,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "e11"
+    },
+    {
+     "at": 1656,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "e12",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1666,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "e12"
+    },
+    {
+     "at": 1670,
+     "agent": "applepay",
+     "tool": {
+      "id": "ap1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "Roast/Checkout/ApplePay.swift",
+      "action": "edit",
+      "added": 42
+     }
+    },
+    {
+     "at": 1680,
+     "agent": "applepay",
+     "toolDone": "ap1"
+    },
+    {
+     "at": 1684,
+     "agent": "deploy",
+     "tool": {
+      "id": "dp1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "deploy/preview.yml",
+      "action": "write",
+      "added": 22
+     }
+    },
+    {
+     "at": 1694,
+     "agent": "deploy",
+     "toolDone": "dp1"
+    },
+    {
+     "at": 1698,
+     "agent": "export",
+     "say": "Refund column added.",
+     "dur": 6
+    },
+    {
+     "at": 1700,
+     "agent": "export",
+     "turn": "done"
+    },
+    {
+     "at": 1716,
+     "pointer": {
+      "to": {
+       "sidebar": "export"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 1746,
+     "click": {
+      "deliver": true
+     },
+     "dur": 70
+    },
+    {
+     "at": 1840,
+     "pointer": {
+      "to": {
+       "tile": "export",
+       "at": "close"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1866,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1880,
+     "pointer": {
+      "to": {
+       "zone": "apiZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 1900,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1906,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 1906,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1920,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 1938,
+     "key": "Return"
+    },
+    {
+     "at": 1952,
+     "key": "Return"
+    },
+    {
+     "at": 1960,
+     "adopt": {
+      "as": "ratelimit",
+      "kind": "agent",
+      "name": "Rate limits",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 1970,
+     "pointer": {
+      "to": {
+       "tile": "ratelimit",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1996,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 2002,
+     "type": "Rate-limit the public orders API.",
+     "dur": 66
+    },
+    {
+     "at": 2076,
+     "key": "Return"
+    },
+    {
+     "at": 2082,
+     "agent": "ratelimit",
+     "turn": "start"
+    },
+    {
+     "at": 2092,
+     "agent": "ratelimit",
+     "tool": {
+      "id": "ratelimit0",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/ratelimit.ts",
+      "action": "write",
+      "added": 18
+     }
+    },
+    {
+     "at": 2102,
+     "agent": "ratelimit",
+     "toolDone": "ratelimit0"
+    },
+    {
+     "at": 2108,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "say": "Plan picker is done, with tests."
+    },
+    {
+     "at": 2118,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "say": "Subscription checkout is done, with tests."
+    },
+    {
+     "at": 2128,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "say": "Renewal emails is done, with tests."
+    },
+    {
+     "at": 2138,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 150
+    }
+   ],
+   "clock": "13:30"
+  },
+  {
+   "name": "06-ship",
+   "frames": 2309,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "subs"
+      ],
+      "padding": 120
+     }
+    },
+    {
+     "at": 0,
+     "key": ",",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "settings"
+    },
+    {
+     "at": 30,
+     "pointer": {
+      "to": {
+       "settings": "section.Agents"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 58,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 78,
+     "pointer": {
+      "to": {
+       "window": [
+        900,
+        520
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 96,
+     "scroll": {
+      "by": [
+       0,
+       -480
+      ]
+     },
+     "dur": 24
+    },
+    {
+     "at": 130,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitPushSucceeded.enabled"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 158,
+     "click": {
+      "deliver": true
+     },
+     "mark": "pickPush"
+    },
+    {
+     "at": 172,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitPushSucceeded.preview"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 196,
+     "click": {
+      "deliver": true
+     },
+     "mark": "pickPushPreview"
+    },
+    {
+     "at": 236,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitMergeSucceeded.enabled"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 264,
+     "click": {
+      "deliver": true
+     },
+     "mark": "pickMerge"
+    },
+    {
+     "at": 278,
+     "pointer": {
+      "to": {
+       "settings": "agentSounds.gitMergeSucceeded.preview"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 302,
+     "click": {
+      "deliver": true
+     },
+     "mark": "pickMergePreview"
+    },
+    {
+     "at": 342,
+     "mark": "soundsLine"
+    },
+    {
+     "at": 402,
+     "key": ",",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 432,
+     "agent": "subs",
+     "toolDone": "toolu_picker"
+    },
+    {
+     "at": 438,
+     "agent": "subs",
+     "toolDone": "toolu_checkout"
+    },
+    {
+     "at": 444,
+     "agent": "subs",
+     "toolDone": "toolu_emails"
+    },
+    {
+     "at": 470,
+     "agent": "subs",
+     "tool": {
+      "id": "test1",
+      "name": "Bash",
+      "input": {
+       "command": "npm test",
+       "description": "Run the tests"
+      },
+      "output": "38 passing"
+     }
+    },
+    {
+     "at": 506,
+     "agent": "subs",
+     "toolDone": "test1"
+    },
+    {
+     "at": 516,
+     "agent": "subs",
+     "tool": {
+      "id": "push1",
+      "name": "Bash",
+      "input": {
+       "command": "git push origin rst-43-subscriptions",
+       "description": "Push the branch"
+      },
+      "output": "To github.com:roast/roast-web.git\n * [new branch]  rst-43-subscriptions -> rst-43-subscriptions"
+     }
+    },
+    {
+     "at": 552,
+     "agent": "subs",
+     "toolDone": "push1",
+     "mark": "pushed"
+    },
+    {
+     "at": 612,
+     "agent": "subs",
+     "tool": {
+      "id": "merge1",
+      "name": "Bash",
+      "input": {
+       "command": "git switch main && git merge --no-ff rst-43-subscriptions",
+       "description": "Merge into main"
+      },
+      "output": "Merge made by the 'ort' strategy."
+     }
+    },
+    {
+     "at": 648,
+     "agent": "subs",
+     "toolDone": "merge1",
+     "mark": "merged"
+    },
+    {
+     "at": 668,
+     "agent": "subs",
+     "tool": {
+      "id": "done2",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-43-done",
+       "cardId": "{card:subs}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 678,
+     "agent": "subs",
+     "toolDone": "done2"
+    },
+    {
+     "at": 684,
+     "agent": "subs",
+     "say": "Subscriptions are merged: plan picker, checkout and renewal emails. RST-43 is done.",
+     "dur": 36
+    },
+    {
+     "at": 724,
+     "agent": "subs",
+     "turn": "done",
+     "mark": "subsDone"
+    },
+    {
+     "at": 734,
+     "mark": "shipLine"
+    },
+    {
+     "at": 824,
+     "camera": {
+      "all": true,
+      "padding": 60
+     },
+     "dur": 240,
+     "mark": "zoomOut"
+    },
+    {
+     "at": 1068,
+     "mark": "canvasLine"
+    },
+    {
+     "at": 1168,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1208,
+     "jumpZone": "iosZone",
+     "dur": 110,
+     "mark": "tour:iosZone"
+    },
+    {
+     "at": 1362,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1402,
+     "jumpZone": "apiZone",
+     "dur": 110,
+     "mark": "tour:apiZone"
+    },
+    {
+     "at": 1556,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1596,
+     "jumpZone": "webZone",
+     "dur": 110,
+     "mark": "tour:webZone"
+    },
+    {
+     "at": 1750,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1790,
+     "jumpZone": "adminZone",
+     "dur": 110,
+     "mark": "tour:adminZone"
+    },
+    {
+     "at": 1944,
+     "hold": "option",
+     "dur": 126
+    },
+    {
+     "at": 1984,
+     "jumpZone": "infraZone",
+     "dur": 110,
+     "mark": "tour:infraZone"
+    }
+   ],
+   "clock": "15:30"
+  },
+  {
+   "name": "06b-dusk",
+   "frames": 13,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "applepay",
+     "say": "Apple Pay works in the simulator; tests pass.",
+     "dur": 4
+    },
+    {
+     "at": 2,
+     "agent": "applepay",
+     "turn": "done"
+    },
+    {
+     "at": 6,
+     "agent": "deploy",
+     "say": "Every pull request now gets a preview URL.",
+     "dur": 4
+    },
+    {
+     "at": 8,
+     "agent": "deploy",
+     "turn": "done"
+    }
+   ],
+   "clock": "17:50",
+   "capture": false
+  },
+  {
+   "name": "07-evening",
+   "frames": 1375,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "all": true,
+      "padding": 60
+     }
+    },
+    {
+     "at": 190,
+     "pointer": {
+      "to": {
+       "sidebar": "ratelimit"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 220,
+     "click": {
+      "deliver": true
+     },
+     "dur": 60
+    },
+    {
+     "at": 292,
+     "pointer": {
+      "to": {
+       "sidebar": "deploy"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 313,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 325,
+     "pointer": {
+      "to": {
+       "sidebar": "applepay"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 346,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 358,
+     "pointer": {
+      "to": {
+       "sidebar": "subs"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 379,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 391,
+     "pointer": {
+      "to": {
+       "sidebar": "subs/toolu_emails"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 412,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 424,
+     "pointer": {
+      "to": {
+       "sidebar": "subs/toolu_checkout"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 445,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     }
+    },
+    {
+     "at": 457,
+     "pointer": {
+      "to": {
+       "sidebar": "picker"
+      }
+     },
+     "dur": 18
+    },
+    {
+     "at": 478,
+     "click": {
+      "deliver": true,
+      "mods": [
+       "cmd"
+      ]
+     },
+     "mark": "range"
+    },
+    {
+     "at": 502,
+     "pointer": {
+      "to": {
+       "bulk": "menu"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 532,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 552,
+     "pointer": {
+      "to": {
+       "bulk": "archive"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 576,
+     "click": {
+      "deliver": true
+     },
+     "mark": "archived"
+    },
+    {
+     "at": 616,
+     "mark": "archiveLine"
+    },
+    {
+     "at": 716,
+     "pointer": {
+      "to": {
+       "sidebar": "history"
+      }
+     },
+     "dur": 30
+    },
+    {
+     "at": 750,
+     "click": {
+      "deliver": true
+     },
+     "mark": "historyOpen"
+    },
+    {
+     "at": 770,
+     "mark": "historyLine"
+    },
+    {
+     "at": 860,
+     "camera": {
+      "all": true,
+      "padding": 120
+     },
+     "dur": 360,
+     "mark": "emptyOut"
+    },
+    {
+     "at": 1224,
+     "mark": "tomorrowLine"
+    }
+   ],
+   "clock": "18:00"
+  }
+ ]
+}

@@ -1,0 +1,2322 @@
+{
+ "schema": "array.film.scene.v1",
+ "id": "full-day",
+ "window": {
+  "width": 1920,
+  "height": 1080
+ },
+ "sidebar": true,
+ "sidebarWidth": 300,
+ "cameraModel": "v2",
+ "autoLayout": true,
+ "fps": 60,
+ "video": "prores",
+ "png": 30,
+ "closeUpMinZoom": 0.85,
+ "site": {
+  "project": "web",
+  "path": "public"
+ },
+ "catalog": [
+  {
+   "harness": "claude",
+   "model": "anthropic/claude-opus-5",
+   "displayName": "Opus 5",
+   "contextWindow": 200000
+  },
+  {
+   "harness": "codex",
+   "model": "openai-codex/gpt-5.5-codex",
+   "displayName": "GPT-5.5 Codex"
+  }
+ ],
+ "workspace": "Roast",
+ "projects": [
+  {
+   "key": "api",
+   "name": "roast-api",
+   "files": "projects/roast-api",
+   "git": {}
+  },
+  {
+   "key": "web",
+   "name": "roast-web",
+   "files": "projects/roast-web",
+   "git": {},
+   "placed": false
+  }
+ ],
+ "zones": [
+  {
+   "key": "apiZone",
+   "project": "api",
+   "name": "Roast API",
+   "rect": [
+    0,
+    0,
+    1500,
+    1000
+   ],
+   "color": "teal"
+  }
+ ],
+ "tiles": [
+  {
+   "key": "emails",
+   "kind": "agent",
+   "zone": "apiZone",
+   "frame": [
+    80,
+    80,
+    640,
+    740
+   ],
+   "name": "Order emails"
+  }
+ ],
+ "takes": [
+  {
+   "name": "00-setup",
+   "frames": 33,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "emails"
+      ],
+      "padding": 160
+     }
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "prompt": "Send an email when an order is placed."
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "turn": "start",
+     "ago": 1500
+    },
+    {
+     "at": 0,
+     "agent": "emails",
+     "say": "Orders now send \"Your coffee is on its way\". The template and a test are in."
+    },
+    {
+     "at": 2,
+     "agent": "emails",
+     "turn": "done"
+    }
+   ],
+   "clock": "8:30",
+   "capture": false
+  },
+  {
+   "name": "01-morning",
+   "frames": 2442,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "emails"
+      ],
+      "padding": 170
+     }
+    },
+    {
+     "at": 160,
+     "pointer": {
+      "to": {
+       "tile": "emails",
+       "at": "close"
+      },
+      "spring": "soft"
+     },
+     "dur": 40
+    },
+    {
+     "at": 208,
+     "click": {
+      "deliver": true
+     },
+     "mark": "closed"
+    },
+    {
+     "at": 222,
+     "mark": "filedLine"
+    },
+    {
+     "at": 332,
+     "camera": {
+      "rect": [
+       1580,
+       -80,
+       1640,
+       1100
+      ]
+     },
+     "dur": 170,
+     "mark": "toEmpty"
+    },
+    {
+     "at": 506,
+     "pointer": {
+      "to": {
+       "world": [
+        1720,
+        30
+       ]
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 534,
+     "gesture": {
+      "to": {
+       "world": [
+        2880,
+        840
+       ]
+      }
+     },
+     "dur": 52,
+     "mark": "marquee"
+    },
+    {
+     "at": 594,
+     "pointer": {
+      "to": {
+       "choice": "roast-web"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 628,
+     "click": {
+      "deliver": true
+     },
+     "mark": "picked"
+    },
+    {
+     "at": 638,
+     "adopt": {
+      "as": "webZone",
+      "kind": "zone"
+     }
+    },
+    {
+     "at": 642,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "header"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 670,
+     "click": {
+      "deliver": true,
+      "count": 2
+     },
+     "mark": "rename"
+    },
+    {
+     "at": 680,
+     "type": "Storefront",
+     "dur": 30
+    },
+    {
+     "at": 718,
+     "key": "Return"
+    },
+    {
+     "at": 728,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "overflow"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 754,
+     "click": {
+      "deliver": true
+     },
+     "mark": "menu"
+    },
+    {
+     "at": 800,
+     "menu": {
+      "choose": [
+       "Color",
+       "Orange"
+      ]
+     },
+     "mark": "colour"
+    },
+    {
+     "at": 812,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": "right"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 840,
+     "gesture": {
+      "to": {
+       "by": [
+        260,
+        0
+       ]
+      }
+     },
+     "dur": 40,
+     "mark": "resize"
+    },
+    {
+     "at": 890,
+     "mark": "zoneLine"
+    },
+    {
+     "at": 990,
+     "pointer": {
+      "to": {
+       "zone": "webZone",
+       "at": [
+        0.35,
+        0.55
+       ]
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 1014,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1024,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "palette"
+    },
+    {
+     "at": 1040,
+     "type": "board",
+     "dur": 15
+    },
+    {
+     "at": 1063,
+     "key": "Return"
+    },
+    {
+     "at": 1075,
+     "adopt": {
+      "as": "board",
+      "kind": "kanban"
+     }
+    },
+    {
+     "at": 1085,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1101,
+     "type": "agent",
+     "dur": 15
+    },
+    {
+     "at": 1124,
+     "key": "Return"
+    },
+    {
+     "at": 1140,
+     "key": "Return"
+    },
+    {
+     "at": 1152,
+     "adopt": {
+      "as": "planner",
+      "kind": "agent",
+      "name": "Planner",
+      "workspaceTools": true
+     },
+     "mark": "grown"
+    },
+    {
+     "at": 1160,
+     "mark": "growLine"
+    },
+    {
+     "at": 1190,
+     "camera": {
+      "zone": "webZone",
+      "padding": 40
+     },
+     "dur": 100
+    },
+    {
+     "at": 1310,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 1336,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1342,
+     "type": "What's on my plate today?",
+     "dur": 50
+    },
+    {
+     "at": 1400,
+     "key": "Return",
+     "mark": "ask"
+    },
+    {
+     "at": 1404,
+     "agent": "planner",
+     "turn": "start"
+    },
+    {
+     "at": 1410,
+     "agent": "planner",
+     "think": "Check this sprint in Jira, then put today’s tickets on the board.",
+     "dur": 24
+    },
+    {
+     "at": 1440,
+     "agent": "planner",
+     "tool": {
+      "id": "jira1",
+      "name": "mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql",
+      "input": {
+       "cloudId": "roast.atlassian.net",
+       "jql": "assignee = currentUser() AND sprint in openSprints() ORDER BY rank"
+      },
+      "output": "RST-41 Dark mode for the shop\nRST-42 Cart total is off by a cent\nRST-43 Coffee subscriptions\nRST-44 Autumn blend hero copy"
+     }
+    },
+    {
+     "at": 1468,
+     "agent": "planner",
+     "toolDone": "jira1"
+    },
+    {
+     "at": 1476,
+     "agent": "planner",
+     "tool": {
+      "id": "card0",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "darkmode",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-41 Dark mode for the shop",
+       "body": "Follow the system setting. The design tokens live in public/theme.css."
+      },
+      "bind": "darkmode"
+     }
+    },
+    {
+     "at": 1488,
+     "agent": "planner",
+     "toolDone": "card0"
+    },
+    {
+     "at": 1498,
+     "agent": "planner",
+     "tool": {
+      "id": "card1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "cartbug",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-42 Cart total is off by a cent",
+       "body": "A 10% discount on two Autumn blends shows $32.39. It should be $32.40."
+      },
+      "bind": "cartbug"
+     }
+    },
+    {
+     "at": 1510,
+     "agent": "planner",
+     "toolDone": "card1"
+    },
+    {
+     "at": 1520,
+     "agent": "planner",
+     "tool": {
+      "id": "card2",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "subs",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-43 Coffee subscriptions",
+       "body": "Weekly or monthly beans, pause any time. Plan picker, checkout and renewal emails."
+      },
+      "bind": "subs"
+     }
+    },
+    {
+     "at": 1532,
+     "agent": "planner",
+     "toolDone": "card2"
+    },
+    {
+     "at": 1542,
+     "agent": "planner",
+     "tool": {
+      "id": "card3",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "create",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "hero",
+       "columnId": "{column:board/To Do}",
+       "title": "RST-44 Autumn blend hero copy",
+       "body": "Shorter headline for the autumn launch."
+      },
+      "bind": "hero"
+     }
+    },
+    {
+     "at": 1554,
+     "agent": "planner",
+     "toolDone": "card3"
+    },
+    {
+     "at": 1564,
+     "agent": "planner",
+     "say": "Four tickets for today. RST-43 is the big one, so it gets its own agent.",
+     "dur": 40,
+     "mark": "planned"
+    },
+    {
+     "at": 1608,
+     "agent": "planner",
+     "turn": "done"
+    },
+    {
+     "at": 1612,
+     "mark": "planLine"
+    },
+    {
+     "at": 1712,
+     "pointer": {
+      "to": {
+       "card": "subs"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 1742,
+     "click": {
+      "deliver": true
+     },
+     "mark": "details"
+    },
+    {
+     "at": 1762,
+     "mark": "detailsLine"
+    },
+    {
+     "at": 1842,
+     "pointer": {
+      "to": {
+       "window": [
+        430,
+        90
+       ]
+      }
+     },
+     "dur": 16
+    },
+    {
+     "at": 1862,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1878,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 1878,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 1894,
+     "type": "agent",
+     "dur": 15
+    },
+    {
+     "at": 1917,
+     "key": "Return"
+    },
+    {
+     "at": 1933,
+     "key": "Return"
+    },
+    {
+     "at": 1945,
+     "adopt": {
+      "as": "codex",
+      "kind": "agent",
+      "name": "Cart total",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 1961,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 90
+    },
+    {
+     "at": 2055,
+     "pointer": {
+      "to": {
+       "card": "cartbug"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 2085,
+     "drag": {
+      "card": "cartbug",
+      "toAgent": "codex"
+     },
+     "dur": 50,
+     "mark": "drop"
+    },
+    {
+     "at": 2141,
+     "pointer": {
+      "to": {
+       "tile": "codex",
+       "at": "send"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 2165,
+     "click": {
+      "deliver": true
+     },
+     "mark": "sendCart"
+    },
+    {
+     "at": 2171,
+     "agent": "codex",
+     "turn": "start"
+    },
+    {
+     "at": 2177,
+     "agent": "codex",
+     "say": "Each line is rounded before the discount, so a cent goes missing. I’ll round once, on the total.",
+     "dur": 50
+    },
+    {
+     "at": 2181,
+     "mark": "dropLine"
+    }
+   ],
+   "clock": "8:45"
+  },
+  {
+   "name": "02-late",
+   "frames": 1606,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 180,
+     "setting": {
+      "agentHarness": "claude"
+     }
+    },
+    {
+     "at": 180,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "palette2"
+    },
+    {
+     "at": 196,
+     "type": "agent",
+     "dur": 15
+    },
+    {
+     "at": 219,
+     "key": "Return"
+    },
+    {
+     "at": 235,
+     "key": "Return"
+    },
+    {
+     "at": 247,
+     "adopt": {
+      "as": "dark",
+      "kind": "agent",
+      "name": "Dark mode",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 263,
+     "camera": {
+      "tiles": [
+       "codex",
+       "dark"
+      ],
+      "padding": 60
+     },
+     "dur": 100
+    },
+    {
+     "at": 367,
+     "mark": "sideLine"
+    },
+    {
+     "at": 457,
+     "pointer": {
+      "to": {
+       "tile": "dark",
+       "at": "composer"
+      }
+     },
+     "dur": 22
+    },
+    {
+     "at": 483,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 489,
+     "type": "Take the dark mode ticket.",
+     "dur": 52
+    },
+    {
+     "at": 549,
+     "key": "Return",
+     "mark": "take"
+    },
+    {
+     "at": 553,
+     "agent": "dark",
+     "turn": "start"
+    },
+    {
+     "at": 559,
+     "agent": "dark",
+     "think": "RST-41 is on the Storefront board. Assign it to me and move it to Doing.",
+     "dur": 24
+    },
+    {
+     "at": 589,
+     "agent": "dark",
+     "tool": {
+      "id": "take0",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "assign",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41-assign",
+       "cardId": "{card:darkmode}",
+       "assigneeAgentId": "{agent:dark}"
+      }
+     }
+    },
+    {
+     "at": 603,
+     "agent": "dark",
+     "toolDone": "take0"
+    },
+    {
+     "at": 617,
+     "agent": "dark",
+     "tool": {
+      "id": "take1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41-move",
+       "cardId": "{card:darkmode}",
+       "columnId": "{column:board/Doing}"
+      }
+     }
+    },
+    {
+     "at": 631,
+     "agent": "dark",
+     "toolDone": "take1"
+    },
+    {
+     "at": 645,
+     "mark": "ownLine"
+    },
+    {
+     "at": 745,
+     "key": "3",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "browserKey"
+    },
+    {
+     "at": 765,
+     "adopt": {
+      "as": "site",
+      "kind": "browser"
+     }
+    },
+    {
+     "at": 771,
+     "pointer": {
+      "to": {
+       "tile": "site",
+       "at": "address"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 795,
+     "key": "l",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "addressKey"
+    },
+    {
+     "at": 805,
+     "type": "localhost:3000",
+     "dur": 42
+    },
+    {
+     "at": 855,
+     "key": "Return"
+    },
+    {
+     "at": 885,
+     "camera": {
+      "tiles": [
+       "dark",
+       "site"
+      ],
+      "padding": 60
+     },
+     "dur": 100
+    },
+    {
+     "at": 989,
+     "mark": "browserLine"
+    },
+    {
+     "at": 1079,
+     "agent": "dark",
+     "say": "The colours are tokens in public/theme.css. I’ll add dark values behind prefers-color-scheme.",
+     "dur": 40
+    },
+    {
+     "at": 1123,
+     "agent": "dark",
+     "open": {
+      "path": "public/theme.css",
+      "as": "editor",
+      "toolId": "open1"
+     },
+     "dur": 120,
+     "mark": "open"
+    },
+    {
+     "at": 1249,
+     "agent": "dark",
+     "tool": {
+      "id": "edit1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "public/theme.css",
+      "action": "edit",
+      "added": 15,
+      "removed": 0
+     }
+    },
+    {
+     "at": 1259,
+     "write": {
+      "project": "web",
+      "path": "public/theme.css",
+      "from": "edits/theme.css"
+     },
+     "mark": "edit"
+    },
+    {
+     "at": 1279,
+     "agent": "dark",
+     "toolDone": "edit1"
+    },
+    {
+     "at": 1285,
+     "browser": {
+      "tile": "site",
+      "reload": true
+     },
+     "mark": "dark"
+    },
+    {
+     "at": 1315,
+     "mark": "liveLine"
+    }
+   ],
+   "clock": "10:30"
+  },
+  {
+   "name": "03-lunch",
+   "frames": 41,
+   "actions": [
+    {
+     "at": 0,
+     "agent": "codex",
+     "tool": {
+      "id": "cx1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/cart/total.ts",
+      "action": "edit",
+      "added": 3,
+      "removed": 2
+     }
+    },
+    {
+     "at": 2,
+     "agent": "codex",
+     "toolDone": "cx1"
+    },
+    {
+     "at": 4,
+     "agent": "codex",
+     "tool": {
+      "id": "cx2",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test",
+      "output": "14 passing"
+     }
+    },
+    {
+     "at": 6,
+     "agent": "codex",
+     "toolDone": "cx2"
+    },
+    {
+     "at": 8,
+     "board": {
+      "move": "cartbug",
+      "column": "Done"
+     }
+    },
+    {
+     "at": 10,
+     "agent": "codex",
+     "say": "Fixed: the discount applies first and the total is rounded once. $32.40 now, and a test pins it.",
+     "dur": 4
+    },
+    {
+     "at": 16,
+     "agent": "codex",
+     "turn": "done"
+    },
+    {
+     "at": 20,
+     "agent": "dark",
+     "say": "Dark mode follows the system setting, and every token has a dark value.",
+     "dur": 4
+    },
+    {
+     "at": 26,
+     "agent": "dark",
+     "tool": {
+      "id": "done1",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-41-done",
+       "cardId": "{card:darkmode}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 28,
+     "agent": "dark",
+     "toolDone": "done1"
+    },
+    {
+     "at": 30,
+     "agent": "dark",
+     "turn": "done"
+    }
+   ],
+   "clock": "12:20",
+   "capture": false
+  },
+  {
+   "name": "04-afternoon",
+   "frames": 1188,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "board"
+      ],
+      "padding": 80
+     }
+    },
+    {
+     "at": 160,
+     "mark": "closedLine"
+    },
+    {
+     "at": 270,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ],
+     "mark": "palette3"
+    },
+    {
+     "at": 286,
+     "type": "agent",
+     "dur": 15
+    },
+    {
+     "at": 309,
+     "key": "Return"
+    },
+    {
+     "at": 325,
+     "key": "Return"
+    },
+    {
+     "at": 337,
+     "adopt": {
+      "as": "subs",
+      "kind": "agent",
+      "name": "Subscriptions",
+      "workspaceTools": true
+     }
+    },
+    {
+     "at": 353,
+     "camera": {
+      "tiles": [
+       "board",
+       "subs"
+      ],
+      "padding": 60
+     },
+     "dur": 90
+    },
+    {
+     "at": 447,
+     "pointer": {
+      "to": {
+       "card": "subs"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 477,
+     "drag": {
+      "card": "subs",
+      "toAgent": "subs"
+     },
+     "dur": 50,
+     "mark": "drop2"
+    },
+    {
+     "at": 533,
+     "pointer": {
+      "to": {
+       "tile": "subs",
+       "at": "send"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 557,
+     "click": {
+      "deliver": true
+     },
+     "mark": "sendSubs"
+    },
+    {
+     "at": 563,
+     "agent": "subs",
+     "turn": "start"
+    },
+    {
+     "at": 569,
+     "agent": "subs",
+     "think": "Three separable parts: the plan picker, checkout, renewal emails.",
+     "dur": 24
+    },
+    {
+     "at": 599,
+     "agent": "subs",
+     "say": "This is three jobs. I’ll give each one to a helper and review what comes back.",
+     "dur": 40
+    },
+    {
+     "at": 643,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_picker",
+      "name": "Agent",
+      "input": {
+       "description": "Plan picker",
+       "prompt": "Build the weekly/monthly plan picker on the product page.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 659,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_checkout",
+      "name": "Agent",
+      "input": {
+       "description": "Subscription checkout",
+       "prompt": "Add subscriptions to checkout and the cart total.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 675,
+     "agent": "subs",
+     "tool": {
+      "id": "toolu_emails",
+      "name": "Agent",
+      "input": {
+       "description": "Renewal emails",
+       "prompt": "Send a reminder email two days before each renewal.",
+       "subagent_type": "general-purpose"
+      }
+     }
+    },
+    {
+     "at": 691,
+     "mark": "helpersLine"
+    },
+    {
+     "at": 721,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "say": "Starting on the plan picker."
+    },
+    {
+     "at": 729,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "say": "Starting on the subscription checkout."
+    },
+    {
+     "at": 737,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "say": "Starting on the renewal emails."
+    },
+    {
+     "at": 815,
+     "pointer": {
+      "to": {
+       "chip": "toolu_picker"
+      }
+     },
+     "dur": 26
+    },
+    {
+     "at": 847,
+     "click": {
+      "deliver": true
+     },
+     "mark": "openHelper"
+    },
+    {
+     "at": 871,
+     "adopt": {
+      "as": "picker",
+      "child": "toolu_picker",
+      "of": "subs"
+     }
+    },
+    {
+     "at": 877,
+     "camera": {
+      "tiles": [
+       "subs",
+       "picker"
+      ],
+      "padding": 70
+     },
+     "dur": 90
+    },
+    {
+     "at": 971,
+     "pointer": {
+      "to": {
+       "tile": "picker",
+       "at": "header"
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 999,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 1011,
+     "gesture": {
+      "to": {
+       "by": [
+        180,
+        140
+       ]
+      }
+     },
+     "dur": 60,
+     "mark": "dragHelper"
+    },
+    {
+     "at": 1077,
+     "mark": "moveLine"
+    }
+   ],
+   "clock": "12:30"
+  },
+  {
+   "name": "05-busy",
+   "frames": 1925,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 0,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "r0",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 20,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "r0"
+    },
+    {
+     "at": 30,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "r1",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 50,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "r1"
+    },
+    {
+     "at": 60,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "r2",
+      "name": "Read",
+      "input": {
+       "file_path": "src/cart/total.ts"
+      },
+      "output": "export function cartTotal"
+     }
+    },
+    {
+     "at": 80,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "r2"
+    },
+    {
+     "at": 90,
+     "pointer": {
+      "to": {
+       "chip": "toolu_checkout"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 114,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 134,
+     "adopt": {
+      "as": "checkout",
+      "child": "toolu_checkout",
+      "of": "subs"
+     }
+    },
+    {
+     "at": 140,
+     "pointer": {
+      "to": {
+       "chip": "toolu_emails"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 164,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 184,
+     "adopt": {
+      "as": "emails2",
+      "child": "toolu_emails",
+      "of": "subs"
+     }
+    },
+    {
+     "at": 190,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "w0",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 214,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "w0"
+    },
+    {
+     "at": 224,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "w1",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 248,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "w1"
+    },
+    {
+     "at": 258,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "w2",
+      "name": "Write",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "content": "// …"
+      }
+     }
+    },
+    {
+     "at": 282,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "w2"
+    },
+    {
+     "at": 292,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     },
+     "dur": 120
+    },
+    {
+     "at": 416,
+     "setting": {
+      "agentHarness": "codex"
+     }
+    },
+    {
+     "at": 416,
+     "pointer": {
+      "to": {
+       "zone": "apiZone",
+       "at": [
+        0.5,
+        0.5
+       ]
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 440,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 450,
+     "key": "k",
+     "mods": [
+      "cmd"
+     ]
+    },
+    {
+     "at": 464,
+     "type": "agent",
+     "dur": 10
+    },
+    {
+     "at": 482,
+     "key": "Return"
+    },
+    {
+     "at": 496,
+     "key": "Return"
+    },
+    {
+     "at": 508,
+     "adopt": {
+      "as": "webhook",
+      "kind": "agent",
+      "name": "Renewal webhook",
+      "harness": "codex"
+     }
+    },
+    {
+     "at": 518,
+     "agent": "webhook",
+     "prompt": "Add a renewal webhook that charges the saved card."
+    },
+    {
+     "at": 522,
+     "agent": "webhook",
+     "turn": "start"
+    },
+    {
+     "at": 532,
+     "agent": "webhook",
+     "say": "Adding POST /subscriptions/renew, idempotent per billing period.",
+     "dur": 30
+    },
+    {
+     "at": 566,
+     "agent": "webhook",
+     "tool": {
+      "id": "wh1",
+      "kind": "fileChange",
+      "title": "Edit",
+      "path": "src/subscriptions/renew.ts",
+      "action": "write",
+      "added": 42
+     }
+    },
+    {
+     "at": 596,
+     "agent": "webhook",
+     "toolDone": "wh1"
+    },
+    {
+     "at": 606,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 120
+    },
+    {
+     "at": 730,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "say": "Plan picker is done, with tests."
+    },
+    {
+     "at": 750,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "say": "Subscription checkout is done, with tests."
+    },
+    {
+     "at": 770,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "say": "Renewal emails is done, with tests."
+    },
+    {
+     "at": 790,
+     "agent": "webhook",
+     "tool": {
+      "id": "wh2",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test",
+      "output": "22 passing"
+     }
+    },
+    {
+     "at": 810,
+     "agent": "webhook",
+     "toolDone": "wh2"
+    },
+    {
+     "at": 820,
+     "camera": {
+      "all": true,
+      "padding": 60
+     },
+     "dur": 120
+    },
+    {
+     "at": 944,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "e00",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 962,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "e00"
+    },
+    {
+     "at": 970,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "e01",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 988,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "e01"
+    },
+    {
+     "at": 996,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "e02",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1014,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "e02"
+    },
+    {
+     "at": 1022,
+     "agent": "webhook",
+     "tool": {
+      "id": "wt0",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test -- renew",
+      "output": "18 passing"
+     }
+    },
+    {
+     "at": 1046,
+     "agent": "webhook",
+     "toolDone": "wt0"
+    },
+    {
+     "at": 1056,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 110
+    },
+    {
+     "at": 1170,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "e10",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1188,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "e10"
+    },
+    {
+     "at": 1196,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "e11",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1214,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "e11"
+    },
+    {
+     "at": 1222,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "e12",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1240,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "e12"
+    },
+    {
+     "at": 1248,
+     "agent": "webhook",
+     "tool": {
+      "id": "wt1",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test -- renew",
+      "output": "19 passing"
+     }
+    },
+    {
+     "at": 1272,
+     "agent": "webhook",
+     "toolDone": "wt1"
+    },
+    {
+     "at": 1282,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     },
+     "dur": 110
+    },
+    {
+     "at": 1396,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "e20",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/plan.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1414,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "e20"
+    },
+    {
+     "at": 1422,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "e21",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/subscription.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1440,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "e21"
+    },
+    {
+     "at": 1448,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "e22",
+      "name": "Edit",
+      "input": {
+       "file_path": "src/subscriptions/renewal.ts",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     }
+    },
+    {
+     "at": 1466,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "e22"
+    },
+    {
+     "at": 1474,
+     "agent": "webhook",
+     "tool": {
+      "id": "wt2",
+      "kind": "commandExecution",
+      "title": "Shell",
+      "command": "npm test -- renew",
+      "output": "20 passing"
+     }
+    },
+    {
+     "at": 1498,
+     "agent": "webhook",
+     "toolDone": "wt2"
+    },
+    {
+     "at": 1508,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 110
+    },
+    {
+     "at": 1622,
+     "agent": "webhook",
+     "say": "Webhook in, tests pass.",
+     "dur": 20
+    },
+    {
+     "at": 1646,
+     "agent": "webhook",
+     "turn": "done"
+    },
+    {
+     "at": 1676,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "tool": {
+      "id": "t0",
+      "name": "Bash",
+      "input": {
+       "command": "npm test",
+       "description": "Run the tests"
+      },
+      "output": "9 passing"
+     }
+    },
+    {
+     "at": 1702,
+     "agent": "subs",
+     "child": "toolu_picker",
+     "toolDone": "t0"
+    },
+    {
+     "at": 1712,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "tool": {
+      "id": "t1",
+      "name": "Bash",
+      "input": {
+       "command": "npm test",
+       "description": "Run the tests"
+      },
+      "output": "10 passing"
+     }
+    },
+    {
+     "at": 1738,
+     "agent": "subs",
+     "child": "toolu_checkout",
+     "toolDone": "t1"
+    },
+    {
+     "at": 1748,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "tool": {
+      "id": "t2",
+      "name": "Bash",
+      "input": {
+       "command": "npm test",
+       "description": "Run the tests"
+      },
+      "output": "11 passing"
+     }
+    },
+    {
+     "at": 1774,
+     "agent": "subs",
+     "child": "toolu_emails",
+     "toolDone": "t2"
+    },
+    {
+     "at": 1784,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     },
+     "dur": 110
+    }
+   ],
+   "clock": "13:00"
+  },
+  {
+   "name": "06-ship",
+   "frames": 1257,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "tiles": [
+       "subs"
+      ],
+      "padding": 120
+     }
+    },
+    {
+     "at": 0,
+     "agent": "subs",
+     "toolDone": "toolu_picker"
+    },
+    {
+     "at": 6,
+     "agent": "subs",
+     "toolDone": "toolu_checkout"
+    },
+    {
+     "at": 12,
+     "agent": "subs",
+     "toolDone": "toolu_emails"
+    },
+    {
+     "at": 48,
+     "agent": "subs",
+     "tool": {
+      "id": "test1",
+      "name": "Bash",
+      "input": {
+       "command": "npm test",
+       "description": "Run the tests"
+      },
+      "output": "38 passing"
+     }
+    },
+    {
+     "at": 88,
+     "agent": "subs",
+     "toolDone": "test1"
+    },
+    {
+     "at": 98,
+     "agent": "subs",
+     "tool": {
+      "id": "push1",
+      "name": "Bash",
+      "input": {
+       "command": "git push origin rst-43-subscriptions",
+       "description": "Push the branch"
+      },
+      "output": "To github.com:roast/roast-web.git\n * [new branch]  rst-43-subscriptions -> rst-43-subscriptions"
+     }
+    },
+    {
+     "at": 134,
+     "agent": "subs",
+     "toolDone": "push1",
+     "mark": "pushed"
+    },
+    {
+     "at": 194,
+     "agent": "subs",
+     "tool": {
+      "id": "merge1",
+      "name": "Bash",
+      "input": {
+       "command": "git switch main && git merge --no-ff rst-43-subscriptions",
+       "description": "Merge into main"
+      },
+      "output": "Merge made by the 'ort' strategy."
+     }
+    },
+    {
+     "at": 230,
+     "agent": "subs",
+     "toolDone": "merge1",
+     "mark": "merged"
+    },
+    {
+     "at": 250,
+     "agent": "subs",
+     "tool": {
+      "id": "done2",
+      "name": "mcp__array_workspace__array_board_apply",
+      "input": {
+       "op": "move",
+       "boardId": "{board:board}",
+       "expectedRevision": "auto",
+       "idempotencyKey": "rst-43-done",
+       "cardId": "{card:subs}",
+       "columnId": "{column:board/Done}"
+      }
+     }
+    },
+    {
+     "at": 262,
+     "agent": "subs",
+     "toolDone": "done2"
+    },
+    {
+     "at": 270,
+     "agent": "subs",
+     "say": "Subscriptions are merged: plan picker, checkout and renewal emails. RST-43 is done.",
+     "dur": 40
+    },
+    {
+     "at": 314,
+     "agent": "subs",
+     "turn": "done",
+     "mark": "subsDone"
+    },
+    {
+     "at": 324,
+     "mark": "shipLine"
+    },
+    {
+     "at": 434,
+     "camera": {
+      "all": true,
+      "padding": 60
+     },
+     "dur": 280,
+     "mark": "zoomOut"
+    },
+    {
+     "at": 718,
+     "mark": "canvasLine"
+    },
+    {
+     "at": 828,
+     "pointer": {
+      "to": {
+       "window": [
+        1100,
+        900
+       ]
+      }
+     },
+     "dur": 24
+    },
+    {
+     "at": 862,
+     "hold": "option",
+     "dur": 110,
+     "mark": "leader"
+    },
+    {
+     "at": 912,
+     "jump": "subs",
+     "dur": 70,
+     "mark": "jump"
+    },
+    {
+     "at": 986,
+     "mark": "jumpLine"
+    }
+   ],
+   "clock": "15:00"
+  },
+  {
+   "name": "07-evening",
+   "frames": 1277,
+   "actions": [
+    {
+     "at": 0,
+     "camera": {
+      "zone": "webZone",
+      "padding": 30
+     }
+    },
+    {
+     "at": 190,
+     "pointer": {
+      "to": {
+       "tile": "picker",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 214,
+     "click": {
+      "deliver": true
+     },
+     "mark": "close0"
+    },
+    {
+     "at": 224,
+     "pointer": {
+      "to": {
+       "tile": "checkout",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 248,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 258,
+     "pointer": {
+      "to": {
+       "tile": "emails2",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 282,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 292,
+     "pointer": {
+      "to": {
+       "tile": "subs",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 316,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 326,
+     "pointer": {
+      "to": {
+       "tile": "dark",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 350,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 360,
+     "pointer": {
+      "to": {
+       "tile": "editor",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 384,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 394,
+     "pointer": {
+      "to": {
+       "tile": "site",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 418,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 428,
+     "pointer": {
+      "to": {
+       "tile": "codex",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 452,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 462,
+     "pointer": {
+      "to": {
+       "tile": "planner",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 486,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 496,
+     "pointer": {
+      "to": {
+       "tile": "board",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 520,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 530,
+     "mark": "closeLine"
+    },
+    {
+     "at": 590,
+     "camera": {
+      "zone": "apiZone",
+      "padding": 30
+     },
+     "dur": 120
+    },
+    {
+     "at": 714,
+     "pointer": {
+      "to": {
+       "tile": "webhook",
+       "at": "close"
+      }
+     },
+     "dur": 20
+    },
+    {
+     "at": 738,
+     "click": {
+      "deliver": true
+     }
+    },
+    {
+     "at": 758,
+     "pointer": {
+      "to": {
+       "sidebar": "history"
+      }
+     },
+     "dur": 30
+    },
+    {
+     "at": 792,
+     "click": {
+      "deliver": true
+     },
+     "mark": "historyOpen"
+    },
+    {
+     "at": 812,
+     "mark": "historyLine"
+    },
+    {
+     "at": 902,
+     "camera": {
+      "all": true,
+      "padding": 120
+     },
+     "dur": 220,
+     "mark": "emptyOut"
+    },
+    {
+     "at": 1126,
+     "mark": "tomorrowLine"
+    }
+   ],
+   "clock": "18:00"
+  }
+ ]
+}

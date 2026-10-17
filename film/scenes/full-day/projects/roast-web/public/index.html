@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roast — coffee, roasted this morning</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+         -webkit-font-smoothing: antialiased; transition: background .3s, color .3s; }
+  nav { display: flex; align-items: center; gap: 26px; padding: 18px 40px; border-bottom: 1px solid var(--line); }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; letter-spacing: -0.02em; }
+  .bean { width: 24px; height: 30px; border-radius: 50%; background: var(--accent); transform: rotate(28deg); position: relative; }
+  .bean::after { content: ""; position: absolute; left: 50%; top: 4px; bottom: 4px; width: 3px; margin-left: -1.5px; border-radius: 3px;
+                 background: var(--bg); transform: rotate(-12deg); }
+  nav a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  nav .spacer { flex: 1; }
+  .cart { display: flex; align-items: center; gap: 8px; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+          padding: 7px 14px; border-radius: 999px; font-weight: 600; font-size: 14px; }
+  .cart b { background: var(--accent); color: var(--on-accent); border-radius: 999px; font-size: 12px; padding: 1px 7px; }
+  .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 30px; align-items: center; padding: 48px 40px 36px; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent);
+         background: var(--accent-soft); padding: 5px 11px; border-radius: 999px; }
+  h1, h2, h3 { font-family: var(--font-heading, inherit); font-weight: var(--heading-weight, 800); }
+  h1 { font-size: 50px; line-height: 1.02; letter-spacing: var(--heading-tracking, -0.04em); margin: 16px 0 14px; }
+  .sub { color: var(--muted); font-size: 17px; max-width: 420px; margin-bottom: 24px; }
+  .cta { display: inline-block; padding: 12px 22px; border-radius: var(--radius, 12px); font-weight: 700; text-decoration: none; font-size: 15px;
+         background: var(--accent); color: var(--on-accent); }
+  .cta.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); margin-left: 8px; }
+  .art { height: 270px; border-radius: calc(var(--radius, 16px) * 1.4); background: var(--panel); border: 1px solid var(--line); position: relative; overflow: hidden; }
+  .art .sun { position: absolute; width: 190px; height: 190px; border-radius: 50%; background: var(--accent-soft); right: -30px; top: -40px; }
+  .bag { position: absolute; bottom: 22px; width: 104px; height: 150px; border-radius: 12px 12px 16px 16px; }
+  .bag::before { content: ""; position: absolute; left: 10px; right: 10px; top: -8px; height: 16px; border-radius: 4px; background: inherit;
+                 filter: brightness(.85); }
+  .bag i { position: absolute; left: 14px; right: 14px; top: 46px; height: 46px; border-radius: 8px; background: rgba(255,255,255,.9); }
+  .bag i::after { content: ""; position: absolute; left: 50%; top: 9px; width: 18px; height: 26px; margin-left: -9px; border-radius: 50%;
+                  background: currentColor; transform: rotate(28deg); }
+  .b1 { left: 34px; background: #d9622b; color: #d9622b; height: 160px; }
+  .b2 { left: 150px; background: #3b6e58; color: #3b6e58; }
+  .b3 { left: 262px; background: #6b4a8c; color: #6b4a8c; height: 138px; }
+  h2 { font-size: 22px; letter-spacing: -0.02em; padding: 4px 40px 14px; }
+  .shelf { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 0 40px 40px; }
+  .item { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius, 16px); padding: 18px; }
+  .swatch { height: 70px; border-radius: calc(var(--radius, 16px) * .75); margin-bottom: 14px; }
+  .item h3 { font-size: 16px; letter-spacing: -0.01em; }
+  .item p { color: var(--muted); font-size: 13px; margin: 2px 0 12px; }
+  .row { display: flex; justify-content: space-between; align-items: center; font-weight: 700; }
+  .add { font-size: 13px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink); }
+</style>
+</head>
+<body>
+  <nav>
+    <div class="logo"><div class="bean"></div>Roast</div>
+    <a href="#">Shop</a><a href="#">Subscriptions</a><a href="#">Brew guides</a>
+    <div class="spacer"></div>
+    <div class="cart">Cart <b>2</b></div>
+  </nav>
+  <section class="hero">
+    <div>
+      <span class="tag">New · Autumn blend</span>
+      <h1>Coffee, roasted<br>this morning.</h1>
+      <p class="sub">Small batches from three farms, roasted the day we ship them. Free delivery over $30.</p>
+      <a class="cta" href="#">Shop the blend</a><a class="cta ghost" href="#">How we roast</a>
+    </div>
+    <div class="art"><div class="sun"></div><div class="bag b1"><i></i></div><div class="bag b2"><i></i></div><div class="bag b3"><i></i></div></div>
+  </section>
+  <h2>Fresh this week</h2>
+  <section class="shelf">
+    <div class="item"><div class="swatch" style="background:#d9622b"></div><h3>Autumn blend</h3><p>Caramel, fig, toasted pecan</p><div class="row">$18<span class="add">Add</span></div></div>
+    <div class="item"><div class="swatch" style="background:#3b6e58"></div><h3>Huila, Colombia</h3><p>Red apple, cocoa nib</p><div class="row">$21<span class="add">Add</span></div></div>
+    <div class="item"><div class="swatch" style="background:#6b4a8c"></div><h3>Sidama, Ethiopia</h3><p>Blueberry, jasmine, honey</p><div class="row">$23<span class="add">Add</span></div></div>
+  </section>
+</body>
+</html>
